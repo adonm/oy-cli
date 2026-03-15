@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import readline
 import re
 import shlex
 import shutil
@@ -2513,9 +2514,23 @@ def audit(prompt: str = ""):
     return code
 
 
+def _setup_readline():
+    """Configure readline with persistent history for shell-like UX."""
+    history_path = CONFIG_PATH.parent / "history"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        readline.read_history_file(history_path)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(1000)
+    import atexit
+    atexit.register(readline.write_history_file, str(history_path))
+
+
 def chat():
     """Start an interactive anonymous session."""
 
+    _setup_readline()
     workspace = current_workspace().resolve()
     if not workspace.is_dir():
         abort(f"Workspace root is not a directory: {inline_code(workspace)}")
@@ -2542,7 +2557,7 @@ def chat():
         try:
             STDERR.print()
             STDERR.rule(style="dim")
-            prompt = Prompt.ask("[bold cyan]oy ❯[/bold cyan]", console=STDERR)
+            prompt = input("oy ❯ ")
             if not prompt.strip():
                 continue
             if prompt.strip().lower() in ("exit", "quit"):
