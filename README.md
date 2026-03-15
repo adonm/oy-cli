@@ -29,8 +29,9 @@ oy audit "focus on authentication"
 ```bash
 oy "prompt"              # Run with a prompt (default)
 oy audit                  # Security audit against OWASP ASVS/MSVS
-oy models                 # Interactive model picker
 oy model                  # Show current default model
+oy model <filter>         # Pick/save a model
+oy model --token          # Print Bedrock OpenAI env exports
 oy --help                 # Show all commands
 ```
 
@@ -99,7 +100,7 @@ OY_ROOT=./src oy audit      # Audit specific directory
 | Variable | Purpose |
 |----------|---------|
 | `OY_MODEL` | Override model for this session (bare name or `shim:model`) |
-| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `gemini`, `claude`, or `bedrock` |
+| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `gemini`, `claude`, `bedrock`, or `bedrock-mantle` |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable checkpoints |
 | `OY_ROOT` | Run against different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
@@ -110,7 +111,7 @@ OY_ROOT=./src oy audit      # Audit specific directory
 {"shim": "gemini", "model": "gemini-2.5-pro"}
 ```
 
-The `shim` field pins which backend to use regardless of what else is signed in. Use `oy models` to pick interactively; it merges models from available signed-in shims into a single list using `shim:model` prefixes.
+The `shim` field pins which backend to use regardless of what else is signed in. Use `oy model <filter>` to pick interactively; it merges models from available signed-in shims into a single list using `shim:model` prefixes.
 
 By default, `oy` prefers a sensible available model automatically. If multiple providers are available, set `OY_MODEL`, `OY_SHIM`, or save a config to pin behavior.
 
@@ -154,7 +155,7 @@ gemini  # follow the login prompt
 oy "refactor this function"
 ```
 
-Default model when using Gemini: `gemini-2.5-pro`. Use `oy models` or `OY_MODEL` to switch.
+Default model when using Gemini: `gemini-2.5-pro`. Use `oy model <filter>` or `OY_MODEL` to switch.
 
 **Claude Code (automatic):** If you have already signed in with Claude Code, `oy` can use that local session directly through the `claude` shim. No Anthropic API key is required.
 

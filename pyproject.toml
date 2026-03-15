@@ -19,6 +19,7 @@ dependencies = [
   "rich>=14.3.0",
   "tiktoken>=0.7.0",
   "tenacity>=9.0.0",
+  "msgspec>=0.20.0",
 ]
 
 [dependency-groups]
