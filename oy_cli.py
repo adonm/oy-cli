@@ -1,26 +1,39 @@
 from __future__ import annotations
 import asyncio
-import base64
-import hashlib
-import hmac
 import json
 import os
 import readline
 import re
 import shlex
-import shutil
-import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 import defopt
 import httpx
-import httpx_aws_auth
 import tiktoken
+from shim import (
+    command_env,
+    load_json,
+    run_cmd,
+    save_json,
+    which,
+    CompletionClient,
+    bedrock_base_url,
+    default_region,
+    detect_available_shims,
+    ensure_api_env as ensure_shim_api_env,
+    get_client as build_shim_client,
+    join_model_spec,
+    list_model_ids as list_shim_model_ids,
+    list_models_for_shim,
+    make_bedrock_token,
+    require_api_env as require_shim_api_env,
+    resolve_shim as resolve_model_shim,
+    split_model_spec,
+    validate_shim,
+)
 from markdownify import markdownify as html_to_markdown
-from openai import AsyncOpenAI, OpenAI
 from openai import (
     AuthenticationError,
     BadRequestError,
@@ -33,165 +46,51 @@ from rich.prompt import Prompt
 from rich.status import Status
 
 __version__ = "0.2.1"
+
+
+def _env(name: str, default, type_fn=None):
+    """Read OY_<NAME> from environment, falling back to *default*.
+
+    Type coercion is automatic: if *default* is an int the env value is cast
+    to int, likewise for float.  Pass *type_fn* to override.
+    """
+    raw = os.environ.get(f"OY_{name}")
+    if raw is None:
+        return default
+    if type_fn is not None:
+        return type_fn(raw)
+    return type(default)(raw)
+
+
 # Per-tool payloads: hard token cap keeps each tool result ≤ one 4k-token message.
-MAX_TOOL_OUTPUT_TOKENS = 4096
-MAX_TOOL_TAIL_TOKENS = 1024   # tail slice preserved for bash head+tail display
+MAX_TOOL_OUTPUT_TOKENS = _env("MAX_TOOL_OUTPUT_TOKENS", 4096)
+MAX_TOOL_TAIL_TOKENS = _env("MAX_TOOL_TAIL_TOKENS", 1024)   # tail slice preserved for bash head+tail display
 # Context window management: hard cap at 128k tokens, individual strings at 4k.
-MAX_CONTEXT_TOKENS = 131072
-MAX_MESSAGE_TOKENS = 4096
-DEFAULT_MODEL = "moonshotai.kimi-k2.5"
-DEFAULT_REGION = (
-    os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-)
-DEFAULT_MAX_STEPS = 512
-DEFAULT_MAX_TOOL_CALLS = 512
+MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
+MAX_MESSAGE_TOKENS = _env("MAX_MESSAGE_TOKENS", 4096)
+DEFAULT_MODEL = _env("DEFAULT_MODEL", "moonshotai.kimi-k2.5")
+DEFAULT_MAX_STEPS = _env("DEFAULT_MAX_STEPS", 512)
+DEFAULT_MAX_TOOL_CALLS = _env("DEFAULT_MAX_TOOL_CALLS", 512)
+# Default line/entry limit for list, read, glob tools (overridable via OY_DEFAULT_LINE_LIMIT).
+DEFAULT_LINE_LIMIT = _env("DEFAULT_LINE_LIMIT", 500)
 CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
-BASE_SYSTEM_PROMPT = """You are oy, a tiny local coding assistant.
+BASE_SYSTEM_PROMPT = """You are oy, a tiny coding cli with tools.
 
-## Core Principles
+Work by inspecting first, then making explicit changes. Prefer simple auditable solutions.
+Keep going until done or genuinely blocked; if blocked, say what you tried and next steps.
 
-- Work simply, inspect before changing, prefer secure boring solutions.
-- Each run is a fresh session: no hidden memory or prior conversation state.
-- If context is missing, ask the user to restate or paste it—don't guess.
-- Keep answers concise but thorough—stay on task until finished or blocked.
-
-## Tool Selection Guide
-
-| Need | Tool | Notes |
-|------|------|-------|
-| Read a file | read | Always read first. Use offset/limit for large files. |
-| List directory | list | Discover structure before diving deep. |
-| Find by pattern | glob | Know the filename pattern but not the path? Use this. |
-| Search contents | grep | Know the text/regex but not the file? Use this. |
-| Edit files | apply | Replace exact strings, write new files, move, or delete. Batch related edits. |
-| Run commands | bash | For builds, tests, git, package managers. Not for reading files. |
-| Fetch web/API | httpx | Fetch documentation, standards, API responses. Presets: 'page' (HTML→markdown), 'json', 'post_json'. |
-
-## Output Truncation
-
-Tool output clips to preserve context (~4k tokens per tool result). Bash preserves both head AND tail.
-
-When clipped: use read with offsets, grep, glob, list, or follow-up httpx calls—never guess.
-
-## File Editing Workflow
-
-1. Read the file first.
-2. Use apply with exact string replacement.
-3. For new files, use apply with op='write'.
-4. Batch related operations.
+Use grugbrain-style simplicity for complexity, OWASP-minded judgment for security, and performance-aware judgment to avoid obvious waste.
 """
-INTERACTIVE_SYSTEM_PROMPT = """## Interactive Mode
-
-This run is interactive—the ask tool is available for human collaboration.
-
-### When to Use ask
-
-Use ask for:
-- **Plans**: When the user requests a plan, inspect code, draft a short plan, then ask if it looks good.
-- **Ambiguity**: When multiple reasonable approaches exist and user preference matters.
-- **Checkpoints**: For multi-batch work, offer checkpoints between batches.
-- **Risky changes**: Before broad refactors or many coordinated edits, ask if the user wants a summary and commit first (for easy undo).
-- **Completion**: After making changes, ask "Would you like me to summarise and commit the work completed?"
-
-### How to Use ask Efficiently
-
-- Don't ask after every trivial step—batch related work, then checkpoint.
-- For multi-step tasks, work in 2-3 meaningful batches with ask between them.
-- Present clear options when possible: ask("Which approach?", choices=["option A", "option B"])
-- If the user gives feedback, revise and continue.
-
-### Forced Checkpoints
-
-Always ask before:
-- Deleting files (confirm with ask)
-- Making irreversible changes without backups
-- Starting a task that will modify many files
+INTERACTIVE_SYSTEM_PROMPT = """Use ask only when significant clarification or direction is needed.
 """
-NONINTERACTIVE_SYSTEM_PROMPT = """## Non-Interactive Mode
-
-This run is non-interactive—the ask tool is **unavailable**. Do not pause for approvals or checkpoints.
-
-### Autonomy Guidelines
-
-- Complete the prompted work without interruptions.
-- Use workspace inspection (read, grep, glob, list) to resolve uncertainty.
-- Choose reasonable, safe defaults when context provides direction.
-- Keep going unless blocked by: missing credentials, an irreversible decision, or unresolvable ambiguity.
-
-### Error Recovery
-
-Be resilient to recoverable faults:
-- Command fails? → Check error message, adjust command, retry.
-- File not found? → Use grep/glob to locate it.
-- Output truncated? → Narrow the query (read with offset, more specific grep).
-- Tool unsuitable? → Switch to a better tool for the job.
-- Complex approach failing? → Take a simpler path.
-
-### Blocking Conditions
-
-Only stop when truly blocked. If blocked, provide a concise status:
-1. What you tried
-2. What remains blocked
-3. The smallest useful next step for the operator
-
-Never stop at the first failure—always attempt recovery first.
+NONINTERACTIVE_SYSTEM_PROMPT = """Non-interactive mode: do not pause for approval.
 """
-AUDIT_SYSTEM_PROMPT = """## Security and Complexity Audit
+AUDIT_SYSTEM_PROMPT = """Audit the repo for security, unnecessary complexity, and major obvious performance issues.
 
-You are conducting a security and code quality audit of this repository.
-
-### Process
-
-1. Fetch current OWASP ASVS/MSVS standards via httpx:
-   - ASVS: https://raw.githubusercontent.com/OWASP/ASVS/master/README.md
-   - MSVS: https://raw.githubusercontent.com/OWASP/owasp-masvs/master/README.md
-2. Explore the repository structure systematically
-3. Read and analyze all source code files
-4. Identify security vulnerabilities and code complexity issues
-5. Prioritize issues by severity (critical/high/medium/low)
-
-### Output: ISSUES.md
-
-Use the apply tool to write findings directly to ISSUES.md in this format:
-
-```markdown
-# Audit Findings
-
-> Last audit: [timestamp]
-
-## Summary
-
-Total issues found: [count]
-
-## Critical Severity (N)
-
-### 1. [Title]
-
-- **Location**: `file:line`
-- **Category**: security|complexity
-- **Standard**: ASVS V5: Security Configuration
-
-[Description]
-
-**Recommendation**: [Action to fix]
-
-**Status**: OPEN
-
----
-
-## High Severity (N)
-...
-```
-
-Include a `**Status**: OPEN` line for each finding so humans can track progress.
-Append to any existing content in ISSUES.md; do not delete human-added notes.
+Fetch current OWASP ASVS and MASVS with httpx, inspect the codebase, and write/merge prioritised findings to ISSUES.md.
+Each finding should include location, category (security|complexity|performance), reference, recommendation, and status: OPEN.
+Avoid removing project or human context.
 """
-SSO_MARKERS = (
-    "error loading sso token",
-    "the sso session associated with this profile has expired",
-    "the sso session has expired or is otherwise invalid",
-    "to refresh this sso session run aws sso login",
-)
 SEARCH_BACKENDS = {
     "rg": lambda exe, pattern, path, glob: [
         exe,
@@ -232,16 +131,9 @@ APPLY_OPERATION = {
     "required": ["op", "path"],
 }
 APPLY_OPERATIONS = {"type": "array", "items": APPLY_OPERATION}
-_using_bedrock = False
-_using_gemini = False
-_last_api_env_error = None
-GEMINI_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
-GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
-GEMINI_CODE_ASSIST_VERSION = "v1internal"
 STDOUT = Console()
 STDERR = Console(stderr=True)
-# Fit terminal display nicely; Rich handles wrapping automatically
-DISPLAY_MAX_WIDTH = 120  # Reasonable max width for tool output previews
+# Rich Console auto-detects terminal width; no manual override needed.
 HTML_MARKERS = ("text/html", "application/xhtml+xml")
 HTTPX_PRESET = {"type": "string", "enum": ["page", "json", "post_json"]}
 HTTPX_RESPONSE_MODE = {"type": "string", "enum": ["auto", "headers", "body", "json"]}
@@ -498,7 +390,7 @@ def show(text, lines=2):
 
     if len(text_lines) <= lines_to_show:
         # Output fits, render as markdown
-        STDERR.print(Markdown(text), width=DISPLAY_MAX_WIDTH, overflow="fold")
+        STDERR.print(Markdown(text), overflow="fold")
         return
 
     # Need to truncate: show first N lines
@@ -520,11 +412,7 @@ def show(text, lines=2):
     if needs_close:
         parts.append("\n```")
 
-    STDERR.print(Markdown("\n".join(parts)), width=DISPLAY_MAX_WIDTH, overflow="fold")
-
-
-def render_markdown(text):
-    markdown(text)
+    STDERR.print(Markdown("\n".join(parts)), overflow="fold")
 
 
 def rel(root, path):
@@ -534,297 +422,8 @@ def rel(root, path):
         return path.as_posix()
 
 
-def split_path(value):
-    return [entry for entry in (value or "").split(os.pathsep) if entry]
-
-
-def merge_paths(*groups):
-    merged, seen = [], set()
-    for group in groups:
-        for entry in group:
-            key = os.path.normcase(os.path.normpath(entry))
-            if entry and key not in seen:
-                seen.add(key)
-                merged.append(entry)
-    return os.pathsep.join(merged)
-
-
-def which(tool, path_value=None):
-    return shutil.which(tool, path=path_value)
-
-
-def gemini_cli_package_root() -> Path:
-    """Return the resolved package root of the installed Gemini CLI.
-
-    The Gemini CLI binary is a Node.js script; its real path resolves to
-    ``<package_root>/dist/index.js``.  We walk up two levels to reach the
-    package root that contains ``node_modules/@google/gemini-cli-core``.
-
-    Raises RuntimeError if the CLI is not found or the path looks wrong.
-    """
-    exe = shutil.which("gemini")
-    if not exe:
-        raise RuntimeError(
-            "Gemini CLI is not installed or not on PATH. "
-            "Install it with `npm i -g @google/gemini-cli` and run `gemini` once to authenticate."
-        )
-    real = Path(exe).resolve()
-    # real is e.g. …/<root>/dist/index.js — two parents up is the package root
-    root = real.parent.parent
-    core = root / "node_modules" / "@google" / "gemini-cli-core"
-    if not core.is_dir():
-        raise RuntimeError(
-            f"Gemini CLI package structure not recognised at {root}. "
-            "Re-install with `npm i -g @google/gemini-cli`."
-        )
-    return root
-
-
-def _read_gemini_cli_file(relative: str) -> str:
-    """Read a text file relative to the gemini-cli-core dist directory."""
-    root = gemini_cli_package_root()
-    path = root / "node_modules" / "@google" / "gemini-cli-core" / "dist" / "src" / relative
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"Cannot read Gemini CLI file {path}: {exc}") from exc
-
-
-def load_gemini_oauth_client() -> tuple[str, str]:
-    """Return (client_id, client_secret) parsed from the Gemini CLI's oauth2.js."""
-    text = _read_gemini_cli_file("code_assist/oauth2.js")
-    id_m = re.search(r"OAUTH_CLIENT_ID\s*=\s*'([^']+)'", text)
-    secret_m = re.search(r"OAUTH_CLIENT_SECRET\s*=\s*'([^']+)'", text)
-    if not id_m or not secret_m:
-        raise RuntimeError(
-            "Could not parse OAuth client credentials from Gemini CLI. "
-            "Re-install with `npm i -g @google/gemini-cli`."
-        )
-    return id_m.group(1), secret_m.group(1)
-
-
-def load_gemini_model_list() -> list[str]:
-    """Return the list of valid Gemini model IDs from the CLI's models.js."""
-    text = _read_gemini_cli_file("config/models.js")
-    # Each model constant looks like:  export const FOO = 'gemini-2.5-pro';
-    models = re.findall(r"=\s*'(gemini-[^']+)'", text)
-    # Deduplicate while preserving first-seen order
-    seen: set[str] = set()
-    result: list[str] = []
-    for m in models:
-        if m not in seen:
-            seen.add(m)
-            result.append(m)
-    if not result:
-        raise RuntimeError(
-            "Could not parse model list from Gemini CLI. "
-            "Re-install with `npm i -g @google/gemini-cli`."
-        )
-    return result
-
-
-def run_cmd(command, cwd=None, env=None, timeout=120):
-    try:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=max(timeout, 1),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError(f"command timed out after {timeout} seconds") from exc
-
-
-def command_env(cwd=None):
-    """Build environment for shell commands, incorporating mise and homebrew paths.
-
-    Merges PATH entries from mise env --json and homebrew prefix detection.
-    This ensures tools installed via mise or homebrew are available.
-    """
-    env = os.environ.copy()
-    if brew := which("brew", env.get("PATH")):
-        prefix = Path(brew).parent.parent
-        env["HOMEBREW_PREFIX"] = str(prefix)
-        env["PATH"] = merge_paths(
-            [str(prefix / "bin"), str(prefix / "sbin")], split_path(env.get("PATH"))
-        )
-    if not (mise := which("mise", env.get("PATH"))):
-        return env
-    try:
-        result = run_cmd(
-            [mise, "env", "--json"],
-            cwd=cwd if cwd and cwd.is_dir() else None,
-            env=env,
-            timeout=5,
-        )
-        data = json.loads(result.stdout) if result.returncode == 0 else {}
-    except (OSError, ValueError, json.JSONDecodeError):
-        return env
-    if not isinstance(data, dict):
-        return env
-    merged = env.copy()
-    for key, value in data.items():
-        if isinstance(value, str):
-            merged[key] = (
-                merge_paths(split_path(value), split_path(env.get("PATH")))
-                if key == "PATH"
-                else value
-            )
-    return merged
-
-
-def aws_cli(parts, cwd=None, timeout=10):
-    env = command_env(cwd)
-    if not (aws := which("aws", env.get("PATH"))):
-        raise RuntimeError("AWS CLI is not installed or not on PATH")
-    return run_cmd([aws, *parts], cwd=cwd, env=env, timeout=timeout)
-
-
-def run_aws_sso_login(cwd=None):
-    env = command_env(cwd)
-    if not (aws := which("aws", env.get("PATH"))):
-        raise RuntimeError("AWS CLI is not installed or not on PATH")
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise RuntimeError(
-            "AWS SSO session is stale. Run `aws sso login --use-device-code --no-browser` and retry."
-        )
-    profile = env.get("AWS_PROFILE")
-    status(
-        "Refreshing AWS SSO session"
-        + (f" for profile {inline_code(profile)}" if profile else "")
-        + " with device-code login."
-    )
-    result = run_cmd(
-        [
-            aws,
-            "sso",
-            "login",
-            "--use-device-code",
-            "--no-browser",
-            "--no-cli-pager",
-        ],
-        cwd=cwd,
-        env=env,
-        timeout=300,
-    )
-    if result.returncode:
-        raise RuntimeError(f"AWS SSO login failed with exit code {result.returncode}")
-
-
-def load_aws_credentials(cwd=None, allow_login=True):
-    """Load AWS credentials via aws configure export-credentials.
-
-    If SSO session is stale and allow_login is True, attempts automatic refresh
-    via `aws sso login --use-device-code --no-browser`.
-
-    Returns dict with access_key, secret_key, and optionally session_token.
-    """
-    result = aws_cli(
-        ["configure", "export-credentials", "--format", "process", "--no-cli-pager"],
-        cwd=cwd,
-        timeout=30,
-    )
-    if result.returncode:
-        message = (
-            result.stderr.strip()
-            or result.stdout.strip()
-            or f"AWS CLI exited with status {result.returncode}"
-        )
-        stale = any(marker in message.lower() for marker in SSO_MARKERS) or (
-            "token for" in message.lower() and "does not exist" in message.lower()
-        )
-        if allow_login and stale:
-            run_aws_sso_login(cwd)
-            return load_aws_credentials(cwd, False)
-        raise RuntimeError(message)
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("AWS CLI returned invalid credential JSON") from exc
-    access_key, secret_key, session_token = (
-        payload.get("AccessKeyId"),
-        payload.get("SecretAccessKey"),
-        payload.get("SessionToken"),
-    )
-    if not isinstance(access_key, str) or not isinstance(secret_key, str):
-        raise RuntimeError("AWS CLI did not return usable Bedrock credentials")
-    creds = {"access_key": access_key, "secret_key": secret_key}
-    if isinstance(session_token, str) and session_token:
-        creds["session_token"] = session_token
-    return creds
-
-
-def _sigv4_sign(key, msg):
-    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
-
-
-def _sigv4_key(secret_key, date_stamp, region, service):
-    key = _sigv4_sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
-    for part in (region, service, "aws4_request"):
-        key = _sigv4_sign(key, part)
-    return key
-
-
-def make_bedrock_token(region, cwd=None, expires=43200):
-    """Generate a Bedrock bearer token using AWS SigV4 signing.
-
-    Takes AWS credentials and produces a token suitable for the Bedrock API.
-    Token is valid for `expires` seconds (default 12 hours).
-    """
-    creds = load_aws_credentials(cwd)
-    now = datetime.now(timezone.utc)
-    amz_date, date_stamp = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
-    query = [
-        ("Action", "CallWithBearerToken"),
-        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
-        (
-            "X-Amz-Credential",
-            f"{creds['access_key']}/{date_stamp}/{region}/bedrock/aws4_request",
-        ),
-        ("X-Amz-Date", amz_date),
-        ("X-Amz-Expires", str(expires)),
-        ("X-Amz-SignedHeaders", "host"),
-    ]
-    if token := creds.get("session_token"):
-        query.append(("X-Amz-Security-Token", token))
-    canonical = "&".join(
-        f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}" for k, v in sorted(query)
-    )
-    request = f"POST\n/\n{canonical}\nhost:bedrock.amazonaws.com\n\nhost\n{hashlib.sha256(b'').hexdigest()}"
-    scope = f"{date_stamp}/{region}/bedrock/aws4_request"
-    string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashlib.sha256(request.encode()).hexdigest()}"
-    signature = hmac.new(
-        _sigv4_key(creds["secret_key"], date_stamp, region, "bedrock"),
-        string_to_sign.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    raw = f"bedrock.amazonaws.com/?{canonical}&X-Amz-Signature={signature}&Version=1"
-    return f"bedrock-api-key-{base64.b64encode(raw.encode()).decode()}"
-
-
-def provide_token(region=None, cwd=None):
-    if not (
-        region := region
-        or os.environ.get("AWS_REGION")
-        or os.environ.get("AWS_DEFAULT_REGION")
-    ):
-        raise RuntimeError(
-            "Region must be provided or set via AWS_REGION/AWS_DEFAULT_REGION"
-        )
-    return make_bedrock_token(region, cwd)
-
-
 def config_path():
     return Path(os.environ.get("OY_CONFIG", str(CONFIG_PATH))).expanduser()
-
-
-def load_json(path, default):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
 
 
 def load_config():
@@ -833,89 +432,44 @@ def load_config():
 
 
 def save_config(data):
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def setting(choice, env_keys, config_key, default):
-    if choice:
-        return choice
-    for key in env_keys:
-        if value := os.environ.get(key):
-            return value
-    return load_config().get(config_key, default) if config_key else default
-
-
-# Adapter identifiers used in config and model prefixes
-ADAPTER_OPENAI = "openai"
-ADAPTER_GEMINI = "gemini"
-ADAPTER_BEDROCK = "bedrock"
-KNOWN_ADAPTERS = {ADAPTER_OPENAI, ADAPTER_GEMINI, ADAPTER_BEDROCK}
-
-
-def split_model_spec(spec: str) -> tuple[str | None, str]:
-    """Split 'adapter:model' into (adapter, model). Returns (None, spec) if no prefix."""
-    if ":" in spec:
-        adapter, _, model = spec.partition(":")
-        if adapter in KNOWN_ADAPTERS:
-            return adapter, model
-    return None, spec
-
-
-def join_model_spec(adapter: str, model: str) -> str:
-    return f"{adapter}:{model}"
-
-
-def find_model_by_suffix(models, suffix):
-    """Return first model spec ending with suffix, or None."""
-    for m in models:
-        if m.endswith(suffix):
-            return m
-    return None
+    save_json(config_path(), data)
 
 
 def pick_default_model():
-    """Pick a sensible default from all available signed-in adapters."""
+    """Pick a sensible default from all available signed-in shims."""
     try:
         available = list_all_model_ids()
     except Exception:
         return DEFAULT_MODEL
     for suffix in ("glm-5", "kimi-k2.5"):
-        if m := find_model_by_suffix(available, suffix):
-            return m
+        if match := next((model for model in available if model.endswith(suffix)), None):
+            return match
     if available:
         return available[0]
     return DEFAULT_MODEL
 
 
-def current_adapter(choice: str | None = None) -> str | None:
-    """Return the configured adapter, or None to mean 'infer from model spec or env'."""
+def env_or_config(choice, env_name, config_key, default=None):
     if choice:
         return choice
-    if v := os.environ.get("OY_ADAPTER"):
-        return v
-    return load_config().get("adapter")
+    if value := os.environ.get(env_name):
+        return value
+    return load_config().get(config_key, default)
+
+
+def current_shim(choice: str | None = None) -> str | None:
+    """Return the configured shim, or None to mean 'infer from model spec or env'."""
+    return env_or_config(choice, "OY_SHIM", "shim")
 
 
 def current_model(choice: str | None = None) -> str:
-    """Return the active model spec ('adapter:model' or bare model id)."""
-    if choice:
-        return choice
-    if v := os.environ.get("OY_MODEL"):
-        return v
-    cfg = load_config()
-    if model := cfg.get("model"):
-        # Re-attach adapter prefix from config if not already present
-        adapter = cfg.get("adapter")
-        if adapter and ":" not in model:
-            return join_model_spec(adapter, model)
-        return model
+    """Return the active model spec ('shim:model' or bare model id)."""
+    if value := env_or_config(choice, "OY_MODEL", "model"):
+        if isinstance(value, str) and ":" not in value:
+            if shim := current_shim():
+                return join_model_spec(shim, value)
+        return value
     return pick_default_model()
-
-
-def current_region(choice):
-    return setting(choice, ("AWS_REGION", "AWS_DEFAULT_REGION"), None, DEFAULT_REGION)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -946,601 +500,28 @@ def current_non_interactive() -> bool:
     return env_flag("OY_NON_INTERACTIVE", False)
 
 
-class CompletionClient:
-    """Base for LLM clients."""
-
-    async def chat_completion(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str = "auto",
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def list_models(self) -> list[str]:
-        raise NotImplementedError
-
-
-class OpenAIAdapter(CompletionClient):
-    """Client for OpenAI-compatible APIs."""
-
-    def __init__(self, async_client: AsyncOpenAI, sync_client: OpenAI):
-        self.async_client = async_client
-        self.sync_client = sync_client
-
-    async def chat_completion(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str = "auto",
-    ) -> dict[str, Any]:
-        response = await self.async_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,  # type: ignore[arg-type]
-            tool_choice=tool_choice,  # type: ignore[arg-type]
-        )
-        return response.choices[0].message.model_dump(exclude_none=True)
-
-    def list_models(self) -> list[str]:
-        return sorted(model.id for model in list(self.sync_client.models.list()))
-
-
-class BedrockConverseAdapter(CompletionClient):
-    """Native Bedrock client using the Converse API."""
-
-    def __init__(self, region: str, credentials: dict[str, str]):
-        self.region = region
-        self.base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
-        self._auth = httpx_aws_auth.AwsSigV4Auth(
-            credentials=httpx_aws_auth.AwsCredentials(
-                access_key=credentials["access_key"],
-                secret_key=credentials["secret_key"],
-                session_token=credentials.get("session_token"),
-            ),
-            service="bedrock",
-            region=region,
-        )
-        self._list_auth = httpx_aws_auth.AwsSigV4Auth(
-            credentials=httpx_aws_auth.AwsCredentials(
-                access_key=credentials["access_key"],
-                secret_key=credentials["secret_key"],
-                session_token=credentials.get("session_token"),
-            ),
-            service="bedrock",
-            region=region,
-        )
-
-    async def chat_completion(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str = "auto",
-    ) -> dict[str, Any]:
-        # Translate OpenAI format to Bedrock Converse format
-        system_prompts = []
-        bedrock_messages = []
-        for msg in messages:
-            role = msg["role"]
-            content = msg.get("content") or ""
-            if role == "system":
-                system_prompts.append({"text": str(content)})
-                continue
-
-            blocks = []
-            if role == "tool":
-                # Group consecutive tool results into the same user message
-                result_block = {
-                    "toolResult": {
-                        "toolUseId": msg["tool_call_id"],
-                        "content": [{"text": str(content)}],
-                    }
-                }
-                if bedrock_messages and bedrock_messages[-1]["role"] == "user":
-                    # Check if the last block was also a toolResult (or just add to user message)
-                    bedrock_messages[-1]["content"].append(result_block)
-                    continue
-                else:
-                    role = "user"
-                    blocks.append(result_block)
-            else:
-                if isinstance(content, str) and content:
-                    blocks.append({"text": content})
-                elif isinstance(content, list):
-                    for item in content:
-                        if item.get("type") == "text" and item.get("text"):
-                            blocks.append({"text": item["text"]})
-                        elif item.get("type") == "image_url":
-                            # Vision placeholder
-                            pass
-
-                if role == "assistant" and "tool_calls" in msg:
-                    for call in msg["tool_calls"]:
-                        blocks.append(
-                            {
-                                "toolUse": {
-                                    "toolUseId": call["id"],
-                                    "name": call["function"]["name"],
-                                    "input": json.loads(call["function"]["arguments"]),
-                                }
-                            }
-                        )
-                
-                if not blocks:
-                    continue # Should not happen in a valid chat history
-
-            bedrock_messages.append({"role": role, "content": blocks})
-
-        payload: dict[str, Any] = {"messages": bedrock_messages}
-        if system_prompts:
-            payload["system"] = system_prompts
-        if tools:
-            payload["toolConfig"] = {
-                "tools": [
-                    {
-                        "toolSpec": {
-                            "name": t["function"]["name"],
-                            "description": t["function"]["description"],
-                            "inputSchema": {"json": t["function"]["parameters"]},
-                        }
-                    }
-                    for t in tools
-                ],
-                "toolChoice": {"auto": {}} if tool_choice == "auto" else {"any": {}},
-            }
-
-        url = f"{self.base_url}/model/{quote(model)}/converse"
-        body = json.dumps(payload)
-
-        async with httpx.AsyncClient(auth=self._auth) as client:
-            response = await client.post(url, content=body, headers={"content-type": "application/json"}, timeout=120)
-            if response.is_error:
-                error_body = response.text
-                try:
-                    error_json = response.json()
-                    message = error_json.get("message", error_body)
-                except Exception:
-                    message = error_body
-                raise RuntimeError(f"Bedrock error ({response.status_code}): {message}")
-
-            data = response.json()
-            output = data["output"]["message"]
-            role = output["role"]
-            content = ""
-            tool_calls = []
-            for block in output["content"]:
-                if "text" in block:
-                    content += block["text"]
-                if "toolUse" in block:
-                    tool = block["toolUse"]
-                    tool_calls.append(
-                        {
-                            "id": tool["toolUseId"],
-                            "type": "function",
-                            "function": {
-                                "name": tool["name"],
-                                "arguments": json.dumps(tool["input"]),
-                            },
-                        }
-                    )
-
-            res: dict[str, Any] = {"role": role, "content": content}
-            if tool_calls:
-                res["tool_calls"] = tool_calls
-            return res
-
-    def list_models(self) -> list[str]:
-        # ListFoundationModels is a Control Plane operation
-        models_url = f"https://bedrock.{self.region}.amazonaws.com/foundation-models"
-        response = httpx.get(models_url, auth=self._list_auth, timeout=30)
-
-        all_ids = []
-        if not response.is_error:
-            data = response.json()
-            all_ids.extend(
-                m["modelId"]
-                for m in data.get("modelSummaries", [])
-                if "TEXT" in m.get("outputModalities", [])
-            )
-
-        # Also try to list inference profiles (required for many newer models)
-        profiles_url = f"https://bedrock.{self.region}.amazonaws.com/inference-profiles"
-        response = httpx.get(profiles_url, auth=self._list_auth, timeout=30)
-        if not response.is_error:
-            data = response.json()
-            all_ids.extend(
-                p["inferenceProfileId"]
-                for p in data.get("inferenceProfileSummaries", [])
-            )
-
-        return sorted(list(set(all_ids)))
-
-
-def bedrock_base_url(region):
-    return f"https://bedrock-mantle.{region}.api.aws/v1"
-
-
-def gemini_creds_path():
-    return GEMINI_CREDS_PATH
-
-
-def load_gemini_oauth_creds():
-    """Load OAuth credentials from ~/.gemini/oauth_creds.json."""
-    path = gemini_creds_path()
+def resolve_active_shim(model_spec: str | None = None) -> str:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Cannot read Gemini OAuth credentials: {exc}") from exc
-    if not isinstance(data.get("refresh_token"), str):
-        raise RuntimeError("Gemini OAuth credentials missing refresh_token")
-    return data
-
-
-def refresh_gemini_token(refresh_token):
-    """Exchange a refresh token for a fresh access token via Google OAuth2."""
-    client_id, client_secret = load_gemini_oauth_client()
-    payload = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    }
-    try:
-        with httpx.Client(timeout=15) as client:
-            resp = client.post(
-                "https://oauth2.googleapis.com/token",
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Gemini token refresh failed: {exc}") from exc
-    if not isinstance(data.get("access_token"), str):
-        raise RuntimeError("Gemini token refresh did not return an access_token")
-    # Persist refreshed creds back to disk
-    existing = load_json(gemini_creds_path(), {})
-    existing.update(
-        {
-            "access_token": data["access_token"],
-            "expiry_date": int(
-                (__import__("time").time() + data.get("expires_in", 3600) - 60) * 1000
-            ),
-        }
-    )
-    try:
-        gemini_creds_path().write_text(
-            json.dumps(existing, indent=2) + "\n", encoding="utf-8"
-        )
-    except OSError:
-        pass  # Best-effort cache write
-    return data["access_token"]
-
-
-def get_gemini_access_token():
-    """Return a valid Gemini access token, refreshing if expired."""
-    creds = load_gemini_oauth_creds()
-    import time
-
-    expiry_ms = creds.get("expiry_date", 0)
-    if isinstance(expiry_ms, (int, float)) and expiry_ms > time.time() * 1000:
-        return creds["access_token"]
-    return refresh_gemini_token(creds["refresh_token"])
-
-
-def resolve_gemini_project():
-    """Resolve the GCP project ID via loadCodeAssist (auto-provisions if needed)."""
-    token = get_gemini_access_token()
-    url = f"{GEMINI_CODE_ASSIST_ENDPOINT}/{GEMINI_CODE_ASSIST_VERSION}:loadCodeAssist"
-    try:
-        with httpx.Client(timeout=20) as client:
-            resp = client.post(
-                url,
-                json={},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Gemini loadCodeAssist failed: {exc}") from exc
-    project_id = data.get("cloudaicompanionProject")
-    if not isinstance(project_id, str) or not project_id:
-        raise RuntimeError("Gemini loadCodeAssist did not return a project ID")
-    return project_id
-
-
-class GeminiCodeAssistAdapter(CompletionClient):
-    """Client for the Gemini Code Assist API (cloudcode-pa.googleapis.com).
-
-    Uses OAuth credentials from ~/.gemini/oauth_creds.json as written by the
-    Gemini CLI. Translates OpenAI-format messages/tools to the Vertex-style
-    generateContent protocol used by the Code Assist endpoint.
-    """
-
-    def __init__(self, project_id: str, access_token: str):
-        self.project_id = project_id
-        self.access_token = access_token
-        self.base_url = f"{GEMINI_CODE_ASSIST_ENDPOINT}/{GEMINI_CODE_ASSIST_VERSION}"
-
-    def _auth_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
-        }
-
-    def _openai_messages_to_vertex(
-        self, messages: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        """Convert OpenAI chat messages to Vertex contents + systemInstruction."""
-        system_parts: list[dict[str, Any]] = []
-        contents: list[dict[str, Any]] = []
-
-        for msg in messages:
-            role = msg["role"]
-            content = msg.get("content") or ""
-
-            if role == "system":
-                system_parts.append({"text": str(content)})
-                continue
-
-            if role == "tool":
-                # Tool result — attach as a functionResponse to the previous user turn
-                result_part = {
-                    "functionResponse": {
-                        "name": msg.get("name", "tool"),
-                        "response": {"output": str(content)},
-                    }
-                }
-                # Group consecutive tool results into one user turn
-                if contents and contents[-1]["role"] == "user":
-                    contents[-1]["parts"].append(result_part)
-                else:
-                    contents.append({"role": "user", "parts": [result_part]})
-                continue
-
-            vertex_role = "model" if role == "assistant" else "user"
-            parts: list[dict[str, Any]] = []
-
-            if isinstance(content, str) and content:
-                parts.append({"text": content})
-            elif isinstance(content, list):
-                for item in content:
-                    if item.get("type") == "text" and item.get("text"):
-                        parts.append({"text": item["text"]})
-
-            if role == "assistant" and "tool_calls" in msg:
-                signatures = msg.get("_thought_signatures", {})
-                for call in msg["tool_calls"]:
-                    fn = call["function"]
-                    fc_part: dict[str, Any] = {
-                        "functionCall": {
-                            "name": fn["name"],
-                            "args": json.loads(fn["arguments"]),
-                        }
-                    }
-                    # Re-attach Gemini thought signatures for thinking models
-                    call_id = call.get("id", "")
-                    if call_id in signatures:
-                        fc_part["thoughtSignature"] = signatures[call_id]
-                    parts.append(fc_part)
-
-            if parts:
-                contents.append({"role": vertex_role, "parts": parts})
-
-        system_instruction = (
-            {"parts": system_parts} if system_parts else None
-        )
-        return contents, system_instruction
-
-    def _openai_tools_to_vertex(
-        self, tools: list[dict[str, Any]]
-    ) -> list[dict[str, Any]] | None:
-        """Convert OpenAI tool specs to Vertex functionDeclarations."""
-        if not tools:
-            return None
-        decls = [
-            {
-                "name": t["function"]["name"],
-                "description": t["function"].get("description", ""),
-                "parameters": t["function"].get("parameters", {}),
-            }
-            for t in tools
-            if t.get("type") == "function"
-        ]
-        return [{"functionDeclarations": decls}] if decls else None
-
-    def _vertex_response_to_openai(
-        self, response: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Convert a Vertex generateContent response to OpenAI message format."""
-        inner = response.get("response", {})
-        candidates = inner.get("candidates", [])
-        if not candidates:
-            return {"role": "assistant", "content": ""}
-
-        content_text = ""
-        tool_calls: list[dict[str, Any]] = []
-        call_index = 0
-
-        thought_signatures: dict[str, str] = {}
-        for part in candidates[0].get("content", {}).get("parts", []):
-            if "text" in part:
-                content_text += part["text"]
-            elif "functionCall" in part:
-                fc = part["functionCall"]
-                call_id = f"call_{call_index}"
-                tool_calls.append(
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": fc["name"],
-                            "arguments": json.dumps(fc.get("args", {})),
-                        },
-                    }
-                )
-                # Preserve Gemini thought signatures for round-tripping
-                if "thoughtSignature" in part:
-                    thought_signatures[call_id] = part["thoughtSignature"]
-                call_index += 1
-
-        result: dict[str, Any] = {"role": "assistant", "content": content_text}
-        if tool_calls:
-            result["tool_calls"] = tool_calls
-        if thought_signatures:
-            result["_thought_signatures"] = thought_signatures
-        return result
-
-    async def chat_completion(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str = "auto",
-    ) -> dict[str, Any]:
-        contents, system_instruction = self._openai_messages_to_vertex(messages)
-        vertex_tools = self._openai_tools_to_vertex(tools or [])
-
-        request_body: dict[str, Any] = {"contents": contents}
-        if system_instruction:
-            request_body["systemInstruction"] = system_instruction
-        if vertex_tools:
-            request_body["tools"] = vertex_tools
-            request_body["toolConfig"] = {
-                "functionCallingConfig": {
-                    "mode": "AUTO" if tool_choice == "auto" else "ANY"
-                }
-            }
-
-        payload = {
-            "model": model,
-            "project": self.project_id,
-            "request": request_body,
-        }
-
-        url = f"{self.base_url}:generateContent"
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(url, json=payload, headers=self._auth_headers())
-            if resp.status_code == 401:
-                # Token expired mid-session — refresh and retry once
-                self.access_token = refresh_gemini_token(
-                    load_gemini_oauth_creds()["refresh_token"]
-                )
-                resp = await client.post(
-                    url, json=payload, headers=self._auth_headers()
-                )
-            if resp.is_error:
-                try:
-                    msg = resp.json().get("error", {}).get("message", resp.text)
-                except Exception:
-                    msg = resp.text
-                raise RuntimeError(
-                    f"Gemini Code Assist error ({resp.status_code}): {msg}"
-                )
-            return self._vertex_response_to_openai(resp.json())
-
-    def list_models(self) -> list[str]:
-        return load_gemini_model_list()
-
-
-def detect_available_adapters() -> list[str]:
-    """Return a list of adapters that appear to be signed in / configured."""
-    available = []
-    if os.environ.get("OPENAI_API_KEY"):
-        available.append(ADAPTER_OPENAI)
-    try:
-        load_gemini_oauth_creds()
-        available.append(ADAPTER_GEMINI)
-    except RuntimeError:
-        pass
-    try:
-        aws_cli(["sts", "get-caller-identity", "--no-cli-pager"], timeout=5)
-        available.append(ADAPTER_BEDROCK)
-    except Exception:
-        pass
-    return available
-
-
-def resolve_adapter(model_spec: str | None = None) -> str:
-    """Determine which adapter to use.
-
-    Priority: OY_ADAPTER env > adapter prefix in model spec > 'adapter' in config >
-    auto-detect from what's signed in.
-    """
-    if env_adapter := os.environ.get("OY_ADAPTER"):
-        if env_adapter in KNOWN_ADAPTERS:
-            return env_adapter
-        abort(f"Unknown OY_ADAPTER value: {inline_code(env_adapter)}. Use one of: {', '.join(sorted(KNOWN_ADAPTERS))}")
-    if model_spec:
-        prefix, _ = split_model_spec(model_spec)
-        if prefix:
-            return prefix
-    if cfg_adapter := load_config().get("adapter"):
-        if cfg_adapter in KNOWN_ADAPTERS:
-            return cfg_adapter
-    # Auto-detect: prefer OpenAI, then Gemini, then Bedrock
-    if os.environ.get("OPENAI_API_KEY"):
-        return ADAPTER_OPENAI
-    try:
-        load_gemini_oauth_creds()
-        return ADAPTER_GEMINI
-    except RuntimeError:
-        pass
-    return ADAPTER_BEDROCK
+        return validate_shim(resolve_model_shim(model_spec, current_shim()))
+    except RuntimeError as exc:
+        abort(str(exc))
+    return "openai"
 
 
 def ensure_api_env(cwd=None, refresh=False):
-    global _using_bedrock, _using_gemini, _last_api_env_error
-    spec = current_model()
-    adapter = resolve_adapter(spec)
-    if adapter == ADAPTER_OPENAI:
-        if os.environ.get("OPENAI_API_KEY"):
-            _using_gemini, _using_bedrock, _last_api_env_error = False, False, None
-            return True
-        _last_api_env_error = "OPENAI_API_KEY is not set"
-        return False
-    if adapter == ADAPTER_GEMINI:
-        try:
-            load_gemini_oauth_creds()
-            _using_gemini, _using_bedrock, _last_api_env_error = True, False, None
-            return True
-        except RuntimeError as exc:
-            _last_api_env_error = str(exc)
-            return False
-    # Bedrock
-    try:
-        current_region(None)
-        _using_bedrock, _using_gemini, _last_api_env_error = True, False, None
-        return True
-    except Exception as exc:
-        _last_api_env_error = str(exc)
-        return False
+    _ = refresh
+    return ensure_shim_api_env(current_model(), current_shim(), cwd)[0]
 
 
 def require_api_env(cwd=None):
-    if ensure_api_env(cwd):
-        return
-    message = (
-        "Missing API credentials.\n\n"
-        "- set `OPENAI_API_KEY`, or\n"
-        "- install Gemini CLI and run `gemini` once to authenticate, or\n"
-        "- configure AWS CLI for Bedrock"
-    )
-    if _last_api_env_error:
-        message += f"\n- error: {_last_api_env_error}"
-    abort(message)
+    try:
+        require_shim_api_env(current_model(), current_shim(), cwd)
+    except RuntimeError as exc:
+        abort(str(exc))
 
 
-def require_runtime(cwd=None):
-    require_api_env(cwd)
-    env = command_env(cwd)
-    missing = [tool for tool in ("bash",) if not which(tool, env.get("PATH"))]
+def require_tools(env, *tools):
+    missing = [tool for tool in tools if not which(tool, env.get("PATH"))]
     if missing:
         abort(
             "Required tools are missing.\n\n"
@@ -1551,29 +532,18 @@ def require_runtime(cwd=None):
         )
 
 
+def require_runtime(cwd=None):
+    require_api_env(cwd)
+    require_tools(command_env(cwd), "bash")
+
+
 def get_client(model_spec: str | None = None) -> CompletionClient:
     require_api_env(Path.cwd())
     spec = model_spec or current_model()
-    adapter = resolve_adapter(spec)
-    if adapter == ADAPTER_GEMINI:
-        token = get_gemini_access_token()
-        project_id = resolve_gemini_project()
-        return GeminiCodeAssistAdapter(project_id, token)
-    if adapter == ADAPTER_BEDROCK:
-        region = current_region(None)
-        creds = load_aws_credentials(Path.cwd())
-        return BedrockConverseAdapter(region, creds)
-    async_c = AsyncOpenAI(
-        api_key=str(os.environ["OPENAI_API_KEY"]),
-        base_url=os.environ.get("OPENAI_BASE_URL"),
-        max_retries=3,
+    shim = resolve_active_shim(spec)
+    return build_shim_client(
+        shim, model_spec=spec, region=default_region(), cwd=Path.cwd()
     )
-    sync_c = OpenAI(
-        api_key=str(os.environ["OPENAI_API_KEY"]),
-        base_url=os.environ.get("OPENAI_BASE_URL"),
-        max_retries=3,
-    )
-    return OpenAIAdapter(async_c, sync_c)
 
 
 def resolve_path(root, raw):
@@ -1602,21 +572,24 @@ def apply_exact_replace(text, old, new, replace_all=False):
     return updated, count
 
 
-def note_tool(state, name, **details):
+def note_tool(state, name, *, _defaults=None, _suffix="", **details):
     if state["tool_calls"] >= state["max_tool_calls"]:
         raise ValueError(
             f"reached max tool calls ({state['max_tool_calls']}) without a final response"
         )
     state["tool_calls"] += 1
+    defaults = _defaults or {}
     parts = [
         inline_code(key.replace("_", "-"))
         if value is True
         else f"{key.replace('_', '-')}: {inline_code(preview(value, 50))}"
         for key, value in details.items()
-        if value not in (None, "", False)
+        if value not in (None, "", False) and value != defaults.get(key)
     ]
     detail_text = ", ".join(parts)
     message = f"tool {inline_code(name)}" + (f": {detail_text}" if detail_text else "")
+    if _suffix:
+        message += f"  {_suffix}"
     # Use bullet for mutating tools (apply, bash), plain for idempotent reads
     if name in {"apply", "bash"}:
         markdown(f"● {message}", stderr=True)
@@ -1624,22 +597,42 @@ def note_tool(state, name, **details):
         markdown(message, stderr=True)
 
 
+def _oneline(text, limit=60):
+    """Collapse *text* to a single line, truncated to *limit* chars."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def render_apply_op(op):
+    kind = op.get("op", "?")
+    path = op.get("path", "?")
+    match kind:
+        case "replace":
+            flag = " *(all)*" if op.get("replace_all") else ""
+            return [
+                f"  replace `{path}`{flag}",
+                f"  − `{_oneline(op.get('old', ''))}`",
+                f"  + `{_oneline(op.get('new', ''))}`",
+            ]
+        case "write":
+            overwrite = " *(overwrite)*" if op.get("overwrite") else " *(new)*"
+            return [
+                f"  write `{path}`{overwrite}",
+                f"  + `{_oneline(op.get('content', ''))}`",
+            ]
+        case "move":
+            return [f"  ⚠ move `{path}` → `{op.get('to', '?')}`"]
+        case "delete":
+            return [f"  ⚠ delete `{path}`"]
+        case _:
+            return [f"  {kind} `{path}`"]
+
+
 def note_apply_ops(operations):
     """Print a per-operation preview for an apply tool call."""
     for op in operations:
-        kind = op.get("op", "?")
-        path = op.get("path", "?")
-        if kind == "replace":
-            markdown(f"  replace `{path}`", stderr=True)
-        elif kind == "write":
-            markdown(f"  write `{path}`", stderr=True)
-        elif kind == "move":
-            to = op.get("to", "?")
-            markdown(f"  ⚠ move `{path}` → `{to}`", stderr=True)
-        elif kind == "delete":
-            markdown(f"  ⚠ delete `{path}`", stderr=True)
-        else:
-            markdown(f"  {kind} `{path}`", stderr=True)
+        for line in render_apply_op(op):
+            markdown(line, stderr=True)
 
 
 class ToolRegistry:
@@ -1652,7 +645,7 @@ class ToolRegistry:
             params={"path": STR, "limit": INT},
             required=[],
         )
-        def tool_list(state, path=".", limit=200):
+        def tool_list(state, path=".", limit=DEFAULT_LINE_LIMIT):
             ...
 
     Each decorated function is stored under its bare name (stripped of the
@@ -1695,13 +688,12 @@ TOOL_REGISTRY = ToolRegistry()
 
 
 @TOOL_REGISTRY.tool(
-    "List directory contents. Use to discover structure before exploring deeper. "
-    "Sorted alphabetically, trailing / for directories. Prefer over glob for unfamiliar trees.",
+    "List a directory. Use this first on unfamiliar trees. Returns sorted entries, one per line, with / for directories.",
     params={"path": STR, "limit": INT},
     required=[],
 )
-def tool_list(state, path=".", limit=200):
-    note_tool(state, "list", path=path, limit=limit)
+def tool_list(state, path=".", limit=DEFAULT_LINE_LIMIT):
+    note_tool(state, "list", _defaults={"path": ".", "limit": DEFAULT_LINE_LIMIT}, path=path, limit=limit)
     target = resolve_path(state["root"], path)
     if not target.is_dir():
         raise ValueError("path is not a directory")
@@ -1719,19 +711,29 @@ def tool_list(state, path=".", limit=200):
 
 
 @TOOL_REGISTRY.tool(
-    "Read a file or directory. ALWAYS read before editing. "
-    "Use offset/limit for large files. Line numbers included. Primary inspection tool.",
+    "Read a file or directory. Use before editing. Files return line-numbered text; directories fall back to list. Use offset/limit for large files.",
     params={"path": STR, "offset": INT, "limit": INT},
     required=["path"],
 )
-def tool_read(state, path, offset=1, limit=200):
-    note_tool(state, "read", path=path, offset=offset, limit=limit)
+def tool_read(state, path, offset=1, limit=DEFAULT_LINE_LIMIT):
     target = resolve_path(state["root"], path)
     if target.is_dir():
+        note_tool(
+            state, "read",
+            _defaults={"path": ".", "offset": 1, "limit": DEFAULT_LINE_LIMIT},
+            path=path, offset=offset, limit=limit,
+        )
         return tool_list(state, path, limit)
-    lines, start = (
-        target.read_text(encoding="utf-8", errors="replace").splitlines(),
-        max(offset, 1) - 1,
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    total = len(lines)
+    start = max(offset, 1) - 1
+    end = min(start + max(limit, 1), total)
+    suffix = f"*(lines {start + 1}\u2013{end} of {total})*" if total else ""
+    note_tool(
+        state, "read",
+        _defaults={"offset": 1, "limit": DEFAULT_LINE_LIMIT},
+        _suffix=suffix,
+        path=path, offset=offset, limit=limit,
     )
     return clip_tokens(
         "\n".join(
@@ -1743,9 +745,7 @@ def tool_read(state, path, offset=1, limit=200):
 
 
 @TOOL_REGISTRY.tool(
-    "Apply structured file operations in the workspace. Operations: "
-    "replace (exact string match), write (new file, use overwrite=true for existing), "
-    "move (rename), delete (remove). Batch related operations. Read files first.",
+    "Edit files inside the workspace. Operations: replace, write, move, delete. Read first and keep edits precise.",
     params={"operations": APPLY_OPERATIONS},
     required=["operations"],
 )
@@ -1770,97 +770,77 @@ def tool_apply(state, operations):
         if not isinstance(path, str) or not path:
             raise ValueError(f"operation {index} is missing a valid path")
         target = resolve_path(root, path)
-        if kind == "replace":
-            old = operation.get("old")
-            new = operation.get("new")
-            replace_all = operation.get("replace_all", False)
-            if not isinstance(old, str) or not isinstance(new, str):
-                raise ValueError(
-                    f"replace operation {index} requires string old and new"
+        match kind:
+            case "replace":
+                old = operation.get("old")
+                new = operation.get("new")
+                replace_all = operation.get("replace_all", False)
+                if not isinstance(old, str) or not isinstance(new, str):
+                    raise ValueError(f"replace operation {index} requires string old and new")
+                if not isinstance(replace_all, bool):
+                    raise ValueError(f"replace operation {index} replace_all must be boolean")
+                if not target.exists():
+                    raise ValueError(f"file does not exist: {rel(root, target)}")
+                if target.is_dir():
+                    raise ValueError(f"cannot replace text in directory: {rel(root, target)}")
+                updated, count = apply_exact_replace(
+                    target.read_text(encoding="utf-8", errors="replace"), old, new, replace_all
                 )
-            if not isinstance(replace_all, bool):
+                target.write_text(updated, encoding="utf-8")
+                summaries.append(f"replaced {rel(root, target)} ({count} match{'es' if count != 1 else ''})")
+            case "write":
+                content = operation.get("content")
+                overwrite = operation.get("overwrite", False)
+                if not isinstance(content, str):
+                    raise ValueError(f"write operation {index} requires string content")
+                if not isinstance(overwrite, bool):
+                    raise ValueError(f"write operation {index} overwrite must be boolean")
+                if target.exists() and target.is_dir():
+                    raise ValueError(f"cannot write directory: {rel(root, target)}")
+                if target.exists() and not overwrite:
+                    raise ValueError(f"file already exists: {rel(root, target)}; set overwrite=true")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                summaries.append(f"wrote {rel(root, target)}")
+            case "move":
+                destination_raw = operation.get("to")
+                if not isinstance(destination_raw, str) or not destination_raw:
+                    raise ValueError(f"move operation {index} requires a valid to path")
+                if not target.exists():
+                    raise ValueError(f"file does not exist: {rel(root, target)}")
+                if target.is_dir():
+                    raise ValueError(f"cannot move directory: {rel(root, target)}")
+                destination = resolve_path(root, destination_raw)
+                if destination == target:
+                    raise ValueError(f"move destination matches source: {rel(root, target)}")
+                if destination.exists():
+                    raise ValueError(f"destination already exists: {rel(root, destination)}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                target.rename(destination)
+                summaries.append(f"⚠ moved {rel(root, target)} -> {rel(root, destination)}")
+            case "delete":
+                if not target.exists():
+                    raise ValueError(f"file does not exist: {rel(root, target)}")
+                if target.is_dir():
+                    raise ValueError(f"cannot delete directory: {rel(root, target)}")
+                target.unlink()
+                summaries.append(f"⚠ deleted {rel(root, target)}")
+            case _:
                 raise ValueError(
-                    f"replace operation {index} replace_all must be boolean"
+                    f"operation {index} has unsupported op {inline_code(kind)}; use replace, write, move, or delete"
                 )
-            if not target.exists():
-                raise ValueError(f"file does not exist: {rel(root, target)}")
-            if target.is_dir():
-                raise ValueError(
-                    f"cannot replace text in directory: {rel(root, target)}"
-                )
-            updated, count = apply_exact_replace(
-                target.read_text(encoding="utf-8", errors="replace"),
-                old,
-                new,
-                replace_all,
-            )
-            target.write_text(updated, encoding="utf-8")
-            summaries.append(
-                f"replaced {rel(root, target)} ({count} match{'es' if count != 1 else ''})"
-            )
-            continue
-        if kind == "write":
-            content = operation.get("content")
-            overwrite = operation.get("overwrite", False)
-            if not isinstance(content, str):
-                raise ValueError(f"write operation {index} requires string content")
-            if not isinstance(overwrite, bool):
-                raise ValueError(f"write operation {index} overwrite must be boolean")
-            if target.exists() and target.is_dir():
-                raise ValueError(f"cannot write directory: {rel(root, target)}")
-            if target.exists() and not overwrite:
-                raise ValueError(
-                    f"file already exists: {rel(root, target)}; set overwrite=true"
-                )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-            summaries.append(f"wrote {rel(root, target)}")
-            continue
-        if kind == "move":
-            destination_raw = operation.get("to")
-            if not isinstance(destination_raw, str) or not destination_raw:
-                raise ValueError(f"move operation {index} requires a valid to path")
-            if not target.exists():
-                raise ValueError(f"file does not exist: {rel(root, target)}")
-            if target.is_dir():
-                raise ValueError(f"cannot move directory: {rel(root, target)}")
-            destination = resolve_path(root, destination_raw)
-            if destination == target:
-                raise ValueError(
-                    f"move destination matches source: {rel(root, target)}"
-                )
-            if destination.exists():
-                raise ValueError(
-                    f"destination already exists: {rel(root, destination)}"
-                )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            target.rename(destination)
-            summaries.append(f"⚠ moved {rel(root, target)} -> {rel(root, destination)}")
-            continue
-        if kind == "delete":
-            if not target.exists():
-                raise ValueError(f"file does not exist: {rel(root, target)}")
-            if target.is_dir():
-                raise ValueError(f"cannot delete directory: {rel(root, target)}")
-            target.unlink()
-            summaries.append(f"⚠ deleted {rel(root, target)}")
-            continue
-        raise ValueError(
-            f"operation {index} has unsupported op {inline_code(kind)}; use replace, write, move, or delete"
-        )
     out = "\n".join(summaries)
     show(out, len(summaries))
     return out
 
 
 @TOOL_REGISTRY.tool(
-    "Run shell commands: builds, tests, git, npm/pip/make, scripts. "
-    "Not for reading files (use read) or searching (use grep). Shows stdout and stderr.",
+    "Run shell commands for tests, builds, git, and scripts. Do not use for routine file inspection. Returns stdout and stderr together.",
     params={"command": STR, "timeout_seconds": INT},
     required=["command"],
 )
 def tool_bash(state, command, timeout_seconds=120):
-    note_tool(state, "bash", command=command, timeout=timeout_seconds)
+    note_tool(state, "bash", _defaults={"timeout": 120}, command=command, timeout=timeout_seconds)
     env = command_env(state["root"])
     result = run_cmd(
         [which("bash", env.get("PATH")) or "bash", "-c", command],
@@ -1875,13 +855,11 @@ def tool_bash(state, command, timeout_seconds=120):
 
 
 @TOOL_REGISTRY.tool(
-    "Search file contents by text/regex. Use when you know what to find but not where. "
-    "Use file_glob to filter by extension (e.g., '*.py'). Returns lines with file:line.",
+    "Search file contents by text or regex. Use file_glob to narrow by filename pattern. Returns matching lines with file and line numbers.",
     params={"pattern": STR, "path": STR, "file_glob": STR},
     required=["pattern"],
 )
 def tool_grep(state, pattern, path=".", file_glob=None):
-    note_tool(state, "grep", pattern=pattern, path=path, glob=file_glob)
     env, target = command_env(state["root"]), resolve_path(state["root"], path)
     if not target.exists():
         raise ValueError(f"search path does not exist: {rel(state['root'], target)}")
@@ -1900,25 +878,33 @@ def tool_grep(state, pattern, path=".", file_glob=None):
                 f"{name} search failed for {rel(state['root'], target)}: {detail}"
             )
         out = result.stdout.strip() or "<no matches>"
+        matches = len(out.splitlines()) if out != "<no matches>" else 0
+        suffix = f"*({matches} match{'es' if matches != 1 else ''})*" if matches else ""
+        note_tool(
+            state, "grep",
+            _defaults={"path": "."},
+            _suffix=suffix,
+            pattern=pattern, path=path, glob=file_glob,
+        )
         show(out, 3)
         return clip_tokens(out)
+    note_tool(state, "grep", _defaults={"path": "."}, pattern=pattern, path=path, glob=file_glob)
     raise ValueError("grep requires `rg` or `grep` on PATH")
 
 
 @TOOL_REGISTRY.tool(
-    "Find files by name pattern ('*.py', 'src/**/*.js'). Use when you know the pattern. "
-    "For exploring structure, use list instead. Supports *, ?, **.",
+    "Find files by name pattern like '*.py' or 'src/**/*.js'. Use when you know the path shape. Supports *, ?, and **.",
     params={"pattern": STR, "path": STR},
     required=["pattern"],
 )
 def tool_glob(state, pattern, path="."):
-    note_tool(state, "glob", pattern=pattern, path=path)
+    note_tool(state, "glob", _defaults={"path": "."}, pattern=pattern, path=path)
     base = resolve_path(state["root"], path)
     out = (
         "\n".join(
             rel(state["root"], match) + ("/" if match.is_dir() else "")
             for match in sorted(base.glob(pattern), key=lambda item: item.as_posix())[
-                :200
+                :DEFAULT_LINE_LIMIT
             ]
         )
         or "<no matches>"
@@ -1928,9 +914,7 @@ def tool_glob(state, pattern, path="."):
 
 
 @TOOL_REGISTRY.tool(
-    "Fetch web pages or APIs. Use to get documentation, standards, or API data. "
-    "Presets: 'page' (HTML→markdown), 'json' (API response), 'post_json' (POST JSON). "
-    "Use json_path for nested extraction. Headers like Authorization are redacted.",
+    "Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted.",
     params={
         "url": STR,
         "preset": HTTPX_PRESET,
@@ -1978,6 +962,12 @@ def tool_httpx(
     note_tool(
         state,
         "httpx",
+        _defaults={
+            "method": "GET",
+            "response_mode": "auto",
+            "timeout": 20,
+            "max_tokens": MAX_TOOL_OUTPUT_TOKENS,
+        },
         preset=preset,
         method=method,
         url=url,
@@ -2032,9 +1022,7 @@ def tool_httpx(
 
 
 @TOOL_REGISTRY.tool(
-    "Ask the user a question. Use for plan approvals, ambiguous decisions, checkpoints. "
-    "Provide choices for multiple-choice. Only available in interactive mode. "
-    "Batch work and ask at meaningful checkpoints, not after every trivial step.",
+    "Ask the user a question in interactive runs. Use for significant ambiguity or decisions. Provide choices when useful.",
     params={"question": STR, "choices": STRINGS},
     required=["question"],
 )
@@ -2291,61 +1279,34 @@ def format_tokens(n: int) -> str:
     return f"{n / 1000:.1f}k tokens"
 
 
-def list_models_for_adapter(adapter: str) -> list[str]:
-    """Return prefixed model specs for a single adapter. Silently returns [] on error."""
-    try:
-        if adapter == ADAPTER_OPENAI:
-            if not os.environ.get("OPENAI_API_KEY"):
-                return []
-            async_c = AsyncOpenAI(
-                api_key=str(os.environ["OPENAI_API_KEY"]),
-                base_url=os.environ.get("OPENAI_BASE_URL"),
-                max_retries=0,
-            )
-            sync_c = OpenAI(
-                api_key=str(os.environ["OPENAI_API_KEY"]),
-                base_url=os.environ.get("OPENAI_BASE_URL"),
-                max_retries=0,
-            )
-            raw = OpenAIAdapter(async_c, sync_c).list_models()
-        elif adapter == ADAPTER_GEMINI:
-            load_gemini_oauth_creds()  # raises if not configured
-            raw = load_gemini_model_list()
-        elif adapter == ADAPTER_BEDROCK:
-            current_region(None)  # raises if no region
-            region = current_region(None)
-            creds = load_aws_credentials(Path.cwd(), allow_login=False)
-            raw = BedrockConverseAdapter(region, creds).list_models()
-        else:
-            return []
-        return [join_model_spec(adapter, m) for m in raw]
-    except Exception:
-        return []
-
-
 def list_all_model_ids() -> list[str]:
-    """Return prefixed model specs merged from every signed-in adapter."""
-    adapters = detect_available_adapters()
-    if not adapters:
-        abort("No adapters are configured. Set OPENAI_API_KEY, authenticate with Gemini CLI, or configure AWS CLI.")
+    """Return prefixed model specs merged from every signed-in shim."""
+    shims = detect_available_shims()
+    if not shims:
+        abort(
+            "No shims are configured. Set OPENAI_API_KEY, sign in with Codex CLI, "
+            "authenticate with Gemini CLI, sign in with Claude Code, or configure AWS CLI."
+        )
     all_models: list[str] = []
-    for adapter in adapters:
-        status(f"Loading models from {inline_code(adapter)}.")
-        all_models.extend(list_models_for_adapter(adapter))
+    for shim in shims:
+        status(f"Loading models from {inline_code(shim)}.")
+        all_models.extend(
+            list_models_for_shim(shim, region=default_region(), cwd=Path.cwd())
+        )
     return all_models
 
 
 def list_model_ids() -> list[str]:
-    """Return model IDs for the currently configured adapter only (no prefix)."""
+    """Return model IDs for the currently configured shim only (no prefix)."""
     require_api_env()
     spec = current_model()
-    adapter = resolve_adapter(spec)
-    status(f"Loading models from {inline_code(adapter)}.")
-    return cast(CompletionClient, get_client(spec)).list_models()
+    shim = resolve_active_shim(spec)
+    status(f"Loading models from {inline_code(shim)}.")
+    return list_shim_model_ids(shim, region=default_region(), cwd=Path.cwd())
 
 
 async def run_turn(client, messages, state, model_spec, tool_defs, max_steps):
-    # Strip adapter prefix before sending to the API
+    # Strip shim prefix before sending to the API
     _, model = split_model_spec(model_spec)
     for _ in range(max_steps):
         # Truncate any over-long individual message strings, then enforce the
@@ -2391,7 +1352,7 @@ async def run_turn(client, messages, state, model_spec, tool_defs, max_steps):
                 for call_id, result in results
             )
             continue
-        render_markdown(output)
+        markdown(output)
         return 0, output
     return fail(f"reached max steps ({max_steps}) without a final response"), ""
 
@@ -2631,23 +1592,27 @@ def run(
     )[0]
 
 
+def append_items(lines, *items):
+    if items:
+        lines.extend(["", *items])
+    return lines
+
+
 def render_model_list(
     items, *, title, query=None, current=None, stderr=False, limit=None
 ):
     shown = list(items if limit is None else items[:limit])
     lines = [title]
     if current:
-        lines.extend(["", f"- current model: {inline_code(current)}"])
+        append_items(lines, f"- current model: {inline_code(current)}")
     if query:
-        lines.extend(["", f"- filter: {inline_code(query)}"])
+        append_items(lines, f"- filter: {inline_code(query)}")
     if shown:
-        lines.extend(
-            ["", *[f"{i}. {inline_code(item)}" for i, item in enumerate(shown, 1)]]
-        )
+        append_items(lines, *[f"{i}. {inline_code(item)}" for i, item in enumerate(shown, 1)])
     else:
-        lines.extend(["", "- no matching models"])
+        append_items(lines, "- no matching models")
     if len(items) > len(shown):
-        lines.extend(["", f"- showing {len(shown)} of {len(items)} matches"])
+        append_items(lines, f"- showing {len(shown)} of {len(items)} matches")
     markdown("\n".join(lines), stderr=stderr)
 
 
@@ -2725,10 +1690,10 @@ def bedrock_token(*, region: str | None = None):
     :param region: AWS region to use when generating the token.
     """
 
-    chosen = current_region(region)
+    chosen = default_region() if region is None else region
     status(f"Generating Bedrock credentials for {inline_code(chosen)}.")
-    token = provide_token(chosen, cwd=Path.cwd())
-    render_markdown(
+    token = make_bedrock_token(chosen, cwd=Path.cwd())
+    markdown(
         "## Bedrock Credentials\n\n"
         + "Paste this into another shell if you want to reuse the current Bedrock session.\n\n"
         + code_block(
@@ -2757,18 +1722,18 @@ def models(query: str | None = None):
     if chosen is None:
         render_model_list(list_all_model_ids(), title="## Available Models")
         return 0
-    adapter, bare_model = split_model_spec(chosen)
+    shim, bare_model = split_model_spec(chosen)
     cfg = load_config()
     cfg["model"] = bare_model
-    if adapter:
-        cfg["adapter"] = adapter
+    if shim:
+        cfg["shim"] = shim
     else:
-        cfg.pop("adapter", None)
+        cfg.pop("shim", None)
     save_config(cfg)
-    render_markdown(
+    markdown(
         f"## Default Model Updated\n\n"
         f"- selected: {inline_code(chosen)}"
-        + (f"\n- adapter: {inline_code(adapter)}" if adapter else "")
+        + (f"\n- shim: {inline_code(shim)}" if shim else "")
     )
     return 0
 
@@ -2777,12 +1742,12 @@ def model():
     """Show the current default model."""
 
     spec = current_model(None)
-    adapter = resolve_adapter(spec)
+    shim = resolve_active_shim(spec)
     _, bare = split_model_spec(spec)
-    render_markdown(
+    markdown(
         f"## Current Model\n\n"
         f"- model: {inline_code(bare)}\n"
-        f"- adapter: {inline_code(adapter)}"
+        f"- shim: {inline_code(shim)}"
     )
     return 0
 

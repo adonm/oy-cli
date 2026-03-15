@@ -30,6 +30,10 @@ mise run build
 - prefer env-first run configuration so common usage stays close to `oy "prompt"`
 - current run env vars: `OY_MODEL`, `OY_NON_INTERACTIVE`, `OY_SYSTEM_FILE`, `OY_ROOT`, `OY_CONFIG`
 - prefer simple, direct changes over abstraction-heavy rewrites
+- keep system prompts tight; avoid duplicating tool docs inside prompts when tool definitions already provide them
+- complexity guidance should favor grugbrain.dev style simplicity
+- security guidance should explicitly align with OWASP thinking
+- performance guidance should reflect performance-aware programming: measure first, avoid obvious waste
 
 ## Release Hygiene
 
