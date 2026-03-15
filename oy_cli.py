@@ -16,6 +16,8 @@ from typing import Any, cast
 from urllib.parse import quote, urlparse
 import defopt
 import httpx
+import httpx_aws_auth
+import tiktoken
 from markdownify import markdownify as html_to_markdown
 from openai import AsyncOpenAI, OpenAI
 from openai import (
@@ -25,16 +27,17 @@ from openai import (
     RateLimitError,
 )
 from rich.console import Console
-from rich import filesize
 from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.status import Status
 
 __version__ = "0.2.1"
-# Per-tool payloads should stay comfortable for long sessions on 128k-ish models.
-MAX_TOOL_OUTPUT_CHARS = 16000
-MAX_TOOL_OUTPUT_TAIL_CHARS = 4000
-MAX_HTTPX_CHARS = 20000
+# Per-tool payloads: hard token cap keeps each tool result ≤ one 4k-token message.
+MAX_TOOL_OUTPUT_TOKENS = 4096
+MAX_TOOL_TAIL_TOKENS = 1024   # tail slice preserved for bash head+tail display
+# Context window management: hard cap at 128k tokens, individual strings at 4k.
+MAX_CONTEXT_TOKENS = 131072
+MAX_MESSAGE_TOKENS = 4096
 DEFAULT_MODEL = "moonshotai.kimi-k2.5"
 DEFAULT_REGION = (
     os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
@@ -65,7 +68,7 @@ BASE_SYSTEM_PROMPT = """You are oy, a tiny local coding assistant.
 
 ## Output Truncation
 
-Tool output clips to preserve context (~16k chars, ~20k for httpx). Bash preserves both head AND tail.
+Tool output clips to preserve context (~4k tokens per tool result). Bash preserves both head AND tail.
 
 When clipped: use read with offsets, grep, glob, list, or follow-up httpx calls—never guess.
 
@@ -182,18 +185,6 @@ Total issues found: [count]
 Include a `**Status**: OPEN` line for each finding so humans can track progress.
 Append to any existing content in ISSUES.md; do not delete human-added notes.
 """
-BREW_CANDIDATES = [
-    Path("/home/linuxbrew/.linuxbrew/bin/brew"),
-    Path("/opt/homebrew/bin/brew"),
-    Path("/usr/local/bin/brew"),
-]
-MISE_CANDIDATES = [
-    Path.home() / ".local" / "bin" / "mise",
-    Path.home() / ".cargo" / "bin" / "mise",
-    Path("/usr/local/bin/mise"),
-    Path("/opt/homebrew/bin/mise"),
-    Path("/home/linuxbrew/.linuxbrew/bin/mise"),
-]
 SSO_MARKERS = (
     "error loading sso token",
     "the sso session associated with this profile has expired",
@@ -241,7 +232,11 @@ APPLY_OPERATION = {
 }
 APPLY_OPERATIONS = {"type": "array", "items": APPLY_OPERATION}
 _using_bedrock = False
+_using_gemini = False
 _last_api_env_error = None
+GEMINI_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
+GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
+GEMINI_CODE_ASSIST_VERSION = "v1internal"
 STDOUT = Console()
 STDERR = Console(stderr=True)
 # Fit terminal display nicely; Rich handles wrapping automatically
@@ -314,22 +309,25 @@ def abort(message, code=1):
     raise SystemExit(fail(message, code))
 
 
-def clip(text, limit=MAX_TOOL_OUTPUT_CHARS, tail_chars=0):
-    """Truncate text to a character limit, optionally preserving tail.
+def clip_tokens(text, limit=MAX_TOOL_OUTPUT_TOKENS, tail_tokens=0):
+    """Truncate text to a token limit, optionally preserving a tail slice.
 
-    For bash output, use tail_chars > 0 to show both head and tail with a marker.
-    Otherwise, just truncates at limit with an omission count.
+    For bash output, use tail_tokens > 0 to show both head and tail with a marker.
+    Otherwise, just truncates at limit with an omission note.
     """
-    if len(text) <= limit:
+    enc = get_tokenizer()
+    ids = enc.encode(text)
+    if len(ids) <= limit:
         return text
-    omitted = len(text) - limit
-    if 0 < tail_chars < limit:
-        head_chars = max(limit - tail_chars, 1)
-        marker = f"\n... [{omitted} chars omitted; showing first {head_chars} and last {tail_chars}]\n"
-        head = text[:head_chars]
-        tail = text[-tail_chars:]
+    omitted_tokens = len(ids) - limit
+    if 0 < tail_tokens < limit:
+        head_tokens = max(limit - tail_tokens, 1)
+        head = enc.decode(ids[:head_tokens])
+        tail = enc.decode(ids[-tail_tokens:])
+        marker = f"\n... [{omitted_tokens} tokens omitted; showing first {head_tokens} and last {tail_tokens}]\n"
         return head + marker + tail
-    return f"{text[:limit]}\n... [{omitted} chars omitted after {limit}]"
+    kept = enc.decode(ids[:limit])
+    return f"{kept}\n... [{omitted_tokens} tokens omitted after {limit}]"
 
 
 def preview(value, limit=72):
@@ -550,13 +548,78 @@ def merge_paths(*groups):
     return os.pathsep.join(merged)
 
 
-def which(tool, path_value=None, candidates=None):
-    if found := shutil.which(tool, path=path_value):
-        return found
-    for candidate in candidates or []:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
+def which(tool, path_value=None):
+    return shutil.which(tool, path=path_value)
+
+
+def gemini_cli_package_root() -> Path:
+    """Return the resolved package root of the installed Gemini CLI.
+
+    The Gemini CLI binary is a Node.js script; its real path resolves to
+    ``<package_root>/dist/index.js``.  We walk up two levels to reach the
+    package root that contains ``node_modules/@google/gemini-cli-core``.
+
+    Raises RuntimeError if the CLI is not found or the path looks wrong.
+    """
+    exe = shutil.which("gemini")
+    if not exe:
+        raise RuntimeError(
+            "Gemini CLI is not installed or not on PATH. "
+            "Install it with `npm i -g @google/gemini-cli` and run `gemini` once to authenticate."
+        )
+    real = Path(exe).resolve()
+    # real is e.g. …/<root>/dist/index.js — two parents up is the package root
+    root = real.parent.parent
+    core = root / "node_modules" / "@google" / "gemini-cli-core"
+    if not core.is_dir():
+        raise RuntimeError(
+            f"Gemini CLI package structure not recognised at {root}. "
+            "Re-install with `npm i -g @google/gemini-cli`."
+        )
+    return root
+
+
+def _read_gemini_cli_file(relative: str) -> str:
+    """Read a text file relative to the gemini-cli-core dist directory."""
+    root = gemini_cli_package_root()
+    path = root / "node_modules" / "@google" / "gemini-cli-core" / "dist" / "src" / relative
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read Gemini CLI file {path}: {exc}") from exc
+
+
+def load_gemini_oauth_client() -> tuple[str, str]:
+    """Return (client_id, client_secret) parsed from the Gemini CLI's oauth2.js."""
+    text = _read_gemini_cli_file("code_assist/oauth2.js")
+    id_m = re.search(r"OAUTH_CLIENT_ID\s*=\s*'([^']+)'", text)
+    secret_m = re.search(r"OAUTH_CLIENT_SECRET\s*=\s*'([^']+)'", text)
+    if not id_m or not secret_m:
+        raise RuntimeError(
+            "Could not parse OAuth client credentials from Gemini CLI. "
+            "Re-install with `npm i -g @google/gemini-cli`."
+        )
+    return id_m.group(1), secret_m.group(1)
+
+
+def load_gemini_model_list() -> list[str]:
+    """Return the list of valid Gemini model IDs from the CLI's models.js."""
+    text = _read_gemini_cli_file("config/models.js")
+    # Each model constant looks like:  export const FOO = 'gemini-2.5-pro';
+    models = re.findall(r"=\s*'(gemini-[^']+)'", text)
+    # Deduplicate while preserving first-seen order
+    seen: set[str] = set()
+    result: list[str] = []
+    for m in models:
+        if m not in seen:
+            seen.add(m)
+            result.append(m)
+    if not result:
+        raise RuntimeError(
+            "Could not parse model list from Gemini CLI. "
+            "Re-install with `npm i -g @google/gemini-cli`."
+        )
+    return result
 
 
 def run_cmd(command, cwd=None, env=None, timeout=120):
@@ -579,16 +642,14 @@ def command_env(cwd=None):
     Merges PATH entries from mise env --json and homebrew prefix detection.
     This ensures tools installed via mise or homebrew are available.
     """
-    env, brew_bins = os.environ.copy(), BREW_CANDIDATES.copy()
-    if prefix := env.get("HOMEBREW_PREFIX") or os.environ.get("HOMEBREW_PREFIX"):
-        brew_bins.insert(0, Path(prefix) / "bin" / "brew")
-    if brew := which("brew", env.get("PATH"), brew_bins):
+    env = os.environ.copy()
+    if brew := which("brew", env.get("PATH")):
         prefix = Path(brew).parent.parent
         env["HOMEBREW_PREFIX"] = str(prefix)
         env["PATH"] = merge_paths(
             [str(prefix / "bin"), str(prefix / "sbin")], split_path(env.get("PATH"))
         )
-    if not (mise := which("mise", env.get("PATH"), MISE_CANDIDATES)):
+    if not (mise := which("mise", env.get("PATH"))):
         return env
     try:
         result = run_cmd(
@@ -694,14 +755,14 @@ def load_aws_credentials(cwd=None, allow_login=True):
     return creds
 
 
-def sign(key, msg):
+def _sigv4_sign(key, msg):
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
 
-def signing_key(secret_key, date_stamp, region, service):
-    key = sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
+def _sigv4_key(secret_key, date_stamp, region, service):
+    key = _sigv4_sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
     for part in (region, service, "aws4_request"):
-        key = sign(key, part)
+        key = _sigv4_sign(key, part)
     return key
 
 
@@ -734,7 +795,7 @@ def make_bedrock_token(region, cwd=None, expires=43200):
     scope = f"{date_stamp}/{region}/bedrock/aws4_request"
     string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashlib.sha256(request.encode()).hexdigest()}"
     signature = hmac.new(
-        signing_key(creds["secret_key"], date_stamp, region, "bedrock"),
+        _sigv4_key(creds["secret_key"], date_stamp, region, "bedrock"),
         string_to_sign.encode(),
         hashlib.sha256,
     ).hexdigest()
@@ -785,8 +846,28 @@ def setting(choice, env_keys, config_key, default):
     return load_config().get(config_key, default) if config_key else default
 
 
+# Adapter identifiers used in config and model prefixes
+ADAPTER_OPENAI = "openai"
+ADAPTER_GEMINI = "gemini"
+ADAPTER_BEDROCK = "bedrock"
+KNOWN_ADAPTERS = {ADAPTER_OPENAI, ADAPTER_GEMINI, ADAPTER_BEDROCK}
+
+
+def split_model_spec(spec: str) -> tuple[str | None, str]:
+    """Split 'adapter:model' into (adapter, model). Returns (None, spec) if no prefix."""
+    if ":" in spec:
+        adapter, _, model = spec.partition(":")
+        if adapter in KNOWN_ADAPTERS:
+            return adapter, model
+    return None, spec
+
+
+def join_model_spec(adapter: str, model: str) -> str:
+    return f"{adapter}:{model}"
+
+
 def find_model_by_suffix(models, suffix):
-    """Return first model ID ending with suffix, or None."""
+    """Return first model spec ending with suffix, or None."""
     for m in models:
         if m.endswith(suffix):
             return m
@@ -794,23 +875,40 @@ def find_model_by_suffix(models, suffix):
 
 
 def pick_default_model():
-    """Try glm-5 then kimi-k2.5 via suffix match on available models."""
+    """Pick a sensible default from all available signed-in adapters."""
     try:
-        available = list_model_ids()
+        available = list_all_model_ids()
     except Exception:
         return DEFAULT_MODEL
     for suffix in ("glm-5", "kimi-k2.5"):
         if m := find_model_by_suffix(available, suffix):
             return m
+    if available:
+        return available[0]
     return DEFAULT_MODEL
 
 
-def current_model(choice):
+def current_adapter(choice: str | None = None) -> str | None:
+    """Return the configured adapter, or None to mean 'infer from model spec or env'."""
     if choice:
         return choice
-    if os.environ.get("OY_MODEL"):
-        return os.environ["OY_MODEL"]
-    if model := load_config().get("model"):
+    if v := os.environ.get("OY_ADAPTER"):
+        return v
+    return load_config().get("adapter")
+
+
+def current_model(choice: str | None = None) -> str:
+    """Return the active model spec ('adapter:model' or bare model id)."""
+    if choice:
+        return choice
+    if v := os.environ.get("OY_MODEL"):
+        return v
+    cfg = load_config()
+    if model := cfg.get("model"):
+        # Re-attach adapter prefix from config if not already present
+        adapter = cfg.get("adapter")
+        if adapter and ":" not in model:
+            return join_model_spec(adapter, model)
         return model
     return pick_default_model()
 
@@ -847,26 +945,570 @@ def current_non_interactive() -> bool:
     return env_flag("OY_NON_INTERACTIVE", False)
 
 
+class CompletionClient:
+    """Base for LLM clients."""
+
+    async def chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def list_models(self) -> list[str]:
+        raise NotImplementedError
+
+
+class OpenAIAdapter(CompletionClient):
+    """Client for OpenAI-compatible APIs."""
+
+    def __init__(self, async_client: AsyncOpenAI, sync_client: OpenAI):
+        self.async_client = async_client
+        self.sync_client = sync_client
+
+    async def chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+    ) -> dict[str, Any]:
+        response = await self.async_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,  # type: ignore[arg-type]
+            tool_choice=tool_choice,  # type: ignore[arg-type]
+        )
+        return response.choices[0].message.model_dump(exclude_none=True)
+
+    def list_models(self) -> list[str]:
+        return sorted(model.id for model in list(self.sync_client.models.list()))
+
+
+class BedrockConverseAdapter(CompletionClient):
+    """Native Bedrock client using the Converse API."""
+
+    def __init__(self, region: str, credentials: dict[str, str]):
+        self.region = region
+        self.base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
+        self._auth = httpx_aws_auth.AwsSigV4Auth(
+            credentials=httpx_aws_auth.AwsCredentials(
+                access_key=credentials["access_key"],
+                secret_key=credentials["secret_key"],
+                session_token=credentials.get("session_token"),
+            ),
+            service="bedrock",
+            region=region,
+        )
+        self._list_auth = httpx_aws_auth.AwsSigV4Auth(
+            credentials=httpx_aws_auth.AwsCredentials(
+                access_key=credentials["access_key"],
+                secret_key=credentials["secret_key"],
+                session_token=credentials.get("session_token"),
+            ),
+            service="bedrock",
+            region=region,
+        )
+
+    async def chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+    ) -> dict[str, Any]:
+        # Translate OpenAI format to Bedrock Converse format
+        system_prompts = []
+        bedrock_messages = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content") or ""
+            if role == "system":
+                system_prompts.append({"text": str(content)})
+                continue
+
+            blocks = []
+            if role == "tool":
+                # Group consecutive tool results into the same user message
+                result_block = {
+                    "toolResult": {
+                        "toolUseId": msg["tool_call_id"],
+                        "content": [{"text": str(content)}],
+                    }
+                }
+                if bedrock_messages and bedrock_messages[-1]["role"] == "user":
+                    # Check if the last block was also a toolResult (or just add to user message)
+                    bedrock_messages[-1]["content"].append(result_block)
+                    continue
+                else:
+                    role = "user"
+                    blocks.append(result_block)
+            else:
+                if isinstance(content, str) and content:
+                    blocks.append({"text": content})
+                elif isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "text" and item.get("text"):
+                            blocks.append({"text": item["text"]})
+                        elif item.get("type") == "image_url":
+                            # Vision placeholder
+                            pass
+
+                if role == "assistant" and "tool_calls" in msg:
+                    for call in msg["tool_calls"]:
+                        blocks.append(
+                            {
+                                "toolUse": {
+                                    "toolUseId": call["id"],
+                                    "name": call["function"]["name"],
+                                    "input": json.loads(call["function"]["arguments"]),
+                                }
+                            }
+                        )
+                
+                if not blocks:
+                    continue # Should not happen in a valid chat history
+
+            bedrock_messages.append({"role": role, "content": blocks})
+
+        payload: dict[str, Any] = {"messages": bedrock_messages}
+        if system_prompts:
+            payload["system"] = system_prompts
+        if tools:
+            payload["toolConfig"] = {
+                "tools": [
+                    {
+                        "toolSpec": {
+                            "name": t["function"]["name"],
+                            "description": t["function"]["description"],
+                            "inputSchema": {"json": t["function"]["parameters"]},
+                        }
+                    }
+                    for t in tools
+                ],
+                "toolChoice": {"auto": {}} if tool_choice == "auto" else {"any": {}},
+            }
+
+        url = f"{self.base_url}/model/{quote(model)}/converse"
+        body = json.dumps(payload)
+
+        async with httpx.AsyncClient(auth=self._auth) as client:
+            response = await client.post(url, content=body, headers={"content-type": "application/json"}, timeout=120)
+            if response.is_error:
+                error_body = response.text
+                try:
+                    error_json = response.json()
+                    message = error_json.get("message", error_body)
+                except Exception:
+                    message = error_body
+                raise RuntimeError(f"Bedrock error ({response.status_code}): {message}")
+
+            data = response.json()
+            output = data["output"]["message"]
+            role = output["role"]
+            content = ""
+            tool_calls = []
+            for block in output["content"]:
+                if "text" in block:
+                    content += block["text"]
+                if "toolUse" in block:
+                    tool = block["toolUse"]
+                    tool_calls.append(
+                        {
+                            "id": tool["toolUseId"],
+                            "type": "function",
+                            "function": {
+                                "name": tool["name"],
+                                "arguments": json.dumps(tool["input"]),
+                            },
+                        }
+                    )
+
+            res: dict[str, Any] = {"role": role, "content": content}
+            if tool_calls:
+                res["tool_calls"] = tool_calls
+            return res
+
+    def list_models(self) -> list[str]:
+        # ListFoundationModels is a Control Plane operation
+        models_url = f"https://bedrock.{self.region}.amazonaws.com/foundation-models"
+        response = httpx.get(models_url, auth=self._list_auth, timeout=30)
+
+        all_ids = []
+        if not response.is_error:
+            data = response.json()
+            all_ids.extend(
+                m["modelId"]
+                for m in data.get("modelSummaries", [])
+                if "TEXT" in m.get("outputModalities", [])
+            )
+
+        # Also try to list inference profiles (required for many newer models)
+        profiles_url = f"https://bedrock.{self.region}.amazonaws.com/inference-profiles"
+        response = httpx.get(profiles_url, auth=self._list_auth, timeout=30)
+        if not response.is_error:
+            data = response.json()
+            all_ids.extend(
+                p["inferenceProfileId"]
+                for p in data.get("inferenceProfileSummaries", [])
+            )
+
+        return sorted(list(set(all_ids)))
+
+
 def bedrock_base_url(region):
     return f"https://bedrock-mantle.{region}.api.aws/v1"
 
 
-def ensure_api_env(cwd=None, refresh=False):
-    global _using_bedrock, _last_api_env_error
-    if refresh and not _using_bedrock:
-        return False
-    if os.environ.get("OPENAI_API_KEY") and not refresh:
-        _using_bedrock, _last_api_env_error = False, None
-        return True
+def gemini_creds_path():
+    return GEMINI_CREDS_PATH
+
+
+def load_gemini_oauth_creds():
+    """Load OAuth credentials from ~/.gemini/oauth_creds.json."""
+    path = gemini_creds_path()
     try:
-        region = current_region(None)
-        os.environ["OPENAI_API_KEY"] = provide_token(region, cwd)
-        os.environ["OPENAI_BASE_URL"] = bedrock_base_url(region)
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot read Gemini OAuth credentials: {exc}") from exc
+    if not isinstance(data.get("refresh_token"), str):
+        raise RuntimeError("Gemini OAuth credentials missing refresh_token")
+    return data
+
+
+def refresh_gemini_token(refresh_token):
+    """Exchange a refresh token for a fresh access token via Google OAuth2."""
+    client_id, client_secret = load_gemini_oauth_client()
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                "https://oauth2.googleapis.com/token",
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Gemini token refresh failed: {exc}") from exc
+    if not isinstance(data.get("access_token"), str):
+        raise RuntimeError("Gemini token refresh did not return an access_token")
+    # Persist refreshed creds back to disk
+    existing = load_json(gemini_creds_path(), {})
+    existing.update(
+        {
+            "access_token": data["access_token"],
+            "expiry_date": int(
+                (__import__("time").time() + data.get("expires_in", 3600) - 60) * 1000
+            ),
+        }
+    )
+    try:
+        gemini_creds_path().write_text(
+            json.dumps(existing, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass  # Best-effort cache write
+    return data["access_token"]
+
+
+def get_gemini_access_token():
+    """Return a valid Gemini access token, refreshing if expired."""
+    creds = load_gemini_oauth_creds()
+    import time
+
+    expiry_ms = creds.get("expiry_date", 0)
+    if isinstance(expiry_ms, (int, float)) and expiry_ms > time.time() * 1000:
+        return creds["access_token"]
+    return refresh_gemini_token(creds["refresh_token"])
+
+
+def resolve_gemini_project():
+    """Resolve the GCP project ID via loadCodeAssist (auto-provisions if needed)."""
+    token = get_gemini_access_token()
+    url = f"{GEMINI_CODE_ASSIST_ENDPOINT}/{GEMINI_CODE_ASSIST_VERSION}:loadCodeAssist"
+    try:
+        with httpx.Client(timeout=20) as client:
+            resp = client.post(
+                url,
+                json={},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Gemini loadCodeAssist failed: {exc}") from exc
+    project_id = data.get("cloudaicompanionProject")
+    if not isinstance(project_id, str) or not project_id:
+        raise RuntimeError("Gemini loadCodeAssist did not return a project ID")
+    return project_id
+
+
+class GeminiCodeAssistAdapter(CompletionClient):
+    """Client for the Gemini Code Assist API (cloudcode-pa.googleapis.com).
+
+    Uses OAuth credentials from ~/.gemini/oauth_creds.json as written by the
+    Gemini CLI. Translates OpenAI-format messages/tools to the Vertex-style
+    generateContent protocol used by the Code Assist endpoint.
+    """
+
+    def __init__(self, project_id: str, access_token: str):
+        self.project_id = project_id
+        self.access_token = access_token
+        self.base_url = f"{GEMINI_CODE_ASSIST_ENDPOINT}/{GEMINI_CODE_ASSIST_VERSION}"
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+
+    def _openai_messages_to_vertex(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Convert OpenAI chat messages to Vertex contents + systemInstruction."""
+        system_parts: list[dict[str, Any]] = []
+        contents: list[dict[str, Any]] = []
+
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content") or ""
+
+            if role == "system":
+                system_parts.append({"text": str(content)})
+                continue
+
+            if role == "tool":
+                # Tool result — attach as a functionResponse to the previous user turn
+                result_part = {
+                    "functionResponse": {
+                        "name": msg.get("name", "tool"),
+                        "response": {"output": str(content)},
+                    }
+                }
+                # Group consecutive tool results into one user turn
+                if contents and contents[-1]["role"] == "user":
+                    contents[-1]["parts"].append(result_part)
+                else:
+                    contents.append({"role": "user", "parts": [result_part]})
+                continue
+
+            vertex_role = "model" if role == "assistant" else "user"
+            parts: list[dict[str, Any]] = []
+
+            if isinstance(content, str) and content:
+                parts.append({"text": content})
+            elif isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text" and item.get("text"):
+                        parts.append({"text": item["text"]})
+
+            if role == "assistant" and "tool_calls" in msg:
+                for call in msg["tool_calls"]:
+                    fn = call["function"]
+                    parts.append(
+                        {
+                            "functionCall": {
+                                "name": fn["name"],
+                                "args": json.loads(fn["arguments"]),
+                            }
+                        }
+                    )
+
+            if parts:
+                contents.append({"role": vertex_role, "parts": parts})
+
+        system_instruction = (
+            {"parts": system_parts} if system_parts else None
+        )
+        return contents, system_instruction
+
+    def _openai_tools_to_vertex(
+        self, tools: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | None:
+        """Convert OpenAI tool specs to Vertex functionDeclarations."""
+        if not tools:
+            return None
+        decls = [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"].get("description", ""),
+                "parameters": t["function"].get("parameters", {}),
+            }
+            for t in tools
+            if t.get("type") == "function"
+        ]
+        return [{"functionDeclarations": decls}] if decls else None
+
+    def _vertex_response_to_openai(
+        self, response: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Convert a Vertex generateContent response to OpenAI message format."""
+        inner = response.get("response", {})
+        candidates = inner.get("candidates", [])
+        if not candidates:
+            return {"role": "assistant", "content": ""}
+
+        content_text = ""
+        tool_calls: list[dict[str, Any]] = []
+        call_index = 0
+
+        for part in candidates[0].get("content", {}).get("parts", []):
+            if "text" in part:
+                content_text += part["text"]
+            elif "functionCall" in part:
+                fc = part["functionCall"]
+                tool_calls.append(
+                    {
+                        "id": f"call_{call_index}",
+                        "type": "function",
+                        "function": {
+                            "name": fc["name"],
+                            "arguments": json.dumps(fc.get("args", {})),
+                        },
+                    }
+                )
+                call_index += 1
+
+        result: dict[str, Any] = {"role": "assistant", "content": content_text}
+        if tool_calls:
+            result["tool_calls"] = tool_calls
+        return result
+
+    async def chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+    ) -> dict[str, Any]:
+        contents, system_instruction = self._openai_messages_to_vertex(messages)
+        vertex_tools = self._openai_tools_to_vertex(tools or [])
+
+        request_body: dict[str, Any] = {"contents": contents}
+        if system_instruction:
+            request_body["systemInstruction"] = system_instruction
+        if vertex_tools:
+            request_body["tools"] = vertex_tools
+            request_body["toolConfig"] = {
+                "functionCallingConfig": {
+                    "mode": "AUTO" if tool_choice == "auto" else "ANY"
+                }
+            }
+
+        payload = {
+            "model": model,
+            "project": self.project_id,
+            "request": request_body,
+        }
+
+        url = f"{self.base_url}:generateContent"
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, json=payload, headers=self._auth_headers())
+            if resp.status_code == 401:
+                # Token expired mid-session — refresh and retry once
+                self.access_token = refresh_gemini_token(
+                    load_gemini_oauth_creds()["refresh_token"]
+                )
+                resp = await client.post(
+                    url, json=payload, headers=self._auth_headers()
+                )
+            if resp.is_error:
+                try:
+                    msg = resp.json().get("error", {}).get("message", resp.text)
+                except Exception:
+                    msg = resp.text
+                raise RuntimeError(
+                    f"Gemini Code Assist error ({resp.status_code}): {msg}"
+                )
+            return self._vertex_response_to_openai(resp.json())
+
+    def list_models(self) -> list[str]:
+        return load_gemini_model_list()
+
+
+def detect_available_adapters() -> list[str]:
+    """Return a list of adapters that appear to be signed in / configured."""
+    available = []
+    if os.environ.get("OPENAI_API_KEY"):
+        available.append(ADAPTER_OPENAI)
+    try:
+        load_gemini_oauth_creds()
+        available.append(ADAPTER_GEMINI)
+    except RuntimeError:
+        pass
+    try:
+        aws_cli(["sts", "get-caller-identity", "--no-cli-pager"], timeout=5)
+        available.append(ADAPTER_BEDROCK)
+    except Exception:
+        pass
+    return available
+
+
+def resolve_adapter(model_spec: str | None = None) -> str:
+    """Determine which adapter to use.
+
+    Priority: OY_ADAPTER env > adapter prefix in model spec > 'adapter' in config >
+    auto-detect from what's signed in.
+    """
+    if env_adapter := os.environ.get("OY_ADAPTER"):
+        if env_adapter in KNOWN_ADAPTERS:
+            return env_adapter
+        abort(f"Unknown OY_ADAPTER value: {inline_code(env_adapter)}. Use one of: {', '.join(sorted(KNOWN_ADAPTERS))}")
+    if model_spec:
+        prefix, _ = split_model_spec(model_spec)
+        if prefix:
+            return prefix
+    if cfg_adapter := load_config().get("adapter"):
+        if cfg_adapter in KNOWN_ADAPTERS:
+            return cfg_adapter
+    # Auto-detect: prefer OpenAI, then Gemini, then Bedrock
+    if os.environ.get("OPENAI_API_KEY"):
+        return ADAPTER_OPENAI
+    try:
+        load_gemini_oauth_creds()
+        return ADAPTER_GEMINI
+    except RuntimeError:
+        pass
+    return ADAPTER_BEDROCK
+
+
+def ensure_api_env(cwd=None, refresh=False):
+    global _using_bedrock, _using_gemini, _last_api_env_error
+    spec = current_model()
+    adapter = resolve_adapter(spec)
+    if adapter == ADAPTER_OPENAI:
+        if os.environ.get("OPENAI_API_KEY"):
+            _using_gemini, _using_bedrock, _last_api_env_error = False, False, None
+            return True
+        _last_api_env_error = "OPENAI_API_KEY is not set"
+        return False
+    if adapter == ADAPTER_GEMINI:
+        try:
+            load_gemini_oauth_creds()
+            _using_gemini, _using_bedrock, _last_api_env_error = True, False, None
+            return True
+        except RuntimeError as exc:
+            _last_api_env_error = str(exc)
+            return False
+    # Bedrock
+    try:
+        current_region(None)
+        _using_bedrock, _using_gemini, _last_api_env_error = True, False, None
+        return True
     except Exception as exc:
         _last_api_env_error = str(exc)
         return False
-    _using_bedrock, _last_api_env_error = True, None
-    return True
 
 
 def require_api_env(cwd=None):
@@ -875,11 +1517,11 @@ def require_api_env(cwd=None):
     message = (
         "Missing API credentials.\n\n"
         "- set `OPENAI_API_KEY`, or\n"
-        "- configure AWS CLI for Bedrock\n"
-        "- `oy` uses the same AWS CLI auth and profile as `aws`"
+        "- install Gemini CLI and run `gemini` once to authenticate, or\n"
+        "- configure AWS CLI for Bedrock"
     )
     if _last_api_env_error:
-        message += f"\n- AWS CLI error: {_last_api_env_error}"
+        message += f"\n- error: {_last_api_env_error}"
     abort(message)
 
 
@@ -897,14 +1539,29 @@ def require_runtime(cwd=None):
         )
 
 
-def get_client(async_=False):
+def get_client(model_spec: str | None = None) -> CompletionClient:
     require_api_env(Path.cwd())
-    cls = AsyncOpenAI if async_ else OpenAI
-    return cls(
+    spec = model_spec or current_model()
+    adapter = resolve_adapter(spec)
+    if adapter == ADAPTER_GEMINI:
+        token = get_gemini_access_token()
+        project_id = resolve_gemini_project()
+        return GeminiCodeAssistAdapter(project_id, token)
+    if adapter == ADAPTER_BEDROCK:
+        region = current_region(None)
+        creds = load_aws_credentials(Path.cwd())
+        return BedrockConverseAdapter(region, creds)
+    async_c = AsyncOpenAI(
         api_key=str(os.environ["OPENAI_API_KEY"]),
         base_url=os.environ.get("OPENAI_BASE_URL"),
         max_retries=3,
     )
+    sync_c = OpenAI(
+        api_key=str(os.environ["OPENAI_API_KEY"]),
+        base_url=os.environ.get("OPENAI_BASE_URL"),
+        max_retries=3,
+    )
+    return OpenAIAdapter(async_c, sync_c)
 
 
 def resolve_path(root, raw):
@@ -955,6 +1612,82 @@ def note_tool(state, name, **details):
         markdown(message, stderr=True)
 
 
+def note_apply_ops(operations):
+    """Print a per-operation preview for an apply tool call."""
+    for op in operations:
+        kind = op.get("op", "?")
+        path = op.get("path", "?")
+        if kind == "replace":
+            markdown(f"  replace `{path}`", stderr=True)
+        elif kind == "write":
+            markdown(f"  write `{path}`", stderr=True)
+        elif kind == "move":
+            to = op.get("to", "?")
+            markdown(f"  ⚠ move `{path}` → `{to}`", stderr=True)
+        elif kind == "delete":
+            markdown(f"  ⚠ delete `{path}`", stderr=True)
+        else:
+            markdown(f"  {kind} `{path}`", stderr=True)
+
+
+class ToolRegistry:
+    """Registry of tool definitions for the agent loop.
+
+    Usage::
+
+        @TOOL_REGISTRY.tool(
+            "Description sent to the model.",
+            params={"path": STR, "limit": INT},
+            required=[],
+        )
+        def tool_list(state, path=".", limit=200):
+            ...
+
+    Each decorated function is stored under its bare name (stripped of the
+    leading ``tool_`` prefix if present) as ``(fn, description, props, required)``.
+    """
+
+    def __init__(self):
+        self._specs: dict[str, tuple] = {}
+
+    def tool(self, description: str, *, params: dict, required: list[str]):
+        """Decorator that registers a tool function."""
+        def decorator(fn):
+            name = fn.__name__
+            if name.startswith("tool_"):
+                name = name[5:]
+            self._specs[name] = (fn, description, params, required)
+            return fn
+        return decorator
+
+    def __contains__(self, name):
+        return name in self._specs
+
+    def __iter__(self):
+        return iter(self._specs)
+
+    def items(self):
+        return self._specs.items()
+
+    def get(self, name):
+        return self._specs.get(name)
+
+    def without(self, *names):
+        """Return a filtered copy of the registry excluding the given tool names."""
+        copy = ToolRegistry()
+        copy._specs = {k: v for k, v in self._specs.items() if k not in names}
+        return copy
+
+
+TOOL_REGISTRY = ToolRegistry()
+
+
+@TOOL_REGISTRY.tool(
+    "List directory contents. Use to discover structure before exploring deeper. "
+    "Sorted alphabetically, trailing / for directories. Prefer over glob for unfamiliar trees.",
+    params={"path": STR, "limit": INT},
+    required=[],
+)
 def tool_list(state, path=".", limit=200):
     note_tool(state, "list", path=path, limit=limit)
     target = resolve_path(state["root"], path)
@@ -970,9 +1703,15 @@ def tool_list(state, path=".", limit=200):
         or "<empty directory>"
     )
     show(text, 1)
-    return clip(text)
+    return clip_tokens(text)
 
 
+@TOOL_REGISTRY.tool(
+    "Read a file or directory. ALWAYS read before editing. "
+    "Use offset/limit for large files. Line numbers included. Primary inspection tool.",
+    params={"path": STR, "offset": INT, "limit": INT},
+    required=["path"],
+)
 def tool_read(state, path, offset=1, limit=200):
     note_tool(state, "read", path=path, offset=offset, limit=limit)
     target = resolve_path(state["root"], path)
@@ -982,7 +1721,7 @@ def tool_read(state, path, offset=1, limit=200):
         target.read_text(encoding="utf-8", errors="replace").splitlines(),
         max(offset, 1) - 1,
     )
-    return clip(
+    return clip_tokens(
         "\n".join(
             f"{i + 1}: {line}"
             for i, line in enumerate(lines[start : start + max(limit, 1)], start=start)
@@ -991,6 +1730,13 @@ def tool_read(state, path, offset=1, limit=200):
     )
 
 
+@TOOL_REGISTRY.tool(
+    "Apply structured file operations in the workspace. Operations: "
+    "replace (exact string match), write (new file, use overwrite=true for existing), "
+    "move (rename), delete (remove). Batch related operations. Read files first.",
+    params={"operations": APPLY_OPERATIONS},
+    required=["operations"],
+)
 def tool_apply(state, operations):
     if isinstance(operations, dict):
         operations = [operations]
@@ -999,6 +1745,7 @@ def tool_apply(state, operations):
             "operations must be a non-empty array or a single operation object"
         )
     note_tool(state, "apply", operations=len(operations))
+    note_apply_ops(operations)
     root = state["root"]
     summaries = []
     for index, operation in enumerate(operations, 1):
@@ -1076,7 +1823,7 @@ def tool_apply(state, operations):
                 )
             destination.parent.mkdir(parents=True, exist_ok=True)
             target.rename(destination)
-            summaries.append(f"moved {rel(root, target)} -> {rel(root, destination)}")
+            summaries.append(f"⚠ moved {rel(root, target)} -> {rel(root, destination)}")
             continue
         if kind == "delete":
             if not target.exists():
@@ -1084,16 +1831,22 @@ def tool_apply(state, operations):
             if target.is_dir():
                 raise ValueError(f"cannot delete directory: {rel(root, target)}")
             target.unlink()
-            summaries.append(f"deleted {rel(root, target)}")
+            summaries.append(f"⚠ deleted {rel(root, target)}")
             continue
         raise ValueError(
             f"operation {index} has unsupported op {inline_code(kind)}; use replace, write, move, or delete"
         )
     out = "\n".join(summaries)
-    show(out, 3)
+    show(out, len(summaries))
     return out
 
 
+@TOOL_REGISTRY.tool(
+    "Run shell commands: builds, tests, git, npm/pip/make, scripts. "
+    "Not for reading files (use read) or searching (use grep). Shows stdout and stderr.",
+    params={"command": STR, "timeout_seconds": INT},
+    required=["command"],
+)
 def tool_bash(state, command, timeout_seconds=120):
     note_tool(state, "bash", command=command, timeout=timeout_seconds)
     env = command_env(state["root"])
@@ -1104,11 +1857,17 @@ def tool_bash(state, command, timeout_seconds=120):
         timeout=timeout_seconds,
     )
     out = format_bash_result(command, result.returncode, result.stdout, result.stderr)
-    out = clip(out, tail_chars=MAX_TOOL_OUTPUT_TAIL_CHARS)
+    out = clip_tokens(out, tail_tokens=MAX_TOOL_TAIL_TOKENS)
     show(out, 8)
     return out
 
 
+@TOOL_REGISTRY.tool(
+    "Search file contents by text/regex. Use when you know what to find but not where. "
+    "Use file_glob to filter by extension (e.g., '*.py'). Returns lines with file:line.",
+    params={"pattern": STR, "path": STR, "file_glob": STR},
+    required=["pattern"],
+)
 def tool_grep(state, pattern, path=".", file_glob=None):
     note_tool(state, "grep", pattern=pattern, path=path, glob=file_glob)
     env, target = command_env(state["root"]), resolve_path(state["root"], path)
@@ -1130,10 +1889,16 @@ def tool_grep(state, pattern, path=".", file_glob=None):
             )
         out = result.stdout.strip() or "<no matches>"
         show(out, 3)
-        return clip(out)
+        return clip_tokens(out)
     raise ValueError("grep requires `rg` or `grep` on PATH")
 
 
+@TOOL_REGISTRY.tool(
+    "Find files by name pattern ('*.py', 'src/**/*.js'). Use when you know the pattern. "
+    "For exploring structure, use list instead. Supports *, ?, **.",
+    params={"pattern": STR, "path": STR},
+    required=["pattern"],
+)
 def tool_glob(state, pattern, path="."):
     note_tool(state, "glob", pattern=pattern, path=path)
     base = resolve_path(state["root"], path)
@@ -1147,9 +1912,28 @@ def tool_glob(state, pattern, path="."):
         or "<no matches>"
     )
     show(out, 1)
-    return clip(out)
+    return clip_tokens(out)
 
 
+@TOOL_REGISTRY.tool(
+    "Fetch web pages or APIs. Use to get documentation, standards, or API data. "
+    "Presets: 'page' (HTML→markdown), 'json' (API response), 'post_json' (POST JSON). "
+    "Use json_path for nested extraction. Headers like Authorization are redacted.",
+    params={
+        "url": STR,
+        "preset": HTTPX_PRESET,
+        "method": STR,
+        "headers": MAP,
+        "params": MAP,
+        "body": STR,
+        "json_body": ANY_JSON,
+        "timeout_seconds": INT,
+        "response_mode": HTTPX_RESPONSE_MODE,
+        "json_path": STR,
+        "max_tokens": INT,
+    },
+    required=["url"],
+)
 def tool_httpx(
     state,
     url,
@@ -1162,7 +1946,7 @@ def tool_httpx(
     timeout_seconds=20,
     response_mode="auto",
     json_path=None,
-    max_chars=MAX_HTTPX_CHARS,
+    max_tokens=MAX_TOOL_OUTPUT_TOKENS,
 ):
     if preset is not None and preset not in HTTPX_PRESET["enum"]:
         raise ValueError("preset must be one of page, json, or post_json")
@@ -1188,7 +1972,7 @@ def tool_httpx(
         response_mode=response_mode,
         json_path=json_path,
         timeout=timeout_seconds,
-        max_chars=max_chars,
+        max_tokens=max_tokens,
     )
     parsed = urlparse(url if "://" in url else f"https://{url}")
     if parsed.scheme not in {"http", "https"}:
@@ -1199,8 +1983,8 @@ def tool_httpx(
         raise ValueError("method must be a non-empty string")
     if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be a positive integer")
-    if not isinstance(max_chars, int) or max_chars <= 0:
-        raise ValueError("max_chars must be a positive integer")
+    if not isinstance(max_tokens, int) or max_tokens <= 0:
+        raise ValueError("max_tokens must be a positive integer")
     if response_mode not in HTTPX_RESPONSE_MODE["enum"]:
         raise ValueError("response_mode must be one of auto, headers, body, or json")
     if json_path is not None and not isinstance(json_path, str):
@@ -1232,9 +2016,16 @@ def tool_httpx(
         raise ValueError(httpx_error_message(exc, timeout_seconds)) from exc
     out = render_httpx_output(response, response_mode, json_path=json_path)
     show(out, 1)
-    return clip(out, max_chars)
+    return clip_tokens(out, max_tokens)
 
 
+@TOOL_REGISTRY.tool(
+    "Ask the user a question. Use for plan approvals, ambiguous decisions, checkpoints. "
+    "Provide choices for multiple-choice. Only available in interactive mode. "
+    "Batch work and ask at meaningful checkpoints, not after every trivial step.",
+    params={"question": STR, "choices": STRINGS},
+    required=["question"],
+)
 def tool_ask(state, question, choices=None):
     note_tool(state, "ask", question=question, choices=choices)
     if not sys.stdin.isatty():
@@ -1258,81 +2049,6 @@ def tool_ask(state, question, choices=None):
         warning(f"Enter a number from 1 to {len(choices)} or an exact choice.")
 
 
-TOOL_SPECS = {
-    "apply": (
-        tool_apply,
-        "Apply structured file operations in the workspace. Operations: "
-        "replace (exact string match), write (new file, use overwrite=true for existing), "
-        "move (rename), delete (remove). Batch related operations. Read files first.",
-        {"operations": APPLY_OPERATIONS},
-        ["operations"],
-    ),
-    "list": (
-        tool_list,
-        "List directory contents. Use to discover structure before exploring deeper. "
-        "Sorted alphabetically, trailing / for directories. Prefer over glob for unfamiliar trees.",
-        {"path": STR, "limit": INT},
-        [],
-    ),
-    "bash": (
-        tool_bash,
-        "Run shell commands: builds, tests, git, npm/pip/make, scripts. "
-        "Not for reading files (use read) or searching (use grep). Shows stdout and stderr.",
-        {"command": STR, "timeout_seconds": INT},
-        ["command"],
-    ),
-    "read": (
-        tool_read,
-        "Read a file or directory. ALWAYS read before editing. "
-        "Use offset/limit for large files. Line numbers included. Primary inspection tool.",
-        {"path": STR, "offset": INT, "limit": INT},
-        ["path"],
-    ),
-    "grep": (
-        tool_grep,
-        "Search file contents by text/regex. Use when you know what to find but not where. "
-        "Use file_glob to filter by extension (e.g., '*.py'). Returns lines with file:line.",
-        {"pattern": STR, "path": STR, "file_glob": STR},
-        ["pattern"],
-    ),
-    "glob": (
-        tool_glob,
-        "Find files by name pattern ('*.py', 'src/**/*.js'). Use when you know the pattern. "
-        "For exploring structure, use list instead. Supports *, ?, **.",
-        {"pattern": STR, "path": STR},
-        ["pattern"],
-    ),
-    "httpx": (
-        tool_httpx,
-        "Fetch web pages or APIs. Use to get documentation, standards, or API data. "
-        "Presets: 'page' (HTML→markdown), 'json' (API response), 'post_json' (POST JSON). "
-        "Use json_path for nested extraction. Headers like Authorization are redacted.",
-        {
-            "url": STR,
-            "preset": HTTPX_PRESET,
-            "method": STR,
-            "headers": MAP,
-            "params": MAP,
-            "body": STR,
-            "json_body": ANY_JSON,
-            "timeout_seconds": INT,
-            "response_mode": HTTPX_RESPONSE_MODE,
-            "json_path": STR,
-            "max_chars": INT,
-        },
-        ["url"],
-    ),
-    "ask": (
-        tool_ask,
-        "Ask the user a question. Use for plan approvals, ambiguous decisions, checkpoints. "
-        "Provide choices for multiple-choice. Only available in interactive mode. "
-        "Batch work and ask at meaningful checkpoints, not after every trivial step.",
-        {"question": STR, "choices": STRINGS},
-        ["question"],
-    ),
-}
-
-
 def run_is_interactive(non_interactive: bool = False) -> bool:
     return sys.stdin.isatty() and not non_interactive
 
@@ -1344,11 +2060,7 @@ def active_system_prompt(interactive):
 
 
 def active_tool_specs(interactive):
-    return (
-        TOOL_SPECS
-        if interactive
-        else {name: spec for name, spec in TOOL_SPECS.items() if name != "ask"}
-    )
+    return TOOL_REGISTRY if interactive else TOOL_REGISTRY.without("ask")
 
 
 def chat_tools(tool_specs):
@@ -1406,83 +2118,245 @@ def run_tool(state, tool_name, tool_args):
     rather than raised, to keep the agent loop running.
     """
     name = tool_name[5:] if tool_name.startswith("tool_") else tool_name
-    tool_specs = state.get("tool_specs", TOOL_SPECS)
-    if name not in tool_specs:
+    registry = state.get("tool_specs", TOOL_REGISTRY)
+    if name not in registry:
         return f"Error: Tool '{name}' is unavailable in this run"
     try:
-        return str(tool_specs[name][0](state, **tool_args))
+        return str(registry.get(name)[0](state, **tool_args))
     except Exception as exc:
         return f"Error in {name}: {type(exc).__name__}: {exc}"
 
 
-def message_size(msg) -> int:
-    """Calculate the approximate character size of a message."""
-    if isinstance(msg, dict):
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            return len(content)
-        if isinstance(content, list):
-            # For multimodal content, sum text lengths
-            total = 0
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "text":
-                        total += len(item.get("text", ""))
-                    elif item.get("type") == "image_url":
-                        # Base64 images are usually large, estimate from URL data
-                        url_data = item.get("image_url", {}).get("url", "")
-                        if url_data.startswith("data:"):
-                            total += len(url_data.split(",", 1)[-1])
-                        else:
-                            total += len(url_data)
-                    else:
-                        total += len(json.dumps(item))
-                else:
-                    total += len(str(item))
-            return total
-        return len(json.dumps(content, ensure_ascii=True))
-    return len(str(msg))
+# ---------------------------------------------------------------------------
+# Token counting and context management
+# ---------------------------------------------------------------------------
+
+_tokenizer: tiktoken.Encoding | None = None
 
 
-def session_size(messages: list) -> int:
-    """Calculate total size of messages in a session."""
-    return sum(message_size(msg) for msg in messages)
+def get_tokenizer() -> tiktoken.Encoding:
+    """Return the shared cl100k_base tokenizer, initialising it once."""
+    global _tokenizer
+    if _tokenizer is None:
+        _tokenizer = tiktoken.get_encoding("cl100k_base")
+    return _tokenizer
 
 
-def format_size(chars: int) -> str:
-    """Format character count as human-readable size."""
-    result = filesize.decimal(chars)
-    if result.endswith(" bytes"):
-        return result.replace(" bytes", " chars")
-    return result.replace("B", " chars")
+def count_tokens(text: str) -> int:
+    """Count tokens in a string using cl100k_base."""
+    return len(get_tokenizer().encode(text))
 
 
-def list_model_ids():
+def truncate_str_to_tokens(text: str, max_tokens: int = MAX_MESSAGE_TOKENS) -> str:
+    """Truncate *text* to at most *max_tokens* tokens.
+
+    If truncation is needed, appends a note reporting how many lines and
+    characters were removed so the model knows the content was cut.
+    """
+    enc = get_tokenizer()
+    ids = enc.encode(text)
+    if len(ids) <= max_tokens:
+        return text
+    kept = enc.decode(ids[:max_tokens])
+    omitted_chars = len(text) - len(kept)
+    # Count lines in the omitted portion
+    omitted_lines = text[len(kept):].count("\n")
+    line_word = "line" if omitted_lines == 1 else "lines"
+    kept = kept.rstrip()
+    return (
+        f"{kept}\n"
+        f"... [truncated: {omitted_lines} {line_word}, "
+        f"{omitted_chars} chars omitted to fit {max_tokens}-token limit]"
+    )
+
+
+def _msg_token_count(msg: dict) -> int:
+    """Approximate token count for a single message dict."""
+    # 4 tokens overhead per message (role + framing), per OpenAI cookbook.
+    overhead = 4
+    content = msg.get("content") or ""
+    if isinstance(content, str):
+        return overhead + count_tokens(content)
+    if isinstance(content, list):
+        total = overhead
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                total += count_tokens(item.get("text") or "")
+            else:
+                total += count_tokens(json.dumps(item, ensure_ascii=True))
+        return total
+    return overhead + count_tokens(json.dumps(content, ensure_ascii=True))
+
+
+def _truncate_msg_content(msg: dict) -> dict:
+    """Return a copy of *msg* with string content fields truncated to MAX_MESSAGE_TOKENS."""
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        truncated = truncate_str_to_tokens(content)
+        if truncated is not content:
+            msg = {**msg, "content": truncated}
+    elif isinstance(content, list):
+        new_items = []
+        changed = False
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                original = item.get("text") or ""
+                clipped = truncate_str_to_tokens(original)
+                if clipped is not original:
+                    item = {**item, "text": clipped}
+                    changed = True
+            new_items.append(item)
+        if changed:
+            msg = {**msg, "content": new_items}
+    return msg
+
+
+def pack_messages_to_context(
+    messages: list[dict],
+    max_context_tokens: int = MAX_CONTEXT_TOKENS,
+) -> list[dict]:
+    """Enforce the hard context-token ceiling, packing history newest-to-oldest.
+
+    Algorithm:
+    1. Separate the leading system message(s) from the rest.
+    2. Count system tokens first — they always stay.
+    3. Walk the remaining messages newest-to-oldest, accumulating tokens until
+       the budget is exhausted.
+    4. If any messages were dropped, insert a single placeholder note directly
+       after the last system message so the model knows history was trimmed.
+    """
+    system_msgs: list[dict] = []
+    other_msgs: list[dict] = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            other_msgs.append(msg)
+
+    system_tokens = sum(_msg_token_count(m) for m in system_msgs)
+    budget = max_context_tokens - system_tokens
+
+    if budget <= 0:
+        # System prompt alone exceeds the budget — just return it.
+        return system_msgs
+
+    # Greedily keep messages from newest to oldest.
+    kept: list[dict] = []
+    used = 0
+    for msg in reversed(other_msgs):
+        cost = _msg_token_count(msg)
+        if used + cost > budget:
+            break
+        kept.append(msg)
+        used += cost
+
+    kept.reverse()  # restore chronological order
+    dropped = len(other_msgs) - len(kept)
+
+    if dropped:
+        placeholder = {
+            "role": "user",
+            "content": (
+                f"... [{dropped} earlier "
+                f"{'message' if dropped == 1 else 'messages'} omitted "
+                f"to fit {max_context_tokens // 1024}k-token context limit]"
+            ),
+        }
+        return system_msgs + [placeholder] + kept
+
+    return system_msgs + kept
+
+
+def session_tokens(messages: list) -> int:
+    """Count total tokens across all messages in a session."""
+    return sum(_msg_token_count(m) for m in messages)
+
+
+def format_tokens(n: int) -> str:
+    """Format a token count as a compact human-readable string."""
+    if n < 1000:
+        return f"{n} tokens"
+    return f"{n / 1000:.1f}k tokens"
+
+
+def list_models_for_adapter(adapter: str) -> list[str]:
+    """Return prefixed model specs for a single adapter. Silently returns [] on error."""
+    try:
+        if adapter == ADAPTER_OPENAI:
+            if not os.environ.get("OPENAI_API_KEY"):
+                return []
+            async_c = AsyncOpenAI(
+                api_key=str(os.environ["OPENAI_API_KEY"]),
+                base_url=os.environ.get("OPENAI_BASE_URL"),
+                max_retries=0,
+            )
+            sync_c = OpenAI(
+                api_key=str(os.environ["OPENAI_API_KEY"]),
+                base_url=os.environ.get("OPENAI_BASE_URL"),
+                max_retries=0,
+            )
+            raw = OpenAIAdapter(async_c, sync_c).list_models()
+        elif adapter == ADAPTER_GEMINI:
+            load_gemini_oauth_creds()  # raises if not configured
+            raw = load_gemini_model_list()
+        elif adapter == ADAPTER_BEDROCK:
+            current_region(None)  # raises if no region
+            region = current_region(None)
+            creds = load_aws_credentials(Path.cwd(), allow_login=False)
+            raw = BedrockConverseAdapter(region, creds).list_models()
+        else:
+            return []
+        return [join_model_spec(adapter, m) for m in raw]
+    except Exception:
+        return []
+
+
+def list_all_model_ids() -> list[str]:
+    """Return prefixed model specs merged from every signed-in adapter."""
+    adapters = detect_available_adapters()
+    if not adapters:
+        abort("No adapters are configured. Set OPENAI_API_KEY, authenticate with Gemini CLI, or configure AWS CLI.")
+    all_models: list[str] = []
+    for adapter in adapters:
+        status(f"Loading models from {inline_code(adapter)}.")
+        all_models.extend(list_models_for_adapter(adapter))
+    return all_models
+
+
+def list_model_ids() -> list[str]:
+    """Return model IDs for the currently configured adapter only (no prefix)."""
     require_api_env()
-    status("Loading available models.")
-    return sorted(model.id for model in list(cast(OpenAI, get_client()).models.list()))
+    spec = current_model()
+    adapter = resolve_adapter(spec)
+    status(f"Loading models from {inline_code(adapter)}.")
+    return cast(CompletionClient, get_client(spec)).list_models()
 
 
-async def run_turn(client, messages, state, model, tool_defs, max_steps):
+async def run_turn(client, messages, state, model_spec, tool_defs, max_steps):
+    # Strip adapter prefix before sending to the API
+    _, model = split_model_spec(model_spec)
     for _ in range(max_steps):
-        size = session_size(messages)
-        size_str = format_size(size)
+        # Truncate any over-long individual message strings, then enforce the
+        # hard 128k-token context cap by dropping oldest messages first.
+        prepared = [_truncate_msg_content(m) for m in messages]
+        prepared = pack_messages_to_context(prepared)
+        size = session_tokens(prepared)
+        size_str = format_tokens(size)
         spinner = Status(
-            f"Waiting for {model} · {size_str}",
+            f"Waiting for {model_spec} · {size_str}",
             console=STDERR,
             spinner="dots",
         )
         spinner.start()
         try:
-            response = await cast(AsyncOpenAI, client).chat.completions.create(
+            message = await cast(CompletionClient, client).chat_completion(
                 model=model,
-                messages=messages,
+                messages=prepared,
                 tools=tool_defs,
                 tool_choice="auto",
-            )  # type: ignore[arg-type]
+            )
         finally:
             spinner.stop()
-        message = response.choices[0].message.model_dump(exclude_none=True)
         calls = []
         for call in message.get("tool_calls") or []:
             if call.get("type") != "function":
@@ -1511,7 +2385,14 @@ async def run_turn(client, messages, state, model, tool_defs, max_steps):
 
 
 async def run_agent(
-    prompt, model, root, system_prompt, max_steps, max_tool_calls, interactive
+    prompt,
+    model,
+    root,
+    system_prompt,
+    max_steps,
+    max_tool_calls,
+    interactive,
+    messages: list[dict[str, Any]] | None = None,
 ):
     tool_specs = active_tool_specs(interactive)
     state = {
@@ -1521,21 +2402,27 @@ async def run_agent(
         "tool_specs": tool_specs,
     }
     tool_defs = chat_tools(tool_specs)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
-    ]
+    if messages is None:
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ]
+
+    # If the last message is a system message and it's different from the current one, update it
+    if messages and messages[0]["role"] == "system":
+        messages[0]["content"] = system_prompt
+
+    messages.append({"role": "user", "content": prompt})
 
     async def run_with_client(client):
         return await run_turn(client, messages, state, model, tool_defs, max_steps)
 
     try:
-        return await run_with_client(get_client(async_=True))
+        return await run_with_client(get_client(model))
     except (AuthenticationError, PermissionDeniedError) as exc:
         if ensure_api_env(root, refresh=True):
-            warning("Bedrock token expired. Refreshing credentials.")
+            warning("Credentials expired. Refreshing.")
             try:
-                return await run_with_client(get_client(async_=True))
+                return await run_with_client(get_client(model))
             except (AuthenticationError, PermissionDeniedError) as retry_exc:
                 kind = (
                     "authentication"
@@ -1615,12 +2502,67 @@ def audit(prompt: str = ""):
     return code
 
 
+def chat():
+    """Start an interactive anonymous session."""
+
+    workspace = current_workspace().resolve()
+    if not workspace.is_dir():
+        abort(f"Workspace root is not a directory: {inline_code(workspace)}")
+    require_runtime(workspace)
+    chosen_model = current_model(None)
+    interactive = True
+    system_file = current_system_file()
+    system_prompt = read_system_prompt(system_file, interactive)
+
+    intro = [
+        "## Chat",
+        "",
+        f"- workspace: {inline_code(workspace)}",
+        f"- model: {inline_code(chosen_model)}",
+        f"- mode: {inline_code('interactive')}",
+    ]
+    if system_file is not None:
+        intro.append(f"- system file: {inline_code(system_file.resolve())}")
+    markdown("\n".join(intro), stderr=True)
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+    while True:
+        try:
+            STDERR.print()
+            STDERR.rule(style="dim")
+            prompt = Prompt.ask("[bold cyan]oy ❯[/bold cyan]", console=STDERR)
+            if not prompt.strip():
+                continue
+            if prompt.strip().lower() in ("exit", "quit"):
+                break
+
+            code, _ = asyncio.run(
+                run_agent(
+                    prompt,
+                    chosen_model,
+                    workspace,
+                    system_prompt,
+                    DEFAULT_MAX_STEPS,
+                    DEFAULT_MAX_TOOL_CALLS,
+                    interactive,
+                    messages=messages,
+                )
+            )
+            size_str = format_tokens(session_tokens(messages))
+            STDERR.print(f"[dim]· {size_str}[/dim]")
+        except (KeyboardInterrupt, EOFError):
+            markdown("\n## Session Ended", stderr=True)
+            break
+    return 0
+
+
 def run(
     *prompt: str,
 ):
     """Run the coding assistant in a workspace.
 
-    :param prompt: Prompt text to send. Reads stdin if omitted.
+    :param prompt: Prompt text to send. Starts an interactive chat if omitted.
     """
 
     task = (
@@ -1629,7 +2571,8 @@ def run(
         else (sys.stdin.read().strip() if not sys.stdin.isatty() else "")
     )
     if not task:
-        abort("Provide a prompt argument or pipe one on stdin.")
+        return chat()
+
     workspace = current_workspace().resolve()
     if not workspace.is_dir():
         abort(f"Workspace root is not a directory: {inline_code(workspace)}")
@@ -1697,7 +2640,7 @@ def select_model_by_number(items, value):
 
 
 def resolve_model_choice(model_id=None):
-    available = list_model_ids()
+    available = list_all_model_ids()
     current = current_model(None)
     if model_id in available:
         return model_id
@@ -1782,15 +2725,24 @@ def models(query: str | None = None):
     """
 
     if query is None and not sys.stdin.isatty():
-        render_model_list(list_model_ids(), title="## Available Models")
+        render_model_list(list_all_model_ids(), title="## Available Models")
         return 0
     chosen = resolve_model_choice(query)
     if chosen is None:
-        render_model_list(list_model_ids(), title="## Available Models")
+        render_model_list(list_all_model_ids(), title="## Available Models")
         return 0
-    save_config({**load_config(), "model": chosen})
+    adapter, bare_model = split_model_spec(chosen)
+    cfg = load_config()
+    cfg["model"] = bare_model
+    if adapter:
+        cfg["adapter"] = adapter
+    else:
+        cfg.pop("adapter", None)
+    save_config(cfg)
     render_markdown(
-        f"## Default Model Updated\n\n- selected model: {inline_code(chosen)}"
+        f"## Default Model Updated\n\n"
+        f"- selected: {inline_code(chosen)}"
+        + (f"\n- adapter: {inline_code(adapter)}" if adapter else "")
     )
     return 0
 
@@ -1798,13 +2750,20 @@ def models(query: str | None = None):
 def model():
     """Show the current default model."""
 
-    render_markdown(f"## Current Model\n\n- model: {inline_code(current_model(None))}")
+    spec = current_model(None)
+    adapter = resolve_adapter(spec)
+    _, bare = split_model_spec(spec)
+    render_markdown(
+        f"## Current Model\n\n"
+        f"- model: {inline_code(bare)}\n"
+        f"- adapter: {inline_code(adapter)}"
+    )
     return 0
 
 
 def main(argv: list[str] | None = None):
     args = list(sys.argv[1:] if argv is None else argv)
-    commands = {"run", "models", "model", "audit", "-h", "--help"}
+    commands = {"run", "chat", "models", "model", "audit", "-h", "--help"}
     if not args:
         args = ["run"] if not sys.stdin.isatty() else ["--help"]
     elif args[0] in {"-v", "--version"}:
@@ -1812,7 +2771,7 @@ def main(argv: list[str] | None = None):
         return 0
     elif args[0] not in commands:
         args = ["run", *args]
-    result = defopt.run([run, models, model, audit], argv=args, version=False, short={})
+    result = defopt.run([run, chat, models, model, audit], argv=args, version=False, short={})
     return 0 if result is None else result
 
 
