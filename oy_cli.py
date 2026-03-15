@@ -1314,16 +1314,20 @@ class GeminiCodeAssistAdapter(CompletionClient):
                         parts.append({"text": item["text"]})
 
             if role == "assistant" and "tool_calls" in msg:
+                signatures = msg.get("_thought_signatures", {})
                 for call in msg["tool_calls"]:
                     fn = call["function"]
-                    parts.append(
-                        {
-                            "functionCall": {
-                                "name": fn["name"],
-                                "args": json.loads(fn["arguments"]),
-                            }
+                    fc_part: dict[str, Any] = {
+                        "functionCall": {
+                            "name": fn["name"],
+                            "args": json.loads(fn["arguments"]),
                         }
-                    )
+                    }
+                    # Re-attach Gemini thought signatures for thinking models
+                    call_id = call.get("id", "")
+                    if call_id in signatures:
+                        fc_part["thoughtSignature"] = signatures[call_id]
+                    parts.append(fc_part)
 
             if parts:
                 contents.append({"role": vertex_role, "parts": parts})
@@ -1363,14 +1367,16 @@ class GeminiCodeAssistAdapter(CompletionClient):
         tool_calls: list[dict[str, Any]] = []
         call_index = 0
 
+        thought_signatures: dict[str, str] = {}
         for part in candidates[0].get("content", {}).get("parts", []):
             if "text" in part:
                 content_text += part["text"]
             elif "functionCall" in part:
                 fc = part["functionCall"]
+                call_id = f"call_{call_index}"
                 tool_calls.append(
                     {
-                        "id": f"call_{call_index}",
+                        "id": call_id,
                         "type": "function",
                         "function": {
                             "name": fc["name"],
@@ -1378,11 +1384,16 @@ class GeminiCodeAssistAdapter(CompletionClient):
                         },
                     }
                 )
+                # Preserve Gemini thought signatures for round-tripping
+                if "thoughtSignature" in part:
+                    thought_signatures[call_id] = part["thoughtSignature"]
                 call_index += 1
 
         result: dict[str, Any] = {"role": "assistant", "content": content_text}
         if tool_calls:
             result["tool_calls"] = tool_calls
+        if thought_signatures:
+            result["_thought_signatures"] = thought_signatures
         return result
 
     async def chat_completion(
