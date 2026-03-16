@@ -34,7 +34,6 @@ oy chat                   # Interactive multi-turn session
 oy audit                  # Security audit against OWASP ASVS/MASVS
 oy model                  # Show current default model
 oy model <filter>         # Pick/save a model
-oy model --token          # Print Bedrock OpenAI env exports
 oy --help                 # Show all commands
 ```
 
@@ -207,7 +206,7 @@ Recommended:
 - avoid exposing long-lived secrets in the environment
 - review generated changes before shipping
 
-**Automatic protections:** workspace-bound file access, structured edits through `apply`, sensitive header redaction in `httpx`, and secure Bedrock token generation.
+**Automatic protections:** workspace-bound file access, structured edits through `apply`, sensitive header redaction in `httpx`, and native boto3 credential resolution for Bedrock.
 
 ## Links
 
