@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeAlias
 from urllib.parse import quote
 import httpx
-import httpx_aws_auth
 import msgspec
 from openai import (
     APIConnectionError,
@@ -2004,84 +2003,84 @@ def _bedrock_output_blocks(data: dict[str, Any]) -> list[ContentBlock]:
     )
 
 
-def _bedrock_model_ids(client: httpx.Client, region: str) -> list[str]:
-    base_url = f"https://bedrock.{region}.amazonaws.com"
-    return [
-        *_fetch_json_ids(
-            client,
-            f"{base_url}/foundation-models",
-            items_key="modelSummaries",
-            id_key="modelId",
-            item_filter=lambda item: (
-                "TEXT" in item.get("outputModalities", [])
-                and item["modelId"].startswith(("global.", "us."))
-            ),
-        ),
-        *_fetch_json_ids(
-            client,
-            f"{base_url}/inference-profiles",
-            items_key="inferenceProfileSummaries",
-            id_key="inferenceProfileId",
-            item_filter=lambda item: item["inferenceProfileId"].startswith(
-                ("global.", "us.")
-            ),
-        ),
-    ]
+def _boto3_bedrock_model_ids(region: str) -> list[str]:
+    """List available Bedrock model IDs using boto3."""
+    import boto3
+
+    client = boto3.client("bedrock", region_name=region)
+    ids: list[str] = []
+    # Foundation models
+    try:
+        resp = client.list_foundation_models()
+        for summary in resp.get("modelSummaries", []):
+            model_id = summary.get("modelId", "")
+            if (
+                "TEXT" in summary.get("outputModalities", [])
+                and model_id.startswith(("global.", "us."))
+            ):
+                ids.append(model_id)
+    except Exception:
+        pass
+    # Inference profiles
+    try:
+        resp = client.list_inference_profiles()
+        for summary in resp.get("inferenceProfileSummaries", []):
+            profile_id = summary.get("inferenceProfileId", "")
+            if profile_id.startswith(("global.", "us.")):
+                ids.append(profile_id)
+    except Exception:
+        pass
+    return ids
 
 
-def _bedrock_converse_client(
-    region: str, credentials: dict[str, str]
-) -> CompletionClient:
-    base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
-    aws_credentials = httpx_aws_auth.AwsCredentials(
-        access_key=credentials["access_key"],
-        secret_key=credentials["secret_key"],
-        session_token=credentials.get("session_token"),
+def _bedrock_converse_client(region: str) -> CompletionClient:
+    import asyncio
+    import boto3
+    from botocore.config import Config as BotoConfig
+
+    config = BotoConfig(
+        read_timeout=float(os.environ.get("OY_BEDROCK_READ_TIMEOUT", "120")),
+        retries={"max_attempts": DEFAULT_RETRY_MAX_ATTEMPTS, "mode": "adaptive"},
     )
-    auth = httpx_aws_auth.AwsSigV4Auth(
-        credentials=aws_credentials, service="bedrock", region=region
-    )
+    rt_client = boto3.client("bedrock-runtime", region_name=region, config=config)
 
-    def make_request(
+    async def chat_completion(
         model: str,
         messages: list[ChatMessage],
-        tools: list[ToolSpec] | None,
-        tool_choice: str,
-    ) -> HttpRequest:
+        tools: list[ToolSpec] | None = None,
+        tool_choice: str = "auto",
+        on_retry=None,
+    ) -> AssistantMessage:
+        _ = on_retry
         bedrock_messages, system_prompts = _encode_provider_messages(
             messages, BEDROCK_CODEC
         )
-        payload: dict[str, Any] = {
+        kwargs: dict[str, Any] = {
+            "modelId": model,
             "messages": bedrock_messages,
             "inferenceConfig": {
-                "maxTokens": int(os.environ.get("OY_BEDROCK_MAX_OUTPUT_TOKENS", "4096"))
+                "maxTokens": int(
+                    os.environ.get("OY_BEDROCK_MAX_OUTPUT_TOKENS", "4096")
+                )
             },
         }
         if system_prompts:
-            payload["system"] = system_prompts
+            kwargs["system"] = system_prompts
         if tools and (tool_config := _bedrock_tools(tools, tool_choice)):
-            payload["toolConfig"] = tool_config
-        return HttpRequest(
-            url=f"{base_url}/model/{model}/converse",
-            content_body=json.dumps(payload),
-            headers={"content-type": "application/json"},
-        )
-
-    endpoint = HttpChatEndpoint(
-        make_client=lambda: async_http_client(auth=auth),
-        build_request=make_request,
-        decode=lambda data: _assistant_from_blocks(_bedrock_output_blocks(data)),
-        error=lambda resp: _http_error_message("Bedrock", resp),
-        timeout=BEDROCK_TIMEOUT,
-        bedrock=True,
-    )
+            kwargs["toolConfig"] = tool_config
+        # boto3 is synchronous; run in executor to avoid blocking the event loop
+        loop = asyncio.get_running_loop()
+        try:
+            data = await loop.run_in_executor(None, lambda: rt_client.converse(**kwargs))
+        except Exception as exc:
+            raise RuntimeError(f"Bedrock converse error: {exc}") from exc
+        return _assistant_from_blocks(_bedrock_output_blocks(data))
 
     def list_models() -> list[str]:
-        with http_client(auth=auth, timeout=30) as client:
-            return sorted(unique_strings(_bedrock_model_ids(client, region)))
+        return sorted(unique_strings(_boto3_bedrock_model_ids(region)))
 
-    return _http_completion_client(
-        endpoint,
+    return CompletionClient(
+        chat_completion=chat_completion,
         list_models=list_models,
     )
 
@@ -2366,6 +2365,25 @@ def _require_aws_env(cwd: Path | None = None) -> None:
     load_aws_credentials(cwd, allow_login=False)
 
 
+def _require_boto3_aws_env(cwd: Path | None = None) -> None:
+    """Validate that boto3 can resolve AWS credentials."""
+    _ = cwd
+    import boto3
+    from botocore.exceptions import NoCredentialsError, PartialCredentialsError
+
+    session = boto3.Session()
+    credentials = session.get_credentials()
+    if credentials is None:
+        raise RuntimeError(
+            "No AWS credentials found. Configure via environment variables, "
+            "~/.aws/credentials, IAM role, or AWS SSO."
+        )
+    try:
+        credentials.get_frozen_credentials()
+    except (NoCredentialsError, PartialCredentialsError) as exc:
+        raise RuntimeError(f"AWS credentials incomplete: {exc}") from exc
+
+
 def _build_openai_client(
     region: str | None = None, cwd: Path | None = None, *, max_retries: int = 3
 ) -> CompletionClient:
@@ -2402,7 +2420,8 @@ def _build_gemini_client(
 def _build_bedrock_client(
     region: str | None = None, cwd: Path | None = None
 ) -> CompletionClient:
-    return _bedrock_converse_client(current_region(region), load_aws_credentials(cwd))
+    _ = cwd
+    return _bedrock_converse_client(current_region(region))
 
 
 def _build_mantle_client(
@@ -2455,9 +2474,8 @@ def _list_claude_models(
 def _list_bedrock_models(
     region: str | None = None, cwd: Path | None = None
 ) -> list[str]:
-    return _bedrock_converse_client(
-        current_region(region), load_aws_credentials(cwd, allow_login=False)
-    ).list_models()
+    _ = cwd
+    return _bedrock_converse_client(current_region(region)).list_models()
 
 
 def _list_mantle_models(
@@ -2487,7 +2505,7 @@ SHIM_SPECS: dict[str, ShimSpec] = {
     ),
     SHIM_BEDROCK: ShimSpec(
         name=SHIM_BEDROCK,
-        ensure_env=_require_aws_env,
+        ensure_env=_require_boto3_aws_env,
         build_client=_build_bedrock_client,
         list_models=_list_bedrock_models,
     ),

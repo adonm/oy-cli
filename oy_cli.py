@@ -5,7 +5,6 @@ import json
 import os
 import readline
 import re
-import shlex
 import sys
 from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias, cast
@@ -28,7 +27,6 @@ from shim import (
     UserMessage,
     which,
     CompletionClient,
-    bedrock_base_url,
     default_region,
     detect_available_shims,
     ensure_api_env as ensure_shim_api_env,
@@ -36,7 +34,6 @@ from shim import (
     join_model_spec,
     list_model_ids as list_shim_model_ids,
     list_models_for_shim,
-    make_bedrock_token,
     require_api_env as require_shim_api_env,
     resolve_shim as resolve_model_shim,
     split_model_spec,
@@ -1719,36 +1716,11 @@ def resolve_model_choice(model_id=None):
         query = Prompt.ask("Model or filter", console=STDERR).strip()
 
 
-def model(query: str | None = None, *, region: str | None = None, token: bool = False):
-    """Show or set the default model, or print Bedrock credentials.
+def model(query: str | None = None):
+    """Show or set the default model.
 
     :param query: Exact model ID to save, or a filter string when running in a TTY.
-    :param region: AWS region to use with --token.
-    :param token: Print Bedrock-backed OpenAI credentials instead of model selection.
     """
-    if token:
-        chosen = default_region() if region is None else region
-        _print(
-            "status",
-            f"Generating Bedrock credentials for {_fmt('inline', chosen)}.",
-            err=True,
-        )
-        value = make_bedrock_token(chosen, cwd=Path.cwd())
-        _print(
-            value="## Bedrock Credentials\n\n"
-            + "Paste this into another shell if you want to reuse the current Bedrock session.\n\n"
-            + _fmt(
-                "block",
-                "\n".join(
-                    [
-                        f"export OPENAI_BASE_URL={shlex.quote(bedrock_base_url(chosen))}",
-                        f"export OPENAI_API_KEY={shlex.quote(value)}",
-                    ]
-                ),
-                "bash",
-            )
-        )
-        return 0
     current = _model(None)
     if query is None and not sys.stdin.isatty():
         shim = resolve_active_shim(current)
