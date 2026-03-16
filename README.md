@@ -1,5 +1,7 @@
 # oy-cli
 
+[![PyPI](https://img.shields.io/pypi/v/oy-cli)](https://pypi.org/project/oy-cli/)
+
 **Tiny AI coding assistant for your shell.** Reads files, runs commands, makes precise edits, and stays intentionally small.
 
 ```bash
