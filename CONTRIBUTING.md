@@ -17,6 +17,7 @@ uv sync
 mise run fmt
 mise run lint
 mise run check
+uv run python -m pytest tests/ -v
 uv run oy --help
 mise run build
 ```
@@ -28,8 +29,9 @@ mise run build
 - intended end-user install path: `uv tool install oy-cli`
 - current design goal: keep the implementation small and easy to audit
 - prefer env-first run configuration so common usage stays close to `oy "prompt"`
-- current run env vars: `OY_MODEL`, `OY_NON_INTERACTIVE`, `OY_SYSTEM_FILE`, `OY_ROOT`, `OY_CONFIG`
+- current run env vars: `OY_MODEL`, `OY_SHIM`, `OY_NON_INTERACTIVE`, `OY_SYSTEM_FILE`, `OY_ROOT`, `OY_CONFIG`
 - prefer simple, direct changes over abstraction-heavy rewrites
+- `except A, B:` syntax is valid Python 3.14+ (PEP 758) — ruff formats it this way; parenthesised form also works
 - keep system prompts tight; avoid duplicating tool docs inside prompts when tool definitions already provide them
 - complexity guidance should favor grugbrain.dev style simplicity
 - security guidance should explicitly align with OWASP thinking

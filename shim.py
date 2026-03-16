@@ -207,9 +207,7 @@ def _normalize_jsonlike(value: Any) -> JSONLike:
 
 def _json_text(value: Any) -> str:
     return (
-        value
-        if isinstance(value, str)
-        else msgspec.json.encode(value).decode("utf-8")
+        value if isinstance(value, str) else msgspec.json.encode(value).decode("utf-8")
     )
 
 
@@ -236,7 +234,9 @@ def _assistant_blocks(message: AssistantMessage) -> list[ContentBlock]:
 
 
 def _tool_message_block(message: ToolMessage) -> ToolResultBlock:
-    return ToolResultBlock(id=message.tool_call_id, name=message.name, result=message.content)
+    return ToolResultBlock(
+        id=message.tool_call_id, name=message.name, result=message.content
+    )
 
 
 def _assistant_from_blocks(blocks: list[ContentBlock]) -> AssistantMessage:
@@ -283,7 +283,9 @@ def _encode_provider_messages(
             continue
         if isinstance(message, UserMessage):
             role = codec.user_role
-            blocks: list[ContentBlock] = [TextBlock(message.content)] if message.content else []
+            blocks: list[ContentBlock] = (
+                [TextBlock(message.content)] if message.content else []
+            )
         elif isinstance(message, AssistantMessage):
             role = codec.assistant_role
             blocks = _assistant_blocks(message)
@@ -355,13 +357,15 @@ def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
 
 
 def load_json(p, d):
+    """Read JSON from path *p*, returning *d* on any error."""
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return d
 
 
 def save_json(p, d):
+    """Write *d* as pretty-printed JSON to path *p*, creating parents."""
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -371,10 +375,12 @@ def save_json(p, d):
 
 
 def split_path(v):
+    """Split a PATH-style string into a list of non-empty entries."""
     return [e for e in (v or "").split(os.pathsep) if e]
 
 
 def merge_paths(*groups):
+    """Merge PATH entry groups, deduplicating by normalised path."""
     merged, seen = [], set()
     for g in groups:
         for e in g:
@@ -386,6 +392,7 @@ def merge_paths(*groups):
 
 
 def unique_strings(v):
+    """Deduplicate *v* preserving order, dropping falsy values."""
     return list(dict.fromkeys(x for x in v if x))
 
 
@@ -456,9 +463,7 @@ def _extract_model_ids(items: Any, *keys: str) -> list[str]:
     if not isinstance(items, list):
         return []
     return unique_strings(
-        _first_nonempty_string(item, *keys)
-        for item in items
-        if isinstance(item, dict)
+        _first_nonempty_string(item, *keys) for item in items if isinstance(item, dict)
     )
 
 
@@ -510,9 +515,10 @@ def _fetch_json_ids(
 
 
 def expiry_ms(s, *, skew=60):
+    """Convert an expires-in-seconds value to a UTC-epoch millisecond timestamp."""
     try:
         return int((time.time() + float(s) - skew) * 1000)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return int((time.time() + 3600.0 - skew) * 1000)
 
 
@@ -521,6 +527,7 @@ def which(t, p=None):
 
 
 def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
+    """Run *cmd* via subprocess.run, raising ValueError on timeout."""
     try:
         return subprocess.run(
             cmd,
@@ -537,6 +544,7 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
 
 @lru_cache(maxsize=8)
 def command_env(cwd=None):
+    """Build a shell environment dict, merging Homebrew and mise paths."""
     env = os.environ.copy()
     if brew := which("brew", env.get("PATH")):
         prefix = Path(brew).parent.parent
@@ -554,7 +562,7 @@ def command_env(cwd=None):
             timeout=5,
         )
         data = json.loads(result.stdout) if result.returncode == 0 else {}
-    except (OSError, ValueError, json.JSONDecodeError):
+    except OSError, ValueError, json.JSONDecodeError:
         return env
     if not isinstance(data, dict):
         return env
@@ -571,10 +579,12 @@ def command_env(cwd=None):
 
 
 def http_client(**kw):
+    """Create a synchronous httpx client with redirects enabled."""
     return httpx.Client(follow_redirects=True, **kw)
 
 
 def async_http_client(**kw):
+    """Create an asynchronous httpx client with redirects enabled."""
     return httpx.AsyncClient(follow_redirects=True, **kw)
 
 
@@ -596,6 +606,7 @@ def bedrock_base_url(region: str) -> str:
 def make_bedrock_token(
     region: str, cwd: Path | None = None, expires: int = 43200
 ) -> str:
+    """Generate a SigV4 pre-signed Bedrock bearer token for *region*."""
     creds = load_aws_credentials(cwd)
     now = datetime.now(timezone.utc)
     amz_date, date_stamp = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
@@ -628,10 +639,12 @@ def make_bedrock_token(
 
 
 def resolve_tool_path(t, cwd=None):
+    """Find executable *t* using the merged command environment."""
     return which(t, command_env(cwd).get("PATH")) or which(t)
 
 
 def aws_cli(parts, cwd=None, timeout=10):
+    """Run an AWS CLI command and return the subprocess result."""
     env = command_env(cwd)
     if not (aws := which("aws", env.get("PATH"))):
         raise RuntimeError("AWS CLI is not installed or not on PATH")
@@ -706,6 +719,7 @@ def default_region() -> str:
 
 
 def validate_shim(shim: str) -> str:
+    """Raise RuntimeError if *shim* is not a known backend name."""
     if shim not in KNOWN_SHIMS:
         raise RuntimeError(
             f"Unknown shim value: `{shim}`. Use one of: {', '.join(SHIM_ORDER)}"
@@ -914,7 +928,7 @@ def _jwt_expiry_epoch(token: str) -> float | None:
         payload = parts[1]
         payload += "=" * (-len(payload) % 4)
         data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+    except OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError:
         return None
     exp = data.get("exp")
     if isinstance(exp, (int, float)):
@@ -955,7 +969,9 @@ def refresh_codex_chatgpt_session(refresh_token: str) -> dict[str, Any]:
         tokens["refresh_token"] = token
     if token := _first_nonempty_string(data, "id_token"):
         tokens["id_token"] = token
-    auth.update({"tokens": tokens, "last_refresh": datetime.now(timezone.utc).isoformat()})
+    auth.update(
+        {"tokens": tokens, "last_refresh": datetime.now(timezone.utc).isoformat()}
+    )
     save_json(CODEX_AUTH_PATH, auth)
     return auth
 
@@ -1083,6 +1099,7 @@ def _openai_pair(
 
 
 def split_model_spec(spec: str) -> tuple[str | None, str]:
+    """Split ``"shim:model"`` into ``(shim, model)``; bare names return ``(None, spec)``."""
     if ":" in spec:
         shim, _, model = spec.partition(":")
         if shim in KNOWN_SHIMS:
@@ -1091,6 +1108,7 @@ def split_model_spec(spec: str) -> tuple[str | None, str]:
 
 
 def join_model_spec(shim: str, model: str) -> str:
+    """Combine a shim name and model ID into a ``"shim:model"`` spec."""
     return f"{shim}:{model}"
 
 
@@ -1134,7 +1152,7 @@ def _parse_retry_after_seconds(value: str | None) -> float | None:
     except ValueError:
         try:
             retry_at = parsedate_to_datetime(value)
-        except (TypeError, ValueError, IndexError, OverflowError):
+        except TypeError, ValueError, IndexError, OverflowError:
             return None
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
@@ -1284,9 +1302,7 @@ class WaitForRetryableResponse(wait_base):
         # Transport errors (including timeouts): use a short fixed floor so we
         # don't hammer the endpoint, but also don't wait as long as rate-limit
         # back-off since the server may just have been slow.
-        if isinstance(
-            exc, (httpx.TransportError, APIConnectionError, APITimeoutError)
-        ):
+        if isinstance(exc, (httpx.TransportError, APIConnectionError, APITimeoutError)):
             return max(TRANSPORT_ERROR_RETRY_DELAY, min(base, self.maximum))
         return base
 
@@ -1531,7 +1547,7 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
             if arguments[i] == "{":
                 try:
                     return decode(arguments[i:])
-                except (msgspec.DecodeError, RuntimeError):
+                except msgspec.DecodeError, RuntimeError:
                     pass
         raise RuntimeError(f"Could not parse tool arguments JSON: {exc}") from exc
 
@@ -1684,7 +1700,9 @@ BEDROCK_CODEC = ProviderCodec(
     encode_tool_result=lambda block: {
         "toolResult": {
             "toolUseId": block.id,
-            "content": [{"text": _tool_output_text(block.result).strip() or "(no output)"}],
+            "content": [
+                {"text": _tool_output_text(block.result).strip() or "(no output)"}
+            ],
             "status": "error" if not block.result.ok else "success",
         }
     },
@@ -1700,7 +1718,11 @@ VERTEX_CODEC = ProviderCodec(
     encode_tool_use=lambda block: (
         {
             "functionCall": {"name": block.name, "args": block.arguments},
-            **({"thoughtSignature": block.thought_signature} if block.thought_signature else {}),
+            **(
+                {"thoughtSignature": block.thought_signature}
+                if block.thought_signature
+                else {}
+            ),
         }
     ),
     encode_tool_result=lambda block: {
@@ -1941,7 +1963,9 @@ def _bedrock_tools(tools: list[ToolSpec], tool_choice: str) -> dict[str, Any] | 
 def _bedrock_output_blocks(data: dict[str, Any]) -> list[ContentBlock]:
     return _extract_blocks(
         data["output"]["message"]["content"],
-        text_of=lambda item: item.get("text") if isinstance(item.get("text"), str) else None,
+        text_of=lambda item: (
+            item.get("text") if isinstance(item.get("text"), str) else None
+        ),
         tool_of=lambda item, _: (
             ToolUseBlock(
                 id=item["toolUse"]["toolUseId"],
@@ -1979,7 +2003,9 @@ def _bedrock_model_ids(client: httpx.Client, region: str) -> list[str]:
     ]
 
 
-def _bedrock_converse_client(region: str, credentials: dict[str, str]) -> CompletionClient:
+def _bedrock_converse_client(
+    region: str, credentials: dict[str, str]
+) -> CompletionClient:
     base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
     aws_credentials = httpx_aws_auth.AwsCredentials(
         access_key=credentials["access_key"],
@@ -2054,7 +2080,9 @@ def _vertex_output_blocks(response: dict[str, Any]) -> list[ContentBlock]:
         return []
     return _extract_blocks(
         candidates[0].get("content", {}).get("parts", []),
-        text_of=lambda item: item.get("text") if isinstance(item.get("text"), str) else None,
+        text_of=lambda item: (
+            item.get("text") if isinstance(item.get("text"), str) else None
+        ),
         tool_of=lambda item, index: (
             ToolUseBlock(
                 id=f"call_{index}",
@@ -2387,9 +2415,7 @@ def _list_gemini_models(
     return load_gemini_model_list()
 
 
-def _list_codex_models(
-    region: str | None = None, cwd: Path | None = None
-) -> list[str]:
+def _list_codex_models(region: str | None = None, cwd: Path | None = None) -> list[str]:
     return _build_codex_client(region, cwd).list_models()
 
 
@@ -2459,6 +2485,7 @@ def _shim_spec(shim: str) -> ShimSpec:
 
 
 def detect_available_shims() -> list[str]:
+    """Probe each known shim and return the names of those with valid credentials."""
     return [
         shim
         for shim in SHIM_ORDER
@@ -2469,6 +2496,7 @@ def detect_available_shims() -> list[str]:
 def resolve_shim(
     model_spec: str | None = None, configured_shim: str | None = None
 ) -> str:
+    """Determine which backend to use from model spec, config, or auto-detection."""
     if env_shim := os.environ.get("OY_SHIM"):
         return env_shim
     if model_spec:

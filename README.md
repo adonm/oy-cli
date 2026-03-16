@@ -106,6 +106,20 @@ OY_ROOT=./src oy audit      # Audit specific directory
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
 
+**Tuning variables** (rarely needed):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OY_MAX_TOOL_OUTPUT_TOKENS` | `4096` | Max tokens kept from tool output |
+| `OY_MAX_TOOL_TAIL_TOKENS` | `1024` | Tail tokens preserved when output is clipped |
+| `OY_MAX_CONTEXT_TOKENS` | `131072` | Context window budget |
+| `OY_MAX_MESSAGE_TOKENS` | `4096` | Per-message truncation limit |
+| `OY_DEFAULT_MAX_STEPS` | `512` | Max LLM turns per run |
+| `OY_DEFAULT_MAX_TOOL_CALLS` | `512` | Max tool invocations per run |
+| `OY_DEFAULT_LINE_LIMIT` | `500` | Default line limit for `read`/`list`/`glob` |
+| `OY_BEDROCK_READ_TIMEOUT` | `120` | HTTP read timeout for Bedrock (seconds) |
+| `OY_BEDROCK_MAX_OUTPUT_TOKENS` | `4096` | Max output tokens for Bedrock Converse |
+
 **Config file** (`~/.config/oy/config.json`):
 ```json
 {"shim": "gemini", "model": "gemini-2.5-pro"}
@@ -113,7 +127,9 @@ OY_ROOT=./src oy audit      # Audit specific directory
 
 The `shim` field pins which backend to use regardless of what else is signed in. Use `oy model <filter>` to pick interactively; it merges models from available signed-in shims into a single list using `shim:model` prefixes.
 
-By default, `oy` prefers a sensible available model automatically. If multiple providers are available, set `OY_MODEL`, `OY_SHIM`, or save a config to pin behavior.
+On first run, if no model is configured, `oy` prompts you to pick one from the available backends. Set `OY_MODEL`, `OY_SHIM`, or save a config with `oy model` to pin behavior.
+
+**Recommended model:** From testing, `glm-5` (via Bedrock) offers the best balance of intelligence, cost, and tool-use ability. `kimi-k2.5` is another strong option.
 
 ## Requirements
 
@@ -182,7 +198,7 @@ export AWS_REGION=us-west-2
 
 **"replace target not found"** -> `apply` requires exact string match. Read file first, check whitespace.
 
-**Output truncated** -> Tools clip at ~16k chars. Agent auto-narrows queries, or guide explicitly: "read lines 100-200".
+**Output truncated** -> Tools clip at 4096 tokens by default. Agent auto-narrows queries, or guide explicitly: "read lines 100-200".
 
 ## Security
 

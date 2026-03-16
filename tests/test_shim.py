@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import shim
 
 
-async def _unused_chat_completion(model, messages, tools=None, tool_choice="auto", on_retry=None):
+async def _unused_chat_completion(
+    model, messages, tools=None, tool_choice="auto", on_retry=None
+):
     raise AssertionError("chat_completion should not be called in this test")
 
 
@@ -139,6 +142,63 @@ class ShimRegistryTests(unittest.TestCase):
                 shim.list_models_for_shim("alpha"),
                 ["alpha:one", "alpha:two"],
             )
+
+
+class LoadJsonTests(unittest.TestCase):
+    def test_load_json_returns_default_on_missing_file(self):
+        result = shim.load_json(Path("/nonexistent/path.json"), {"default": True})
+        self.assertEqual(result, {"default": True})
+
+    def test_load_json_returns_default_on_invalid_json(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("not json")
+            f.flush()
+            result = shim.load_json(Path(f.name), "fallback")
+            self.assertEqual(result, "fallback")
+
+    def test_load_json_reads_valid_file(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write('{"key": "value"}')
+            f.flush()
+            result = shim.load_json(Path(f.name), {})
+            self.assertEqual(result, {"key": "value"})
+
+
+class ExpiryMsTests(unittest.TestCase):
+    def test_expiry_ms_with_valid_seconds(self):
+        result = shim.expiry_ms(3600)
+        import time
+
+        expected_approx = int((time.time() + 3600.0 - 60) * 1000)
+        self.assertAlmostEqual(result, expected_approx, delta=2000)
+
+    def test_expiry_ms_with_invalid_value_uses_default(self):
+        result = shim.expiry_ms("not-a-number")
+        import time
+
+        expected_approx = int((time.time() + 3600.0 - 60) * 1000)
+        self.assertAlmostEqual(result, expected_approx, delta=2000)
+
+
+class SplitModelSpecTests(unittest.TestCase):
+    def test_bare_model_returns_none_prefix(self):
+        shim_name, model = shim.split_model_spec("gpt-4o")
+        self.assertIsNone(shim_name)
+        self.assertEqual(model, "gpt-4o")
+
+    def test_prefixed_model_splits_correctly(self):
+        shim_name, model = shim.split_model_spec("bedrock:us.anthropic.claude-3")
+        self.assertEqual(shim_name, "bedrock")
+        self.assertEqual(model, "us.anthropic.claude-3")
+
+    def test_unknown_prefix_treated_as_bare(self):
+        shim_name, model = shim.split_model_spec("unknown:model")
+        self.assertIsNone(shim_name)
+        self.assertEqual(model, "unknown:model")
 
 
 if __name__ == "__main__":

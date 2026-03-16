@@ -54,10 +54,11 @@ from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.status import Status
 
-__version__ = "0.2.1"
+__version__ = __import__("importlib.metadata").metadata.version("oy-cli")
 
 
 def _env(name, default, t=None):
+    """Read OY_{name} from the environment, coercing to the type of *default*."""
     v = os.environ.get(f"OY_{name}")
     return default if v is None else (t or type(default))(v)
 
@@ -66,7 +67,6 @@ MAX_TOOL_OUTPUT_TOKENS = _env("MAX_TOOL_OUTPUT_TOKENS", 4096)
 MAX_TOOL_TAIL_TOKENS = _env("MAX_TOOL_TAIL_TOKENS", 1024)
 MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
 MAX_MESSAGE_TOKENS = _env("MAX_MESSAGE_TOKENS", 4096)
-DEFAULT_MODEL = _env("DEFAULT_MODEL", "moonshotai.kimi-k2.5")
 DEFAULT_MAX_STEPS = _env("DEFAULT_MAX_STEPS", 512)
 DEFAULT_MAX_TOOL_CALLS = _env("DEFAULT_MAX_TOOL_CALLS", 512)
 DEFAULT_LINE_LIMIT = _env("DEFAULT_LINE_LIMIT", 500)
@@ -114,6 +114,7 @@ _httpx_mode = {"type": "string", "enum": ["auto", "headers", "body", "json"]}
 
 
 def _fmt(kind, value="", extra=None):
+    """Format *value* as markdown according to *kind* (md, block, inline, bash, etc.)."""
     text = str(value)
     if kind == "bash":
         out, rc, err = extra
@@ -144,15 +145,18 @@ def _print(kind="md", value="", *, err=False, extra=None):
 
 
 def fail(m, c=1):
+    """Print an error to stderr and return exit code *c*."""
     _print("error", str(m).strip(), err=True)
     return c
 
 
 def abort(m, c=1):
+    """Print an error and immediately exit."""
     raise SystemExit(fail(m, c))
 
 
 def clip_tokens(text, limit=MAX_TOOL_OUTPUT_TOKENS, tail=0):
+    """Truncate *text* to *limit* tokens, optionally keeping *tail* tokens from the end."""
     e = get_tokenizer()
     ids = e.encode(text)
     n = len(ids)
@@ -166,6 +170,7 @@ def clip_tokens(text, limit=MAX_TOOL_OUTPUT_TOKENS, tail=0):
 
 
 def preview(v, lim=72):
+    """Return a one-line preview of *v*, truncated to *lim* characters."""
     s = " ".join(
         (v if isinstance(v, str) else json.dumps(v, separators=(",", ":"))).split()
     )
@@ -173,12 +178,14 @@ def preview(v, lim=72):
 
 
 def _compact_md(t):
+    """Collapse runs of 3+ newlines to 2 and normalise line endings."""
     return re.sub(
         r"\n{3,}", "\n\n", t.replace("\r\n", "\n").replace("\r", "\n")
     ).strip()
 
 
 def _is_html(ct, text):
+    """Heuristic: return True if *ct* or the start of *text* looks like HTML."""
     ct = (ct or "").lower()
     if "text/html" in ct or "application/xhtml" in ct:
         return True
@@ -191,6 +198,7 @@ def _is_html(ct, text):
 
 
 def _http_body(text, ct):
+    """Convert HTML responses to compact markdown; pass others through."""
     return (
         text
         if not _is_html(ct, text)
@@ -207,6 +215,7 @@ def _http_body(text, ct):
 
 
 def _json_path(v, p):
+    """Walk into *v* using dot-separated *p* (supports dict keys and list indices)."""
     for part in (p or "").split("."):
         if not part:
             continue
@@ -224,6 +233,7 @@ def _json_path(v, p):
 
 
 def _norm_map(v, n):
+    """Coerce *v* to a ``{str: str}`` dict for HTTP headers/params, or return None."""
     if v is None:
         return None
     if not isinstance(v, dict):
@@ -232,6 +242,7 @@ def _norm_map(v, n):
 
 
 def _redact_header(k, v):
+    """Return ``'<redacted>'`` for sensitive headers, otherwise *v*."""
     kl = k.lower()
     return (
         "<redacted>"
@@ -260,6 +271,7 @@ def _httpx_err(e, t):
 
 
 def render_httpx_output(response, response_mode, json_path=None):
+    """Format an httpx *response* for tool output according to *response_mode*."""
     content_type = response.headers.get("content-type", "")
     lines = [
         f"url: {response.url}",
@@ -270,11 +282,14 @@ def render_httpx_output(response, response_mode, json_path=None):
     if response_mode == "auto":
         response_mode = (
             "json"
-            if json_path or any(x in content_type.lower() for x in ("application/json", "+json"))
+            if json_path
+            or any(x in content_type.lower() for x in ("application/json", "+json"))
             else "body"
         )
     if response_mode == "headers":
-        return "\n".join([*lines, "headers:", _render_headers(response.headers) or "<none>"])
+        return "\n".join(
+            [*lines, "headers:", _render_headers(response.headers) or "<none>"]
+        )
     if response_mode == "json":
         try:
             body = response.json()
@@ -288,14 +303,21 @@ def render_httpx_output(response, response_mode, json_path=None):
                 *lines,
                 "body-format: json",
                 "",
-                body if isinstance(body, str) else json.dumps(body, ensure_ascii=True, indent=2),
+                body
+                if isinstance(body, str)
+                else json.dumps(body, ensure_ascii=True, indent=2),
             ]
         )
     body = _http_body(response.text, content_type)
-    return "\n".join(lines + (["body-format: markdown"] if body != response.text else []) + ["", body])
+    return "\n".join(
+        lines
+        + (["body-format: markdown"] if body != response.text else [])
+        + ["", body]
+    )
 
 
 def show(t, n=2):
+    """Print the first *n* lines of *t* to stderr as a preview."""
     if not t:
         return
     lines = t.splitlines()
@@ -331,14 +353,69 @@ def _save_cfg(d):
 
 
 def _pick_model():
+    """Prompt the user to choose and save a default model.
+
+    In non-interactive mode (no TTY or OY_NON_INTERACTIVE=1), aborts with
+    instructions.  Otherwise lists available models and asks for a selection.
+    """
+    if not sys.stdin.isatty() or _flag("OY_NON_INTERACTIVE", False):
+        abort(
+            "No model configured.\n\n"
+            "Pick one interactively:\n"
+            "  oy model\n\n"
+            "Or set directly:\n"
+            "  OY_MODEL=bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0 oy ...\n"
+        )
     try:
         avail = list_all_model_ids()
     except Exception:
-        return DEFAULT_MODEL
-    for s in ("glm-5", "kimi-k2.5"):
-        if m := next((x for x in avail if x.endswith(s)), None):
-            return m
-    return avail[0] if avail else DEFAULT_MODEL
+        abort(
+            "No model configured and could not list available models.\n\n"
+            "Set OY_MODEL or run `oy model` to pick one."
+        )
+    if not avail:
+        abort(
+            "No model configured and no models found from available shims.\n\n"
+            "Set OY_MODEL or run `oy model` to pick one."
+        )
+    _print(
+        value="## No model configured\n\n"
+        "Pick a default model to save (recommended: a `glm-5` or `kimi-k2.5` variant if available).\n",
+        err=True,
+    )
+    render_model_list(avail, title="## Available Models", err=True)
+    while True:
+        response = Prompt.ask("Model number or ID", console=STDERR).strip()
+        if response.isdigit() and 1 <= int(response) <= len(avail):
+            chosen = avail[int(response) - 1]
+            break
+        if response in avail:
+            chosen = response
+            break
+        matches = [m for m in avail if response.lower() in m.lower()]
+        if len(matches) == 1:
+            chosen = matches[0]
+            break
+        if matches:
+            render_model_list(
+                matches, title="## Matching Models", query=response, err=True
+            )
+            continue
+        _print(
+            "warning", f"No match for {_fmt('inline', response)}. Try again.", err=True
+        )
+    shim_name, bare_model = split_model_spec(chosen)
+    cfg = {**_load_cfg(), "model": bare_model}
+    if shim_name:
+        cfg["shim"] = shim_name
+    else:
+        cfg.pop("shim", None)
+    _save_cfg(cfg)
+    _print(
+        value=f"## Default Model Saved\n\n- selected: {_fmt('inline', chosen)}",
+        err=True,
+    )
+    return chosen
 
 
 def _env_or_cfg(c, e, k, d=None):
@@ -391,7 +468,8 @@ def resolve_active_shim(spec=None):
     return _wrap_runtime_error(validate_shim, resolve_model_shim(spec, _shim()))
 
 
-def ensure_api_env(cwd=None, refresh=False):
+def ensure_api_env(cwd=None):
+    """Return True if API credentials are available."""
     return ensure_shim_api_env(_model(), _shim(), cwd)[0]
 
 
@@ -418,21 +496,23 @@ def get_client(spec=None):
 
 
 def resolve_path(r, p):
+    """Resolve *p* under workspace root *r*; raise ValueError on traversal."""
     path = (r / p).resolve()
     if path == r or r in path.parents:
         return path
     raise ValueError(f"Path traversal denied: '{p}'")
 
 
-def _replace(t, old, new, all=False):
+def _replace(text, old, new, replace_all=False):
+    """Replace *old* with *new* in *text*.  Returns (updated_text, match_count)."""
     if not old:
         raise ValueError("old is empty")
-    n = t.count(old)
+    n = text.count(old)
     if n == 0:
         raise ValueError("not found")
-    if n > 1 and not all:
+    if n > 1 and not replace_all:
         raise ValueError("multiple matches; set replace_all=true")
-    return t.replace(old, new) if all else t.replace(old, new, 1), n
+    return text.replace(old, new) if replace_all else text.replace(old, new, 1), n
 
 
 def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details):
@@ -441,12 +521,14 @@ def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details)
     parts = [
         _fmt("inline", key.replace("_", "-"))
         if value is True
-        else f"{key.replace('_', '-')}: {_fmt("inline", preview(value, 50))}"
+        else f"{key.replace('_', '-')}: {_fmt('inline', preview(value, 50))}"
         for key, value in details.items()
         if value not in (None, "", False) and value != defaults.get(key)
     ]
     detail_text = ", ".join(parts)
-    message = f"tool {_fmt('inline', name)}" + (f": {detail_text}" if detail_text else "")
+    message = f"tool {_fmt('inline', name)}" + (
+        f": {detail_text}" if detail_text else ""
+    )
     if _suffix:
         message += f"  {_suffix}"
     # Use bullet for mutating tools (apply, bash), plain for idempotent reads
@@ -471,7 +553,8 @@ def note_apply_ops(ops):
                 f"  + `{_oneline(op.get('new', ''))}`",
             ],
             "write": [
-                f"  write `{path}`" + (" *(overwrite)*" if op.get("overwrite") else " *(new)*"),
+                f"  write `{path}`"
+                + (" *(overwrite)*" if op.get("overwrite") else " *(new)*"),
                 f"  + `{_oneline(op.get('content', ''))}`",
             ],
             "move": [f"  ⚠ move `{path}` → `{op.get('to', '?')}`"],
@@ -554,7 +637,9 @@ class ToolHandler:
     spec: ToolSpec
     args_type: Any
 
-    def invoke(self, state: AgentState, args: dict[str, Any] | None = None) -> ToolResult:
+    def invoke(
+        self, state: AgentState, args: dict[str, Any] | None = None
+    ) -> ToolResult:
         try:
             parsed = msgspec.convert(args or {}, type=self.args_type)
             payload = self.fn(state, **msgspec.to_builtins(parsed))
@@ -677,7 +762,9 @@ def _message_tokens(message: ChatMessage) -> int:
 def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
     if isinstance(message, ToolMessage) or not message.content:
         return message
-    if (truncated := truncate_str_to_tokens(message.content, max_tokens=max_tokens)) is message.content:
+    if (
+        truncated := truncate_str_to_tokens(message.content, max_tokens=max_tokens)
+    ) is message.content:
         return message
     match message:
         case SystemMessage():
@@ -735,7 +822,19 @@ class Transcript(msgspec.Struct, omit_defaults=True):
                 kept.append(message)
                 used += cost
         kept.reverse()
-        return sys_msgs + ([UserMessage(f"... [{len(other) - len(kept)} earlier messages omitted to fit context limit]")] if len(kept) < len(other) else []) + kept
+        return (
+            sys_msgs
+            + (
+                [
+                    UserMessage(
+                        f"... [{len(other) - len(kept)} earlier messages omitted to fit context limit]"
+                    )
+                ]
+                if len(kept) < len(other)
+                else []
+            )
+            + kept
+        )
 
     def session_tokens(self) -> int:
         return sum(map(_message_tokens, self.messages))
@@ -786,7 +885,14 @@ def tool_read(state, path, offset=1, limit=DEFAULT_LINE_LIMIT):
     target = resolve_path(state.root, path)
     defaults = {"offset": 1, "limit": DEFAULT_LINE_LIMIT}
     if target.is_dir():
-        note_tool(state, "read", _defaults={"path": ".", **defaults}, path=path, offset=offset, limit=limit)
+        note_tool(
+            state,
+            "read",
+            _defaults={"path": ".", **defaults},
+            path=path,
+            offset=offset,
+            limit=limit,
+        )
         text = _list_dir(state.root, target, limit)
         show(text, 1)
         return clip_tokens(text)
@@ -797,19 +903,23 @@ def tool_read(state, path, offset=1, limit=DEFAULT_LINE_LIMIT):
         state,
         "read",
         _defaults=defaults,
-        _suffix=(f"*(lines {start + 1}–{min(start + len(shown), total)} of {total})*" if total else ""),
+        _suffix=(
+            f"*(lines {start + 1}–{min(start + len(shown), total)} of {total})*"
+            if total
+            else ""
+        ),
         path=path,
         offset=offset,
         limit=limit,
     )
-    return clip_tokens("\n".join(f"{i}: {line}" for i, line in enumerate(shown, start + 1)) or "<empty file>")
+    return clip_tokens(
+        "\n".join(f"{i}: {line}" for i, line in enumerate(shown, start + 1))
+        or "<empty file>"
+    )
 
 
-@tool(
-    "Edit files inside the workspace. Operations: replace, write, move, delete. Read first and keep edits precise.",
-    ApplyArgs,
-)
 def _need(op, key, typ, msg):
+    """Extract and validate a typed field from an operation dict."""
     value = op.get(key)
     if not isinstance(value, typ) or (typ is str and not value):
         raise ValueError(msg)
@@ -836,15 +946,43 @@ def _apply_op(root, index, op):
             rel = _require_file(root, target, "replace text in")
             updated, count = _replace(
                 target.read_text(encoding="utf-8", errors="surrogateescape"),
-                _need(op, "old", str, f"replace operation {index} requires string old and new"),
-                _need(op, "new", str, f"replace operation {index} requires string old and new"),
-                _need(op, "replace_all", bool, f"replace operation {index} replace_all must be boolean") if "replace_all" in op else False,
+                _need(
+                    op,
+                    "old",
+                    str,
+                    f"replace operation {index} requires string old and new",
+                ),
+                _need(
+                    op,
+                    "new",
+                    str,
+                    f"replace operation {index} requires string old and new",
+                ),
+                _need(
+                    op,
+                    "replace_all",
+                    bool,
+                    f"replace operation {index} replace_all must be boolean",
+                )
+                if "replace_all" in op
+                else False,
             )
             target.write_text(updated, encoding="utf-8", errors="surrogateescape")
             return f"replaced {rel} ({count} match{'es' if count != 1 else ''})"
         case "write":
-            content = _need(op, "content", str, f"write operation {index} requires string content")
-            overwrite = _need(op, "overwrite", bool, f"write operation {index} overwrite must be boolean") if "overwrite" in op else False
+            content = _need(
+                op, "content", str, f"write operation {index} requires string content"
+            )
+            overwrite = (
+                _need(
+                    op,
+                    "overwrite",
+                    bool,
+                    f"write operation {index} overwrite must be boolean",
+                )
+                if "overwrite" in op
+                else False
+            )
             rel = _rel(root, target)
             if target.exists() and target.is_dir():
                 raise ValueError(f"cannot write directory: {rel}")
@@ -855,7 +993,12 @@ def _apply_op(root, index, op):
             return f"wrote {rel}"
         case "move":
             rel = _require_file(root, target, "move")
-            dest = resolve_path(root, _need(op, "to", str, f"move operation {index} requires a valid to path"))
+            dest = resolve_path(
+                root,
+                _need(
+                    op, "to", str, f"move operation {index} requires a valid to path"
+                ),
+            )
             if dest == target:
                 raise ValueError(f"move destination matches source: {rel}")
             if dest.exists():
@@ -867,14 +1010,22 @@ def _apply_op(root, index, op):
             rel = _require_file(root, target, "delete")
             target.unlink()
             return f"⚠ deleted {rel}"
-    raise ValueError(f"operation {index} has unsupported op {_fmt("inline", kind)}; use replace, write, move, or delete")
+    raise ValueError(
+        f"operation {index} has unsupported op {_fmt('inline', kind)}; use replace, write, move, or delete"
+    )
 
 
+@tool(
+    "Edit files inside the workspace. Operations: replace, write, move, delete. Read first and keep edits precise.",
+    ApplyArgs,
+)
 def tool_apply(state, operations):
     if isinstance(operations, dict):
         operations = [operations]
     if not isinstance(operations, list) or not operations:
-        raise ValueError("operations must be a non-empty array or a single operation object")
+        raise ValueError(
+            "operations must be a non-empty array or a single operation object"
+        )
     note_tool(state, "apply", operations=len(operations))
     note_apply_ops(operations)
     out = "\n".join(_apply_op(state.root, i, op) for i, op in enumerate(operations, 1))
@@ -977,22 +1128,22 @@ def tool_glob(state, pattern, path=".", limit=DEFAULT_LINE_LIMIT):
         limit=limit,
     )
     out = _join_paths(
-        sorted(resolve_path(state.root, path).glob(pattern), key=lambda item: item.as_posix())[
-            : max(limit, 1)
-        ],
+        sorted(
+            resolve_path(state.root, path).glob(pattern),
+            key=lambda item: item.as_posix(),
+        )[: max(limit, 1)],
         state.root,
     )
     show(out, 1)
     return clip_tokens(out)
 
 
-@tool(
-    "Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted.",
-    HttpxArgs,
-)
 def _enum(value, allowed, name):
+    """Validate *value* is in *allowed* or None; raise ValueError otherwise."""
     if value is not None and value not in allowed:
-        raise ValueError(f"{name} must be one of {', '.join(allowed[:-1])}, or {allowed[-1]}")
+        raise ValueError(
+            f"{name} must be one of {', '.join(allowed[:-1])}, or {allowed[-1]}"
+        )
     return value
 
 
@@ -1002,6 +1153,10 @@ def _positive_int(value, name):
     return value
 
 
+@tool(
+    "Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted.",
+    HttpxArgs,
+)
 def tool_httpx(
     state,
     url,
@@ -1021,7 +1176,9 @@ def tool_httpx(
         raise ValueError("method must be a string")
     if body is not None and not isinstance(body, str):
         raise ValueError("body must be a string")
-    if json_body is not None and not isinstance(json_body, (dict, list, str, int, float, bool)):
+    if json_body is not None and not isinstance(
+        json_body, (dict, list, str, int, float, bool)
+    ):
         raise ValueError("json_body must be valid JSON-like data")
     timeout_seconds = _positive_int(timeout_seconds, "timeout_seconds")
     max_tokens = _positive_int(max_tokens, "max_tokens")
@@ -1030,17 +1187,31 @@ def tool_httpx(
         raise ValueError("json_path must be a string")
     if body is not None and json_body is not None:
         raise ValueError("provide either body or json_body, not both")
-    method = ((method or ("POST" if body is not None or json_body is not None else "GET")).strip().upper())
+    method = (
+        (method or ("POST" if body is not None or json_body is not None else "GET"))
+        .strip()
+        .upper()
+    )
     if preset == "post_json" and method == "GET":
         method = "POST"
-    if response_mode == "auto" and preset in {"json", "post_json"} or response_mode == "body" and json_path:
+    if (
+        response_mode == "auto"
+        and preset in {"json", "post_json"}
+        or response_mode == "body"
+        and json_path
+    ):
         response_mode = "json"
     if response_mode == "headers" and json_path:
         raise ValueError("json_path requires body or json output")
     note_tool(
         state,
         "httpx",
-        _defaults={"method": "GET", "response_mode": "auto", "timeout": 20, "max_tokens": MAX_TOOL_OUTPUT_TOKENS},
+        _defaults={
+            "method": "GET",
+            "response_mode": "auto",
+            "timeout": 20,
+            "max_tokens": MAX_TOOL_OUTPUT_TOKENS,
+        },
         preset=preset,
         method=method,
         url=url,
@@ -1054,8 +1225,17 @@ def tool_httpx(
         raise ValueError("httpx only supports http and https")
     _print("status", "Fetching HTTP content.", err=True)
     try:
-        with httpx.Client(follow_redirects=True, timeout=float(timeout_seconds)) as http:
-            response = http.request(method, parsed.geturl(), headers=_norm_map(headers, "headers"), params=_norm_map(params, "params"), content=body, json=json_body)
+        with httpx.Client(
+            follow_redirects=True, timeout=float(timeout_seconds)
+        ) as http:
+            response = http.request(
+                method,
+                parsed.geturl(),
+                headers=_norm_map(headers, "headers"),
+                params=_norm_map(params, "params"),
+                content=body,
+                json=json_body,
+            )
     except httpx.HTTPError as exc:
         raise ValueError(_httpx_err(exc, timeout_seconds)) from exc
     out = render_httpx_output(response, response_mode, json_path=json_path)
@@ -1074,23 +1254,35 @@ def tool_ask(state, question, choices=None):
     _print("prompt", question, err=True)
     if not choices:
         return Prompt.ask("Answer", console=STDERR).strip()
-    _print(value="## Options\n\n" + "\n".join(f"{i}. {_fmt('inline', choice)}" for i, choice in enumerate(choices, 1)), err=True)
+    _print(
+        value="## Options\n\n"
+        + "\n".join(
+            f"{i}. {_fmt('inline', choice)}" for i, choice in enumerate(choices, 1)
+        ),
+        err=True,
+    )
     while True:
         response = Prompt.ask("Selection", console=STDERR).strip()
         if response.isdigit() and 0 < int(response) <= len(choices):
             return choices[int(response) - 1]
         if response in choices:
             return response
-        _print("warning", f"Enter a number 1–{len(choices)} or type the choice exactly.", err=True)
+        _print(
+            "warning",
+            f"Enter a number 1–{len(choices)} or type the choice exactly.",
+            err=True,
+        )
 
 
 def active_system_prompt(interactive):
+    """Build the system prompt, choosing interactive or non-interactive suffix."""
     return BASE_SYSTEM_PROMPT + (
         INTERACTIVE_SYSTEM_PROMPT if interactive else NONINTERACTIVE_SYSTEM_PROMPT
     )
 
 
 def active_tool_specs(interactive):
+    """Return the tool registry, excluding ``ask`` in non-interactive mode."""
     return TOOL_REGISTRY if interactive else TOOL_REGISTRY.without("ask")
 
 
@@ -1099,6 +1291,7 @@ def chat_tools(specs):
 
 
 def run_tool(state: AgentState, name, args):
+    """Dispatch a single tool call and return its ToolResult."""
     return state.tool_specs.invoke(state, name, args)
 
 
@@ -1252,11 +1445,16 @@ async def run_agent(
     transcript = transcript or Transcript()
     transcript.set_system_prompt(system_prompt)
     transcript.add_user(prompt)
-    runner = lambda client: run_turn(client, transcript, state, model, chat_tools(tool_specs), max_steps)
+
+    async def runner(client):
+        return await run_turn(
+            client, transcript, state, model, chat_tools(tool_specs), max_steps
+        )
+
     try:
         return await runner(get_client(model))
     except (AuthenticationError, PermissionDeniedError) as exc:
-        if not ensure_api_env(root, refresh=True):
+        if not ensure_api_env(root):
             return fail(f"API {_api_error_kind(exc)} error: {exc}"), ""
         _print("warning", "Credentials expired. Refreshing.", err=True)
         try:
@@ -1398,7 +1596,7 @@ def chat():
             )
             size_str = format_tokens(transcript.session_tokens())
             STDERR.print(f"[dim]· {size_str}[/dim]")
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt, EOFError:
             _print(value="\n## Session Ended", err=True)
             break
     return 0
@@ -1453,7 +1651,10 @@ def render_model_list(items, *, title, query=None, current=None, err=False, limi
         lines += ["", f"- current model: {_fmt('inline', current)}"]
     if query:
         lines += ["", f"- filter: {_fmt('inline', query)}"]
-    lines += [""] + ([f"{i}. {_fmt('inline', item)}" for i, item in enumerate(shown, 1)] or ["- no matching models"])
+    lines += [""] + (
+        [f"{i}. {_fmt('inline', item)}" for i, item in enumerate(shown, 1)]
+        or ["- no matching models"]
+    )
     if len(items) > len(shown):
         lines += ["", f"- showing {len(shown)} of {len(items)} matches"]
     _print(value="\n".join(lines), err=err)
@@ -1467,14 +1668,30 @@ def resolve_model_choice(model_id=None):
         if model_id:
             matches = [m for m in available if model_id.strip().lower() in m.lower()]
             if matches:
-                render_model_list(matches, title="## Matching Models", query=model_id, current=current, err=True)
-            abort(f"No exact model match for {_fmt('inline', model_id)}. Re-run in a TTY to filter and choose interactively.")
+                render_model_list(
+                    matches,
+                    title="## Matching Models",
+                    query=model_id,
+                    current=current,
+                    err=True,
+                )
+            abort(
+                f"No exact model match for {_fmt('inline', model_id)}. Re-run in a TTY to filter and choose interactively."
+            )
         return None
-    _print(value="## Choose a Model\n\n- Enter an exact model ID to save it.\n- Enter text to filter the list.\n- Enter a number to pick from the currently listed models.", err=True)
+    _print(
+        value="## Choose a Model\n\n- Enter an exact model ID to save it.\n- Enter text to filter the list.\n- Enter a number to pick from the currently listed models.",
+        err=True,
+    )
     if model_id is None:
-        render_model_list(available, title="## Available Models", current=current, err=True)
+        render_model_list(
+            available, title="## Available Models", current=current, err=True
+        )
     shown = available
-    query = model_id or Prompt.ask("Model or filter", console=STDERR, default=current).strip()
+    query = (
+        model_id
+        or Prompt.ask("Model or filter", console=STDERR, default=current).strip()
+    )
     while True:
         query = query.strip() or current
         if query in available:
@@ -1482,7 +1699,9 @@ def resolve_model_choice(model_id=None):
         if query.isdigit() and 1 <= (idx := int(query)) <= len(shown):
             return shown[idx - 1]
         shown = [m for m in available if query.lower() in m.lower()]
-        render_model_list(shown, title="## Matching Models", query=query, current=current, err=True)
+        render_model_list(
+            shown, title="## Matching Models", query=query, current=current, err=True
+        )
         query = Prompt.ask("Model or filter", console=STDERR).strip()
 
 
@@ -1491,33 +1710,65 @@ def model(query: str | None = None, *, region: str | None = None, token: bool = 
 
     :param query: Exact model ID to save, or a filter string when running in a TTY.
     :param region: AWS region to use with --token.
-    :param token: Print Bedrock-backed OpenAI credentials instead of showing/model selection.
+    :param token: Print Bedrock-backed OpenAI credentials instead of model selection.
     """
-
     if token:
         chosen = default_region() if region is None else region
-        _print("status", f"Generating Bedrock credentials for {_fmt('inline', chosen)}.", err=True)
+        _print(
+            "status",
+            f"Generating Bedrock credentials for {_fmt('inline', chosen)}.",
+            err=True,
+        )
         value = make_bedrock_token(chosen, cwd=Path.cwd())
-        _print(value="## Bedrock Credentials\n\n" + "Paste this into another shell if you want to reuse the current Bedrock session.\n\n" + _fmt("block", "\n".join([f"export OPENAI_BASE_URL={shlex.quote(bedrock_base_url(chosen))}", f"export OPENAI_API_KEY={shlex.quote(value)}"]), "bash"))
+        _print(
+            value="## Bedrock Credentials\n\n"
+            + "Paste this into another shell if you want to reuse the current Bedrock session.\n\n"
+            + _fmt(
+                "block",
+                "\n".join(
+                    [
+                        f"export OPENAI_BASE_URL={shlex.quote(bedrock_base_url(chosen))}",
+                        f"export OPENAI_API_KEY={shlex.quote(value)}",
+                    ]
+                ),
+                "bash",
+            )
+        )
         return 0
+    current = _model(None)
     if query is None and not sys.stdin.isatty():
-        spec = _model(None)
-        shim = resolve_active_shim(spec)
-        _, bare = split_model_spec(spec)
-        _print(value=f"## Current Model\n\n- model: {_fmt('inline', bare)}\n- shim: {_fmt('inline', shim)}")
+        shim = resolve_active_shim(current)
+        _, bare = split_model_spec(current)
+        _print(
+            value=f"## Current Model\n\n- model: {_fmt('inline', bare)}\n- shim: {_fmt('inline', shim)}"
+        )
         return 0
-    if query is None:
-        render_model_list(list_all_model_ids(), title="## Available Models")
-        return 0
+    # Interactive mode: show current model first if set
+    if current:
+        shim = resolve_active_shim(current)
+        _, bare = split_model_spec(current)
+        _print(
+            value=f"## Current Model\n\n- model: {_fmt('inline', bare)}\n- shim: {_fmt('inline', shim)}",
+            err=True,
+        )
+        if (
+            not Prompt.ask(
+                "\nPick a new model?", console=STDERR, choices=["y", "n"], default="n"
+            )
+            == "y"
+        ):
+            return 0
     chosen = resolve_model_choice(query)
     if chosen is None:
-        render_model_list(list_all_model_ids(), title="## Available Models")
-        return 0
+        return 1
     shim, bare_model = split_model_spec(chosen)
     cfg = {**_load_cfg(), "model": bare_model}
     (cfg.__setitem__("shim", shim) if shim else cfg.pop("shim", None))
     _save_cfg(cfg)
-    _print(value=f"## Default Model Updated\n\n- selected: {_fmt('inline', chosen)}" + (f"\n- shim: {_fmt('inline', shim)}" if shim else ""))
+    _print(
+        value=f"## Default Model Updated\n\n- selected: {_fmt('inline', chosen)}"
+        + (f"\n- shim: {_fmt('inline', shim)}" if shim else "")
+    )
     return 0
 
 
@@ -1531,9 +1782,7 @@ def main(argv: list[str] | None = None):
         return 0
     elif args[0] not in commands:
         args = ["run", *args]
-    result = defopt.run(
-        [run, chat, model, audit], argv=args, version=False, short={}
-    )
+    result = defopt.run([run, chat, model, audit], argv=args, version=False, short={})
     return 0 if result is None else result
 
 

@@ -81,18 +81,22 @@ class ToolDispatchTests(unittest.TestCase):
             state.note_tool_call()
 
     def test_model_command_shows_current_model_in_non_tty(self):
-        with patch.object(oy_cli, "_model", return_value="openai:gpt-4o"), patch.object(
-            oy_cli, "resolve_active_shim", return_value="openai"
-        ), patch.object(oy_cli, "split_model_spec", return_value=("openai", "gpt-4o")), patch.object(
-            oy_cli.sys.stdin, "isatty", return_value=False
-        ), patch.object(oy_cli, "_print") as mock_print:
+        with (
+            patch.object(oy_cli, "_model", return_value="openai:gpt-4o"),
+            patch.object(oy_cli, "resolve_active_shim", return_value="openai"),
+            patch.object(oy_cli, "split_model_spec", return_value=("openai", "gpt-4o")),
+            patch.object(oy_cli.sys.stdin, "isatty", return_value=False),
+            patch.object(oy_cli, "_print") as mock_print,
+        ):
             self.assertEqual(oy_cli.model(), 0)
         self.assertIn("Current Model", mock_print.call_args.kwargs["value"])
 
 
 class TranscriptTests(unittest.TestCase):
     def test_set_system_prompt_replaces_first_system_message(self):
-        transcript = oy_cli.Transcript(messages=[SystemMessage("old"), UserMessage("hi")])
+        transcript = oy_cli.Transcript(
+            messages=[SystemMessage("old"), UserMessage("hi")]
+        )
         transcript.set_system_prompt("new")
         self.assertEqual(transcript.messages[0], SystemMessage("new"))
         self.assertEqual(transcript.messages[1], UserMessage("hi"))
@@ -110,7 +114,12 @@ class TranscriptTests(unittest.TestCase):
 
     def test_prepared_messages_drops_older_context(self):
         transcript = oy_cli.Transcript(
-            messages=[SystemMessage("sys"), UserMessage("abcdef"), UserMessage("ghij"), UserMessage("kl")],
+            messages=[
+                SystemMessage("sys"),
+                UserMessage("abcdef"),
+                UserMessage("ghij"),
+                UserMessage("kl"),
+            ],
             max_context_tokens=18,
             max_message_tokens=100,
         )
@@ -129,6 +138,74 @@ class TranscriptTests(unittest.TestCase):
         )
         with patch.object(oy_cli, "count_tokens", side_effect=lambda text: len(text)):
             self.assertEqual(transcript.prepared_tokens(), 20)
+
+
+class PickModelTests(unittest.TestCase):
+    def test_pick_model_aborts_in_non_interactive_mode(self):
+        with patch.object(oy_cli.sys.stdin, "isatty", return_value=False):
+            with self.assertRaises(SystemExit):
+                oy_cli._pick_model()
+
+    def test_pick_model_aborts_when_non_interactive_env_set(self):
+        with (
+            patch.object(oy_cli.sys.stdin, "isatty", return_value=True),
+            patch.dict(oy_cli.os.environ, {"OY_NON_INTERACTIVE": "1"}),
+        ):
+            with self.assertRaises(SystemExit):
+                oy_cli._pick_model()
+
+
+class ResolvePathTests(unittest.TestCase):
+    def test_resolve_path_allows_child(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sub").mkdir()
+            result = oy_cli.resolve_path(root, "sub")
+            self.assertEqual(result, (root / "sub").resolve())
+
+    def test_resolve_path_rejects_traversal(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with self.assertRaisesRegex(ValueError, "Path traversal denied"):
+                oy_cli.resolve_path(root, "../../etc/passwd")
+
+
+class ReplaceTests(unittest.TestCase):
+    def test_replace_single_match(self):
+        text, count = oy_cli._replace("hello world", "world", "earth")
+        self.assertEqual(text, "hello earth")
+        self.assertEqual(count, 1)
+
+    def test_replace_rejects_empty_old(self):
+        with self.assertRaisesRegex(ValueError, "old is empty"):
+            oy_cli._replace("hello", "", "x")
+
+    def test_replace_rejects_missing_target(self):
+        with self.assertRaisesRegex(ValueError, "not found"):
+            oy_cli._replace("hello", "xyz", "x")
+
+    def test_replace_rejects_ambiguous_match(self):
+        with self.assertRaisesRegex(ValueError, "multiple matches"):
+            oy_cli._replace("aa", "a", "b")
+
+    def test_replace_all(self):
+        text, count = oy_cli._replace("aa", "a", "b", replace_all=True)
+        self.assertEqual(text, "bb")
+        self.assertEqual(count, 2)
+
+
+class ClipTokensTests(unittest.TestCase):
+    def test_short_text_unchanged(self):
+        result = oy_cli.clip_tokens("hello", limit=1000)
+        self.assertEqual(result, "hello")
+
+    def test_long_text_truncated(self):
+        result = oy_cli.clip_tokens("a " * 10000, limit=10)
+        self.assertIn("tokens omitted", result)
 
 
 if __name__ == "__main__":

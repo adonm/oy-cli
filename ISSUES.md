@@ -6,6 +6,12 @@
 
 Total issues found: 5
 
+| Severity | Open | Resolved |
+|----------|------|----------|
+| High     | 1    | 0        |
+| Medium   | 2    | 0        |
+| Low      | 0    | 2        |
+
 ## High Severity (1)
 
 ### 1. Missing Unit Tests and Test Coverage
@@ -98,31 +104,31 @@ No pre-commit hooks are configured to catch common issues before commit:
 
 ### 1. Hardcoded Default Model Without Validation
 
-- **Location**: `oy_cli.py:38`
+- **Location**: `oy_cli.py` (model selection)
 - **Category**: security, usability
 - **Standard**: ASVS V5: Configuration
 
-The `DEFAULT_MODEL` is hardcoded to `'moonshotai.kimi-k2.5'` without validation that this model exists or is appropriate for the endpoint. If the model is unavailable, users receive cryptic errors.
+The `DEFAULT_MODEL` was hardcoded to `'moonshotai.kimi-k2.5'` without validation that this model exists or is appropriate for the endpoint.
 
 **Recommendation**: 
 1. Validate model availability on startup or first use
 2. Provide clear error messages when default model is unavailable
 3. Consider making default model configurable per installation
 
-**Status**: OPEN - Minor usability improvement
+**Status**: RESOLVED - Removed hardcoded default. `oy` now prompts users to pick and save a model on first run, or aborts with instructions in non-interactive mode.
 
 ---
 
 ### 2. Hardcoded Timeouts and Limits Could Cause Production Issues
 
-- **Location**: `oy_cli.py:35-43, 562, 1097, 1162`
+- **Location**: `oy_cli.py` and `shim.py` (various constants)
 - **Category**: complexity, operations
 - **Standard**: ASVS V8: Resource Management
 
 Several operational limits are hardcoded as constants:
-- MAX_TOOL_OUTPUT_CHARS = 16000
-- DEFAULT_MAX_STEPS = 512
-- DEFAULT_MAX_TOOL_CALLS = 512
+- MAX_TOOL_OUTPUT_TOKENS = 4096 (configurable via `OY_MAX_TOOL_OUTPUT_TOKENS`)
+- DEFAULT_MAX_STEPS = 512 (configurable via `OY_DEFAULT_MAX_STEPS`)
+- DEFAULT_MAX_TOOL_CALLS = 512 (configurable via `OY_DEFAULT_MAX_TOOL_CALLS`)
 - Default bash timeout = 120 seconds
 - Default httpx timeout = 20 seconds
 
@@ -133,7 +139,7 @@ These cannot be tuned for different environments or use cases without code chang
 2. Document recommended values for different scenarios
 3. Add config file support for operational parameters
 
-**Status**: OPEN - Minor operational improvement
+**Status**: RESOLVED - All operational parameters are now configurable via `OY_*` environment variables and documented in README
 
 ---
 
@@ -141,9 +147,9 @@ These cannot be tuned for different environments or use cases without code chang
 
 The codebase demonstrates several good security practices:
 
-1. **Path Traversal Protection**: Line 910-919 implements proper path resolution with explicit ValueError on traversal attempts
+1. **Path Traversal Protection**: `resolve_path()` implements proper path resolution with explicit ValueError on traversal attempts
 
-2. **Header Redaction**: Line 416-422 properly redacts sensitive headers (Authorization, Cookie, etc.) in httpx output
+2. **Header Redaction**: `_redact_header()` properly redacts sensitive headers (Authorization, Cookie, etc.) in httpx output
 
 3. **No Dangerous Patterns**: No use of eval(), exec(), pickle, marshal, or other high-risk patterns
 
@@ -153,9 +159,9 @@ The codebase demonstrates several good security practices:
 
 6. **Credential Handling**: AWS credentials are obtained via official AWS CLI, not stored in files
 
-7. **Small Attack Surface**: ~1820 lines of straightforward code is auditable
+7. **Small Attack Surface**: ~4000 lines across two modules of straightforward code is auditable
 
-8. **Proper Exception Handling**: All exception handlers use Python 3 tuple syntax correctly (fixed in commit 2cd1524)
+8. **Proper Exception Handling**: Exception handlers use Python 3.14 PEP 758 bare-comma syntax (`except A, B:`) which ruff formats automatically; both bare and parenthesised forms are valid
 
 ---
 
@@ -169,5 +175,5 @@ The codebase demonstrates several good security practices:
 2. Configure pre-commit hooks
 
 **Low Priority**:
-1. Make operational parameters configurable
-2. Add model validation with clear error messages
+1. ~~Make operational parameters configurable~~ RESOLVED
+2. ~~Add model validation with clear error messages~~ RESOLVED
