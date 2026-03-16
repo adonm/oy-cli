@@ -168,6 +168,19 @@ class LoadJsonTests(unittest.TestCase):
             self.assertEqual(result, {"key": "value"})
 
 
+class SaveJsonTests(unittest.TestCase):
+    def test_save_json_sets_owner_only_permissions(self):
+        import os
+        import stat
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "creds.json"
+            shim.save_json(p, {"token": "secret"})
+            mode = stat.S_IMODE(os.stat(p).st_mode)
+            self.assertEqual(mode, 0o600)
+
+
 class ExpiryMsTests(unittest.TestCase):
     def test_expiry_ms_with_valid_seconds(self):
         result = shim.expiry_ms(3600)

@@ -54,7 +54,9 @@ from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.status import Status
 
-__version__ = __import__("importlib.metadata").metadata.version("oy-cli")
+from importlib.metadata import version as _meta_version
+
+__version__ = _meta_version("oy-cli")
 
 
 def _env(name, default, t=None):
@@ -65,6 +67,7 @@ def _env(name, default, t=None):
 
 MAX_TOOL_OUTPUT_TOKENS = _env("MAX_TOOL_OUTPUT_TOKENS", 4096)
 MAX_TOOL_TAIL_TOKENS = _env("MAX_TOOL_TAIL_TOKENS", 1024)
+MAX_BASH_CMD_BYTES = _env("MAX_BASH_CMD_BYTES", 65536)
 MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
 MAX_MESSAGE_TOKENS = _env("MAX_MESSAGE_TOKENS", 4096)
 DEFAULT_MAX_STEPS = _env("DEFAULT_MAX_STEPS", 512)
@@ -336,7 +339,7 @@ def _rel(r, p):
     try:
         return p.relative_to(r).as_posix() or "."
     except ValueError:
-        return p.as_posix()
+        return "<outside workspace>"
 
 
 def _cfg_path():
@@ -1038,6 +1041,10 @@ def tool_apply(state, operations):
     BashArgs,
 )
 def tool_bash(state, command, timeout_seconds=120):
+    if len(command.encode("utf-8", errors="replace")) > MAX_BASH_CMD_BYTES:
+        raise ValueError(
+            f"command too large ({len(command)} chars); limit is {MAX_BASH_CMD_BYTES} bytes"
+        )
     note_tool(
         state,
         "bash",
@@ -1127,13 +1134,19 @@ def tool_glob(state, pattern, path=".", limit=DEFAULT_LINE_LIMIT):
         path=path,
         limit=limit,
     )
-    out = _join_paths(
-        sorted(
-            resolve_path(state.root, path).glob(pattern),
-            key=lambda item: item.as_posix(),
-        )[: max(limit, 1)],
-        state.root,
-    )
+    base = resolve_path(state.root, path)
+    # H1: filter glob results to only include paths within the workspace root,
+    # since glob patterns or symlinks could escape the workspace boundary.
+    results = []
+    for p in base.glob(pattern):
+        try:
+            resolved = p.resolve()
+            if resolved == state.root or state.root in resolved.parents:
+                results.append(resolved)
+        except OSError:
+            pass
+    results.sort(key=lambda item: item.as_posix())
+    out = _join_paths(results[: max(limit, 1)], state.root)
     show(out, 1)
     return clip_tokens(out)
 
@@ -1392,12 +1405,13 @@ async def run_turn(
         spinner.start()
 
         def on_retry(attempt, max_attempts, error_ctx=None):
+            excerpt = ""
             if error_ctx:
                 lines = error_ctx.strip().splitlines()
                 excerpt = " · ".join(line.strip() for line in lines[:3] if line.strip())
-                spinner.console.log(
-                    f"[dim]↳ retry {attempt}/{max_attempts}: {excerpt}[/dim]"
-                )
+            spinner.console.log(
+                f"[dim]↳ retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}[/dim]"
+            )
             spinner.update(
                 f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) · {size_str}"
             )

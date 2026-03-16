@@ -198,6 +198,18 @@ class ReplaceTests(unittest.TestCase):
         self.assertEqual(count, 2)
 
 
+class RelTests(unittest.TestCase):
+    def test_rel_returns_relative_path_inside_workspace(self):
+        root = Path("/workspace")
+        p = Path("/workspace/src/main.py")
+        self.assertEqual(oy_cli._rel(root, p), "src/main.py")
+
+    def test_rel_returns_placeholder_for_outside_workspace(self):
+        root = Path("/workspace")
+        p = Path("/etc/passwd")
+        self.assertEqual(oy_cli._rel(root, p), "<outside workspace>")
+
+
 class ClipTokensTests(unittest.TestCase):
     def test_short_text_unchanged(self):
         result = oy_cli.clip_tokens("hello", limit=1000)

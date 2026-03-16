@@ -28,7 +28,8 @@ oy audit "focus on authentication"
 
 ```bash
 oy "prompt"              # Run with a prompt (default)
-oy audit                  # Security audit against OWASP ASVS/MSVS
+oy chat                   # Interactive multi-turn session
+oy audit                  # Security audit against OWASP ASVS/MASVS
 oy model                  # Show current default model
 oy model <filter>         # Pick/save a model
 oy model --token          # Print Bedrock OpenAI env exports
@@ -41,51 +42,44 @@ Most AI coding tools are large, complex, or lock you into a single provider. `oy
 
 **Design goals:** small auditable codebase, minimal tool surface, OpenAI-completions-focused CLI loop, multiple backends behind shims, fresh session each run, and explicit checkpoints when needed.
 
-**Built-in guidance:**
-- complexity: grugbrain.dev style simplicity over abstraction
-- security: OWASP-minded defaults and review
-- performance: performance-aware programming; measure first, avoid obvious waste
+## System Prompt
+
+The system prompt is intentionally short. Tool semantics live with the tool definitions; the system prompt focuses on operating rules and judgment:
+
+> You are oy, a tiny coding cli with tools.
+> Work by inspecting first, then making explicit changes. Prefer simple auditable solutions.
+> Keep going until done or genuinely blocked; if blocked, say what you tried and next steps.
+> Use grugbrain-style simplicity for complexity, OWASP-minded judgment for security, and performance-aware judgment to avoid obvious waste.
+
+In interactive mode, the `ask` tool is available: *"Use ask only when significant clarification or direction is needed."*
+
+In non-interactive mode (`OY_NON_INTERACTIVE=1`): *"Non-interactive mode: do not pause for approval."*
 
 ## Tools
 
-| Tool | Purpose | Best Use |
-|------|---------|----------|
-| `list` | List directory contents | First pass on unfamiliar trees |
-| `read` | Read files or directories | Primary inspection tool; always before editing |
-| `apply` | Modify files | Exact replacements, writes, moves, deletes |
-| `grep` | Search file contents | Find code by text or regex |
-| `glob` | Find files by pattern | Find paths when you know the filename shape |
-| `bash` | Run shell commands | Tests, builds, git, scripts |
-| `httpx` | Fetch web/API content | Docs, standards, and API responses |
-| `ask` | Ask the user questions | Interactive approvals and checkpoints |
+Each tool description is passed directly to the model. These are the exact descriptions:
 
-**Behavioral rules:**
-- Inspect before changing.
-- Prefer `list`/`read`/`grep`/`glob` over shelling out for inspection.
-- Use `apply` for all file edits.
-- Keep edits targeted and batch related operations.
-- If output is clipped, narrow the query instead of guessing.
+| Tool | Description |
+|------|-------------|
+| `list` | List a directory. Use this first on unfamiliar trees. Returns sorted entries, one per line, with `/` for directories. |
+| `read` | Read a file or directory. Use before editing. Files return line-numbered text; directories fall back to list. Use offset/limit for large files. |
+| `apply` | Edit files inside the workspace. Operations: replace, write, move, delete. Read first and keep edits precise. |
+| `bash` | Run shell commands for tests, builds, git, and scripts. Do not use for routine file inspection. Returns stdout and stderr together. |
+| `grep` | Search file contents by text or regex. Use file_glob to narrow by filename pattern. Returns matching lines with file and line numbers. |
+| `glob` | Find files by name pattern like `*.py` or `src/**/*.js`. Use when you know the path shape. Supports `*`, `?`, and `**`. |
+| `httpx` | Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted. |
+| `ask` | Ask the user a question in interactive runs. Use for significant ambiguity or decisions. Provide choices when useful. |
 
-## Agent Behavior
-
-**Core workflow:** inspect first, use the narrowest useful tool, make precise edits, and keep going until done or genuinely blocked.
-
-**Prompt style:** the embedded system prompts are intentionally short. Tool semantics live with the tool definitions, while the system prompt focuses on operating rules and judgment.
-
-**Reasoning defaults:**
-- prefer grugbrain.dev style simplicity to reduce complexity
-- use OWASP framing for security-sensitive work
-- apply performance-aware programming judgment from Computer Enhance: measure before tuning, but avoid obvious waste
-
-**Interactive mode:** use checkpoints for plans, ambiguous choices, and risky changes.
-
-**Non-interactive mode:** do not pause for approval; recover from failures when possible and stop only with a concise blocked status.
-
-**Output truncation:** tool output is clipped to preserve context; `bash` keeps both head and tail. When that happens, narrow the next query.
+**Output truncation:** tool output is clipped to preserve context window; `bash` keeps both head and tail. When clipped, narrow the next query.
 
 ## Audit Command
 
-Fetches current OWASP ASVS/MASVS standards, explores the repository, identifies security issues, complexity problems, and major obvious performance issues, then writes findings to `ISSUES.md`.
+`oy audit` runs the agent with a dedicated system prompt:
+
+> Audit the repo for security, unnecessary complexity, and major obvious performance issues.
+> Fetch current OWASP ASVS and MASVS with httpx, inspect the codebase, and write/merge prioritised findings to ISSUES.md.
+> Each finding should include location, category (security|complexity|performance), reference, recommendation, and status: OPEN.
+> Avoid removing project or human context.
 
 ```bash
 oy audit                    # Full audit
@@ -112,6 +106,7 @@ OY_ROOT=./src oy audit      # Audit specific directory
 |----------|---------|---------|
 | `OY_MAX_TOOL_OUTPUT_TOKENS` | `4096` | Max tokens kept from tool output |
 | `OY_MAX_TOOL_TAIL_TOKENS` | `1024` | Tail tokens preserved when output is clipped |
+| `OY_MAX_BASH_CMD_BYTES` | `65536` | Max command size for `bash` tool |
 | `OY_MAX_CONTEXT_TOKENS` | `131072` | Context window budget |
 | `OY_MAX_MESSAGE_TOKENS` | `4096` | Per-message truncation limit |
 | `OY_DEFAULT_MAX_STEPS` | `512` | Max LLM turns per run |

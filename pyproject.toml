@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oy-cli"
-version = "0.3.0"
+version = "0.3.1"
 description = "Tiny local coding CLI with a small tool surface"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -30,6 +30,11 @@ dev = [
 
 [project.scripts]
 oy = "oy_cli:main"
+
+[project.urls]
+Homepage = "https://github.com/wagov-dtt/oy-cli"
+Repository = "https://github.com/wagov-dtt/oy-cli"
+Issues = "https://github.com/wagov-dtt/oy-cli/issues"
 
 [tool.setuptools]
 py-modules = ["oy_cli", "shim"]

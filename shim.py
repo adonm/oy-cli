@@ -62,16 +62,32 @@ CLAUDE_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
 CODEX_DEFAULT_MODEL = "gpt-5-codex"
 CODEX_CHATGPT_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
-CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+# --- Public OAuth2 "installed app" credentials ---
+# These are NOT confidential server secrets. Google and OpenAI/Anthropic embed
+# client IDs (and, for installed apps, client secrets) directly in CLI/mobile
+# binaries by design. They are safe to publish in source code. See:
+#   - https://developers.google.com/identity/protocols/oauth2/native-app
+#   - https://datatracker.ietf.org/doc/html/rfc8252#section-8.5
+# Override via env: CODEX_OAUTH_CLIENT_ID, GEMINI_OAUTH_CLIENT_ID,
+#   GEMINI_OAUTH_CLIENT_SECRET, CLAUDE_OAUTH_CLIENT_ID
+CODEX_OAUTH_CLIENT_ID = (
+    os.environ.get("CODEX_OAUTH_CLIENT_ID") or "app_EMoamEEZ73f0CkXaXp7hrann"
+)
 GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 GEMINI_CODE_ASSIST_VERSION = "v1internal"
 GEMINI_OAUTH_CLIENT_ID = (
-    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+    os.environ.get("GEMINI_OAUTH_CLIENT_ID")
+    or "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 )
-GEMINI_OAUTH_CLIENT_SECRET = "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"
+GEMINI_OAUTH_CLIENT_SECRET = (
+    os.environ.get("GEMINI_OAUTH_CLIENT_SECRET")
+    or "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"  # installed-app secret; not confidential
+)
 CLAUDE_API_URL = "https://api.anthropic.com"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_OAUTH_CLIENT_ID = (
+    os.environ.get("CLAUDE_OAUTH_CLIENT_ID") or "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+)
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_RETRY_MAX_ATTEMPTS = 10
 DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 5.0
@@ -365,10 +381,15 @@ def load_json(p, d):
 
 
 def save_json(p, d):
-    """Write *d* as pretty-printed JSON to path *p*, creating parents."""
+    """Write *d* as pretty-printed JSON to path *p*, creating parents.
+
+    Sets file permissions to 0o600 (owner-only) since these files may
+    contain OAuth tokens or other credentials.
+    """
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        p.chmod(0o600)
         return True
     except OSError:
         return False
@@ -542,6 +563,9 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
         raise ValueError(f"command timed out after {timeout}s") from e
 
 
+# lru_cache is intentional: the environment is expected to be stable within a
+# single oy run, so we avoid re-scanning Homebrew/mise paths on every tool call.
+# If env vars change mid-process (e.g. in tests), the cache will be stale.
 @lru_cache(maxsize=8)
 def command_env(cwd=None):
     """Build a shell environment dict, merging Homebrew and mise paths."""
@@ -799,11 +823,8 @@ def _read_gemini_cli_file(relative: str) -> str:
 
 @lru_cache(maxsize=1)
 def load_gemini_oauth_client() -> tuple[str, str]:
-    client_id = os.environ.get("GEMINI_OAUTH_CLIENT_ID") or GEMINI_OAUTH_CLIENT_ID
-    client_secret = (
-        os.environ.get("GEMINI_OAUTH_CLIENT_SECRET") or GEMINI_OAUTH_CLIENT_SECRET
-    )
-    return client_id, client_secret
+    # Env-override is handled at the constant level (GEMINI_OAUTH_CLIENT_ID, etc.)
+    return GEMINI_OAUTH_CLIENT_ID, GEMINI_OAUTH_CLIENT_SECRET
 
 
 @lru_cache(maxsize=1)
@@ -1332,7 +1353,10 @@ async def _send_with_retry(
                     else None
                 )
                 if isinstance(exc, RetryableHttpError):
-                    error_ctx = _response_error_message(exc.response)
+                    error_ctx = (
+                        _response_error_message(exc.response)
+                        or f"HTTP {exc.response.status_code}"
+                    )
                 elif isinstance(exc, httpx.TimeoutException):
                     error_ctx = f"timeout ({type(exc).__name__})"
                 elif isinstance(exc, httpx.TransportError):
@@ -1356,9 +1380,11 @@ async def _send_with_retry(
 
 def _retry_error_context(exc: BaseException | None) -> str | None:
     if isinstance(exc, RetryableHttpError):
-        return _response_error_message(exc.response)
+        msg = _response_error_message(exc.response)
+        return msg or f"HTTP {exc.response.status_code}"
     if isinstance(exc, APIStatusError):
-        return _response_error_message(exc.response)
+        msg = _response_error_message(exc.response)
+        return msg or f"HTTP {exc.response.status_code}"
     if isinstance(exc, APITimeoutError):
         return f"timeout ({type(exc).__name__})"
     if isinstance(exc, APIConnectionError):
@@ -2197,7 +2223,7 @@ def _claude_client(initial_access_token: str) -> CompletionClient:
         anthropic_payload, system = _encode_provider_messages(messages, ANTHROPIC_CODEC)
         body: dict[str, Any] = {
             "model": model,
-            "max_tokens": 8096,
+            "max_tokens": 8192,
             "messages": anthropic_payload,
         }
         if system:
