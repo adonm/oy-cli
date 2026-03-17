@@ -256,7 +256,7 @@ def abort(m, c=1):
 def clip_tokens(text, limit=MAX_TOOL_OUTPUT_TOKENS, tail=0):
     """Truncate *text* to *limit* tokens, optionally keeping *tail* tokens from the end."""
     e = get_tokenizer()
-    ids = e.encode(text)
+    ids = e.encode(text, disallowed_special=())
     n = len(ids)
     if n <= limit:
         return text
@@ -1536,7 +1536,7 @@ def truncate_str_to_tokens(text: str, max_tokens: int = MAX_MESSAGE_TOKENS) -> s
     characters were removed so the model knows the content was cut.
     """
     enc = get_tokenizer()
-    ids = enc.encode(text)
+    ids = enc.encode(text, disallowed_special=())
     if len(ids) <= max_tokens:
         return text
     kept = enc.decode(ids[:max_tokens])
@@ -1798,19 +1798,69 @@ def _setup_readline():
     atexit.register(readline.write_history_file, str(history_path))
 
 
-def _read_input():
-    """Read user input, supporting \\ continuation for multi-line."""
-    line = input("oy > ")
-    if not line.endswith("\\"):
-        return line
-    parts = [line[:-1]]
+def _drain_stdin(timeout: float = 0.05) -> str:
+    """Read any data already buffered on stdin (e.g. the tail of a paste).
+
+    Uses select() with a short timeout.  Returns the extra text, or "".
+    Only works on real ttys; returns "" for piped stdin.
+    """
+    import select
+    if not sys.stdin.isatty():
+        return ""
+    chunks: list[str] = []
     while True:
-        cont = input("... ")
-        if not cont.endswith("\\"):
-            parts.append(cont)
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not ready:
             break
-        parts.append(cont[:-1])
-    return "\n".join(parts)
+        chunk = os.read(sys.stdin.fileno(), 4096)
+        if not chunk:
+            break
+        chunks.append(chunk.decode("utf-8", errors="replace"))
+        # After first chunk, use a tighter timeout for the rest.
+        timeout = 0.01
+    return "".join(chunks)
+
+
+def _read_input():
+    '''Read user input, with automatic paste detection.
+
+    Input modes:
+    1. Single line  -- type and press Enter.
+    2. Paste        -- paste multiline text; lines that arrive within a
+       few milliseconds of Enter are collected automatically.
+    3. Block mode   -- start with ``"""`` to open a fenced block;
+       close it with ``"""`` on its own line.
+
+    Paste detection works by draining stdin right after readline returns.
+    During normal typing there is nothing buffered, so it is a no-op.
+    During a paste, the remaining lines are already queued up.
+    '''
+    line = input("oy > ")
+
+    # --- block mode: triple-quote fence (still supported) ------------------
+    stripped = line.strip()
+    if stripped == '"""' or stripped.startswith('"""'):
+        if stripped == '"""':
+            parts: list[str] = []
+        else:
+            parts = [stripped[3:]]
+        while True:
+            try:
+                cont = input('... ')
+            except EOFError:
+                break
+            if cont.strip() == '"""':
+                break
+            parts.append(cont)
+        return "\n".join(parts)
+
+    # --- paste detection: drain any remaining buffered input ---------------
+    extra = _drain_stdin()
+    if extra:
+        # Strip trailing newline that the terminal added from the final Enter.
+        return line + "\n" + extra.rstrip("\n")
+
+    return line
 
 
 
@@ -1879,7 +1929,8 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
             "- `/clear` -- reset conversation (keeps system prompt)",
             "- `/quit` or `/exit` -- end session",
             "",
-            "Tip: end a line with `\\` to continue on the next line.",
+            "Tip: paste multiline text — extra lines are detected automatically.",
+            'Tip: type `"""` to start a multiline block, `"""` to end it.',
         ]), err=True)
         return True
     if cmd == "/tokens":

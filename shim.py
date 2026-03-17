@@ -36,6 +36,7 @@ SHIM_GEMINI = "gemini"
 SHIM_BEDROCK = "bedrock"
 SHIM_MANTLE = "bedrock-mantle"
 SHIM_CLAUDE = "claude"
+SHIM_COPILOT = "copilot"
 SHIM_ORDER = (
     SHIM_OPENAI,
     SHIM_CODEX,
@@ -43,6 +44,7 @@ SHIM_ORDER = (
     SHIM_BEDROCK,
     SHIM_MANTLE,
     SHIM_CLAUDE,
+    SHIM_COPILOT,
 )
 KNOWN_SHIMS = set(SHIM_ORDER)
 
@@ -2486,6 +2488,160 @@ def _list_mantle_models(
     return _build_mantle_client(region, cwd).list_models()
 
 
+# ---------------------------------------------------------------------------
+# Copilot shim – uses the GitHub Copilot API (api.githubcopilot.com)
+# with a GitHub PAT obtained from COPILOT_GITHUB_TOKEN / GH_TOKEN /
+# GITHUB_TOKEN / `gh auth token`.  Set COPILOT_BASE_URL to override
+# (e.g. https://api.business.githubcopilot.com for enterprise).
+# Models that support /responses use that API; others fall back to
+# /chat/completions automatically.
+# ---------------------------------------------------------------------------
+
+_COPILOT_BASE_URL = os.environ.get(
+    "COPILOT_BASE_URL", "https://api.githubcopilot.com"
+)
+_COPILOT_INTEGRATION_ID = "copilot-developer-cli"
+_COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
+
+
+def _get_github_token() -> str | None:
+    """Return a GitHub PAT from env vars or the ``gh`` CLI, or *None*.
+
+    Checks (in order): ``COPILOT_GITHUB_TOKEN``, ``GH_TOKEN``,
+    ``GITHUB_TOKEN``, then ``gh auth token``.
+    """
+    for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        val = os.environ.get(var)
+        if isinstance(val, str) and val:
+            return val
+    gh = which("gh")
+    if not gh:
+        return None
+    try:
+        proc = subprocess.run(
+            [gh, "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        token = proc.stdout.strip()
+        return token if proc.returncode == 0 and token else None
+    except Exception:
+        return None
+
+
+def _copilot_default_headers() -> dict[str, str]:
+    return {
+        "Copilot-Integration-Id": _COPILOT_INTEGRATION_ID,
+        "Editor-Version": _COPILOT_EDITOR_VERSION,
+    }
+
+
+def _copilot_openai_pair(token: str) -> tuple[AsyncOpenAI, OpenAI]:
+    kwargs: dict[str, Any] = {
+        "api_key": token,
+        "base_url": _COPILOT_BASE_URL,
+        "max_retries": 0,
+        "default_headers": _copilot_default_headers(),
+    }
+    return AsyncOpenAI(**kwargs), OpenAI(**kwargs)
+
+
+def _require_copilot_env(_: Path | None = None) -> None:
+    _require_string(
+        _get_github_token(),
+        "No GitHub token found (set GH_TOKEN, GITHUB_TOKEN, or run `gh auth login`)",
+    )
+
+
+def _fetch_copilot_models_raw(token: str) -> list[JSONDict]:
+    """Fetch the full model metadata list from the Copilot API."""
+    resp = httpx.get(
+        f"{_COPILOT_BASE_URL}/models",
+        headers={
+            "Authorization": f"Bearer {token}",
+            **_copilot_default_headers(),
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("data", []) if isinstance(data, dict) else []
+
+
+def _copilot_chat_model_ids(token: str) -> list[str]:
+    """Return sorted model IDs that support chat (not embeddings)."""
+    raw = _fetch_copilot_models_raw(token)
+    return sorted(
+        m["id"]
+        for m in raw
+        if isinstance(m.get("id"), str)
+        and m.get("capabilities", {}).get("type") == "chat"
+    )
+
+
+def _copilot_responses_model_ids(token: str) -> set[str]:
+    """Return model IDs that support the /responses endpoint."""
+    raw = _fetch_copilot_models_raw(token)
+    return {
+        m["id"]
+        for m in raw
+        if isinstance(m.get("id"), str)
+        and "/responses" in (m.get("supported_endpoints") or [])
+    }
+
+
+def _build_copilot_client(
+    region: str | None = None, cwd: Path | None = None
+) -> CompletionClient:
+    """Build a Copilot client that routes to /responses or /chat/completions."""
+    _ = region, cwd
+    token = _require_string(_get_github_token(), "No GitHub token found")
+    async_client, sync_client = _copilot_openai_pair(token)
+
+    # Probe which models support /responses vs /chat/completions
+    try:
+        responses_models = _copilot_responses_model_ids(token)
+    except Exception:
+        responses_models = set()
+
+    responses_inner = _openai_responses_client(
+        async_client, sync_client, fallback_models=None, default_models=None
+    )
+    chat_inner = _openai_chat_completions_client(
+        async_client, sync_client, tools_map=_tool_specs_to_openai
+    )
+
+    async def chat_completion(
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec] | None = None,
+        tool_choice: str = "auto",
+        on_retry=None,
+    ) -> AssistantMessage:
+        inner = responses_inner if model in responses_models else chat_inner
+        return await inner.chat_completion(model, messages, tools, tool_choice, on_retry)
+
+    def list_models() -> list[str]:
+        try:
+            return _copilot_chat_model_ids(token)
+        except Exception:
+            return sorted(
+                m.id
+                for m in sync_client.models.list()
+                if not m.id.startswith("text-embedding")
+            )
+
+    return CompletionClient(chat_completion=chat_completion, list_models=list_models)
+
+
+def _list_copilot_models(
+    region: str | None = None, cwd: Path | None = None
+) -> list[str]:
+    _ = region, cwd
+    return _build_copilot_client(region, cwd).list_models()
+
+
 SHIM_SPECS: dict[str, ShimSpec] = {
     SHIM_OPENAI: ShimSpec(
         name=SHIM_OPENAI,
@@ -2522,6 +2678,12 @@ SHIM_SPECS: dict[str, ShimSpec] = {
         ensure_env=_require_claude_env,
         build_client=_build_claude_shim,
         list_models=_list_claude_models,
+    ),
+    SHIM_COPILOT: ShimSpec(
+        name=SHIM_COPILOT,
+        ensure_env=_require_copilot_env,
+        build_client=_build_copilot_client,
+        list_models=_list_copilot_models,
     ),
 }
 

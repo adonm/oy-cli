@@ -1,296 +1,182 @@
 # Audit Findings
 
-> **Last audit**: 2026-03-17 · commit `f2a023f` · OWASP ASVS 5.0.0 · [grugbrain.dev](https://grugbrain.dev)
+> **Last audit**: 2026-03-17 · commit `2a03f49` · OWASP ASVS 5.0 / ASVS 4.0 references checked · [grugbrain.dev](https://grugbrain.dev)
 >
-> **Codebase**: `oy-cli` v0.3.3 — tiny AI coding assistant (2 source files, 4 Python total)
+> **Codebase**: `oy-cli` v0.3.4alpha — tiny local coding CLI with a small tool surface
 >
 > | Metric | Value |
 > |--------|-------|
-> | Python LoC | 4,665 |
-> | `oy_cli.py` | 2,167 lines (134 functions, 13 classes) |
-> | `shim.py` | 2,588 lines (169 functions, 17 classes) |
-> | Test LoC | ~486 lines across 2 files (45 tests) |
-> | Provider shims | 6 (openai, codex, gemini, bedrock, bedrock-mantle, claude) |
-> | Dependencies | 9 runtime (`boto3`, `defopt`, `httpx`, `markdownify`, `msgspec`, `openai`, `rich`, `tiktoken`, `tenacity`) |
+> | Python files | 4 |
+> | Python LoC | 4,674 non-empty lines |
+> | `oy_cli.py` | 1,907 lines (122 functions, 13 classes) |
+> | `shim.py` | 2,376 lines (163 functions, 17 classes) |
+> | Tests | 391 non-empty lines across 2 files (basic unit coverage) |
+> | Provider shims | 6 (`openai`, `codex`, `gemini`, `bedrock`, `bedrock-mantle`, `claude`) |
+> | Runtime dependencies | 9 (`boto3`, `defopt`, `httpx`, `markdownify`, `msgspec`, `openai`, `rich`, `tiktoken`, `tenacity`) |
+>
+> **Audit lens**: CLI agent that can read/write workspace files, execute shell commands, make outbound HTTP requests, and persist local auth/config state. Priority was given to workspace-boundary safety, secret handling, least surprise, and keeping a deliberately small codebase from accreting provider-specific complexity.
 
----
-
-## H1 · SSRF via `httpx` tool — no private-IP filtering
+## H1 · Debug log may persist full prompts, tool outputs, and secrets without permission hardening or redaction
 
 | | |
 |---|---|
-| **Location** | `oy_cli.py:1426-1433` (`tool_httpx`) |
+| **Location** | `oy_cli.py:86-121`, `oy_cli.py:1599-1650` |
 | **Category** | Security |
-| **Standard** | OWASP ASVS V4.3.1 — SSRF prevention; V2.1.3 — server-side request validation |
+| **Standard** | OWASP ASVS V8.3 / V14.3; grugbrain: avoid clever hidden footguns |
 | **Status** | Open |
 
-The `httpx` tool validates that the URL scheme is `http` or `https` but does not
-check whether the resolved IP is a private, loopback, or link-local address.
-An LLM-generated tool call like `httpx http://169.254.169.254/latest/meta-data/`
-could reach cloud metadata endpoints, Docker sockets, or internal services.
+When `OY_DEBUG` is enabled, the process eagerly opens `~/.config/oy/debug.jsonl` and logs full request/response payloads, including serialized messages and tool results. That can include repository contents, prompts, command output, HTTP bodies, tokens pasted by users, and other sensitive material. Unlike `save_json()` and the shell history path, this file is created via `logging.FileHandler` with no explicit `chmod(0o600)`, so permissions depend on the process umask and any pre-existing file state.
 
-**Recommendation**: After parsing the URL, resolve the hostname and reject
-addresses in `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
-`169.254.0.0/16`, `::1`, and `fd00::/8` using `ipaddress.ip_address().is_private`.
-Apply the check *after* DNS resolution to defeat DNS-rebinding via redirect
-(the tool already caps redirects at 10). Consider an `OY_ALLOW_PRIVATE_HTTP=1`
-escape hatch for local-dev use.
+**Recommendation**: Treat debug logging as sensitive data at rest. Enforce `0o600` on creation and on reuse, document the risk in README/help output, and redact obviously sensitive fields before logging. Ideally add a narrower `OY_DEBUG=meta` mode that logs timing and tool names without full content.
 
 ---
 
-## H2 · Credential file written world-readable before `chmod`
+## H2 · `httpx` tool allows unrestricted outbound network access, including localhost and cloud metadata targets
 
 | | |
 |---|---|
-| **Location** | `shim.py:389-392` (`save_json`) |
+| **Location** | `oy_cli.py:1362-1461` |
 | **Category** | Security |
-| **Standard** | OWASP ASVS V14.3.3 — sensitive data at rest; V8.3.4 — file permissions |
+| **Standard** | OWASP ASVS V1.14, V5.3 |
 | **Status** | Open |
 
-`save_json` calls `write_text()` then `chmod(0o600)`. Between those two calls
-the file is briefly world-readable (inheriting the process umask, typically
-`0o644`). On a shared system an attacker could race the window and read
-OAuth tokens.
+The built-in HTTP fetch tool accepts arbitrary URLs and follows redirects. In an agentic workflow this is effectively an SSRF primitive from the local machine: it can reach `localhost`, RFC1918 addresses, container bridges, and cloud metadata endpoints such as `169.254.169.254`, then return the response to the model. This may be acceptable for a power-user CLI, but it is a meaningful security boundary decision and currently appears unrestricted.
 
-**Recommendation**: Write to a temp file with `os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600)` +
-`os.fdopen()` (or `tempfile.NamedTemporaryFile` + `os.rename`) to ensure the
-file is *never* accessible to other users. Alternatively, set `os.umask(0o077)`
-at startup (simpler but process-global).
+**Recommendation**: Add an opt-in network policy. At minimum support deny-by-default or configurable blocking for loopback, link-local, private IP ranges, and metadata hostnames; re-check redirect targets before following them. If preserving current behavior, document it plainly as a trusted-local-user feature.
 
 ---
 
-## H3 · Debug log records full conversation (including workspace secrets)
+## H3 · `bash` tool executes arbitrary shell with inherited credentials and broad ambient authority
 
 | | |
 |---|---|
-| **Location** | `oy_cli.py:86-121, 1600-1604` (`_debug_log`, `run_turn`) |
+| **Location** | `oy_cli.py:1241-1263`, `shim.py:552-565`, `shim.py:571-618` |
 | **Category** | Security |
-| **Standard** | OWASP ASVS V14.2.1 — prevent sensitive data leakage in logs |
-| **Status** | Open |
+| **Standard** | OWASP ASVS V1.14, V4.3 |
+| **Status** | Accepted risk / Open |
 
-When `OY_DEBUG=1`, every request event serializes the full `prepared` message
-list — including all prior tool outputs (file contents, command results, grep
-hits) — to `~/.config/oy/debug.jsonl`. If the workspace contains API keys,
-`.env` files, or credentials they end up in a plaintext, append-only log with
-no rotation or size cap.
+`tool_bash()` runs `bash -c` inside the workspace with a fairly complete environment assembled by `command_env()`. That is a core product feature, so the issue is not "shell injection" in the usual sense; the user is explicitly delegating shell execution to the agent. The concern is that the current design gives the model access to everything the invoking user can reach: git credentials, cloud credentials, SSH agents, package managers, local services, and destructive filesystem commands.
 
-**Recommendation**:
-1. Truncate tool-result bodies in log entries (e.g. first 200 chars).
-2. Add `RotatingFileHandler` with a sensible cap (e.g. 10 MB, 2 backups).
-3. Set `0o600` on the log file at creation (currently inherits umask).
-4. Document the risk in `README.md` next to the `OY_DEBUG` reference.
+**Recommendation**: Keep the feature, but make the risk more explicit and easier to reduce. Provide a documented `--safe` or env-based mode that strips high-risk environment variables, disables network tools, or requires confirmation for destructive commands outside common dev workflows. This is more about safe operation than code correctness.
 
 ---
 
-## H4 · Safety-limit env overrides have no bounds checking
+## H4 · Two monolithic modules concentrate most behavior and provider complexity, making review and change-risk high
 
 | | |
 |---|---|
-| **Location** | `oy_cli.py:60-75` (`_env`) |
-| **Category** | Security |
-| **Standard** | OWASP ASVS V2.2.1 — input validation for configuration |
-| **Status** | Open |
-
-`_env` coerces environment variables to the type of the default but applies
-no min/max bounds. Setting `OY_DEFAULT_MAX_STEPS=0` silently disables the
-agent loop; setting `OY_MAX_BASH_CMD_BYTES=999999999` removes the command-size
-guard. A malicious `.env` loader or shell profile could weaken safety limits.
-
-**Recommendation**: Add `clamp(value, lo, hi)` after coercion for
-security-critical limits (`MAX_BASH_CMD_BYTES`, `DEFAULT_MAX_STEPS`,
-`DEFAULT_MAX_TOOL_CALLS`). Document the env-override surface in
-`CONTRIBUTING.md`.
-
----
-
-## M1 · `shim.py` is a 2,588-line monolith
-
-| | |
-|---|---|
-| **Location** | `shim.py` (entire file) |
+| **Location** | `oy_cli.py` (1,907 lines), `shim.py` (2,376 lines) |
 | **Category** | Complexity |
-| **Standard** | grugbrain.dev — "complexity is the enemy"; ASVS V1.1.1 — architectural simplicity |
+| **Standard** | grugbrain: complex thing bad; OWASP ASVS V1.1 (architecture clarity) |
 | **Status** | Open |
 
-`shim.py` contains 169 functions and 17 classes covering six distinct
-provider backends (OpenAI, Codex, Gemini, Bedrock, Bedrock-Mantle, Claude),
-SigV4 signing, OAuth token refresh, JSON/path utilities, retry logic, and
-message codec registries. Finding a specific provider's auth flow requires
-scrolling past unrelated code.
+The project is intentionally small in file count, but most logic lives in two very dense modules containing CLI flow, transcript management, tool dispatch, IO helpers, OAuth helpers, HTTP clients, provider adapters, and Bedrock/OpenAI/Codex/Gemini/Claude specifics. This keeps packaging simple, yet increases reviewer cognitive load and makes subtle regressions more likely because unrelated concerns share the same files and import surface.
 
-**Recommendation**: Split into a `shim/` package with one module per provider
-(e.g. `shim/gemini.py`, `shim/bedrock.py`) plus `shim/common.py` for shared
-types and retry logic. This aligns with the project's "easy to audit" goal
-and reduces merge-conflict surface. The public API (`CompletionClient`,
-`get_client`, `detect_available_shims`) stays in `shim/__init__.py`.
+**Recommendation**: Split by responsibility, not by framework fashion. For example: `tools_fs.py`, `tools_net.py`, `transcript.py`, and `providers/`. Keep the public surface tiny, but separate high-risk code paths so tests and audits can target them more directly.
 
 ---
 
-## M2 · Six provider codecs use similar-but-different patterns
+## H5 · Provider-specific OAuth and model plumbing is drifting toward a mini platform inside `shim.py`
 
 | | |
 |---|---|
-| **Location** | `shim.py:250-360` (codec definitions), `shim.py:1585-2265` (client builders) |
+| **Location** | `shim.py` broadly, especially provider auth/cache sections and client builders |
 | **Category** | Complexity |
-| **Standard** | grugbrain.dev — "say thing once" / DRY |
+| **Standard** | grugbrain: one day simple system become complicated mess |
 | **Status** | Open |
 
-Each provider has its own message-encoding lambdas, output-block extractors,
-and request builders. The Gemini and Claude codecs are structurally identical
-in several places (text encoding, tool-result wrapping) but differ just enough
-to prevent direct reuse, making it easy for a fix in one to be missed in another.
+`shim.py` now owns provider discovery, OAuth device/refresh flows, credential persistence, model caching, retry logic, Bedrock signing, and request adaptation for six providers. None of these pieces are individually unreasonable, but together they make the module harder to understand than the rest of the product concept suggests.
 
-**Recommendation**: Introduce a thin `ProviderCodec` protocol with
-`encode_text`, `encode_tool_use`, `encode_tool_result`, and `decode_output`
-methods, then implement per-provider. This replaces the six anonymous-lambda
-registries with something greppable and testable.
+**Recommendation**: Define a narrow provider interface and move each provider’s auth/model quirks behind isolated adapters. The goal is not lots of files; it is to stop every provider from expanding shared branching logic.
 
 ---
 
-## M3 · `oy_cli.py` tool schemas parsed from README at import time
+## M1 · Existing debug logger setup may duplicate handlers on repeated imports in long-lived processes or tests
 
 | | |
 |---|---|
-| **Location** | `oy_cli.py:128-180` (`_load_readme`, `_parse_tool_descriptions`, `_parse_system_prompts`) |
+| **Location** | `oy_cli.py:86-100` |
 | **Category** | Complexity |
-| **Standard** | grugbrain.dev — "no magic"; ASVS V1.1.1 — predictability |
+| **Standard** | grugbrain: avoid surprising behavior |
 | **Status** | Open |
 
-Tool descriptions and system prompts are regex-scraped from `README.md` at
-import time. A small formatting change in the README (e.g. adding a column)
-silently breaks tool registration with an opaque `RuntimeError`. The
-indirection also makes it harder to find where a tool's description lives.
+`_init_debug_log()` attaches a `FileHandler` to the named logger each import when `OY_DEBUG` is enabled. In the common CLI path that likely happens once, but in embedded use, reload scenarios, or certain tests this can duplicate log lines and retain file handles longer than expected.
 
-**Recommendation**: Keep the README as the human-readable reference but
-define tool descriptions as constants in `oy_cli.py` (or a `tools.py`).
-Generate the README table from those constants during `mise run docs` if
-single-source-of-truth is desired.
+**Recommendation**: Guard against duplicate handlers by checking `logger.handlers` or using a module-local one-shot initializer.
 
 ---
 
-## M4 · OAuth token-refresh race in `_persist_json_dict`
+## M2 · HTTP clients follow redirects broadly, which expands trust boundaries and complicates reasoning
 
 | | |
 |---|---|
-| **Location** | `shim.py:457-461` (`_persist_json_dict`) |
+| **Location** | `oy_cli.py:1432-1442`, `shim.py:611-618` |
 | **Category** | Security |
-| **Standard** | OWASP ASVS V14.3.3 — data integrity at rest |
+| **Standard** | OWASP ASVS V5.1, V5.3 |
 | **Status** | Open |
 
-`_persist_json_dict` reads a JSON file, mutates the dict in memory, and writes
-it back without any locking. Two concurrent `oy` processes refreshing the same
-OAuth token could clobber each other's writes, leaving a stale or corrupt
-credential file.
+Both the user-facing HTTP tool and shared provider HTTP clients enable `follow_redirects=True`. For provider APIs this is usually harmless, but for a general-purpose fetch tool it means an apparently benign URL can bounce into an internal address space or a different host entirely.
 
-**Recommendation**: Use `fcntl.flock` (or `msvcrt.locking` on Windows) around
-the read-update-write cycle. Alternatively, write to a temp file and
-`os.replace()` atomically (also addresses H2).
+**Recommendation**: For the general HTTP tool, prefer manual redirect handling with validation of each hop against the same allow/deny policy. For provider clients, keep redirects only where the endpoint behavior truly requires it.
 
 ---
 
-## L1 · `resolve_path` does not reject symlinks targeting outside workspace
+## M3 · Arbitrary file writes do not enforce restrictive mode when creating new files that may contain sensitive content
 
 | | |
 |---|---|
-| **Location** | `oy_cli.py:604-609` (`resolve_path`) |
+| **Location** | `oy_cli.py:1180-1201` |
 | **Category** | Security |
-| **Standard** | OWASP ASVS V5.3.1 — file path traversal; V5.2.8 — symlink checks |
+| **Standard** | OWASP ASVS V8.3, V14.3 |
 | **Status** | Open |
 
-`resolve_path` uses `.resolve()` which follows symlinks, then checks the
-resolved path is under the workspace root. This *is* safe for reads/writes
-(the resolved path is verified). However, if an attacker can plant a symlink
-inside the workspace pointing outside it, `resolve_path` will happily allow
-operations on the target — the write lands on the external file, not the
-symlink. The `tool_glob` filter (line 1330) already documents this risk.
+`apply write` and `replace` correctly stay inside the workspace, but newly created files inherit default umask-driven permissions. In normal source repos that is fine; however, this CLI can also be asked to create `.env`, credentials, deploy keys, or other sensitive artifacts during agent sessions.
 
-**Recommendation**: Consider warning when the resolved path differs from the
-un-resolved path (i.e. a symlink was followed). For high-security contexts,
-add an `OY_DENY_SYMLINKS=1` mode that rejects any path where
-`target.resolve() != (root / p)` (without resolve on the right side).
+**Recommendation**: Consider an optional secure-write mode or automatic `0o600` for obviously sensitive filenames (`.env`, `*.pem`, auth/config files). If that feels too opinionated, at least document that generated secret files inherit normal filesystem defaults.
 
 ---
 
-## L2 · No test coverage for provider auth/refresh flows
+## M4 · Response buffering in `httpx` tool is bounded, but still scales linearly with `max_tokens` and holds all chunks in memory
 
 | | |
 |---|---|
-| **Location** | `tests/test_shim.py` (15 tests) |
+| **Location** | `oy_cli.py:1430-1459` |
+| **Category** | Performance |
+| **Standard** | OWASP ASVS V1.2; grugbrain: simple resource limits good |
+| **Status** | Open |
+
+The HTTP tool streams responses, but appends chunks to a list and then joins them into a bytes object before rendering. Because `max_bytes = max_tokens * 16`, users can raise memory use by selecting a large `max_tokens` value, and the tool pays for both the list of chunks and the final concatenated bytes.
+
+**Recommendation**: Cap `max_tokens` more aggressively for this tool and use a pre-sized `bytearray` or incremental decoder so only one bounded buffer is retained.
+
+---
+
+## M5 · Tests cover several recent safety fixes, but there is still little direct coverage for the riskiest agent features
+
+| | |
+|---|---|
+| **Location** | `tests/test_oy_cli.py`, `tests/test_shim.py` |
 | **Category** | Complexity |
-| **Standard** | OWASP ASVS V1.1.6 — security controls are tested; grugbrain.dev — "test is good" |
+| **Standard** | OWASP ASVS V1.1.5 |
 | **Status** | Open |
 
-The shim test file has 15 tests covering model-spec parsing, message encoding,
-and JSON utilities. The OAuth refresh flows for Gemini, Codex, and Claude
-(~200 lines of auth logic) have zero test coverage. A regression in token
-refresh silently breaks authentication.
+Current tests cover path traversal, JSON path depth, immutable command env, and some transcript behavior. That is good. But there is no visible direct test coverage here for debug-log redaction/permissions, HTTP tool redirect/network policy, or the most sensitive persistence paths.
 
-**Recommendation**: Add integration-style tests using `httpx`'s mock transport
-or `respx` to exercise `refresh_gemini_token`, `_refresh_codex_session`,
-and `_refresh_claude_token` with happy-path and error responses.
+**Recommendation**: Add small focused tests around high-risk invariants: debug log mode/permissions, blocklist checks for unsafe URLs, and permission enforcement for persisted files. These tests will do more for auditability than broad integration tests.
 
 ---
 
-## L3 · `requires-python = ">=3.14"` limits adoption
+## Resolved or improved since the previous audit
 
-| | |
-|---|---|
-| **Location** | `pyproject.toml:10` |
-| **Category** | Complexity |
-| **Standard** | grugbrain.dev — "don't be too clever" |
-| **Status** | Open |
+- Workspace path resolution now rejects traversal outside the root via `resolve_path()`.
+- `glob` results are re-resolved and filtered back to the workspace, reducing symlink/pattern escape risk.
+- Sensitive HTTP headers are redacted in rendered output.
+- JSON path traversal has a depth cap with test coverage.
+- Credential persistence in `shim.py` uses `save_json()` with `chmod(0o600)`.
 
-Python 3.14 was released in 2025 and is not yet widely available in CI images,
-Docker base images, or enterprise environments. The codebase uses PEP 758
-bare-except syntax (`except A, B:` without parentheses) which requires 3.14+,
-but this is the *only* 3.14-specific feature used.
+## Short audit log
 
-**Recommendation**: If broader adoption is desired, replace the 6 bare
-`except A, B:` sites with `except (A, B):` and lower the requirement to
-`>=3.12`. If 3.14 is intentional, document the rationale in `CONTRIBUTING.md`.
-
----
-
-## L4 · History file permissions set after creation
-
-| | |
-|---|---|
-| **Location** | `oy_cli.py:1793-1795` (`_setup_readline`) |
-| **Category** | Security |
-| **Standard** | OWASP ASVS V14.3.3 — sensitive data at rest |
-| **Status** | Open |
-
-`history_path.touch(mode=0o600, exist_ok=True)` only sets the mode on
-*creation*. If the file already exists with laxer permissions (e.g. from an
-older version), `touch` with `exist_ok=True` does *not* change the mode.
-The subsequent `readline.write_history_file` inherits whatever permissions
-the file already has.
-
-**Recommendation**: Unconditionally call `history_path.chmod(0o600)` after
-the `touch` call to enforce permissions on every run.
-
----
-
-## L5 · Unbounded `OY_BEDROCK_MAX_OUTPUT_TOKENS` parsed via bare `int()`
-
-| | |
-|---|---|
-| **Location** | `shim.py:2064-2066` |
-| **Category** | Security |
-| **Standard** | OWASP ASVS V2.2.1 — safe configuration parsing |
-| **Status** | Open |
-
-`int(os.environ.get("OY_BEDROCK_MAX_OUTPUT_TOKENS", "4096"))` has no
-validation. A non-numeric value causes an unhandled `ValueError` crash;
-an absurdly large value could trigger unexpected API costs.
-
-**Recommendation**: Use the same `_env()` helper from `oy_cli.py` (or a
-shared config parser) with bounds clamping.
-
----
-
-## Resolved / Changed Since Previous Audit
-
-| # | Previous Finding | Resolution |
-|---|-----------------|-----------|
-| — | (First full audit) | No prior findings to resolve. Previous `ISSUES.md` at commit `cd63495` was the initial audit; this revision at `f2a023f` re-validates all findings against the current source and updates metrics. |
+- Refreshed audit header for commit `2a03f49` and current code metrics.
+- Rechecked repository intent against `README.md` and `CONTRIBUTING.md`.
+- Cross-checked findings against OWASP ASVS material and grugbrain simplicity guidance.
+- Previous findings not re-added when they appear resolved or materially improved in current code.

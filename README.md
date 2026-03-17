@@ -9,6 +9,8 @@ uv tool install oy-cli
 oy "add docstrings to public functions"
 ```
 
+Note: `oy` also supports a Copilot-compatible shim via `OY_SHIM=copilot` or `copilot:model` selection where available.
+
 ## Examples
 
 ```bash
