@@ -9,8 +9,6 @@ uv tool install oy-cli
 oy "add docstrings to public functions"
 ```
 
-Note: `oy` also supports a Copilot-compatible shim via `OY_SHIM=copilot` or `copilot:model` selection where available.
-
 ## Examples
 
 ```bash
@@ -123,7 +121,7 @@ OY_ROOT=./src oy audit      # Audit specific directory
 | Variable | Purpose |
 |----------|---------|
 | `OY_MODEL` | Override model for this session (bare name or `shim:model`) |
-| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `gemini`, `claude`, `bedrock`, or `bedrock-mantle` |
+| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `gemini`, `claude`, `copilot`, `bedrock`, or `bedrock-mantle` |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable checkpoints |
 | `OY_ROOT` | Run against different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |

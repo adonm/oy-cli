@@ -255,16 +255,19 @@ def abort(m, c=1):
 
 def clip_tokens(text, limit=MAX_TOOL_OUTPUT_TOKENS, tail=0):
     """Truncate *text* to *limit* tokens, optionally keeping *tail* tokens from the end."""
-    e = get_tokenizer()
-    ids = e.encode(text, disallowed_special=())
+    ids = encode_tokens(text)
     n = len(ids)
     if n <= limit:
         return text
     omitted = n - limit
     if 0 < tail < limit:
         h = max(limit - tail, 1)
-        return f"{e.decode(ids[:h])}\n... [{omitted} tokens omitted; showing first {h} and last {tail}]\n{e.decode(ids[-tail:])}"
-    return f"{e.decode(ids[:limit])}\n... [{omitted} tokens omitted after {limit}]"
+        return (
+            f"{decode_tokens(ids[:h])}\n"
+            f"... [{omitted} tokens omitted; showing first {h} and last {tail}]\n"
+            f"{decode_tokens(ids[-tail:])}"
+        )
+    return f"{decode_tokens(ids[:limit])}\n... [{omitted} tokens omitted after {limit}]"
 
 
 def preview(v, lim=72):
@@ -273,6 +276,12 @@ def preview(v, lim=72):
         (v if isinstance(v, str) else json.dumps(v, separators=(",", ":"))).split()
     )
     return s if len(s) <= lim else s[: lim - 3] + "..."
+
+
+def _show_and_clip(text, lines, limit=MAX_TOOL_OUTPUT_TOKENS, tail=0):
+    """Render tool output, then return a clipped version for the model."""
+    show(text, lines)
+    return clip_tokens(text, limit=limit, tail=tail)
 
 
 def _compact_md(t):
@@ -856,13 +865,15 @@ class AgentState(msgspec.Struct, omit_defaults=True):
         self.tool_calls += 1
 
 
+def _message_text(message: ChatMessage) -> str:
+    """Return a message body as plain text for token counting/rendering."""
+    if isinstance(message, ToolMessage):
+        return json.dumps(message.content.content, ensure_ascii=True, default=str)
+    return message.content
+
+
 def _message_tokens(message: ChatMessage) -> int:
-    body = (
-        json.dumps(message.content.content, ensure_ascii=True, default=str)
-        if isinstance(message, ToolMessage)
-        else message.content
-    )
-    return 4 + count_tokens(body)
+    return 4 + count_tokens(_message_text(message))
 
 
 def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
@@ -899,11 +910,8 @@ def _flatten_tool_call(call) -> str:
 
 def _flatten_tool_result(msg: ToolMessage) -> str:
     """Render a ToolMessage result as a compact markdown fragment."""
-    result = msg.content
-    ok = result.ok if hasattr(result, "ok") else True
-    body = result.content if hasattr(result, "content") else result
-    text = body if isinstance(body, str) else json.dumps(body, default=str)
-    text = clip_tokens(text, limit=256)
+    ok = msg.content.ok if isinstance(msg.content, ToolResult) else True
+    text = clip_tokens(_message_text(msg), limit=256)
     status = "ok" if ok else "error"
     return f"[{msg.name} -> {status}]\n{text}"
 
@@ -1084,8 +1092,7 @@ def tool_list(state, path=".", limit=DEFAULT_LINE_LIMIT):
     if not target.is_dir():
         raise ValueError("path is not a directory")
     text = _list_dir(state.root, target, limit)
-    show(text, 1)
-    return clip_tokens(text)
+    return _show_and_clip(text, 1)
 
 
 @tool(_TOOL_DESCS["read"], ReadArgs)
@@ -1102,8 +1109,7 @@ def tool_read(state, path, offset=1, limit=DEFAULT_LINE_LIMIT):
             limit=limit,
         )
         text = _list_dir(state.root, target, limit)
-        show(text, 1)
-        return clip_tokens(text)
+        return _show_and_clip(text, 1)
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     start, total = max(offset, 1) - 1, len(lines)
     shown = lines[start : start + max(limit, 1)]
@@ -1259,9 +1265,7 @@ def tool_bash(state, command, timeout_seconds=120):
         timeout=timeout_seconds,
     )
     out = _fmt("bash", command, (result.stdout, result.returncode, result.stderr))
-    out = clip_tokens(out, tail=MAX_TOOL_TAIL_TOKENS)
-    show(out, 8)
-    return out
+    return _show_and_clip(out, 8, tail=MAX_TOOL_TAIL_TOKENS)
 
 
 @tool(_TOOL_DESCS["grep"], GrepArgs)
@@ -1304,8 +1308,7 @@ def tool_grep(state, pattern, path=".", file_glob=None):
             path=path,
             glob=file_glob,
         )
-        show(out, 3)
-        return clip_tokens(out)
+        return _show_and_clip(out, 3)
     note_tool(
         state,
         "grep",
@@ -1340,8 +1343,7 @@ def tool_glob(state, pattern, path=".", limit=DEFAULT_LINE_LIMIT):
             pass
     results.sort(key=lambda item: item.as_posix())
     out = _join_paths(results[: max(limit, 1)], state.root)
-    show(out, 1)
-    return clip_tokens(out)
+    return _show_and_clip(out, 1)
 
 
 def _enum(value, allowed, name):
@@ -1524,9 +1526,19 @@ def get_tokenizer() -> tiktoken.Encoding:
     return _tokenizer
 
 
+def encode_tokens(text: str) -> list[int]:
+    """Encode *text* with the shared tokenizer."""
+    return get_tokenizer().encode(text, disallowed_special=())
+
+
+def decode_tokens(token_ids: list[int]) -> str:
+    """Decode token ids with the shared tokenizer."""
+    return get_tokenizer().decode(token_ids)
+
+
 def count_tokens(text: str) -> int:
     """Count tokens in a string using cl100k_base."""
-    return len(get_tokenizer().encode(text))
+    return len(encode_tokens(text))
 
 
 def truncate_str_to_tokens(text: str, max_tokens: int = MAX_MESSAGE_TOKENS) -> str:
@@ -1535,13 +1547,11 @@ def truncate_str_to_tokens(text: str, max_tokens: int = MAX_MESSAGE_TOKENS) -> s
     If truncation is needed, appends a note reporting how many lines and
     characters were removed so the model knows the content was cut.
     """
-    enc = get_tokenizer()
-    ids = enc.encode(text, disallowed_special=())
+    ids = encode_tokens(text)
     if len(ids) <= max_tokens:
         return text
-    kept = enc.decode(ids[:max_tokens])
+    kept = decode_tokens(ids[:max_tokens])
     omitted_chars = len(text) - len(kept)
-    # Count lines in the omitted portion
     omitted_lines = text[len(kept) :].count("\n")
     line_word = "line" if omitted_lines == 1 else "lines"
     kept = kept.rstrip()
