@@ -40,7 +40,9 @@ oy --help                 # Show all commands
 
 Most AI coding tools are large, complex, or lock you into a single provider. `oy` is deliberately small, easy to audit, and built around a narrow tool surface.
 
-**Design goals:** small auditable codebase, minimal tool surface, OpenAI-completions-focused CLI loop, multiple backends behind shims, fresh session each run, and explicit checkpoints when needed.
+**Design goals:** small auditable codebase, minimal tool surface,
+OpenAI-completions-focused CLI loop, multiple backends behind shims,
+fresh session each run, and explicit checkpoints when needed.
 
 ## System Prompts
 
@@ -91,7 +93,19 @@ Each tool description is passed directly to the model. These are the exact descr
 ### Audit Prompt
 
 ```markdown
-Audit the repo for security, unnecessary complexity, and major obvious performance issues, preserving project and human context. First read key markdown docs, then refresh or generate an audit header at the top of ISSUES.md that includes the current date, the latest Git commit reference, and a concise codebase summary using tools like `scc` or `tokei`. Next, fetch the current OWASP ASVS (or MASVS if more relevant) and grugbrain.dev guidelines using httpx, inspect the codebase against these, and write or merge prioritised findings (max 10-15) into the ISSUES.md file. Ensure each finding is formatted to include its location, category (security, complexity, or performance), standard reference, a clear recommendation, and has a Status, if existing findings have been resolved, summarise and note them in a short log at the end.
+Audit the repo for security, unnecessary complexity, and major
+obvious performance issues, preserving project and human context.
+First read key markdown docs, then refresh or generate an audit
+header at the top of ISSUES.md that includes the current date,
+the latest Git commit reference, and a concise codebase summary
+using tools like `scc` or `tokei`. Next, fetch the current OWASP
+ASVS (or MASVS if more relevant) and grugbrain.dev guidelines
+using httpx, inspect the codebase against these, and write or
+merge prioritised findings (max 10-15) into the ISSUES.md file.
+Ensure each finding is formatted to include its location, category
+(security, complexity, or performance), standard reference, a clear
+recommendation, and has a Status, if existing findings have been
+resolved, summarise and note them in a short log at the end.
 ```
 
 ```bash
@@ -118,18 +132,27 @@ OY_ROOT=./src oy audit      # Audit specific directory
 {"shim": "openai", "model": "glm-5"}
 ```
 
-The `shim` field pins which backend to use regardless of what else is signed in. Use `oy model <filter>` to pick interactively; it merges models from available signed-in shims into a single list using `shim:model` prefixes.
+The `shim` field pins which backend to use regardless of what else is signed in.
+Use `oy model <filter>` to pick interactively; it merges models from available
+signed-in shims into a single list using `shim:model` prefixes.
 
-On first run, if no model is configured, `oy` prompts you to pick one from the available backends. Set `OY_MODEL`, `OY_SHIM`, or save a config with `oy model` to pin behavior.
+On first run, if no model is configured, `oy` prompts you to pick one from
+the available backends. Set `OY_MODEL`, `OY_SHIM`, or save a config with
+`oy model` to pin behavior.
 
-**Recommended model:** From testing, `glm-5` offers the best balance of intelligence, cost, and tool-use ability. `kimi-k2.5` is another strong option. The [Artificial Analysis Comparison of Open Source Models](https://artificialanalysis.ai/models/open-source) is a good reference.
+**Recommended model:** From testing, `glm-5` offers the best balance of
+intelligence, cost, and tool-use ability. `kimi-k2.5` is another strong option.
+The [Artificial Analysis Comparison of Open Source Models](https://artificialanalysis.ai/models/open-source)
+is a good reference.
 
 ## Requirements
 
 - Python 3.14+
 - `bash`
 - (Optional) `rg` (ripgrep) for faster search
-- OpenAI API key or Codex local auth **OR** Gemini CLI OAuth credentials (`~/.gemini/oauth_creds.json`) **OR** Claude Code local auth **OR** AWS CLI configured for Bedrock
+- OpenAI API key or Codex local auth **OR** Gemini CLI OAuth credentials
+  (`~/.gemini/oauth_creds.json`) **OR** Claude Code local auth **OR**
+  AWS CLI configured for Bedrock
 
 ## Installation
 
@@ -151,7 +174,8 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1
 export OPENAI_API_KEY=...
 ```
 
-Gemini, Claude, Codex (OpenAI) creds should be automatically introspected and used, if creds are available `oy model` will show them in the model list.
+Gemini, Claude, Codex (OpenAI) creds should be automatically introspected
+and used, if creds are available `oy model` will show them in the model list.
 
 **AWS Bedrock (automatic):** Uses your default AWS profile/region. Supports auto-refresh of stale SSO sessions.
 ```bash
@@ -161,7 +185,9 @@ export AWS_REGION=us-west-2
 
 ## Troubleshooting
 
-**"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`, `gemini` or `claude`, or configure AWS CLI (`aws configure`). For Bedrock: ensure your profile has `bedrock:InvokeModel` permission.
+**"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`,
+`gemini` or `claude`, or configure AWS CLI (`aws configure`). For Bedrock:
+ensure your profile has `bedrock:InvokeModel` permission.
 
 **"stdin is not a TTY"** -> Piping input disables `ask`. Set `OY_NON_INTERACTIVE=1` to make explicit.
 
@@ -177,7 +203,9 @@ Recommended:
 - avoid exposing long-lived secrets in the environment
 - review generated changes before shipping
 
-**Automatic protections:** workspace-bound file access, structured edits through `apply`, sensitive header redaction in `httpx`, and native boto3 credential resolution for Bedrock.
+**Automatic protections:** workspace-bound file access, structured edits
+through `apply`, sensitive header redaction in `httpx`, and native boto3
+credential resolution for Bedrock.
 
 ## Links
 
