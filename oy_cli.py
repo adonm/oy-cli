@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import json
 import logging
 import os
-import readline
 import re
 import sys
 import tempfile
@@ -89,8 +88,9 @@ def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
     raw = os.environ.get("OY_DEBUG", "").strip().lower()
     if raw not in {"1", "true", "yes", "on"}:
         return None, None
-    fd, path = tempfile.mkstemp(prefix="oy-debug-", suffix=".jsonl")
-    os.close(fd)
+    debug_dir = CONFIG_PATH.parent
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    path = str(debug_dir / "debug.jsonl")
     logger = logging.getLogger("oy.debug")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
@@ -312,15 +312,23 @@ def _http_body(text, ct):
     )
 
 
+_JSON_PATH_MAX_DEPTH = 20
+
+
 def _json_path(v, p):
     """Walk into *v* using dot-separated *p* (supports dict keys and list indices)."""
-    for part in (p or "").split("."):
+    for i, part in enumerate((p or "").split(".")):
         if not part:
             continue
+        if i >= _JSON_PATH_MAX_DEPTH:
+            raise ValueError(f"json_path exceeded max depth of {_JSON_PATH_MAX_DEPTH}")
         if isinstance(v, list):
             if not part.isdigit():
                 raise ValueError(f"json_path expected index, got {part}")
-            v = v[int(part)]
+            try:
+                v = v[int(part)]
+            except IndexError:
+                raise ValueError(f"json_path index {part} out of range (length {len(v)})")
         elif isinstance(v, dict):
             if part not in v:
                 raise ValueError(f"json_path key not found: {part}")
@@ -1419,21 +1427,36 @@ def tool_httpx(
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("httpx only supports http and https")
     _print("status", "Fetching HTTP content.", err=True)
+    max_bytes = max_tokens * 16  # generous: ~16 bytes per token
     try:
         with httpx.Client(
-            follow_redirects=True, timeout=float(timeout_seconds)
+            follow_redirects=True, timeout=float(timeout_seconds), max_redirects=10,
         ) as http:
-            response = http.request(
+            with http.stream(
                 method,
                 parsed.geturl(),
                 headers=_norm_map(headers, "headers"),
                 params=_norm_map(params, "params"),
                 content=body,
                 json=json_body,
-            )
+            ) as response:
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > max_bytes:
+                        break
     except httpx.HTTPError as exc:
         raise ValueError(_httpx_err(exc, timeout_seconds)) from exc
-    out = render_httpx_output(response, response_mode, json_path=json_path)
+    # Reconstruct a response with bounded content for render_httpx_output
+    bounded = httpx.Response(
+        status_code=response.status_code,
+        headers=response.headers,
+        content=b"".join(chunks)[:max_bytes],
+        request=response.request,
+    )
+    out = render_httpx_output(bounded, response_mode, json_path=json_path)
     show(out, 1)
     return clip_tokens(out, max_tokens)
 
@@ -1757,6 +1780,10 @@ def audit(prompt: str = ""):
 
 def _setup_readline():
     """Configure readline with persistent history for shell-like UX."""
+    try:
+        import readline
+    except ImportError:
+        return  # no readline on minimal builds (Alpine, WASM)
     history_path = CONFIG_PATH.parent / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1764,6 +1791,8 @@ def _setup_readline():
     except FileNotFoundError:
         pass
     readline.set_history_length(1000)
+    # Ensure history file has restrictive permissions (M2: OWASP ASVS V8.3.4)
+    history_path.touch(mode=0o600, exist_ok=True)
     import atexit
 
     atexit.register(readline.write_history_file, str(history_path))

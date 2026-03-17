@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
+from types import MappingProxyType
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeAlias
 from urllib.parse import quote
@@ -567,7 +568,11 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
 # If env vars change mid-process (e.g. in tests), the cache will be stale.
 @lru_cache(maxsize=8)
 def command_env(cwd=None):
-    """Build a shell environment dict, merging Homebrew and mise paths."""
+    """Build a shell environment dict, merging Homebrew and mise paths.
+
+    Returns a read-only ``MappingProxyType`` so the cached value cannot be
+    accidentally mutated by callers.
+    """
     env = os.environ.copy()
     if brew := which("brew", env.get("PATH")):
         prefix = Path(brew).parent.parent
@@ -576,7 +581,7 @@ def command_env(cwd=None):
             [str(prefix / "bin"), str(prefix / "sbin")], split_path(env.get("PATH"))
         )
     if not (mise := which("mise", env.get("PATH"))):
-        return env
+        return MappingProxyType(env)
     try:
         result = run_cmd(
             [mise, "env", "--json"],
@@ -598,7 +603,7 @@ def command_env(cwd=None):
             if key == "PATH"
             else value
         )
-    return merged
+    return MappingProxyType(merged)
 
 
 def http_client(**kw):
@@ -1639,9 +1644,6 @@ def _decode_responses_output(response: Any) -> AssistantMessage:
         tool_calls=tool_calls,
     )
 
-
-parse_tool_call_arguments = _decode_tool_call_arguments
-_responses_output_to_message = _decode_responses_output
 
 
 def _http_error_message(prefix: str, response: httpx.Response) -> str:

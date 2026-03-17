@@ -220,5 +220,49 @@ class ClipTokensTests(unittest.TestCase):
         self.assertIn("tokens omitted", result)
 
 
+class JsonPathTests(unittest.TestCase):
+    """Tests for _json_path including the depth cap (M3)."""
+
+    def test_simple_dict_traversal(self):
+        self.assertEqual(oy_cli._json_path({"a": {"b": 1}}, "a.b"), 1)
+
+    def test_list_index(self):
+        self.assertEqual(oy_cli._json_path([10, 20, 30], "1"), 20)
+
+    def test_missing_key_raises(self):
+        with self.assertRaisesRegex(ValueError, "key not found"):
+            oy_cli._json_path({"a": 1}, "b")
+
+    def test_non_integer_index_raises(self):
+        with self.assertRaisesRegex(ValueError, "expected index"):
+            oy_cli._json_path([1, 2], "foo")
+
+    def test_depth_cap_raises(self):
+        # Build a deeply nested structure and a path exceeding 20 levels
+        obj = 0
+        for _ in range(25):
+            obj = {"a": obj}
+        deep = ".".join(["a"] * 21)
+        with self.assertRaisesRegex(ValueError, "json_path exceeded max depth"):
+            oy_cli._json_path(obj, deep)
+
+    def test_index_error_caught(self):
+        with self.assertRaisesRegex(ValueError, "out of range"):
+            oy_cli._json_path([1, 2], "5")
+
+    def test_empty_path_returns_value(self):
+        self.assertEqual(oy_cli._json_path(42, ""), 42)
+
+
+class CommandEnvImmutabilityTests(unittest.TestCase):
+    """Test that command_env returns an immutable mapping (L3)."""
+
+    def test_command_env_is_immutable(self):
+        from shim import command_env
+        env = command_env()
+        with self.assertRaises(TypeError):
+            env["SHOULD_NOT_WORK"] = "value"
+
+
 if __name__ == "__main__":
     unittest.main()

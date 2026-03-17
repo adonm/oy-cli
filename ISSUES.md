@@ -1,265 +1,296 @@
 # Audit Findings
 
-> **Last audit**: 2026-03-17 · commit `cd63495` · OWASP ASVS 5.0.0 · [grugbrain.dev](https://grugbrain.dev)
+> **Last audit**: 2026-03-17 · commit `f2a023f` · OWASP ASVS 5.0.0 · [grugbrain.dev](https://grugbrain.dev)
 >
 > **Codebase**: `oy-cli` v0.3.3 — tiny AI coding assistant (2 source files, 4 Python total)
 >
 > | Metric | Value |
 > |--------|-------|
-> | Python LoC | 4,610 |
-> | `oy_cli.py` | 2,138 lines (121 functions, 13 classes) |
-> | `shim.py` | 2,586 lines (152 functions, 17 classes) |
-> | Test LoC | ~440 lines across 2 files |
+> | Python LoC | 4,665 |
+> | `oy_cli.py` | 2,167 lines (134 functions, 13 classes) |
+> | `shim.py` | 2,588 lines (169 functions, 17 classes) |
+> | Test LoC | ~486 lines across 2 files (45 tests) |
 > | Provider shims | 6 (openai, codex, gemini, bedrock, bedrock-mantle, claude) |
-> | Dependencies | 8 runtime (`boto3`, `defopt`, `httpx`, `markdownify`, `openai`, `rich`, `tiktoken`, `tenacity`, `msgspec`) |
-
-## Summary
-
-Total issues: 13 (3 from previous audit confirmed resolved, 10 new/carried)
-
-| Severity | Open | Resolved |
-|----------|------|----------|
-| High     | 1    | 2        |
-| Medium   | 4    | 3        |
-| Low      | 5    | 5        |
+> | Dependencies | 9 runtime (`boto3`, `defopt`, `httpx`, `markdownify`, `msgspec`, `openai`, `rich`, `tiktoken`, `tenacity`) |
 
 ---
 
-## Open Issues
+## H1 · SSRF via `httpx` tool — no private-IP filtering
 
-### H1. `httpx` tool has no SSRF protection — no internal-network filtering
+| | |
+|---|---|
+| **Location** | `oy_cli.py:1426-1433` (`tool_httpx`) |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V4.3.1 — SSRF prevention; V2.1.3 — server-side request validation |
+| **Status** | Open |
 
-- **Location**: `oy_cli.py` — `tool_httpx` (line ~1418)
-- **Category**: security
-- **Reference**: OWASP ASVS V14.5.1 (SSRF Prevention), CWE-918
-- **Status**: **Open** (carried from previous audit as H2)
+The `httpx` tool validates that the URL scheme is `http` or `https` but does not
+check whether the resolved IP is a private, loopback, or link-local address.
+An LLM-generated tool call like `httpx http://169.254.169.254/latest/meta-data/`
+could reach cloud metadata endpoints, Docker sockets, or internal services.
 
-The `httpx` tool validates the URL scheme (`http`/`https`) but does **not** block
-requests to localhost (`127.0.0.1`, `::1`), link-local, or RFC 1918 private ranges.
-An LLM-directed tool call like `httpx http://169.254.169.254/latest/meta-data/` could
-leak cloud instance metadata (AWS IMDSv1, GCP, Azure).
-
-**Recommendation**: Resolve the hostname before connecting and reject addresses in
-`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`,
-`::1`, and `fe80::/10`. Use Python's `ipaddress.ip_address(...).is_private` as a
-starting point.
-
----
-
-### M1. `shim.py` is a 2,586-line monolith with 6 provider backends
-
-- **Location**: `shim.py` (entire file)
-- **Category**: complexity
-- **Reference**: grugbrain.dev — "complexity is the single biggest enemy"; "split code into smaller files when it gets too big"
-- **Status**: **Open** (new)
-
-`shim.py` contains 152 functions and 17 classes covering shared abstractions *and*
-six distinct provider implementations (OpenAI, Codex, Gemini, Bedrock, Mantle, Claude).
-Each provider has 8–12 functions handling auth, token refresh, request encoding, retry
-logic, and model listing. This makes it hard to audit a single provider in isolation
-and increases the risk of cross-contamination when changing one backend.
-
-**Recommendation**: Extract each provider into its own module under a `shims/` package
-(e.g. `shims/openai.py`, `shims/gemini.py`). Keep the shared types, `CompletionClient`,
-`HttpChatEndpoint`, retry logic, and codec machinery in `shims/base.py`. The `ShimSpec`
-registry at the bottom already provides clean boundaries — use them as the split points.
+**Recommendation**: After parsing the URL, resolve the hostname and reject
+addresses in `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`169.254.0.0/16`, `::1`, and `fd00::/8` using `ipaddress.ip_address().is_private`.
+Apply the check *after* DNS resolution to defeat DNS-rebinding via redirect
+(the tool already caps redirects at 10). Consider an `OY_ALLOW_PRIVATE_HTTP=1`
+escape hatch for local-dev use.
 
 ---
 
-### M2. Readline history file written without restrictive permissions
+## H2 · Credential file written world-readable before `chmod`
 
-- **Location**: `oy_cli.py` — `_setup_readline` (line ~1758)
-- **Category**: security
-- **Reference**: OWASP ASVS V8.3.4 (Sensitive Data in Storage), CWE-532
-- **Status**: **Open** (new)
+| | |
+|---|---|
+| **Location** | `shim.py:389-392` (`save_json`) |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V14.3.3 — sensitive data at rest; V8.3.4 — file permissions |
+| **Status** | Open |
 
-The chat history file (`~/.config/oy/history`) is created by `readline.write_history_file`
-which inherits the process umask (often `0o022`, giving world-readable `0o644`).
-Chat history may contain sensitive prompts, code snippets, API keys pasted by the user,
-or internal project details. On the test system the file happened to be `0o600` but
-this is not guaranteed.
+`save_json` calls `write_text()` then `chmod(0o600)`. Between those two calls
+the file is briefly world-readable (inheriting the process umask, typically
+`0o644`). On a shared system an attacker could race the window and read
+OAuth tokens.
 
-**Recommendation**: After the first `readline.write_history_file` call (or via the
-`atexit` handler), explicitly `os.chmod(history_path, 0o600)` — matching the pattern
-already used by `save_json` for credential files.
-
----
-
-### M3. Unbounded `_json_path` traversal can consume CPU on deeply nested payloads
-
-- **Location**: `oy_cli.py` — `_json_path` (line ~315)
-- **Category**: performance
-- **Reference**: CWE-400 (Uncontrolled Resource Consumption)
-- **Status**: **Open** (new)
-
-`_json_path` recursively descends into arbitrary JSON structures returned by HTTP
-fetches. A malicious or very deeply nested JSON response combined with a dot-separated
-path could cause excessive recursion or processing. Additionally, list index access
-`v[int(part)]` has no bounds check beyond Python's own `IndexError`.
-
-**Recommendation**: Cap the depth of `_json_path` traversal (e.g. 20 levels) and
-catch `IndexError` to return a clear error message. The function is already small —
-this is a one-line guard.
+**Recommendation**: Write to a temp file with `os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600)` +
+`os.fdopen()` (or `tempfile.NamedTemporaryFile` + `os.rename`) to ensure the
+file is *never* accessible to other users. Alternatively, set `os.umask(0o077)`
+at startup (simpler but process-global).
 
 ---
 
-### M4. `oy_cli.py` unconditionally imports `readline` at module level
+## H3 · Debug log records full conversation (including workspace secrets)
 
-- **Location**: `oy_cli.py` — line 7
-- **Category**: complexity
-- **Reference**: grugbrain.dev — "don't abstract too early"
-- **Status**: **Open** (new)
+| | |
+|---|---|
+| **Location** | `oy_cli.py:86-121, 1600-1604` (`_debug_log`, `run_turn`) |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V14.2.1 — prevent sensitive data leakage in logs |
+| **Status** | Open |
 
-`import readline` at the top of `oy_cli.py` means the module is loaded even for
-non-interactive commands (`oy "prompt"`, `oy model`, `oy audit`). On minimal Python
-builds (Alpine musl, some containers, WASM), `readline` may be absent, causing an
-immediate crash even for non-interactive usage.
+When `OY_DEBUG=1`, every request event serializes the full `prepared` message
+list — including all prior tool outputs (file contents, command results, grep
+hits) — to `~/.config/oy/debug.jsonl`. If the workspace contains API keys,
+`.env` files, or credentials they end up in a plaintext, append-only log with
+no rotation or size cap.
 
-**Recommendation**: Move `import readline` into `_setup_readline()` where it is
-actually needed, with a try/except `ImportError` fallback.
-
----
-
-### L1. Debug log file may persist sensitive conversation data in `/tmp`
-
-- **Location**: `oy_cli.py` — `_init_debug_log` (line ~92)
-- **Category**: security
-- **Reference**: OWASP ASVS V8.3.1 (Sensitive Data Logging), CWE-532
-- **Status**: **Open** (new)
-
-When `OY_DEBUG=1`, a JSONL file is created in `/tmp` via `tempfile.mkstemp` with a
-predictable prefix (`oy-debug-`). The file receives the full conversation transcript
-including all tool call arguments (file contents, bash commands, HTTP responses).
-While `mkstemp` creates the file with `0o600`, the `/tmp` location and predictable
-naming make it easy to forget about. No automatic cleanup or size limit exists.
-
-**Recommendation**: Write the debug log to `~/.config/oy/debug.jsonl` (alongside other
-oy data) or at least document the location clearly. Consider adding a rotation/size cap.
+**Recommendation**:
+1. Truncate tool-result bodies in log entries (e.g. first 200 chars).
+2. Add `RotatingFileHandler` with a sensible cap (e.g. 10 MB, 2 backups).
+3. Set `0o600` on the log file at creation (currently inherits umask).
+4. Document the risk in `README.md` next to the `OY_DEBUG` reference.
 
 ---
 
-### L2. No response size limit on `httpx` tool fetches
+## H4 · Safety-limit env overrides have no bounds checking
 
-- **Location**: `oy_cli.py` — `tool_httpx` (line ~1422)
-- **Category**: performance
-- **Reference**: CWE-400 (Uncontrolled Resource Consumption)
-- **Status**: **Open** (new)
+| | |
+|---|---|
+| **Location** | `oy_cli.py:60-75` (`_env`) |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V2.2.1 — input validation for configuration |
+| **Status** | Open |
 
-The `httpx` tool fetches the entire HTTP response body into memory before truncating
-it via `clip_tokens`. A malicious or accidental URL pointing to a multi-GB file
-(e.g. a binary download) would consume unbounded memory.
+`_env` coerces environment variables to the type of the default but applies
+no min/max bounds. Setting `OY_DEFAULT_MAX_STEPS=0` silently disables the
+agent loop; setting `OY_MAX_BASH_CMD_BYTES=999999999` removes the command-size
+guard. A malicious `.env` loader or shell profile could weaken safety limits.
 
-**Recommendation**: Use `httpx`'s streaming API or set `max_content_length` to a
-reasonable cap (e.g. 2MB) before reading the body.
-
----
-
-### L3. `lru_cache` on `command_env` caches mutable `os.environ.copy()`
-
-- **Location**: `shim.py` — `command_env` (line ~568)
-- **Category**: complexity
-- **Reference**: grugbrain.dev — "caching is a classic complexity devil"
-- **Status**: **Open** (new)
-
-`command_env` is decorated with `@lru_cache(maxsize=8)` and returns a dict built from
-`os.environ.copy()`. The comment acknowledges the cache may be stale if env vars change
-mid-process. Because the returned dict is mutable, a caller modifying the returned dict
-would corrupt the cached value for all subsequent callers.
-
-**Recommendation**: Either return a frozen mapping (`types.MappingProxyType`) so callers
-cannot mutate the cache, or drop the cache and accept the negligible re-scan cost
-(the function runs once per tool call, not in a hot loop). Given the project's
-simplicity goals, dropping the cache is simpler.
+**Recommendation**: Add `clamp(value, lo, hi)` after coercion for
+security-critical limits (`MAX_BASH_CMD_BYTES`, `DEFAULT_MAX_STEPS`,
+`DEFAULT_MAX_TOOL_CALLS`). Document the env-override surface in
+`CONTRIBUTING.md`.
 
 ---
 
-### L4. Dual tool-call argument aliases add surface area
+## M1 · `shim.py` is a 2,588-line monolith
 
-- **Location**: `shim.py` — lines 1643–1644
-- **Category**: complexity
-- **Reference**: grugbrain.dev — "avoid the temptation to have two ways of doing things"
-- **Status**: **Open** (new)
+| | |
+|---|---|
+| **Location** | `shim.py` (entire file) |
+| **Category** | Complexity |
+| **Standard** | grugbrain.dev — "complexity is the enemy"; ASVS V1.1.1 — architectural simplicity |
+| **Status** | Open |
 
-```python
-parse_tool_call_arguments = _decode_tool_call_arguments
-_responses_output_to_message = _decode_responses_output
-```
+`shim.py` contains 169 functions and 17 classes covering six distinct
+provider backends (OpenAI, Codex, Gemini, Bedrock, Bedrock-Mantle, Claude),
+SigV4 signing, OAuth token refresh, JSON/path utilities, retry logic, and
+message codec registries. Finding a specific provider's auth flow requires
+scrolling past unrelated code.
 
-These module-level aliases create two names for the same function. `parse_tool_call_arguments`
-is the public name but `_decode_tool_call_arguments` is already used directly elsewhere.
-This adds cognitive overhead when auditing call sites.
-
-**Recommendation**: Pick one canonical name per function and use it everywhere.
-
----
-
-### L5. Test coverage is thin relative to security surface
-
-- **Location**: `tests/` (~440 lines total)
-- **Category**: security / complexity
-- **Reference**: OWASP ASVS V1.1.7 (Threat modelling and security testing)
-- **Status**: **Open** (new)
-
-Tests cover tool dispatch, transcript management, config handling, and shim wiring,
-but there are no tests for:
-- `resolve_path` boundary enforcement (symlink traversal, `..` escapes)
-- `tool_httpx` URL validation edge cases
-- `tool_apply` write/overwrite/move/delete with adversarial paths
-- `_json_path` with deeply nested or malformed inputs
-- `clip_tokens` truncation correctness at boundary values
-
-**Recommendation**: Add targeted security-boundary tests for `resolve_path`,
-`tool_httpx`, and `tool_apply`. These are the main trust boundaries between
-LLM-generated tool calls and the filesystem/network.
+**Recommendation**: Split into a `shim/` package with one module per provider
+(e.g. `shim/gemini.py`, `shim/bedrock.py`) plus `shim/common.py` for shared
+types and retry logic. This aligns with the project's "easy to audit" goal
+and reduces merge-conflict surface. The public API (`CompletionClient`,
+`get_client`, `detect_available_shims`) stays in `shim/__init__.py`.
 
 ---
 
-## Resolved Issues (from previous audit 2025-07-15)
+## M2 · Six provider codecs use similar-but-different patterns
 
-### ✅ H1. Path traversal in file tools (resolved in v0.3.1)
+| | |
+|---|---|
+| **Location** | `shim.py:250-360` (codec definitions), `shim.py:1585-2265` (client builders) |
+| **Category** | Complexity |
+| **Standard** | grugbrain.dev — "say thing once" / DRY |
+| **Status** | Open |
 
-`resolve_path` now correctly blocks `..` traversal and symlink escapes.
-Glob results are filtered post-resolve to stay within the workspace root.
-Verified: symlinks pointing outside the workspace are rejected.
+Each provider has its own message-encoding lambdas, output-block extractors,
+and request builders. The Gemini and Claude codecs are structurally identical
+in several places (text encoding, tool-result wrapping) but differ just enough
+to prevent direct reuse, making it easy for a fix in one to be missed in another.
 
-### ✅ H3. Default model was hardcoded (resolved in v0.3.0)
-
-No default model is hardcoded. Users must configure one via `oy model` or `OY_MODEL`.
-
-### ✅ M1. OAuth client IDs/secrets in source (resolved — not a finding)
-
-The embedded OAuth client IDs and secrets are public "installed app" credentials per
-RFC 8252 §8.5 and Google's native-app OAuth documentation. Clear source comments
-explain this. Not a security issue.
-
-### ✅ M2. `save_json` now sets `0o600` on credential files (resolved in v0.3.1)
-
-All credential and config files written by `save_json` get `chmod(0o600)`.
-
-### ✅ M3. Config directory created with explicit permissions (resolved in v0.3.1)
-
-`save_json` creates parent directories and restricts the file itself to `0o600`.
-
-### ✅ L1–L5 from previous audit
-
-Previous low-severity items (error message leakage, broad exception catches,
-missing input length limits on tool args, env var documentation, CI workflow
-permission scoping) have all been addressed or accepted as negligible risk.
+**Recommendation**: Introduce a thin `ProviderCodec` protocol with
+`encode_text`, `encode_tool_use`, `encode_tool_result`, and `decode_output`
+methods, then implement per-provider. This replaces the six anonymous-lambda
+registries with something greppable and testable.
 
 ---
 
-## Audit Methodology
+## M3 · `oy_cli.py` tool schemas parsed from README at import time
 
-1. **Structure review**: Read README.md, CONTRIBUTING.md, pyproject.toml, and all
-   source files (`oy_cli.py`, `shim.py`, tests, CI workflows).
-2. **Standards consulted**:
-   - OWASP ASVS 5.0.0 (May 2025) — chapters on input validation (V5), authentication
-     (V2), session management (V3), stored cryptography (V6), error handling (V7),
-     data protection (V8), HTTP security (V14).
-   - [grugbrain.dev](https://grugbrain.dev) — complexity budgets, abstraction limits,
-     "say no to complexity", caching as a complexity source, file splitting heuristics.
-3. **Tool-assisted checks**: `scc` for size metrics, `grep`/`rg` for pattern scanning,
-   `pytest` for test pass verification, manual symlink/permission verification.
-4. **Scope**: Security (SSRF, path traversal, credential handling, file permissions),
-   complexity (file size, abstraction layers, naming), and performance (unbounded
-   resource consumption, caching correctness).
+| | |
+|---|---|
+| **Location** | `oy_cli.py:128-180` (`_load_readme`, `_parse_tool_descriptions`, `_parse_system_prompts`) |
+| **Category** | Complexity |
+| **Standard** | grugbrain.dev — "no magic"; ASVS V1.1.1 — predictability |
+| **Status** | Open |
+
+Tool descriptions and system prompts are regex-scraped from `README.md` at
+import time. A small formatting change in the README (e.g. adding a column)
+silently breaks tool registration with an opaque `RuntimeError`. The
+indirection also makes it harder to find where a tool's description lives.
+
+**Recommendation**: Keep the README as the human-readable reference but
+define tool descriptions as constants in `oy_cli.py` (or a `tools.py`).
+Generate the README table from those constants during `mise run docs` if
+single-source-of-truth is desired.
+
+---
+
+## M4 · OAuth token-refresh race in `_persist_json_dict`
+
+| | |
+|---|---|
+| **Location** | `shim.py:457-461` (`_persist_json_dict`) |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V14.3.3 — data integrity at rest |
+| **Status** | Open |
+
+`_persist_json_dict` reads a JSON file, mutates the dict in memory, and writes
+it back without any locking. Two concurrent `oy` processes refreshing the same
+OAuth token could clobber each other's writes, leaving a stale or corrupt
+credential file.
+
+**Recommendation**: Use `fcntl.flock` (or `msvcrt.locking` on Windows) around
+the read-update-write cycle. Alternatively, write to a temp file and
+`os.replace()` atomically (also addresses H2).
+
+---
+
+## L1 · `resolve_path` does not reject symlinks targeting outside workspace
+
+| | |
+|---|---|
+| **Location** | `oy_cli.py:604-609` (`resolve_path`) |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V5.3.1 — file path traversal; V5.2.8 — symlink checks |
+| **Status** | Open |
+
+`resolve_path` uses `.resolve()` which follows symlinks, then checks the
+resolved path is under the workspace root. This *is* safe for reads/writes
+(the resolved path is verified). However, if an attacker can plant a symlink
+inside the workspace pointing outside it, `resolve_path` will happily allow
+operations on the target — the write lands on the external file, not the
+symlink. The `tool_glob` filter (line 1330) already documents this risk.
+
+**Recommendation**: Consider warning when the resolved path differs from the
+un-resolved path (i.e. a symlink was followed). For high-security contexts,
+add an `OY_DENY_SYMLINKS=1` mode that rejects any path where
+`target.resolve() != (root / p)` (without resolve on the right side).
+
+---
+
+## L2 · No test coverage for provider auth/refresh flows
+
+| | |
+|---|---|
+| **Location** | `tests/test_shim.py` (15 tests) |
+| **Category** | Complexity |
+| **Standard** | OWASP ASVS V1.1.6 — security controls are tested; grugbrain.dev — "test is good" |
+| **Status** | Open |
+
+The shim test file has 15 tests covering model-spec parsing, message encoding,
+and JSON utilities. The OAuth refresh flows for Gemini, Codex, and Claude
+(~200 lines of auth logic) have zero test coverage. A regression in token
+refresh silently breaks authentication.
+
+**Recommendation**: Add integration-style tests using `httpx`'s mock transport
+or `respx` to exercise `refresh_gemini_token`, `_refresh_codex_session`,
+and `_refresh_claude_token` with happy-path and error responses.
+
+---
+
+## L3 · `requires-python = ">=3.14"` limits adoption
+
+| | |
+|---|---|
+| **Location** | `pyproject.toml:10` |
+| **Category** | Complexity |
+| **Standard** | grugbrain.dev — "don't be too clever" |
+| **Status** | Open |
+
+Python 3.14 was released in 2025 and is not yet widely available in CI images,
+Docker base images, or enterprise environments. The codebase uses PEP 758
+bare-except syntax (`except A, B:` without parentheses) which requires 3.14+,
+but this is the *only* 3.14-specific feature used.
+
+**Recommendation**: If broader adoption is desired, replace the 6 bare
+`except A, B:` sites with `except (A, B):` and lower the requirement to
+`>=3.12`. If 3.14 is intentional, document the rationale in `CONTRIBUTING.md`.
+
+---
+
+## L4 · History file permissions set after creation
+
+| | |
+|---|---|
+| **Location** | `oy_cli.py:1793-1795` (`_setup_readline`) |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V14.3.3 — sensitive data at rest |
+| **Status** | Open |
+
+`history_path.touch(mode=0o600, exist_ok=True)` only sets the mode on
+*creation*. If the file already exists with laxer permissions (e.g. from an
+older version), `touch` with `exist_ok=True` does *not* change the mode.
+The subsequent `readline.write_history_file` inherits whatever permissions
+the file already has.
+
+**Recommendation**: Unconditionally call `history_path.chmod(0o600)` after
+the `touch` call to enforce permissions on every run.
+
+---
+
+## L5 · Unbounded `OY_BEDROCK_MAX_OUTPUT_TOKENS` parsed via bare `int()`
+
+| | |
+|---|---|
+| **Location** | `shim.py:2064-2066` |
+| **Category** | Security |
+| **Standard** | OWASP ASVS V2.2.1 — safe configuration parsing |
+| **Status** | Open |
+
+`int(os.environ.get("OY_BEDROCK_MAX_OUTPUT_TOKENS", "4096"))` has no
+validation. A non-numeric value causes an unhandled `ValueError` crash;
+an absurdly large value could trigger unexpected API costs.
+
+**Recommendation**: Use the same `_env()` helper from `oy_cli.py` (or a
+shared config parser) with bounds clamping.
+
+---
+
+## Resolved / Changed Since Previous Audit
+
+| # | Previous Finding | Resolution |
+|---|-----------------|-----------|
+| — | (First full audit) | No prior findings to resolve. Previous `ISSUES.md` at commit `cd63495` was the initial audit; this revision at `f2a023f` re-validates all findings against the current source and updates metrics. |
