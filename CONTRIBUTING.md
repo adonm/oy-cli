@@ -6,6 +6,8 @@ Thanks for contributing to `oy-cli`.
 
 `mise` manages local tooling and `uv` handles Python environments and packaging.
 
+If you use Dev Containers, this repo includes `.devcontainer/devcontainer.json` based on [`wagov-dtt/devcontainer-base`](https://github.com/wagov-dtt/devcontainer-base).
+
 ```bash
 mise install
 uv sync

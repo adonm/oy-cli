@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import shim
 
 
@@ -93,6 +94,131 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual([item["role"] for item in encoded], ["assistant", "user"])
         self.assertEqual(len(encoded[1]["content"]), 2)
         self.assertEqual(encoded[1]["content"][1]["toolResult"]["status"], "error")
+
+
+class ReasoningTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        shim._REASONING_SUPPORT_CACHE.clear()
+
+    def test_responses_payload_sets_reasoning_high_by_default(self):
+        payload = shim._responses_payload("gpt-test", [], None, "auto")
+        self.assertEqual(payload["reasoning"], {"effort": "high"})
+
+    def test_drop_reasoning_arg_removes_both_reasoning_fields(self):
+        payload = {
+            "model": "gpt-test",
+            "reasoning": {"effort": "high"},
+            "reasoning_effort": "high",
+        }
+        self.assertEqual(shim._drop_reasoning_arg(payload), {"model": "gpt-test"})
+
+    def test_reasoning_unsupported_error_detection(self):
+        response = httpx.Response(
+            400,
+            json={"error": {"message": "Unknown parameter: reasoning_effort"}},
+            request=httpx.Request("POST", "https://example.com"),
+        )
+        exc = shim.APIStatusError("bad request", response=response, body=None)
+        self.assertTrue(shim._is_reasoning_unsupported_error(exc))
+
+    async def test_responses_client_falls_back_without_reasoning_when_unsupported(self):
+        unsupported = shim.APIStatusError(
+            "bad request",
+            response=httpx.Response(
+                400,
+                json={"error": {"message": "Unsupported parameter: reasoning"}},
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            body=None,
+        )
+        final_response = {"output": []}
+
+        create = AsyncMock(side_effect=[unsupported, final_response])
+        responses = Mock(create=create)
+        async_client = Mock()
+        async_client.with_options.return_value = Mock(responses=responses)
+        sync_client = Mock()
+
+        client = shim._openai_responses_client(async_client, sync_client)
+        await client.chat_completion("gpt-test", [])
+
+        self.assertEqual(create.call_count, 2)
+        first_payload = create.call_args_list[0].kwargs
+        second_payload = create.call_args_list[1].kwargs
+        self.assertEqual(first_payload["reasoning"], {"effort": "high"})
+        self.assertNotIn("reasoning", second_payload)
+
+    async def test_chat_completions_client_falls_back_without_reasoning_when_unsupported(
+        self,
+    ):
+        unsupported = shim.APIStatusError(
+            "bad request",
+            response=httpx.Response(
+                400,
+                json={"error": {"message": "Unknown parameter: reasoning_effort"}},
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            body=None,
+        )
+        message = Mock(content="done", tool_calls=None)
+        choice = Mock(message=message)
+        final_response = Mock(choices=[choice])
+
+        create = AsyncMock(side_effect=[unsupported, final_response])
+        chat = Mock(completions=Mock(create=create))
+        async_client = Mock()
+        async_client.with_options.return_value = Mock(chat=chat)
+        sync_client = Mock()
+
+        client = shim._openai_chat_completions_client(
+            async_client,
+            sync_client,
+            tools_map=lambda tools: [],
+        )
+        result = await client.chat_completion("gpt-test", [])
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(create.call_count, 2)
+        first_payload = create.call_args_list[0].kwargs
+        second_payload = create.call_args_list[1].kwargs
+        self.assertEqual(first_payload["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_effort", second_payload)
+
+    async def test_responses_client_skips_reasoning_after_cached_rejection(self):
+        final_response = {"output": []}
+        create = AsyncMock(return_value=final_response)
+        responses = Mock(create=create)
+        async_client = Mock()
+        async_client.with_options.return_value = Mock(responses=responses)
+        sync_client = Mock()
+        shim._mark_reasoning_unsupported("responses", "gpt-test")
+
+        client = shim._openai_responses_client(async_client, sync_client)
+        await client.chat_completion("gpt-test", [])
+
+        payload = create.call_args.kwargs
+        self.assertNotIn("reasoning", payload)
+
+    async def test_chat_completions_client_skips_reasoning_after_cached_rejection(self):
+        message = Mock(content="done", tool_calls=None)
+        choice = Mock(message=message)
+        final_response = Mock(choices=[choice])
+        create = AsyncMock(return_value=final_response)
+        chat = Mock(completions=Mock(create=create))
+        async_client = Mock()
+        async_client.with_options.return_value = Mock(chat=chat)
+        sync_client = Mock()
+        shim._mark_reasoning_unsupported("chat_completions", "gpt-test")
+
+        client = shim._openai_chat_completions_client(
+            async_client,
+            sync_client,
+            tools_map=lambda tools: [],
+        )
+        await client.chat_completion("gpt-test", [])
+
+        payload = create.call_args.kwargs
+        self.assertNotIn("reasoning_effort", payload)
 
 
 class ShimRegistryTests(unittest.TestCase):

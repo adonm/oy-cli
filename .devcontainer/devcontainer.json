@@ -1,0 +1,13 @@
+{
+  "name": "oy-cli",
+  "image": "ghcr.io/wagov-dtt/devcontainer-base",
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "onCreateCommand": "docker-init.sh",
+  "remoteEnv": {
+    "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}",
+    "DOCKER_API_VERSION": "1.43"
+  },
+  "remoteUser": "vscode"
+}

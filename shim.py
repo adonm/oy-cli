@@ -1122,7 +1122,14 @@ def _openai_pair(
         kwargs["base_url"] = base_url
     if timeout is not None:
         kwargs["timeout"] = timeout
-    return AsyncOpenAI(**kwargs), OpenAI(**kwargs)
+    http_client_kwargs = dict(kwargs)
+    http_client_kwargs.pop("max_retries", None)
+    async_http = async_http_client(**http_client_kwargs)
+    sync_http = http_client(**http_client_kwargs)
+    return (
+        AsyncOpenAI(http_client=async_http, **kwargs),
+        OpenAI(http_client=sync_http, **kwargs),
+    )
 
 
 def split_model_spec(spec: str) -> tuple[str | None, str]:
@@ -1584,6 +1591,45 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
         raise RuntimeError(f"Could not parse tool arguments JSON: {exc}") from exc
 
 
+def _drop_reasoning_arg(payload: dict[str, Any]) -> dict[str, Any]:
+    stripped = dict(payload)
+    stripped.pop("reasoning", None)
+    stripped.pop("reasoning_effort", None)
+    return stripped
+
+
+_REASONING_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def _reasoning_cache_key(api_kind: str, model: str) -> tuple[str, str]:
+    return (api_kind, model)
+
+
+def _should_send_reasoning(api_kind: str, model: str) -> bool:
+    return _REASONING_SUPPORT_CACHE.get(_reasoning_cache_key(api_kind, model), True)
+
+
+def _mark_reasoning_unsupported(api_kind: str, model: str) -> None:
+    _REASONING_SUPPORT_CACHE[_reasoning_cache_key(api_kind, model)] = False
+
+
+def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
+    if exc.response.status_code != 400:
+        return False
+    message = (_response_error_message(exc.response) or "").lower()
+    return "reasoning" in message and any(
+        token in message
+        for token in (
+            "unsupported",
+            "unknown parameter",
+            "not allowed",
+            "not supported",
+            "invalid parameter",
+            "extra inputs",
+        )
+    )
+
+
 def _responses_payload(
     model: str,
     messages: list[ChatMessage],
@@ -1595,6 +1641,7 @@ def _responses_payload(
         "input": _responses_input_from_messages(messages),
         "store": False,
     }
+    payload["reasoning"] = {"effort": "high"}
     instructions = _responses_instructions(messages)
     if instructions:
         payload["instructions"] = instructions
@@ -1853,14 +1900,25 @@ def _openai_responses_client(
     ) -> AssistantMessage:
         client = async_client.with_options(max_retries=0)
 
-        async def create_response():
-            return await client.responses.create(
-                **_responses_payload(model, messages, tools, tool_choice)
-            )
+        async def create_response(payload: dict[str, Any]):
+            return await client.responses.create(**payload)
 
-        response = await _call_with_retry(
-            create_response, on_retry=on_retry, bedrock=bedrock
-        )
+        payload = _responses_payload(model, messages, tools, tool_choice)
+        if not _should_send_reasoning("responses", model):
+            payload = _drop_reasoning_arg(payload)
+        try:
+            response = await _call_with_retry(
+                lambda: create_response(payload), on_retry=on_retry, bedrock=bedrock
+            )
+        except APIStatusError as exc:
+            if not _is_reasoning_unsupported_error(exc):
+                raise
+            _mark_reasoning_unsupported("responses", model)
+            response = await _call_with_retry(
+                lambda: create_response(_drop_reasoning_arg(payload)),
+                on_retry=on_retry,
+                bedrock=bedrock,
+            )
         return _decode_responses_output(response)
 
     return CompletionClient(
@@ -1889,17 +1947,30 @@ def _openai_chat_completions_client(
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": [_openai_chat_message(message) for message in messages],
+            "reasoning_effort": "high",
         }
+        if not _should_send_reasoning("chat_completions", model):
+            kwargs = _drop_reasoning_arg(kwargs)
         if tools:
             kwargs["tools"] = tools_map(tools)
             kwargs["tool_choice"] = tool_choice
 
-        async def create_response():
-            return await client.chat.completions.create(**kwargs)
+        async def create_response(payload: dict[str, Any]):
+            return await client.chat.completions.create(**payload)
 
-        response = await _call_with_retry(
-            create_response, on_retry=on_retry, bedrock=bedrock
-        )
+        try:
+            response = await _call_with_retry(
+                lambda: create_response(kwargs), on_retry=on_retry, bedrock=bedrock
+            )
+        except APIStatusError as exc:
+            if not _is_reasoning_unsupported_error(exc):
+                raise
+            _mark_reasoning_unsupported("chat_completions", model)
+            response = await _call_with_retry(
+                lambda: create_response(_drop_reasoning_arg(kwargs)),
+                on_retry=on_retry,
+                bedrock=bedrock,
+            )
         choice = response.choices[0]
         msg = choice.message
         return AssistantMessage(
@@ -2544,7 +2615,14 @@ def _copilot_openai_pair(token: str) -> tuple[AsyncOpenAI, OpenAI]:
         "max_retries": 0,
         "default_headers": _copilot_default_headers(),
     }
-    return AsyncOpenAI(**kwargs), OpenAI(**kwargs)
+    http_client_kwargs = dict(kwargs)
+    http_client_kwargs.pop("max_retries", None)
+    async_http = async_http_client(**http_client_kwargs)
+    sync_http = http_client(**http_client_kwargs)
+    return (
+        AsyncOpenAI(http_client=async_http, **kwargs),
+        OpenAI(http_client=sync_http, **kwargs),
+    )
 
 
 def _require_copilot_env(_: Path | None = None) -> None:
