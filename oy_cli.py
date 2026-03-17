@@ -2,10 +2,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import logging
 import os
 import readline
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias, cast
 from urllib.parse import urlparse
@@ -70,21 +72,117 @@ MAX_MESSAGE_TOKENS = _env("MAX_MESSAGE_TOKENS", 4096)
 DEFAULT_MAX_STEPS = _env("DEFAULT_MAX_STEPS", 512)
 DEFAULT_MAX_TOOL_CALLS = _env("DEFAULT_MAX_TOOL_CALLS", 512)
 DEFAULT_LINE_LIMIT = _env("DEFAULT_LINE_LIMIT", 500)
+KEEP_RECENT_TURNS = _env("KEEP_RECENT_TURNS", 3)
+COMPACT_SUMMARY_TOKENS = _env("COMPACT_SUMMARY_TOKENS", 16384)
 CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
-BASE_SYSTEM_PROMPT = """You are oy, a tiny coding cli with tools.
-Work by inspecting first, then making explicit changes. Prefer simple auditable solutions.
-Keep going until done or genuinely blocked; if blocked, say what you tried and next steps.
-Use grugbrain-style simplicity for complexity, OWASP-minded judgment for security, and performance-aware judgment to avoid obvious waste.
-"""
-INTERACTIVE_SYSTEM_PROMPT = (
-    "Use ask only when significant clarification or direction is needed."
-)
-NONINTERACTIVE_SYSTEM_PROMPT = "Non-interactive mode: do not pause for approval."
-AUDIT_SYSTEM_PROMPT = """Audit the repo for security, unnecessary complexity, and major obvious performance issues.
-Fetch current OWASP ASVS and MASVS with httpx, inspect the codebase, and write/merge prioritised findings to ISSUES.md.
-Each finding should include location, category (security|complexity|performance), reference, recommendation, and status: OPEN.
-Avoid removing project or human context.
-"""
+
+# ---------------------------------------------------------------------------
+# Debug logging -- activated by OY_DEBUG=1
+# Writes all LLM request/response messages to a JSON-lines tmpfile.
+# The logger is initialised eagerly at import time so it is available even
+# when early startup code (workspace resolution, model selection) fails.
+# ---------------------------------------------------------------------------
+
+
+def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
+    """Create a debug JSONL logger if OY_DEBUG is truthy.  Called once at import."""
+    raw = os.environ.get("OY_DEBUG", "").strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return None, None
+    fd, path = tempfile.mkstemp(prefix="oy-debug-", suffix=".jsonl")
+    os.close(fd)
+    logger = logging.getLogger("oy.debug")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    return logger, path
+
+
+_debug_logger, _debug_log_path = _init_debug_log()
+
+
+def _msg_to_dict(msg) -> dict[str, Any]:
+    """Serialize a ChatMessage to a plain dict for debug logging."""
+    return msgspec.to_builtins(msg)
+
+
+def _debug_log(event: str, **data: Any) -> None:
+    """Write a timestamped JSON-lines entry to the debug log (no-op if disabled)."""
+    if _debug_logger is None:
+        return
+    import time as _time
+    entry = {
+        "ts": _time.time(),
+        "event": event,
+        **data,
+    }
+    _debug_logger.debug(json.dumps(entry, default=str, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------------------
+# Prompts – parsed from README.md (single source of truth)
+# ---------------------------------------------------------------------------
+
+def _load_readme() -> str:
+    """Return the README text, preferring the file next to this module.
+
+    For editable/dev installs the file is always fresher than cached metadata.
+    For proper installs the file won't exist, so we fall back to package metadata
+    (setuptools embeds README.md via the ``readme`` key in pyproject.toml).
+    """
+    readme_path = Path(__file__).resolve().parent / "README.md"
+    if readme_path.exists():
+        return readme_path.read_text(encoding="utf-8")
+    try:
+        from importlib.metadata import metadata as _metadata
+        text = _metadata("oy-cli").get_payload()
+        if text:
+            return text
+    except Exception:
+        pass
+    raise RuntimeError("Cannot locate README.md for prompt extraction")
+
+
+def _parse_prompts(readme: str) -> dict[str, str]:
+    """Extract prompts from README: ``### Header`` followed by a ````markdown`` code block.
+
+    Header is slugified (lowercased, non-alpha stripped) so
+    ``Non-Interactive Appendix`` → ``noninteractiveappendix``.
+    Returns {slug: content} stripped.
+    """
+    prompts: dict[str, str] = {}
+    pattern = re.compile(
+        r"^### ([^\n]+)\n+```markdown\n(.*?)```", re.MULTILINE | re.DOTALL
+    )
+    for m in pattern.finditer(readme):
+        slug = re.sub(r"[^a-z0-9]", "", m.group(1).strip().lower())
+        prompts[slug] = m.group(2).strip()
+    return prompts
+
+
+def _parse_tool_descriptions(readme: str) -> dict[str, str]:
+    """Extract tool descriptions from the first table under ``## Tools``."""
+    tools_match = re.search(r"^## Tools\b.*?\n(\|.+?\|\n)+", readme, re.MULTILINE | re.DOTALL)
+    if not tools_match:
+        raise RuntimeError("Could not find ## Tools table in README")
+    descs: dict[str, str] = {}
+    for line in tools_match.group(0).splitlines():
+        m = re.match(r"\| `(\w+)` \| (.+?) \|$", line)
+        if m:
+            descs[m.group(1)] = m.group(2)
+    return descs
+
+
+_README = _load_readme()
+_PROMPTS = _parse_prompts(_README)
+_TOOL_DESCS = _parse_tool_descriptions(_README)
+
+BASE_SYSTEM_PROMPT = _PROMPTS["baseprompt"]
+INTERACTIVE_SYSTEM_PROMPT = _PROMPTS["interactiveappendix"]
+NONINTERACTIVE_SYSTEM_PROMPT = _PROMPTS["noninteractiveappendix"]
+AUDIT_SYSTEM_PROMPT = _PROMPTS["auditprompt"]
 SEARCH_BACKENDS = {
     "rg": lambda e, p, d, g: [
         e,
@@ -533,14 +631,14 @@ def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details)
         message += f"  {_suffix}"
     # Use bullet for mutating tools (apply, bash), plain for idempotent reads
     if name in {"apply", "bash"}:
-        _print(value=f"● {message}", err=True)
+        _print(value=f"* {message}", err=True)
     else:
         _print(value=message, err=True)
 
 
 def _oneline(text, limit=60):
     flat = " ".join((text or "").split())
-    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+    return flat if len(flat) <= limit else flat[: limit - 1] + "..."
 
 
 def note_apply_ops(ops):
@@ -549,7 +647,7 @@ def note_apply_ops(ops):
         lines = {
             "replace": [
                 f"  replace `{path}`" + (" *(all)*" if op.get("replace_all") else ""),
-                f"  − `{_oneline(op.get('old', ''))}`",
+                f"  - `{_oneline(op.get('old', ''))}`",
                 f"  + `{_oneline(op.get('new', ''))}`",
             ],
             "write": [
@@ -557,8 +655,8 @@ def note_apply_ops(ops):
                 + (" *(overwrite)*" if op.get("overwrite") else " *(new)*"),
                 f"  + `{_oneline(op.get('content', ''))}`",
             ],
-            "move": [f"  ⚠ move `{path}` → `{op.get('to', '?')}`"],
-            "delete": [f"  ⚠ delete `{path}`"],
+            "move": [f"  ! move `{path}` -> `{op.get('to', '?')}`"],
+            "delete": [f"  ! delete `{path}`"],
         }.get(kind, [f"  {kind} `{path}`"])
         for line in lines:
             _print(value=line, err=True)
@@ -780,6 +878,104 @@ def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
     return message
 
 
+def _flatten_tool_call(call) -> str:
+    """Render a single ToolCall as a compact markdown fragment."""
+    args = call.arguments
+    if isinstance(args, dict):
+        parts = [f"  {k}: {preview(v, 120)}" for k, v in args.items()]
+        arg_str = "\n".join(parts)
+    else:
+        arg_str = f"  {preview(args, 200)}"
+    return f"### {call.name}\n{arg_str}"
+
+
+def _flatten_tool_result(msg: ToolMessage) -> str:
+    """Render a ToolMessage result as a compact markdown fragment."""
+    result = msg.content
+    ok = result.ok if hasattr(result, "ok") else True
+    body = result.content if hasattr(result, "content") else result
+    text = body if isinstance(body, str) else json.dumps(body, default=str)
+    text = clip_tokens(text, limit=256)
+    status = "ok" if ok else "error"
+    return f"[{msg.name} -> {status}]\n{text}"
+
+
+def _flatten_turn(assistant: AssistantMessage, tool_msgs: list[ToolMessage]) -> str:
+    """Flatten one assistant-tool turn into a markdown summary."""
+    parts: list[str] = []
+    if assistant.content:
+        parts.append(assistant.content)
+    for call in assistant.tool_calls:
+        parts.append(_flatten_tool_call(call))
+    for tm in tool_msgs:
+        parts.append(_flatten_tool_result(tm))
+    return "\n\n".join(parts)
+
+
+def _compress_older_turns(
+    messages: list[ChatMessage], keep_recent: int = KEEP_RECENT_TURNS
+) -> list[ChatMessage]:
+    """Replace older tool-call turns with flattened markdown summaries.
+
+    A "turn" is an AssistantMessage with tool_calls followed by its
+    corresponding ToolMessages.  The most recent *keep_recent* such turns
+    are kept in their native structured format; all older turns are
+    collapsed into UserMessages containing a markdown summary.
+    """
+    if keep_recent < 0:
+        return messages
+
+    # 1. Identify turn boundaries: (start_index, end_index_exclusive)
+    turns: list[tuple[int, int]] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if isinstance(msg, AssistantMessage) and msg.tool_calls:
+            start = i
+            i += 1
+            # Collect the following ToolMessages that belong to this turn
+            while i < len(messages) and isinstance(messages[i], ToolMessage):
+                i += 1
+            turns.append((start, i))
+        else:
+            i += 1
+
+    if len(turns) <= keep_recent:
+        return messages
+
+    to_flatten = turns[: len(turns) - keep_recent]
+    flatten_set: set[int] = set()
+    for s, e in to_flatten:
+        flatten_set.update(range(s, e))
+
+    # 2. Rebuild the message list, replacing flattened spans
+    result: list[ChatMessage] = []
+    idx = 0
+    while idx < len(messages):
+        if idx not in flatten_set:
+            result.append(messages[idx])
+            idx += 1
+            continue
+        # Find the turn that starts here
+        for s, e in to_flatten:
+            if s == idx:
+                assistant = cast(AssistantMessage, messages[s])
+                tool_msgs = [
+                    cast(ToolMessage, messages[j]) for j in range(s + 1, e)
+                ]
+                summary = _flatten_turn(assistant, tool_msgs)
+                result.append(UserMessage(
+                    f"[Previous tool activity]\n\n{summary}"
+                ))
+                idx = e
+                break
+        else:
+            # Part of a turn but not the start -- skip (already consumed)
+            idx += 1
+
+    return result
+
+
 class Transcript(msgspec.Struct, omit_defaults=True):
     messages: list[ChatMessage] = msgspec.field(default_factory=list)
     max_context_tokens: int = MAX_CONTEXT_TOKENS
@@ -790,6 +986,14 @@ class Transcript(msgspec.Struct, omit_defaults=True):
             self.messages[0] = SystemMessage(system_prompt)
         else:
             self.messages[:0] = [SystemMessage(system_prompt)]
+
+    def checkpoint(self) -> int:
+        """Save the current message count so we can rollback on failure."""
+        return len(self.messages)
+
+    def rollback(self, checkpoint: int) -> None:
+        """Discard all messages added after *checkpoint*."""
+        del self.messages[checkpoint:]
 
     def add_user(self, prompt: str) -> None:
         self.messages.append(UserMessage(prompt))
@@ -813,6 +1017,8 @@ class Transcript(msgspec.Struct, omit_defaults=True):
         msgs = [_truncate_message(m, self.max_message_tokens) for m in self.messages]
         sys_msgs = [m for m in msgs if isinstance(m, SystemMessage)]
         other = [m for m in msgs if not isinstance(m, SystemMessage)]
+        # Flatten older tool-call turns into markdown summaries
+        other = _compress_older_turns(other)
         budget = self.max_context_tokens - sum(map(_message_tokens, sys_msgs))
         if budget <= 0:
             return sys_msgs
@@ -857,10 +1063,7 @@ def _list_dir(root, target, limit):
     )
 
 
-@tool(
-    "List a directory. Use this first on unfamiliar trees. Returns sorted entries, one per line, with / for directories.",
-    ListArgs,
-)
+@tool(_TOOL_DESCS["list"], ListArgs)
 def tool_list(state, path=".", limit=DEFAULT_LINE_LIMIT):
     note_tool(
         state,
@@ -877,10 +1080,7 @@ def tool_list(state, path=".", limit=DEFAULT_LINE_LIMIT):
     return clip_tokens(text)
 
 
-@tool(
-    "Read a file or directory. Use before editing. Files return line-numbered text; directories fall back to list. Use offset/limit for large files.",
-    ReadArgs,
-)
+@tool(_TOOL_DESCS["read"], ReadArgs)
 def tool_read(state, path, offset=1, limit=DEFAULT_LINE_LIMIT):
     target = resolve_path(state.root, path)
     defaults = {"offset": 1, "limit": DEFAULT_LINE_LIMIT}
@@ -904,7 +1104,7 @@ def tool_read(state, path, offset=1, limit=DEFAULT_LINE_LIMIT):
         "read",
         _defaults=defaults,
         _suffix=(
-            f"*(lines {start + 1}–{min(start + len(shown), total)} of {total})*"
+            f"*(lines {start + 1}-{min(start + len(shown), total)} of {total})*"
             if total
             else ""
         ),
@@ -1005,20 +1205,17 @@ def _apply_op(root, index, op):
                 raise ValueError(f"destination already exists: {_rel(root, dest)}")
             dest.parent.mkdir(parents=True, exist_ok=True)
             target.rename(dest)
-            return f"⚠ moved {rel} -> {_rel(root, dest)}"
+            return f"! moved {rel} -> {_rel(root, dest)}"
         case "delete":
             rel = _require_file(root, target, "delete")
             target.unlink()
-            return f"⚠ deleted {rel}"
+            return f"! deleted {rel}"
     raise ValueError(
         f"operation {index} has unsupported op {_fmt('inline', kind)}; use replace, write, move, or delete"
     )
 
 
-@tool(
-    "Edit files inside the workspace. Operations: replace, write, move, delete. Read first and keep edits precise.",
-    ApplyArgs,
-)
+@tool(_TOOL_DESCS["apply"], ApplyArgs)
 def tool_apply(state, operations):
     if isinstance(operations, dict):
         operations = [operations]
@@ -1033,10 +1230,7 @@ def tool_apply(state, operations):
     return out
 
 
-@tool(
-    "Run shell commands for tests, builds, git, and scripts. Do not use for routine file inspection. Returns stdout and stderr together.",
-    BashArgs,
-)
+@tool(_TOOL_DESCS["bash"], BashArgs)
 def tool_bash(state, command, timeout_seconds=120):
     if len(command.encode("utf-8", errors="replace")) > MAX_BASH_CMD_BYTES:
         raise ValueError(
@@ -1062,10 +1256,7 @@ def tool_bash(state, command, timeout_seconds=120):
     return out
 
 
-@tool(
-    "Search file contents by text or regex. Use file_glob to narrow by filename pattern. Returns matching lines with file and line numbers.",
-    GrepArgs,
-)
+@tool(_TOOL_DESCS["grep"], GrepArgs)
 def tool_grep(state, pattern, path=".", file_glob=None):
     env, target = command_env(state.root), resolve_path(state.root, path)
     if not target.exists():
@@ -1118,10 +1309,7 @@ def tool_grep(state, pattern, path=".", file_glob=None):
     raise ValueError("grep requires `rg` or `grep` on PATH")
 
 
-@tool(
-    "Find files by name pattern like '*.py' or 'src/**/*.js'. Use when you know the path shape. Supports *, ?, and **.",
-    GlobArgs,
-)
+@tool(_TOOL_DESCS["glob"], GlobArgs)
 def tool_glob(state, pattern, path=".", limit=DEFAULT_LINE_LIMIT):
     note_tool(
         state,
@@ -1163,10 +1351,7 @@ def _positive_int(value, name):
     return value
 
 
-@tool(
-    "Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted.",
-    HttpxArgs,
-)
+@tool(_TOOL_DESCS["httpx"], HttpxArgs)
 def tool_httpx(
     state,
     url,
@@ -1253,10 +1438,7 @@ def tool_httpx(
     return clip_tokens(out, max_tokens)
 
 
-@tool(
-    "Ask the user a question in interactive runs. Use for significant ambiguity or decisions. Provide choices when useful.",
-    AskArgs,
-)
+@tool(_TOOL_DESCS["ask"], AskArgs)
 def tool_ask(state, question, choices=None):
     note_tool(state, "ask", question=question, choices=choices)
     if not sys.stdin.isatty():
@@ -1279,16 +1461,15 @@ def tool_ask(state, question, choices=None):
             return response
         _print(
             "warning",
-            f"Enter a number 1–{len(choices)} or type the choice exactly.",
+            f"Enter a number 1-{len(choices)} or type the choice exactly.",
             err=True,
         )
 
 
 def active_system_prompt(interactive):
     """Build the system prompt, choosing interactive or non-interactive suffix."""
-    return BASE_SYSTEM_PROMPT + (
-        INTERACTIVE_SYSTEM_PROMPT if interactive else NONINTERACTIVE_SYSTEM_PROMPT
-    )
+    suffix = INTERACTIVE_SYSTEM_PROMPT if interactive else NONINTERACTIVE_SYSTEM_PROMPT
+    return BASE_SYSTEM_PROMPT + "\n" + suffix + "\n"
 
 
 def active_tool_specs(interactive):
@@ -1391,11 +1572,18 @@ async def run_turn(
 ):
     # Strip shim prefix before sending to the API
     _, model = split_model_spec(model_spec)
-    for _ in range(max_steps):
+    for step in range(max_steps):
         prepared = transcript.prepared_messages()
+        _debug_log(
+            "request",
+            model=model_spec,
+            step=step,
+            messages=[_msg_to_dict(m) for m in prepared],
+            tool_count=len(tool_defs),
+        )
         size_str = format_tokens(transcript.prepared_tokens())
         spinner = Status(
-            f"Waiting for {model_spec} · {size_str}",
+            f"Waiting for {model_spec} | {size_str}",
             console=STDERR,
             spinner="dots",
         )
@@ -1405,12 +1593,12 @@ async def run_turn(
             excerpt = ""
             if error_ctx:
                 lines = error_ctx.strip().splitlines()
-                excerpt = " · ".join(line.strip() for line in lines[:3] if line.strip())
+                excerpt = " | ".join(line.strip() for line in lines[:3] if line.strip())
             spinner.console.log(
-                f"[dim]↳ retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}[/dim]"
+                f"[dim]\\-> retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}[/dim]"
             )
             spinner.update(
-                f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) · {size_str}"
+                f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) | {size_str}"
             )
 
         try:
@@ -1425,11 +1613,26 @@ async def run_turn(
             spinner.stop()
         calls = [(call.id, call.name, call.arguments) for call in message.tool_calls]
         output = message.content
+        _debug_log(
+            "response",
+            model=model_spec,
+            step=step,
+            assistant=_msg_to_dict(message),
+        )
         if calls:
             transcript.add_assistant(message)
             results = [
                 (call_id, run_tool(state, name, args)) for call_id, name, args in calls
             ]
+            _debug_log(
+                "tool_results",
+                model=model_spec,
+                step=step,
+                results=[
+                    {"call_id": cid, "name": n, "ok": r.ok}
+                    for (cid, n, _), (_, r) in zip(calls, results, strict=False)
+                ],
+            )
             transcript.add_tool_outputs(calls, results)
             continue
         _print(value=output)
@@ -1507,6 +1710,8 @@ def _print_intro(heading, workspace, model, mode, **extras):
     for key, value in extras.items():
         if value is not None:
             lines.append(f"- {key}: {_fmt('inline', value)}")
+    if _debug_log_path:
+        lines.append(f"- debug log: {_fmt('inline', _debug_log_path)}")
     _print(value="\n".join(lines), err=True)
 
 
@@ -1564,6 +1769,132 @@ def _setup_readline():
     atexit.register(readline.write_history_file, str(history_path))
 
 
+def _read_input():
+    """Read user input, supporting \\ continuation for multi-line."""
+    line = input("oy > ")
+    if not line.endswith("\\"):
+        return line
+    parts = [line[:-1]]
+    while True:
+        cont = input("... ")
+        if not cont.endswith("\\"):
+            parts.append(cont)
+            break
+        parts.append(cont[:-1])
+    return "\n".join(parts)
+
+
+
+COMPACT_PROMPT = """Summarise this conversation so it can replace the history.
+Include: what the user asked, what was done (files read/written, commands run, key
+findings), current state, and any open tasks. Be specific about file paths, function
+names, and error messages. Omit tool-call IDs and boilerplate.
+Target about {token_budget} tokens."""
+
+
+async def _compact_via_llm(transcript, model_spec):
+    """Compress transcript by asking the LLM to summarise it.
+
+    Falls back to local-only compression on any error.
+    """
+    # 1. Local flatten first to shrink what we send
+    sys_msgs = [m for m in transcript.messages if isinstance(m, SystemMessage)]
+    other = [m for m in transcript.messages if not isinstance(m, SystemMessage)]
+    flattened = _compress_older_turns(other, keep_recent=0)
+    if not flattened:
+        return
+
+    # 2. Build a one-shot summary request
+    _, model = split_model_spec(model_spec)
+    prompt = COMPACT_PROMPT.format(token_budget=format_tokens(COMPACT_SUMMARY_TOKENS))
+    summary_messages = sys_msgs + flattened + [UserMessage(prompt)]
+
+    client = get_client(model_spec)
+    spinner = Status(
+        f"Compacting via {model_spec}",
+        console=STDERR,
+        spinner="dots",
+    )
+    spinner.start()
+    try:
+        response = await cast(CompletionClient, client).chat_completion(
+            model=model,
+            messages=summary_messages,
+            tools=None,
+            tool_choice="auto",
+        )
+    finally:
+        spinner.stop()
+
+    summary = (response.content or "").strip()
+    if not summary:
+        # LLM returned nothing useful; keep local compression
+        transcript.messages = sys_msgs + flattened
+        return
+
+    transcript.messages = sys_msgs + [
+        UserMessage(f"[Conversation summary from /compact]\n\n{summary}")
+    ]
+
+
+def _chat_command(cmd, transcript, system_prompt, model_spec):
+    """Handle a /command.  Return True if handled, None to exit, False if unknown."""
+    cmd = cmd.strip().lower()
+    if cmd in ("/help", "/?"):
+        _print(value="\n".join([
+            "## Commands",
+            "",
+            "- `/help` -- show this help",
+            "- `/tokens` -- show context usage",
+            "- `/compact` -- summarise conversation via LLM to free context",
+            "- `/clear` -- reset conversation (keeps system prompt)",
+            "- `/quit` or `/exit` -- end session",
+            "",
+            "Tip: end a line with `\\` to continue on the next line.",
+        ]), err=True)
+        return True
+    if cmd == "/tokens":
+        total = transcript.session_tokens()
+        prepped = transcript.prepared_tokens()
+        budget = transcript.max_context_tokens
+        msgs = len(transcript.messages)
+        _print(value="\n".join([
+            "## Context",
+            "",
+            f"- messages: {msgs}",
+            f"- session tokens: {format_tokens(total)}",
+            f"- prepared tokens: {format_tokens(prepped)}",
+            f"- context budget: {format_tokens(budget)}",
+            f"- remaining: ~{format_tokens(max(budget - prepped, 0))}",
+        ]), err=True)
+        return True
+    if cmd == "/compact":
+        before = transcript.session_tokens()
+        try:
+            asyncio.run(_compact_via_llm(transcript, model_spec))
+        except KeyboardInterrupt:
+            _print(value="\nCompact cancelled.", err=True)
+            return True
+        except Exception as exc:
+            _print("warning", f"LLM compact failed ({exc}); using local compression.", err=True)
+            sys_msgs = [m for m in transcript.messages if isinstance(m, SystemMessage)]
+            other = [m for m in transcript.messages if not isinstance(m, SystemMessage)]
+            transcript.messages = sys_msgs + _compress_older_turns(other, keep_recent=0)
+        after = transcript.session_tokens()
+        _print(
+            value=f"Compacted: {format_tokens(before)} -> {format_tokens(after)}",
+            err=True,
+        )
+        return True
+    if cmd == "/clear":
+        transcript.messages = [SystemMessage(system_prompt)]
+        _print(value="Conversation cleared.", err=True)
+        return True
+    if cmd in ("/quit", "/exit"):
+        return None  # sentinel: exit
+    return False
+
+
 def chat():
     """Start an interactive anonymous session."""
 
@@ -1580,6 +1911,7 @@ def chat():
         "interactive",
         **({"system file": system_file.resolve()} if system_file else {}),
     )
+    _print(value="Type `/help` for commands.", err=True)
 
     transcript = Transcript(messages=[SystemMessage(system_prompt)])
 
@@ -1587,12 +1919,33 @@ def chat():
         try:
             STDERR.print()
             STDERR.rule(style="dim")
-            prompt = input("oy ❯ ")
-            if not prompt.strip():
-                continue
-            if prompt.strip().lower() in ("exit", "quit"):
-                break
+            prompt = _read_input()
+        except KeyboardInterrupt:
+            STDERR.print()
+            continue
+        except EOFError:
+            _print(value="\n## Session Ended", err=True)
+            break
 
+        if not prompt.strip():
+            continue
+
+        # Slash commands
+        if prompt.strip().startswith("/"):
+            result = _chat_command(prompt.strip(), transcript, system_prompt, chosen_model)
+            if result is None:
+                break
+            if result:
+                continue
+            _print("warning", f"Unknown command: {prompt.strip().split()[0]}", err=True)
+            continue
+
+        # Legacy exit
+        if prompt.strip().lower() in ("exit", "quit"):
+            break
+
+        cp = transcript.checkpoint()
+        try:
             code, _ = asyncio.run(
                 run_agent(
                     prompt,
@@ -1605,11 +1958,20 @@ def chat():
                     transcript=transcript,
                 )
             )
-            size_str = format_tokens(transcript.session_tokens())
-            STDERR.print(f"[dim]· {size_str}[/dim]")
-        except KeyboardInterrupt, EOFError:
-            _print(value="\n## Session Ended", err=True)
-            break
+        except KeyboardInterrupt:
+            transcript.rollback(cp)
+            _print(value="\nCancelled — your message is in readline history (press ↑).", err=True)
+            continue
+        except Exception as exc:
+            transcript.rollback(cp)
+            _print("error", f"Agent error: {exc}", err=True)
+            _print(value="Your message is in readline history (press ↑).", err=True)
+            continue
+
+        prepped = transcript.prepared_tokens()
+        budget = transcript.max_context_tokens
+        remaining = max(budget - prepped, 0)
+        STDERR.print(f"[dim]| {format_tokens(prepped)} used, ~{format_tokens(remaining)} remaining[/dim]")
     return 0
 
 

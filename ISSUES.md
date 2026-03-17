@@ -16,9 +16,9 @@ Total issues found: 13
 
 ## Open Issues
 
-### H2. `httpx` tool has no SSRF protection — no internal-network filtering
+### H2. `httpx` tool has no SSRF protection -- no internal-network filtering
 
-- **Location**: `oy_cli.py` — `tool_httpx`
+- **Location**: `oy_cli.py` -- `tool_httpx`
 - **Category**: security
 - **Reference**: OWASP ASVS V14.5.1 (SSRF Prevention), CWE-918
 
@@ -68,7 +68,7 @@ No pre-commit hooks are configured to catch syntax errors, formatting violations
 | ID | Issue | Resolution |
 |----|-------|------------|
 | H1 | `glob` results escaped workspace via symlinks/`..` | Glob results filtered through workspace-root containment check; out-of-workspace paths silently excluded |
-| H3 | Hardcoded OAuth client secrets | All credentials have `os.environ.get()` overrides; source comment documents them as public "installed app" creds per RFC 8252 §8.5 |
+| H3 | Hardcoded OAuth client secrets | All credentials have `os.environ.get()` overrides; source comment documents them as public "installed app" creds per RFC 8252 S8.5 |
 | M1 | `max_tokens: 8096` instead of `8192` in Claude client | Corrected to `8192` |
 | M4 | `_rel()` leaked absolute paths for out-of-workspace files | Returns `"<outside workspace>"` placeholder instead |
 | M5 | Credential files written world-readable | `save_json()` calls `p.chmod(0o600)` after writing |
