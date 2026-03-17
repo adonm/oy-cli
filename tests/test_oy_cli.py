@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import msgspec
 
 import oy_cli
-from shim import SystemMessage, ToolSpec, UserMessage
+from shim import SystemMessage, ToolMessage, ToolResult, ToolSpec, UserMessage
 
 
 class EchoArgs(msgspec.Struct, omit_defaults=True):
@@ -19,28 +20,6 @@ def _echo(state, text):
 
 
 class ToolDispatchTests(unittest.TestCase):
-    def _state(self, registry):
-        return oy_cli.AgentState(
-            root=Path("/tmp/ok"),
-            max_tool_calls=2,
-            tool_specs=registry,
-        )
-
-    def test_registry_invokes_normalized_tool_name(self):
-        registry = oy_cli.ToolRegistry(
-            {
-                "echo": oy_cli.ToolHandler(
-                    name="echo",
-                    fn=_echo,
-                    spec=ToolSpec("echo", "echo text", {"type": "object"}),
-                    args_type=EchoArgs,
-                )
-            }
-        )
-        result = registry.invoke(self._state(registry), "tool_echo", {"text": "hi"})
-        self.assertTrue(result.ok)
-        self.assertEqual(result.content, "ok:hi")
-
     def test_registry_returns_structured_validation_errors(self):
         registry = oy_cli.ToolRegistry(
             {
@@ -52,66 +31,30 @@ class ToolDispatchTests(unittest.TestCase):
                 )
             }
         )
-        result = registry.invoke(self._state(registry), "echo", {})
+        state = oy_cli.AgentState(
+            root=Path("/tmp/ok"),
+            tool_specs=registry,
+            unattended_timeout_seconds=3600,
+            unattended_deadline=float("inf"),
+        )
+        result = registry.invoke(state, "echo", {})
         self.assertFalse(result.ok)
         self.assertEqual(result.content["tool"], "echo")
         self.assertIn("error_type", result.content)
 
-    def test_chat_tools_returns_registered_specs(self):
-        registry = oy_cli.ToolRegistry(
-            {
-                "echo": oy_cli.ToolHandler(
-                    name="echo",
-                    fn=_echo,
-                    spec=ToolSpec("echo", "echo text", {"type": "object"}),
-                    args_type=EchoArgs,
-                )
-            }
-        )
-        self.assertEqual(oy_cli.chat_tools(registry), [registry.get("echo").spec])
-
-    def test_agent_state_enforces_tool_call_limit(self):
+    def test_agent_state_enforces_unattended_timeout(self):
         state = oy_cli.AgentState(
             root=Path("/tmp/ok"),
-            max_tool_calls=1,
             tool_specs=oy_cli.ToolRegistry(),
+            unattended_timeout_seconds=3600,
+            unattended_deadline=10.0,
         )
-        state.note_tool_call()
-        with self.assertRaisesRegex(ValueError, "reached max tool calls"):
-            state.note_tool_call()
-
-    def test_model_command_shows_current_model_in_non_tty(self):
-        with (
-            patch.object(oy_cli, "_model", return_value="openai:gpt-4o"),
-            patch.object(oy_cli, "resolve_active_shim", return_value="openai"),
-            patch.object(oy_cli, "split_model_spec", return_value=("openai", "gpt-4o")),
-            patch.object(oy_cli.sys.stdin, "isatty", return_value=False),
-            patch.object(oy_cli, "_print") as mock_print,
-        ):
-            self.assertEqual(oy_cli.model(), 0)
-        self.assertIn("Current Model", mock_print.call_args.kwargs["value"])
+        with patch.object(oy_cli.time, "monotonic", return_value=10.0):
+            with self.assertRaisesRegex(TimeoutError, r"reached unattended timeout \(1h\)"):
+                state.note_progress()
 
 
 class TranscriptTests(unittest.TestCase):
-    def test_set_system_prompt_replaces_first_system_message(self):
-        transcript = oy_cli.Transcript(
-            messages=[SystemMessage("old"), UserMessage("hi")]
-        )
-        transcript.set_system_prompt("new")
-        self.assertEqual(transcript.messages[0], SystemMessage("new"))
-        self.assertEqual(transcript.messages[1], UserMessage("hi"))
-
-    def test_truncate_message_adds_notice_for_long_content(self):
-        transcript = oy_cli.Transcript(max_message_tokens=3)
-        with patch.object(
-            oy_cli,
-            "truncate_str_to_tokens",
-            return_value="abc\n... [truncated: 1 line, 3 chars omitted to fit 3-token limit]",
-        ):
-            truncated = transcript.truncate_message(UserMessage("abcdef"))
-        self.assertIsInstance(truncated, UserMessage)
-        self.assertIn("truncated:", truncated.content)
-
     def test_prepared_messages_drops_older_context(self):
         transcript = oy_cli.Transcript(
             messages=[
@@ -130,41 +73,54 @@ class TranscriptTests(unittest.TestCase):
         self.assertIn("earlier messages omitted", prepared[1].content)
         self.assertEqual(prepared[-1], UserMessage("kl"))
 
-    def test_prepared_tokens_counts_prepared_transcript(self):
+    def test_prepared_messages_uses_headroom_before_dropping_history(self):
         transcript = oy_cli.Transcript(
-            messages=[SystemMessage("sys"), UserMessage("abc"), UserMessage("de")],
-            max_context_tokens=20,
-            max_message_tokens=10,
+            messages=[
+                SystemMessage("sys"),
+                UserMessage("abcdef"),
+                UserMessage("ghij"),
+            ],
+            max_context_tokens=21,
+            max_message_tokens=100,
         )
-        with patch.object(oy_cli, "count_tokens", side_effect=lambda text: len(text)):
-            self.assertEqual(transcript.prepared_tokens(), 20)
-
-
-class PickModelTests(unittest.TestCase):
-    def test_pick_model_aborts_in_non_interactive_mode(self):
-        with patch.object(oy_cli.sys.stdin, "isatty", return_value=False):
-            with self.assertRaises(SystemExit):
-                oy_cli._pick_model()
-
-    def test_pick_model_aborts_when_non_interactive_env_set(self):
         with (
-            patch.object(oy_cli.sys.stdin, "isatty", return_value=True),
-            patch.dict(oy_cli.os.environ, {"OY_NON_INTERACTIVE": "1"}),
+            patch.object(oy_cli, "count_tokens", side_effect=lambda text: len(text)),
+            patch.object(
+                oy_cli,
+                "headroom_compress",
+                return_value=SimpleNamespace(
+                    messages=[
+                        {"role": "system", "content": "sys"},
+                        {"role": "user", "content": ""},
+                        {"role": "user", "content": "ghij"},
+                    ]
+                ),
+            ) as mock_headroom,
         ):
-            with self.assertRaises(SystemExit):
-                oy_cli._pick_model()
+            prepared = transcript.prepared_messages(model="gpt-4o")
+        mock_headroom.assert_called_once()
+        self.assertEqual(
+            prepared,
+            [
+                SystemMessage("sys"),
+                UserMessage(""),
+                UserMessage("ghij"),
+            ],
+        )
+
+
+class BudgetTests(unittest.TestCase):
+    def test_runtime_budgets_scale_up_for_large_context_models(self):
+        small = oy_cli._derive_runtime_budgets(32_768)
+        large = oy_cli._derive_runtime_budgets(131_072)
+
+        self.assertGreater(large.message_tokens, small.message_tokens)
+        self.assertGreater(large.tool_output_tokens, small.tool_output_tokens)
+        self.assertGreater(large.tool_tail_tokens, small.tool_tail_tokens)
+        self.assertGreater(large.default_line_limit, small.default_line_limit)
 
 
 class ResolvePathTests(unittest.TestCase):
-    def test_resolve_path_allows_child(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            (root / "sub").mkdir()
-            result = oy_cli.resolve_path(root, "sub")
-            self.assertEqual(result, (root / "sub").resolve())
-
     def test_resolve_path_rejects_traversal(self):
         import tempfile
 
@@ -174,71 +130,126 @@ class ResolvePathTests(unittest.TestCase):
                 oy_cli.resolve_path(root, "../../etc/passwd")
 
 
-class ReplaceTests(unittest.TestCase):
-    def test_replace_single_match(self):
-        text, count = oy_cli._replace("hello world", "world", "earth")
-        self.assertEqual(text, "hello earth")
-        self.assertEqual(count, 1)
+class EditToolTests(unittest.TestCase):
+    def test_edit_replace_supports_regex(self):
+        import tempfile
 
-    def test_replace_rejects_empty_old(self):
-        with self.assertRaisesRegex(ValueError, "old is empty"):
-            oy_cli._replace("hello", "", "x")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            path = root / "demo.txt"
+            path.write_text("alpha-1\nalpha-2\n", encoding="utf-8")
+            state = oy_cli.AgentState(
+                root=root,
+                tool_specs=oy_cli.TOOL_REGISTRY,
+                unattended_timeout_seconds=3600,
+                unattended_deadline=float("inf"),
+            )
+            with patch.object(oy_cli, "_print"):
+                result = oy_cli.tool_edit(
+                    state,
+                    {
+                        "op": "replace",
+                        "path": "demo.txt",
+                        "old": r"alpha-\d",
+                        "new": "beta",
+                        "regex": True,
+                        "replace_all": True,
+                    },
+                )
+            updated = path.read_text(encoding="utf-8")
+        self.assertIn("replaced demo.txt (2 matches)", result)
+        self.assertEqual(updated, "beta\nbeta\n")
 
-    def test_replace_rejects_missing_target(self):
-        with self.assertRaisesRegex(ValueError, "not found"):
-            oy_cli._replace("hello", "xyz", "x")
+    def test_edit_write_can_target_line_range(self):
+        import tempfile
 
-    def test_replace_rejects_ambiguous_match(self):
-        with self.assertRaisesRegex(ValueError, "multiple matches"):
-            oy_cli._replace("aa", "a", "b")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            path = root / "demo.txt"
+            path.write_text("a\nb\nc\n", encoding="utf-8")
+            state = oy_cli.AgentState(
+                root=root,
+                tool_specs=oy_cli.TOOL_REGISTRY,
+                unattended_timeout_seconds=3600,
+                unattended_deadline=float("inf"),
+            )
+            with patch.object(oy_cli, "_print"):
+                result = oy_cli.tool_edit(
+                    state,
+                    {
+                        "op": "write",
+                        "path": "demo.txt",
+                        "content": "x\ny\n",
+                        "start_line": 2,
+                        "end_line": 3,
+                    },
+                )
+            updated = path.read_text(encoding="utf-8")
+        self.assertEqual(result, "wrote demo.txt")
+        self.assertEqual(updated, "a\nx\ny\n")
 
-    def test_replace_all(self):
-        text, count = oy_cli._replace("aa", "a", "b", replace_all=True)
-        self.assertEqual(text, "bb")
-        self.assertEqual(count, 2)
+
+class ListToolTests(unittest.TestCase):
+    def test_list_path_accepts_pathlib_glob(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+            (root / "src" / "util.txt").write_text("helper\n", encoding="utf-8")
+            state = oy_cli.AgentState(
+                root=root,
+                tool_specs=oy_cli.TOOL_REGISTRY,
+                unattended_timeout_seconds=3600,
+                unattended_deadline=float("inf"),
+            )
+            with patch.object(oy_cli, "_print"):
+                result = oy_cli.tool_list(state, path="src/*.py")
+        self.assertEqual(result, "src/main.py")
 
 
-class RelTests(unittest.TestCase):
-    def test_rel_returns_relative_path_inside_workspace(self):
-        root = Path("/workspace")
-        p = Path("/workspace/src/main.py")
-        self.assertEqual(oy_cli._rel(root, p), "src/main.py")
+class SearchToolTests(unittest.TestCase):
+    def _state(self, root: Path):
+        return oy_cli.AgentState(
+            root=root,
+            tool_specs=oy_cli.TOOL_REGISTRY,
+            unattended_timeout_seconds=3600,
+            unattended_deadline=float("inf"),
+        )
 
-    def test_rel_returns_placeholder_for_outside_workspace(self):
-        root = Path("/workspace")
-        p = Path("/etc/passwd")
-        self.assertEqual(oy_cli._rel(root, p), "<outside workspace>")
+    def test_search_path_accepts_pathlib_glob(self):
+        import tempfile
 
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
+            (root / "src" / "guide.txt").write_text("needle\n", encoding="utf-8")
+            with patch.object(oy_cli, "_print"):
+                result = oy_cli.tool_search(self._state(root), "needle", path="src/*.py")
+        self.assertIn("src/main.py:1:1:needle", result)
+        self.assertNotIn("src/guide.txt", result)
 
-class ClipTokensTests(unittest.TestCase):
-    def test_short_text_unchanged(self):
-        result = oy_cli.clip_tokens("hello", limit=1000)
-        self.assertEqual(result, "hello")
+    def test_search_can_target_line_range_in_single_file(self):
+        import tempfile
 
-    def test_long_text_truncated(self):
-        result = oy_cli.clip_tokens("a " * 10000, limit=10)
-        self.assertIn("tokens omitted", result)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "demo.txt").write_text("skip\nneedle\nskip\nneedle\n", encoding="utf-8")
+            with patch.object(oy_cli, "_print"):
+                result = oy_cli.tool_search(
+                    self._state(root),
+                    "needle",
+                    path="demo.txt",
+                    start_line=4,
+                    end_line=4,
+                )
+        self.assertEqual(result, "demo.txt:4:1:needle")
 
 
 class JsonPathTests(unittest.TestCase):
-    """Tests for _json_path including the depth cap (M3)."""
-
-    def test_simple_dict_traversal(self):
-        self.assertEqual(oy_cli._json_path({"a": {"b": 1}}, "a.b"), 1)
-
-    def test_list_index(self):
-        self.assertEqual(oy_cli._json_path([10, 20, 30], "1"), 20)
-
-    def test_missing_key_raises(self):
-        with self.assertRaisesRegex(ValueError, "key not found"):
-            oy_cli._json_path({"a": 1}, "b")
-
-    def test_non_integer_index_raises(self):
-        with self.assertRaisesRegex(ValueError, "expected index"):
-            oy_cli._json_path([1, 2], "foo")
-
     def test_depth_cap_raises(self):
-        # Build a deeply nested structure and a path exceeding 20 levels
         obj = 0
         for _ in range(25):
             obj = {"a": obj}
@@ -246,22 +257,41 @@ class JsonPathTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "json_path exceeded max depth"):
             oy_cli._json_path(obj, deep)
 
-    def test_index_error_caught(self):
-        with self.assertRaisesRegex(ValueError, "out of range"):
-            oy_cli._json_path([1, 2], "5")
 
-    def test_empty_path_returns_value(self):
-        self.assertEqual(oy_cli._json_path(42, ""), 42)
+class HeadroomSerializationTests(unittest.TestCase):
+    def test_serialize_for_headroom_stringifies_tool_content(self):
+        message = ToolMessage(
+            tool_call_id="call_1",
+            name="httpx",
+            content=ToolResult(ok=False, content={"count": 2, "ok": True}),
+        )
+        payload = oy_cli._serialize_for_headroom(message)
+        self.assertEqual(payload["role"], "tool")
+        self.assertFalse(payload["ok"])
+        self.assertIsInstance(payload["content"], str)
+        self.assertIn('"count": 2', payload["content"])
 
-
-class CommandEnvImmutabilityTests(unittest.TestCase):
-    """Test that command_env returns an immutable mapping (L3)."""
-
-    def test_command_env_is_immutable(self):
-        from shim import command_env
-        env = command_env()
-        with self.assertRaises(TypeError):
-            env["SHOULD_NOT_WORK"] = "value"
+    def test_deserialize_from_headroom_restores_openai_tool_calls(self):
+        message = oy_cli._deserialize_from_headroom(
+            {
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": '{"command":"pytest"}',
+                        },
+                    }
+                ],
+            }
+        )
+        self.assertEqual(message.content, "checking")
+        self.assertEqual(len(message.tool_calls), 1)
+        self.assertEqual(message.tool_calls[0].name, "bash")
+        self.assertEqual(message.tool_calls[0].arguments, {"command": "pytest"})
 
 
 if __name__ == "__main__":

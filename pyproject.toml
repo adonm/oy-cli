@@ -20,6 +20,7 @@ dependencies = [
   "tiktoken>=0.7.0",
   "tenacity>=9.0.0",
   "msgspec>=0.20.0",
+  "headroom-ai>=0.4.6",
 ]
 
 [dependency-groups]

@@ -32,7 +32,7 @@ mise run build
 - current design goal: keep the implementation small and easy to audit
 - prefer env-first run configuration so common usage stays close to `oy "prompt"`
 - run env vars: `OY_MODEL`, `OY_SHIM`, `OY_NON_INTERACTIVE`, `OY_SYSTEM_FILE`, `OY_ROOT`, `OY_CONFIG`
-- tuning env vars: `OY_MAX_TOOL_OUTPUT_TOKENS`, `OY_MAX_TOOL_TAIL_TOKENS`, `OY_MAX_BASH_CMD_BYTES`, `OY_MAX_CONTEXT_TOKENS`, `OY_MAX_MESSAGE_TOKENS`, `OY_DEFAULT_MAX_STEPS`, `OY_DEFAULT_MAX_TOOL_CALLS`, `OY_DEFAULT_LINE_LIMIT`, `OY_BEDROCK_READ_TIMEOUT`, `OY_BEDROCK_MAX_OUTPUT_TOKENS`
+- tuning env vars: `OY_MAX_CONTEXT_TOKENS`, `OY_UNATTENDED_TIMEOUT_SECONDS`, `OY_MAX_BASH_CMD_BYTES`, `OY_BEDROCK_READ_TIMEOUT`, `OY_BEDROCK_MAX_OUTPUT_TOKENS`
 - prefer simple, direct changes over abstraction-heavy rewrites
 - `except A, B:` syntax is valid Python 3.14+ (PEP 758) -- ruff formats it this way; parenthesised form also works
 - keep system prompts tight; avoid duplicating tool docs inside prompts when tool definitions already provide them

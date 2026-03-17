@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/oy-cli)](https://pypi.org/project/oy-cli/)
 
-**Tiny AI coding assistant for your shell.** Reads files, runs commands, makes precise edits, and stays intentionally small.
+**AI coding assistant for your shell.** Reads files, runs commands, and makes edits.
 
 ```bash
 uv tool install oy-cli
@@ -13,7 +13,7 @@ oy "add docstrings to public functions"
 
 ```bash
 # Basic usage
-oy "read the main module and suggest improvements"
+oy "inspect the main module and suggest improvements"
 
 # Work in a specific directory
 OY_ROOT=./my-project oy "fix the failing tests"
@@ -38,29 +38,30 @@ oy --help                 # Show all commands
 
 ## Why This Exists
 
-Most AI coding tools are large, complex, or lock you into a single provider. `oy` is deliberately small, easy to audit, and built around a narrow tool surface.
+`oy` is small, auditable, and built around a narrow tool surface.
 
 **Design goals:** small auditable codebase, minimal tool surface,
 OpenAI-completions-focused CLI loop, multiple backends behind shims,
-fresh session each run, and explicit checkpoints when needed.
+new session each run, and explicit checkpoints when needed.
 
 ## System Prompts
 
-The system prompt is intentionally short. Tool semantics live with the tool definitions; the system prompt focuses on operating rules and judgment:
+The system prompt is short. Tool semantics live with the tool definitions; the system prompt focuses on operating rules and judgment:
 
 ### Base Prompt
 
 ```markdown
-You are oy, a tiny coding cli with tools.
+You are oy, a coding cli with tools.
 Work by inspecting first, then making explicit changes. Prefer simple auditable solutions.
-Keep going until done or genuinely blocked; if blocked, say what you tried and next steps.
-Use grugbrain-style simplicity for complexity, OWASP-minded judgment for security, and performance-aware judgment to avoid obvious waste.
+Keep going until done or blocked; if blocked, say what you tried and next steps.
+Use grugbrain-style simplicity for complexity, OWASP-minded judgment for security, and performance-aware judgment.
+Inspect with `search` for content and `list` for path discovery. Batch independent tool calls.
 ```
 
 ### Interactive Appendix
 
 ```markdown
-Use ask only when significant clarification or direction is needed.
+Use ask only when clarification or direction is needed.
 ```
 
 ### Non-Interactive Appendix
@@ -71,20 +72,22 @@ Non-interactive mode: do not pause for approval.
 
 ## Tools
 
-Each tool description is passed directly to the model. These are the exact descriptions:
+Each tool description is passed directly to the model:
 
 | Tool | Description |
 |------|-------------|
-| `list` | List a directory. Use this first on unfamiliar trees. Returns sorted entries, one per line, with / for directories. |
-| `read` | Read a file or directory. Use before editing. Files return line-numbered text; directories fall back to list. Use offset/limit for large files. |
-| `apply` | Edit files inside the workspace. Operations: replace, write, move, delete. Read first and keep edits precise. |
+| `list` | List paths by calling `Path.glob(path)`. Defaults to `path: "*"`. Use `src/*` or `src/**/*.py` exactly like pathlib glob patterns. Returns sorted entries, one per line, with / for directories. |
+| `edit` | Edit files inside the workspace. Operations: replace, write, move, delete. `replace` supports literal replacement or regex replacement with `regex: true`. `replace` and `write` also accept 1-based `start_line` and `end_line` when targeting a file. |
 | `bash` | Run shell commands for tests, builds, git, and scripts. Do not use for routine file inspection. Returns stdout and stderr together. |
-| `grep` | Search file contents by text or regex. Use file_glob to narrow by filename pattern. Returns matching lines with file and line numbers. |
-| `glob` | Find files by name pattern like '*.py' or 'src/**/*.js'. Use when you know the path shape. Supports *, ?, and **. |
+| `search` | Search file contents with Python regex. Use this for content inspection. `path` limits where it searches and may be a file, directory, or pathlib-style glob. When `path` resolves to one file, `start_line` and `end_line` limit the search to that 1-based line range. |
 | `httpx` | Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted. |
-| `ask` | Ask the user a question in interactive runs. Use for significant ambiguity or decisions. Provide choices when useful. |
+| `ask` | Ask the user a question in interactive runs. Use for ambiguity or decisions. Provide choices. |
 
-**Output truncation:** tool output is clipped to preserve context window; `bash` keeps both head and tail. When clipped, narrow the next query.
+**Output truncation:** tool output is clipped to preserve context window; `bash` keeps both head and tail. When clipped, narrow the next query or use `search` with a tighter `path` instead of re-running broad inspection.
+
+**Conversation compaction:** interactive chat compresses prepared context with [Headroom](https://github.com/chopratejas/headroom) before each model request, then falls back to omitting the oldest messages if the transcript still does not fit.
+
+**Parallel tool calls:** `oy` can execute multiple tool calls returned in a single assistant turn. Explicit provider flags for parallel tool calls are only sent where the upstream API supports them directly today; other providers rely on their native tool-calling behavior.
 
 ## Audit Command
 
@@ -94,10 +97,10 @@ Each tool description is passed directly to the model. These are the exact descr
 
 ```markdown
 Audit the repo for security, unnecessary complexity, and major
-obvious performance issues, preserving project and human context.
+performance issues, preserving project and human context.
 First read key markdown docs, then refresh or generate an audit
 header at the top of ISSUES.md that includes the current date,
-the latest Git commit reference, and a concise codebase summary
+the latest Git commit reference, and a codebase summary
 using tools like `scc` or `tokei`. Next, fetch the current OWASP
 ASVS (or MASVS if more relevant) and grugbrain.dev guidelines
 using httpx, inspect the codebase against these, and write or
@@ -140,10 +143,10 @@ On first run, if no model is configured, `oy` prompts you to pick one from
 the available backends. Set `OY_MODEL`, `OY_SHIM`, or save a config with
 `oy model` to pin behavior.
 
-**Recommended model:** From testing, `glm-5` offers the best balance of
-intelligence, cost, and tool-use ability. `kimi-k2.5` is another strong option.
+**Model notes:** From testing, `glm-5` balances intelligence,
+cost, and tool-use ability. `kimi-k2.5` is another option.
 The [Artificial Analysis Comparison of Open Source Models](https://artificialanalysis.ai/models/open-source)
-is a good reference.
+is a reference.
 
 ## Requirements
 
@@ -174,10 +177,10 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1
 export OPENAI_API_KEY=...
 ```
 
-Gemini, Claude, Codex (OpenAI) creds should be automatically introspected
+Gemini, Claude, Copilot, and Codex (OpenAI) creds are introspected
 and used, if creds are available `oy model` will show them in the model list.
 
-**AWS Bedrock (automatic):** Uses your default AWS profile/region. Supports auto-refresh of stale SSO sessions.
+**AWS Bedrock:** Uses your default AWS profile/region. Supports auto-refresh of stale SSO sessions.
 ```bash
 export AWS_PROFILE=my-profile
 export AWS_REGION=us-west-2
@@ -203,8 +206,8 @@ Recommended:
 - avoid exposing long-lived secrets in the environment
 - review generated changes before shipping
 
-**Automatic protections:** workspace-bound file access, structured edits
-through `apply`, sensitive header redaction in `httpx`, and native boto3
+**Protections:** workspace-bound file access, structured edits
+through `edit`, sensitive header redaction in `httpx`, and native boto3
 credential resolution for Bedrock.
 
 ## Links

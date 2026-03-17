@@ -609,13 +609,45 @@ def command_env(cwd=None):
 
 
 def http_client(**kw):
-    """Create a synchronous httpx client with redirects enabled."""
-    return httpx.Client(follow_redirects=True, **kw)
+    """Create a synchronous httpx client with redirects enabled.
+
+    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so strip
+    them when callers pass through shared config dicts.
+    """
+    httpx_kw = dict(kw)
+    for key in (
+        "api_key",
+        "max_retries",
+        "default_headers",
+        "default_query",
+        "organization",
+        "project",
+        "webhook_secret",
+        "_strict_response_validation",
+    ):
+        httpx_kw.pop(key, None)
+    return httpx.Client(follow_redirects=True, **httpx_kw)
 
 
 def async_http_client(**kw):
-    """Create an asynchronous httpx client with redirects enabled."""
-    return httpx.AsyncClient(follow_redirects=True, **kw)
+    """Create an asynchronous httpx client with redirects enabled.
+
+    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so strip
+    them when callers pass through shared config dicts.
+    """
+    httpx_kw = dict(kw)
+    for key in (
+        "api_key",
+        "max_retries",
+        "default_headers",
+        "default_query",
+        "organization",
+        "project",
+        "webhook_secret",
+        "_strict_response_validation",
+    ):
+        httpx_kw.pop(key, None)
+    return httpx.AsyncClient(follow_redirects=True, **httpx_kw)
 
 
 def _sigv4_sign(key: bytes, msg: str) -> bytes:
@@ -1649,7 +1681,7 @@ def _responses_payload(
     if response_tools:
         payload["tools"] = response_tools
         payload["tool_choice"] = tool_choice
-        payload["parallel_tool_calls"] = False
+        payload["parallel_tool_calls"] = True
     return payload
 
 

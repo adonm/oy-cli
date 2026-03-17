@@ -6,11 +6,12 @@ import logging
 import os
 import re
 import sys
-import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias, cast
 from urllib.parse import urlparse
 import defopt
+from headroom import compress as headroom_compress
 import httpx
 import msgspec
 import tiktoken
@@ -22,6 +23,7 @@ from shim import (
     run_cmd,
     save_json,
     SystemMessage,
+    ToolCall,
     ToolMessage,
     ToolResult,
     ToolSpec,
@@ -63,17 +65,35 @@ def _env(name, default, t=None):
     return default if v is None else (t or type(default))(v)
 
 
-MAX_TOOL_OUTPUT_TOKENS = _env("MAX_TOOL_OUTPUT_TOKENS", 4096)
-MAX_TOOL_TAIL_TOKENS = _env("MAX_TOOL_TAIL_TOKENS", 1024)
 MAX_BASH_CMD_BYTES = _env("MAX_BASH_CMD_BYTES", 65536)
 MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
-MAX_MESSAGE_TOKENS = _env("MAX_MESSAGE_TOKENS", 4096)
-DEFAULT_MAX_STEPS = _env("DEFAULT_MAX_STEPS", 512)
-DEFAULT_MAX_TOOL_CALLS = _env("DEFAULT_MAX_TOOL_CALLS", 512)
-DEFAULT_LINE_LIMIT = _env("DEFAULT_LINE_LIMIT", 500)
-KEEP_RECENT_TURNS = _env("KEEP_RECENT_TURNS", 3)
-COMPACT_SUMMARY_TOKENS = _env("COMPACT_SUMMARY_TOKENS", 16384)
+DEFAULT_UNATTENDED_TIMEOUT_SECONDS = _env("UNATTENDED_TIMEOUT_SECONDS", 3600)
 CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
+
+
+def _clamp_int(value: int, lower: int, upper: int) -> int:
+    return max(lower, min(value, upper))
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeBudgets:
+    message_tokens: int
+    tool_output_tokens: int
+    tool_tail_tokens: int
+    default_line_limit: int
+
+
+def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
+    tool_output_tokens = _clamp_int(context_tokens // 24, 2048, 8192)
+    return RuntimeBudgets(
+        message_tokens=_clamp_int(context_tokens // 16, tool_output_tokens, 12288),
+        tool_output_tokens=tool_output_tokens,
+        tool_tail_tokens=_clamp_int(tool_output_tokens // 5, 512, 2048),
+        default_line_limit=_clamp_int(tool_output_tokens // 6, 200, 1200),
+    )
+
+
+BUDGETS = _derive_runtime_budgets(MAX_CONTEXT_TOKENS)
 
 # ---------------------------------------------------------------------------
 # Debug logging -- activated by OY_DEBUG=1
@@ -183,29 +203,6 @@ BASE_SYSTEM_PROMPT = _PROMPTS["baseprompt"]
 INTERACTIVE_SYSTEM_PROMPT = _PROMPTS["interactiveappendix"]
 NONINTERACTIVE_SYSTEM_PROMPT = _PROMPTS["noninteractiveappendix"]
 AUDIT_SYSTEM_PROMPT = _PROMPTS["auditprompt"]
-SEARCH_BACKENDS = {
-    "rg": lambda e, p, d, g: [
-        e,
-        "--line-number",
-        "--column",
-        "--color",
-        "never",
-        "--hidden",
-        "--glob",
-        "!.git",
-        *(["--glob", g] if g else []),
-        p,
-        d,
-    ],
-    "grep": lambda e, p, d, g: [
-        e,
-        "-rnE",
-        "--exclude-dir=.git",
-        *(["--include", g] if g else []),
-        p,
-        d,
-    ],
-}
 STDOUT, STDERR = Console(), Console(stderr=True)
 _httpx_preset = {"type": "string", "enum": ["page", "json", "post_json"]}
 _httpx_mode = {"type": "string", "enum": ["auto", "headers", "body", "json"]}
@@ -253,8 +250,9 @@ def abort(m, c=1):
     raise SystemExit(fail(m, c))
 
 
-def clip_tokens(text, limit=MAX_TOOL_OUTPUT_TOKENS, tail=0):
+def clip_tokens(text, limit=None, tail=0):
     """Truncate *text* to *limit* tokens, optionally keeping *tail* tokens from the end."""
+    limit = BUDGETS.tool_output_tokens if limit is None else limit
     ids = encode_tokens(text)
     n = len(ids)
     if n <= limit:
@@ -278,8 +276,17 @@ def preview(v, lim=72):
     return s if len(s) <= lim else s[: lim - 3] + "..."
 
 
-def _show_and_clip(text, lines, limit=MAX_TOOL_OUTPUT_TOKENS, tail=0):
+def _format_duration(seconds: int) -> str:
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def _show_and_clip(text, lines, limit=None, tail=0):
     """Render tool output, then return a clipped version for the model."""
+    limit = BUDGETS.tool_output_tokens if limit is None else limit
     show(text, lines)
     return clip_tokens(text, limit=limit, tail=tail)
 
@@ -630,8 +637,23 @@ def _replace(text, old, new, replace_all=False):
     return text.replace(old, new) if replace_all else text.replace(old, new, 1), n
 
 
+def _replace_regex(text, pattern, new, replace_all=False):
+    if not pattern:
+        raise ValueError("old is empty")
+    try:
+        matches = list(re.finditer(pattern, text))
+    except re.error as exc:
+        raise ValueError(f"invalid regex pattern: {exc}") from exc
+    n = len(matches)
+    if n == 0:
+        raise ValueError("not found")
+    if n > 1 and not replace_all:
+        raise ValueError("multiple matches; set replace_all=true")
+    return re.subn(pattern, new, text, count=0 if replace_all else 1)
+
+
 def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details):
-    state.note_tool_call()
+    state.note_progress()
     defaults = _defaults or {}
     parts = [
         _fmt("inline", key.replace("_", "-"))
@@ -646,8 +668,8 @@ def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details)
     )
     if _suffix:
         message += f"  {_suffix}"
-    # Use bullet for mutating tools (apply, bash), plain for idempotent reads
-    if name in {"apply", "bash"}:
+    # Use bullet for mutating tools (edit, bash), plain for inspection tools
+    if name in {"edit", "bash"}:
         _print(value=f"* {message}", err=True)
     else:
         _print(value=message, err=True)
@@ -661,14 +683,34 @@ def _oneline(text, limit=60):
 def note_apply_ops(ops):
     for op in ops:
         kind, path = op.get("op", "?"), op.get("path", "?")
+        line_span = (
+            f" lines {op.get('start_line')}-{op.get('end_line') or op.get('start_line')}"
+            if op.get("start_line")
+            else ""
+        )
         lines = {
             "replace": [
-                f"  replace `{path}`" + (" *(all)*" if op.get("replace_all") else ""),
+                "  replace "
+                + f"`{path}`{line_span}"
+                + (
+                    " *("
+                    + ", ".join(
+                        label
+                        for label, enabled in (
+                            ("all", op.get("replace_all")),
+                            ("regex", op.get("regex")),
+                        )
+                        if enabled
+                    )
+                    + ")*"
+                    if op.get("replace_all") or op.get("regex")
+                    else ""
+                ),
                 f"  - `{_oneline(op.get('old', ''))}`",
                 f"  + `{_oneline(op.get('new', ''))}`",
             ],
             "write": [
-                f"  write `{path}`"
+                f"  write `{path}`{line_span}"
                 + (" *(overwrite)*" if op.get("overwrite") else " *(new)*"),
                 f"  + `{_oneline(op.get('content', ''))}`",
             ],
@@ -686,23 +728,20 @@ class ApplyOperation(msgspec.Struct, omit_defaults=True):
     old: str | None = None
     new: str | None = None
     replace_all: bool = False
+    regex: bool = False
+    start_line: int | None = None
+    end_line: int | None = None
     content: str | None = None
     overwrite: bool = False
     to: str | None = None
 
 
 class ListArgs(msgspec.Struct, omit_defaults=True):
-    path: str = "."
-    limit: int = DEFAULT_LINE_LIMIT
+    path: str = "*"
+    limit: int = BUDGETS.default_line_limit
 
 
-class ReadArgs(msgspec.Struct, omit_defaults=True):
-    path: str
-    offset: int = 1
-    limit: int = DEFAULT_LINE_LIMIT
-
-
-class ApplyArgs(msgspec.Struct, omit_defaults=True):
+class EditArgs(msgspec.Struct, omit_defaults=True):
     operations: ApplyOperation | list[ApplyOperation]
 
 
@@ -711,16 +750,12 @@ class BashArgs(msgspec.Struct, omit_defaults=True):
     timeout_seconds: int = 120
 
 
-class GrepArgs(msgspec.Struct, omit_defaults=True):
+class SearchArgs(msgspec.Struct, omit_defaults=True):
     pattern: str
     path: str = "."
-    file_glob: str | None = None
-
-
-class GlobArgs(msgspec.Struct, omit_defaults=True):
-    pattern: str
-    path: str = "."
-    limit: int = DEFAULT_LINE_LIMIT
+    start_line: int | None = None
+    end_line: int | None = None
+    limit: int = BUDGETS.default_line_limit
 
 
 class HttpxArgs(msgspec.Struct, omit_defaults=True):
@@ -734,7 +769,7 @@ class HttpxArgs(msgspec.Struct, omit_defaults=True):
     timeout_seconds: int = 20
     response_mode: Literal["auto", "headers", "body", "json"] = "auto"
     json_path: str | None = None
-    max_tokens: int = MAX_TOOL_OUTPUT_TOKENS
+    max_tokens: int = BUDGETS.tool_output_tokens
 
 
 class AskArgs(msgspec.Struct, omit_defaults=True):
@@ -823,29 +858,15 @@ class ToolRegistry:
     def __init__(self, tools=None):
         self._tools = _TOOLS if tools is None else tools
 
-    def __contains__(self, n):
-        return _tool_name(n) in self._tools
-
-    def __iter__(self):
-        return iter(self._tools)
-
-    def get(self, n):
-        return self._tools.get(_tool_name(n))
-
     def specs(self):
         return [t.spec for t in self._tools.values()]
 
     def invoke(self, state: AgentState, name: str, args: dict[str, Any] | None = None):
-        name = _tool_name(name)
         return (
             handler.invoke(state, args)
             if (handler := self._tools.get(name))
             else ToolResult(ok=False, content=f"Tool '{name}' unavailable")
         )
-
-    def without(self, *names):
-        blocked = {_tool_name(name) for name in names}
-        return ToolRegistry({k: v for k, v in self._tools.items() if k not in blocked})
 
 
 TOOL_REGISTRY = ToolRegistry()
@@ -853,22 +874,25 @@ TOOL_REGISTRY = ToolRegistry()
 
 class AgentState(msgspec.Struct, omit_defaults=True):
     root: Path
-    max_tool_calls: int
     tool_specs: ToolRegistry
-    tool_calls: int = 0
+    unattended_timeout_seconds: int
+    unattended_deadline: float
 
-    def note_tool_call(self) -> None:
-        if self.tool_calls >= self.max_tool_calls:
-            raise ValueError(
-                f"reached max tool calls ({self.max_tool_calls}) without a final response"
+    def remaining_unattended_seconds(self) -> float:
+        return self.unattended_deadline - time.monotonic()
+
+    def note_progress(self) -> None:
+        if self.remaining_unattended_seconds() <= 0:
+            raise TimeoutError(
+                "reached unattended timeout "
+                f"({_format_duration(self.unattended_timeout_seconds)}) without a final response"
             )
-        self.tool_calls += 1
 
 
 def _message_text(message: ChatMessage) -> str:
     """Return a message body as plain text for token counting/rendering."""
     if isinstance(message, ToolMessage):
-        return json.dumps(message.content.content, ensure_ascii=True, default=str)
+        return _headroom_tool_output(message.content)
     return message.content
 
 
@@ -897,105 +921,116 @@ def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
     return message
 
 
-def _flatten_tool_call(call) -> str:
-    """Render a single ToolCall as a compact markdown fragment."""
-    args = call.arguments
-    if isinstance(args, dict):
-        parts = [f"  {k}: {preview(v, 120)}" for k, v in args.items()]
-        arg_str = "\n".join(parts)
-    else:
-        arg_str = f"  {preview(args, 200)}"
-    return f"### {call.name}\n{arg_str}"
+def _headroom_tool_output(result: ToolResult) -> str:
+    value = result.content
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=True, default=str)
 
 
-def _flatten_tool_result(msg: ToolMessage) -> str:
-    """Render a ToolMessage result as a compact markdown fragment."""
-    ok = msg.content.ok if isinstance(msg.content, ToolResult) else True
-    text = clip_tokens(_message_text(msg), limit=256)
-    status = "ok" if ok else "error"
-    return f"[{msg.name} -> {status}]\n{text}"
+def _headroom_tool_call(call: ToolCall) -> dict[str, Any]:
+    return {
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json.dumps(call.arguments, ensure_ascii=True, separators=(",", ":")),
+        },
+    }
 
 
-def _flatten_turn(assistant: AssistantMessage, tool_msgs: list[ToolMessage]) -> str:
-    """Flatten one assistant-tool turn into a markdown summary."""
-    parts: list[str] = []
-    if assistant.content:
-        parts.append(assistant.content)
-    for call in assistant.tool_calls:
-        parts.append(_flatten_tool_call(call))
-    for tm in tool_msgs:
-        parts.append(_flatten_tool_result(tm))
-    return "\n\n".join(parts)
+def _serialize_for_headroom(message: ChatMessage) -> dict[str, Any]:
+    match message:
+        case SystemMessage():
+            return {"role": "system", "content": message.content}
+        case UserMessage():
+            return {"role": "user", "content": message.content}
+        case AssistantMessage():
+            payload: dict[str, Any] = {"role": "assistant", "content": message.content}
+            if message.tool_calls:
+                payload["tool_calls"] = [_headroom_tool_call(call) for call in message.tool_calls]
+            return payload
+        case ToolMessage():
+            return {
+                "role": "tool",
+                "tool_call_id": message.tool_call_id,
+                "name": message.name,
+                "ok": message.content.ok,
+                "content": _headroom_tool_output(message.content),
+            }
+    raise TypeError(f"Unsupported message type: {type(message).__name__}")
 
 
-def _compress_older_turns(
-    messages: list[ChatMessage], keep_recent: int = KEEP_RECENT_TURNS
+def _decode_headroom_tool_arguments(arguments: Any) -> dict[str, Any]:
+    if isinstance(arguments, dict):
+        return arguments
+    if arguments in (None, ""):
+        return {}
+    if not isinstance(arguments, str):
+        raise RuntimeError("Tool arguments must be a JSON object or JSON string")
+    parsed = msgspec.json.decode(arguments)
+    parsed = msgspec.json.decode(parsed) if isinstance(parsed, str) else parsed
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Tool arguments must decode to a JSON object")
+    return parsed
+
+
+def _deserialize_headroom_tool_call(payload: dict[str, Any]) -> ToolCall:
+    function = payload.get("function")
+    if isinstance(function, dict):
+        return ToolCall(
+            id=str(payload.get("id") or ""),
+            name=str(function.get("name") or ""),
+            arguments=_decode_headroom_tool_arguments(function.get("arguments")),
+        )
+    return ToolCall(
+        id=str(payload.get("id") or ""),
+        name=str(payload.get("name") or ""),
+        arguments=_decode_headroom_tool_arguments(payload.get("arguments")),
+    )
+
+
+def _deserialize_from_headroom(message: dict[str, Any]) -> ChatMessage:
+    role = message.get("role")
+    if role == "system":
+        return SystemMessage(str(message.get("content") or ""))
+    if role == "user":
+        return UserMessage(str(message.get("content") or ""))
+    if role == "assistant":
+        tool_calls = message.get("tool_calls")
+        return AssistantMessage(
+            str(message.get("content") or ""),
+            tool_calls=[
+                _deserialize_headroom_tool_call(call)
+                for call in tool_calls
+                if isinstance(call, dict)
+            ] if isinstance(tool_calls, list) else [],
+        )
+    if role == "tool":
+        return ToolMessage(
+            tool_call_id=str(message.get("tool_call_id") or ""),
+            name=str(message.get("name") or ""),
+            content=ToolResult(
+                ok=bool(message.get("ok", True)),
+                content=message.get("content"),
+            ),
+        )
+    raise RuntimeError(f"Unsupported headroom message role: {role!r}")
+
+
+def _compress_messages_with_headroom(
+    messages: list[ChatMessage], model: str, model_limit: int
 ) -> list[ChatMessage]:
-    """Replace older tool-call turns with flattened markdown summaries.
-
-    A "turn" is an AssistantMessage with tool_calls followed by its
-    corresponding ToolMessages.  The most recent *keep_recent* such turns
-    are kept in their native structured format; all older turns are
-    collapsed into UserMessages containing a markdown summary.
-    """
-    if keep_recent < 0:
-        return messages
-
-    # 1. Identify turn boundaries: (start_index, end_index_exclusive)
-    turns: list[tuple[int, int]] = []
-    i = 0
-    while i < len(messages):
-        msg = messages[i]
-        if isinstance(msg, AssistantMessage) and msg.tool_calls:
-            start = i
-            i += 1
-            # Collect the following ToolMessages that belong to this turn
-            while i < len(messages) and isinstance(messages[i], ToolMessage):
-                i += 1
-            turns.append((start, i))
-        else:
-            i += 1
-
-    if len(turns) <= keep_recent:
-        return messages
-
-    to_flatten = turns[: len(turns) - keep_recent]
-    flatten_set: set[int] = set()
-    for s, e in to_flatten:
-        flatten_set.update(range(s, e))
-
-    # 2. Rebuild the message list, replacing flattened spans
-    result: list[ChatMessage] = []
-    idx = 0
-    while idx < len(messages):
-        if idx not in flatten_set:
-            result.append(messages[idx])
-            idx += 1
-            continue
-        # Find the turn that starts here
-        for s, e in to_flatten:
-            if s == idx:
-                assistant = cast(AssistantMessage, messages[s])
-                tool_msgs = [
-                    cast(ToolMessage, messages[j]) for j in range(s + 1, e)
-                ]
-                summary = _flatten_turn(assistant, tool_msgs)
-                result.append(UserMessage(
-                    f"[Previous tool activity]\n\n{summary}"
-                ))
-                idx = e
-                break
-        else:
-            # Part of a turn but not the start -- skip (already consumed)
-            idx += 1
-
-    return result
+    result = headroom_compress(
+        [_serialize_for_headroom(message) for message in messages],
+        model=model,
+        model_limit=model_limit,
+    )
+    return [_deserialize_from_headroom(message) for message in result.messages]
 
 
 class Transcript(msgspec.Struct, omit_defaults=True):
     messages: list[ChatMessage] = msgspec.field(default_factory=list)
     max_context_tokens: int = MAX_CONTEXT_TOKENS
-    max_message_tokens: int = MAX_MESSAGE_TOKENS
+    max_message_tokens: int = BUDGETS.message_tokens
 
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and isinstance(self.messages[0], SystemMessage):
@@ -1029,12 +1064,12 @@ class Transcript(msgspec.Struct, omit_defaults=True):
     def message_tokens(self, message: ChatMessage) -> int:
         return _message_tokens(message)
 
-    def prepared_messages(self) -> list[ChatMessage]:
+    def prepared_messages(self, model: str | None = None) -> list[ChatMessage]:
         msgs = [_truncate_message(m, self.max_message_tokens) for m in self.messages]
+        if model:
+            msgs = _compress_messages_with_headroom(msgs, model, self.max_context_tokens)
         sys_msgs = [m for m in msgs if isinstance(m, SystemMessage)]
         other = [m for m in msgs if not isinstance(m, SystemMessage)]
-        # Flatten older tool-call turns into markdown summaries
-        other = _compress_older_turns(other)
         budget = self.max_context_tokens - sum(map(_message_tokens, sys_msgs))
         if budget <= 0:
             return sys_msgs
@@ -1061,8 +1096,8 @@ class Transcript(msgspec.Struct, omit_defaults=True):
     def session_tokens(self) -> int:
         return sum(map(_message_tokens, self.messages))
 
-    def prepared_tokens(self) -> int:
-        return sum(map(_message_tokens, self.prepared_messages()))
+    def prepared_tokens(self, model: str | None = None) -> int:
+        return sum(map(_message_tokens, self.prepared_messages(model=model)))
 
 
 def _join_paths(paths, root, empty="<no matches>"):
@@ -1071,65 +1106,35 @@ def _join_paths(paths, root, empty="<no matches>"):
     )
 
 
-def _list_dir(root, target, limit):
-    return _join_paths(
-        sorted(target.iterdir(), key=lambda i: i.as_posix())[: max(limit, 1)],
-        root,
-        "<empty directory>",
-    )
+def _has_glob(path: str) -> bool:
+    return any(ch in path for ch in "*?[")
+
+
+def _glob_paths(root: Path, pattern: str) -> list[Path]:
+    if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+        raise ValueError(f"Path traversal denied: '{pattern}'")
+    matches: list[Path] = []
+    for candidate in root.glob(pattern):
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved == root or root in resolved.parents:
+            matches.append(resolved)
+    return sorted(set(matches), key=lambda item: item.as_posix())
 
 
 @tool(_TOOL_DESCS["list"], ListArgs)
-def tool_list(state, path=".", limit=DEFAULT_LINE_LIMIT):
+def tool_list(state, path="*", limit=BUDGETS.default_line_limit):
     note_tool(
         state,
         "list",
-        _defaults={"path": ".", "limit": DEFAULT_LINE_LIMIT},
+        _defaults={"path": "*", "limit": BUDGETS.default_line_limit},
         path=path,
         limit=limit,
     )
-    target = resolve_path(state.root, path)
-    if not target.is_dir():
-        raise ValueError("path is not a directory")
-    text = _list_dir(state.root, target, limit)
+    text = _join_paths(_glob_paths(state.root, path)[: max(limit, 1)], state.root)
     return _show_and_clip(text, 1)
-
-
-@tool(_TOOL_DESCS["read"], ReadArgs)
-def tool_read(state, path, offset=1, limit=DEFAULT_LINE_LIMIT):
-    target = resolve_path(state.root, path)
-    defaults = {"offset": 1, "limit": DEFAULT_LINE_LIMIT}
-    if target.is_dir():
-        note_tool(
-            state,
-            "read",
-            _defaults={"path": ".", **defaults},
-            path=path,
-            offset=offset,
-            limit=limit,
-        )
-        text = _list_dir(state.root, target, limit)
-        return _show_and_clip(text, 1)
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    start, total = max(offset, 1) - 1, len(lines)
-    shown = lines[start : start + max(limit, 1)]
-    note_tool(
-        state,
-        "read",
-        _defaults=defaults,
-        _suffix=(
-            f"*(lines {start + 1}-{min(start + len(shown), total)} of {total})*"
-            if total
-            else ""
-        ),
-        path=path,
-        offset=offset,
-        limit=limit,
-    )
-    return clip_tokens(
-        "\n".join(f"{i}: {line}" for i, line in enumerate(shown, start + 1))
-        or "<empty file>"
-    )
 
 
 def _need(op, key, typ, msg):
@@ -1149,6 +1154,34 @@ def _require_file(root, target, action):
     return rel
 
 
+def _line_range(
+    text: str, *, start_line: int | None = None, end_line: int | None = None
+) -> tuple[list[str], int, int]:
+    lines = text.splitlines(keepends=True)
+    if start_line is None and end_line is None:
+        return lines, 0, len(lines)
+    start = _positive_int(start_line or 1, "start_line")
+    end = _positive_int(end_line or start, "end_line")
+    if end < start:
+        raise ValueError("end_line must be greater than or equal to start_line")
+    if start > len(lines) or end > len(lines):
+        raise ValueError(f"line range {start}-{end} is outside the file")
+    return lines, start - 1, end
+
+
+def _rewrite_line_range(
+    text: str,
+    replacer: Callable[[str], str],
+    *,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    lines, start, end = _line_range(text, start_line=start_line, end_line=end_line)
+    segment = "".join(lines[start:end])
+    updated = replacer(segment)
+    return "".join([*lines[:start], updated, *lines[end:]])
+
+
 def _apply_op(root, index, op):
     if not isinstance(op, dict):
         raise ValueError(f"operation {index} must be an object")
@@ -1158,20 +1191,19 @@ def _apply_op(root, index, op):
     match kind:
         case "replace":
             rel = _require_file(root, target, "replace text in")
-            updated, count = _replace(
-                target.read_text(encoding="utf-8", errors="surrogateescape"),
-                _need(
-                    op,
-                    "old",
-                    str,
-                    f"replace operation {index} requires string old and new",
-                ),
-                _need(
-                    op,
-                    "new",
-                    str,
-                    f"replace operation {index} requires string old and new",
-                ),
+            old = _need(
+                op,
+                "old",
+                str,
+                f"replace operation {index} requires string old and new",
+            )
+            new = _need(
+                op,
+                "new",
+                str,
+                f"replace operation {index} requires string old and new",
+            )
+            replace_all = (
                 _need(
                     op,
                     "replace_all",
@@ -1179,8 +1211,50 @@ def _apply_op(root, index, op):
                     f"replace operation {index} replace_all must be boolean",
                 )
                 if "replace_all" in op
-                else False,
+                else False
             )
+            regex = (
+                _need(
+                    op,
+                    "regex",
+                    bool,
+                    f"replace operation {index} regex must be boolean",
+                )
+                if "regex" in op
+                else False
+            )
+            start_line = (
+                _need(
+                    op,
+                    "start_line",
+                    int,
+                    f"replace operation {index} start_line must be an integer",
+                )
+                if "start_line" in op
+                else None
+            )
+            end_line = (
+                _need(
+                    op,
+                    "end_line",
+                    int,
+                    f"replace operation {index} end_line must be an integer",
+                )
+                if "end_line" in op
+                else None
+            )
+            replacer = _replace_regex if regex else _replace
+            source = target.read_text(encoding="utf-8", errors="surrogateescape")
+            if start_line is not None or end_line is not None:
+                lines, start, end = _line_range(
+                    source, start_line=start_line, end_line=end_line
+                )
+                replacement, count = replacer(
+                    "".join(lines[start:end]), old, new, replace_all
+                )
+                updated = "".join([*lines[:start], replacement, *lines[end:]])
+            else:
+                updated, count = replacer(source, old, new, replace_all)
             target.write_text(updated, encoding="utf-8", errors="surrogateescape")
             return f"replaced {rel} ({count} match{'es' if count != 1 else ''})"
         case "write":
@@ -1197,9 +1271,41 @@ def _apply_op(root, index, op):
                 if "overwrite" in op
                 else False
             )
+            start_line = (
+                _need(
+                    op,
+                    "start_line",
+                    int,
+                    f"write operation {index} start_line must be an integer",
+                )
+                if "start_line" in op
+                else None
+            )
+            end_line = (
+                _need(
+                    op,
+                    "end_line",
+                    int,
+                    f"write operation {index} end_line must be an integer",
+                )
+                if "end_line" in op
+                else None
+            )
             rel = _rel(root, target)
             if target.exists() and target.is_dir():
                 raise ValueError(f"cannot write directory: {rel}")
+            if start_line is not None or end_line is not None:
+                if not target.exists():
+                    raise ValueError(f"file does not exist: {rel}")
+                source = target.read_text(encoding="utf-8", errors="surrogateescape")
+                updated = _rewrite_line_range(
+                    source,
+                    lambda _segment: content,
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+                target.write_text(updated, encoding="utf-8", errors="surrogateescape")
+                return f"wrote {rel}"
             if target.exists() and not overwrite:
                 raise ValueError(f"file already exists: {rel}; set overwrite=true")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1229,15 +1335,15 @@ def _apply_op(root, index, op):
     )
 
 
-@tool(_TOOL_DESCS["apply"], ApplyArgs)
-def tool_apply(state, operations):
+@tool(_TOOL_DESCS["edit"], EditArgs)
+def tool_edit(state, operations):
     if isinstance(operations, dict):
         operations = [operations]
     if not isinstance(operations, list) or not operations:
         raise ValueError(
             "operations must be a non-empty array or a single operation object"
         )
-    note_tool(state, "apply", operations=len(operations))
+    note_tool(state, "edit", operations=len(operations))
     note_apply_ops(operations)
     out = "\n".join(_apply_op(state.root, i, op) for i, op in enumerate(operations, 1))
     show(out, len(operations))
@@ -1265,85 +1371,134 @@ def tool_bash(state, command, timeout_seconds=120):
         timeout=timeout_seconds,
     )
     out = _fmt("bash", command, (result.stdout, result.returncode, result.stderr))
-    return _show_and_clip(out, 8, tail=MAX_TOOL_TAIL_TOKENS)
+    return _show_and_clip(out, 8, tail=BUDGETS.tool_tail_tokens)
 
 
-@tool(_TOOL_DESCS["grep"], GrepArgs)
-def tool_grep(state, pattern, path=".", file_glob=None):
-    env, target = command_env(state.root), resolve_path(state.root, path)
-    if not target.exists():
-        raise ValueError(f"search path does not exist: {_rel(state.root, target)}")
-    if target.is_file() and file_glob:
-        raise ValueError("file_glob only works when path is a directory")
-    search_path = str(target)
-    _grep_defaults = {"path": "."}
-    for name, build in SEARCH_BACKENDS.items():
-        if not (exe := which(name, env.get("PATH"))):
+def _search_summary(matches: int, shown: int) -> str:
+    if not matches:
+        return "*(no matches)*"
+    extra = f"; showing {shown} of {matches}" if shown < matches else ""
+    plural = "es" if matches != 1 else ""
+    return f"*({matches} match{plural}{extra})*"
+
+
+def _iter_workspace_files(root: Path, target: Path | list[Path]) -> list[Path]:
+    if isinstance(target, list):
+        return sorted(
+            [candidate for candidate in target if candidate.is_file()],
+            key=lambda item: item.as_posix(),
+        )
+    if target.is_file():
+        return [target]
+    results: list[Path] = []
+    for candidate in target.rglob("*"):
+        if ".git" in candidate.parts:
             continue
-        result = run_cmd(
-            build(exe, pattern, search_path, file_glob), cwd=state.root, env=env
-        )
-        if result.returncode not in (0, 1):
-            detail = (result.stderr or result.stdout or f"{name} failed").strip()
-            note_tool(
-                state,
-                "grep",
-                _defaults=_grep_defaults,
-                pattern=pattern,
-                path=path,
-                glob=file_glob,
-            )
-            raise ValueError(
-                f"{name} search failed for {_rel(state.root, target)}: {detail}"
-            )
-        out = result.stdout.strip() or "<no matches>"
-        matches = len(out.splitlines()) if out != "<no matches>" else 0
-        suffix = f"*({matches} match{'es' if matches != 1 else ''})*" if matches else ""
-        note_tool(
-            state,
-            "grep",
-            _defaults=_grep_defaults,
-            _suffix=suffix,
-            pattern=pattern,
-            path=path,
-            glob=file_glob,
-        )
-        return _show_and_clip(out, 3)
-    note_tool(
-        state,
-        "grep",
-        _defaults=_grep_defaults,
-        pattern=pattern,
-        path=path,
-        glob=file_glob,
-    )
-    raise ValueError("grep requires `rg` or `grep` on PATH")
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved != root and root not in resolved.parents:
+            continue
+        if not resolved.is_file():
+            continue
+        results.append(resolved)
+    results.sort(key=lambda item: item.as_posix())
+    return results
 
 
-@tool(_TOOL_DESCS["glob"], GlobArgs)
-def tool_glob(state, pattern, path=".", limit=DEFAULT_LINE_LIMIT):
-    note_tool(
-        state,
-        "glob",
-        _defaults={"path": ".", "limit": DEFAULT_LINE_LIMIT},
-        pattern=pattern,
-        path=path,
+def _trim_search_lines(lines: list[str], limit: int) -> tuple[str, int, int]:
+    total = len(lines)
+    shown = lines[: max(limit, 1)]
+    if not shown:
+        return "<no matches>", total, 0
+    out = "\n".join(shown)
+    if total > len(shown):
+        out += f"\n... [{total - len(shown)} more matches omitted]"
+    return out, total, len(shown)
+
+
+def _single_file_target(target: Path | list[Path]) -> Path | None:
+    if isinstance(target, list):
+        files = [candidate for candidate in target if candidate.is_file()]
+        return files[0] if len(files) == 1 else None
+    return target if target.is_file() else None
+
+
+def _search_contents(
+    root: Path,
+    target: Path | list[Path],
+    pattern: str,
+    *,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    limit: int,
+    ):
+    try:
+        matcher = re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"invalid regex pattern: {exc}") from exc
+    target_file = _single_file_target(target)
+    if (start_line is not None or end_line is not None) and not target_file:
+        raise ValueError("start_line/end_line require path to resolve to exactly one file")
+    lines: list[str] = []
+    for candidate in _iter_workspace_files(root, target):
+        rel = _rel(root, candidate)
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        raw_lines = text.splitlines()
+        start = 1
+        end = len(raw_lines)
+        if target_file == candidate and (start_line is not None or end_line is not None):
+            _, start_idx, end_idx = _line_range(
+                text, start_line=start_line, end_line=end_line
+            )
+            start, end = start_idx + 1, end_idx
+        for lineno, line in enumerate(raw_lines[start - 1 : end], start):
+            if match := matcher.search(line):
+                lines.append(f"{rel}:{lineno}:{match.start() + 1}:{line}")
+    out, total, shown = _trim_search_lines(lines, limit)
+    return out, total, shown
+
+
+@tool(_TOOL_DESCS["search"], SearchArgs)
+def tool_search(
+    state,
+    pattern,
+    path=".",
+    start_line=None,
+    end_line=None,
+    limit=BUDGETS.default_line_limit,
+):
+    defaults = {"path": ".", "limit": BUDGETS.default_line_limit}
+    if _has_glob(path):
+        target: Path | list[Path] = _glob_paths(state.root, path)
+    else:
+        target = resolve_path(state.root, path)
+        if not target.exists():
+            raise ValueError(f"search path does not exist: {_rel(state.root, target)}")
+    out, matches, shown = _search_contents(
+        state.root,
+        target,
+        pattern,
+        start_line=start_line,
+        end_line=end_line,
         limit=limit,
     )
-    base = resolve_path(state.root, path)
-    # H1: filter glob results to only include paths within the workspace root,
-    # since glob patterns or symlinks could escape the workspace boundary.
-    results = []
-    for p in base.glob(pattern):
-        try:
-            resolved = p.resolve()
-            if resolved == state.root or state.root in resolved.parents:
-                results.append(resolved)
-        except OSError:
-            pass
-    results.sort(key=lambda item: item.as_posix())
-    out = _join_paths(results[: max(limit, 1)], state.root)
-    return _show_and_clip(out, 1)
+    note_tool(
+        state,
+        "search",
+        _defaults=defaults,
+        _suffix=_search_summary(matches, shown),
+        pattern=pattern,
+        path=path,
+        start_line=start_line,
+        end_line=end_line,
+        limit=limit,
+    )
+    return _show_and_clip(out, 3)
 
 
 def _enum(value, allowed, name):
@@ -1374,7 +1529,7 @@ def tool_httpx(
     timeout_seconds=20,
     response_mode="auto",
     json_path=None,
-    max_tokens=MAX_TOOL_OUTPUT_TOKENS,
+    max_tokens=BUDGETS.tool_output_tokens,
 ):
     preset = _enum(preset, _httpx_preset["enum"], "preset")
     if method is not None and not isinstance(method, str):
@@ -1415,7 +1570,7 @@ def tool_httpx(
             "method": "GET",
             "response_mode": "auto",
             "timeout": 20,
-            "max_tokens": MAX_TOOL_OUTPUT_TOKENS,
+            "max_tokens": BUDGETS.tool_output_tokens,
         },
         preset=preset,
         method=method,
@@ -1499,7 +1654,11 @@ def active_system_prompt(interactive):
 
 def active_tool_specs(interactive):
     """Return the tool registry, excluding ``ask`` in non-interactive mode."""
-    return TOOL_REGISTRY if interactive else TOOL_REGISTRY.without("ask")
+    return (
+        TOOL_REGISTRY
+        if interactive
+        else ToolRegistry({name: tool for name, tool in _TOOLS.items() if name != "ask"})
+    )
 
 
 def chat_tools(specs):
@@ -1541,7 +1700,9 @@ def count_tokens(text: str) -> int:
     return len(encode_tokens(text))
 
 
-def truncate_str_to_tokens(text: str, max_tokens: int = MAX_MESSAGE_TOKENS) -> str:
+def truncate_str_to_tokens(
+    text: str, max_tokens: int = BUDGETS.message_tokens
+) -> str:
     """Truncate *text* to at most *max_tokens* tokens.
 
     If truncation is needed, appends a note reporting how many lines and
@@ -1601,12 +1762,13 @@ async def run_turn(
     state: AgentState,
     model_spec,
     tool_defs,
-    max_steps,
 ):
     # Strip shim prefix before sending to the API
     _, model = split_model_spec(model_spec)
-    for step in range(max_steps):
-        prepared = transcript.prepared_messages()
+    step = 0
+    while True:
+        state.note_progress()
+        prepared = transcript.prepared_messages(model=model)
         _debug_log(
             "request",
             model=model_spec,
@@ -1614,7 +1776,7 @@ async def run_turn(
             messages=[_msg_to_dict(m) for m in prepared],
             tool_count=len(tool_defs),
         )
-        size_str = format_tokens(transcript.prepared_tokens())
+        size_str = format_tokens(sum(map(_message_tokens, prepared)))
         spinner = Status(
             f"Waiting for {model_spec} | {size_str}",
             console=STDERR,
@@ -1635,13 +1797,21 @@ async def run_turn(
             )
 
         try:
-            message = await cast(CompletionClient, client).chat_completion(
-                model=model,
-                messages=prepared,
-                tools=tool_defs,
-                tool_choice="auto",
-                on_retry=on_retry,
+            message = await asyncio.wait_for(
+                cast(CompletionClient, client).chat_completion(
+                    model=model,
+                    messages=prepared,
+                    tools=tool_defs,
+                    tool_choice="auto",
+                    on_retry=on_retry,
+                ),
+                timeout=state.remaining_unattended_seconds(),
             )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                "reached unattended timeout "
+                f"({_format_duration(state.unattended_timeout_seconds)}) without a final response"
+            ) from exc
         finally:
             spinner.stop()
         calls = [(call.id, call.name, call.arguments) for call in message.tool_calls]
@@ -1667,10 +1837,10 @@ async def run_turn(
                 ],
             )
             transcript.add_tool_outputs(calls, results)
+            step += 1
             continue
         _print(value=output)
         return 0, output
-    return fail(f"reached max steps ({max_steps}) without a final response"), ""
 
 
 def _api_error_kind(e):
@@ -1682,21 +1852,26 @@ async def run_agent(
     model,
     root,
     system_prompt,
-    max_steps,
-    max_tool_calls,
+    unattended_timeout_seconds,
     interactive,
     transcript: Transcript | None = None,
 ):
     tool_specs = active_tool_specs(interactive)
-    state = AgentState(root=root, max_tool_calls=max_tool_calls, tool_specs=tool_specs)
+    unattended_timeout_seconds = _positive_int(
+        unattended_timeout_seconds, "unattended_timeout_seconds"
+    )
+    state = AgentState(
+        root=root,
+        tool_specs=tool_specs,
+        unattended_timeout_seconds=unattended_timeout_seconds,
+        unattended_deadline=time.monotonic() + unattended_timeout_seconds,
+    )
     transcript = transcript or Transcript()
     transcript.set_system_prompt(system_prompt)
     transcript.add_user(prompt)
 
     async def runner(client):
-        return await run_turn(
-            client, transcript, state, model, chat_tools(tool_specs), max_steps
-        )
+        return await run_turn(client, transcript, state, model, chat_tools(tool_specs))
 
     try:
         return await runner(get_client(model))
@@ -1780,8 +1955,7 @@ def audit(prompt: str = ""):
             chosen_model,
             workspace,
             AUDIT_SYSTEM_PROMPT,
-            DEFAULT_MAX_STEPS,
-            DEFAULT_MAX_TOOL_CALLS,
+            DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
             interactive=False,
         )
     )
@@ -1871,81 +2045,27 @@ def _read_input():
         return line + "\n" + extra.rstrip("\n")
 
     return line
-
-
-
-COMPACT_PROMPT = """Summarise this conversation so it can replace the history.
-Include: what the user asked, what was done (files read/written, commands run, key
-findings), current state, and any open tasks. Be specific about file paths, function
-names, and error messages. Omit tool-call IDs and boilerplate.
-Target about {token_budget} tokens."""
-
-
-async def _compact_via_llm(transcript, model_spec):
-    """Compress transcript by asking the LLM to summarise it.
-
-    Falls back to local-only compression on any error.
-    """
-    # 1. Local flatten first to shrink what we send
-    sys_msgs = [m for m in transcript.messages if isinstance(m, SystemMessage)]
-    other = [m for m in transcript.messages if not isinstance(m, SystemMessage)]
-    flattened = _compress_older_turns(other, keep_recent=0)
-    if not flattened:
-        return
-
-    # 2. Build a one-shot summary request
-    _, model = split_model_spec(model_spec)
-    prompt = COMPACT_PROMPT.format(token_budget=format_tokens(COMPACT_SUMMARY_TOKENS))
-    summary_messages = sys_msgs + flattened + [UserMessage(prompt)]
-
-    client = get_client(model_spec)
-    spinner = Status(
-        f"Compacting via {model_spec}",
-        console=STDERR,
-        spinner="dots",
-    )
-    spinner.start()
-    try:
-        response = await cast(CompletionClient, client).chat_completion(
-            model=model,
-            messages=summary_messages,
-            tools=None,
-            tool_choice="auto",
-        )
-    finally:
-        spinner.stop()
-
-    summary = (response.content or "").strip()
-    if not summary:
-        # LLM returned nothing useful; keep local compression
-        transcript.messages = sys_msgs + flattened
-        return
-
-    transcript.messages = sys_msgs + [
-        UserMessage(f"[Conversation summary from /compact]\n\n{summary}")
-    ]
-
-
 def _chat_command(cmd, transcript, system_prompt, model_spec):
     """Handle a /command.  Return True if handled, None to exit, False if unknown."""
     cmd = cmd.strip().lower()
+    _, model = split_model_spec(model_spec)
     if cmd in ("/help", "/?"):
         _print(value="\n".join([
             "## Commands",
             "",
             "- `/help` -- show this help",
             "- `/tokens` -- show context usage",
-            "- `/compact` -- summarise conversation via LLM to free context",
             "- `/clear` -- reset conversation (keeps system prompt)",
             "- `/quit` or `/exit` -- end session",
             "",
+            "Context is compressed with Headroom before model requests.",
             "Tip: paste multiline text — extra lines are detected automatically.",
             'Tip: type `"""` to start a multiline block, `"""` to end it.',
         ]), err=True)
         return True
     if cmd == "/tokens":
         total = transcript.session_tokens()
-        prepped = transcript.prepared_tokens()
+        prepped = transcript.prepared_tokens(model=model)
         budget = transcript.max_context_tokens
         msgs = len(transcript.messages)
         _print(value="\n".join([
@@ -1957,24 +2077,6 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
             f"- context budget: {format_tokens(budget)}",
             f"- remaining: ~{format_tokens(max(budget - prepped, 0))}",
         ]), err=True)
-        return True
-    if cmd == "/compact":
-        before = transcript.session_tokens()
-        try:
-            asyncio.run(_compact_via_llm(transcript, model_spec))
-        except KeyboardInterrupt:
-            _print(value="\nCompact cancelled.", err=True)
-            return True
-        except Exception as exc:
-            _print("warning", f"LLM compact failed ({exc}); using local compression.", err=True)
-            sys_msgs = [m for m in transcript.messages if isinstance(m, SystemMessage)]
-            other = [m for m in transcript.messages if not isinstance(m, SystemMessage)]
-            transcript.messages = sys_msgs + _compress_older_turns(other, keep_recent=0)
-        after = transcript.session_tokens()
-        _print(
-            value=f"Compacted: {format_tokens(before)} -> {format_tokens(after)}",
-            err=True,
-        )
         return True
     if cmd == "/clear":
         transcript.messages = [SystemMessage(system_prompt)]
@@ -2042,8 +2144,7 @@ def chat():
                     chosen_model,
                     workspace,
                     system_prompt,
-                    DEFAULT_MAX_STEPS,
-                    DEFAULT_MAX_TOOL_CALLS,
+                    DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
                     interactive,
                     transcript=transcript,
                 )
@@ -2058,7 +2159,8 @@ def chat():
             _print(value="Your message is in readline history (press ↑).", err=True)
             continue
 
-        prepped = transcript.prepared_tokens()
+        _, model = split_model_spec(chosen_model)
+        prepped = transcript.prepared_tokens(model=model)
         budget = transcript.max_context_tokens
         remaining = max(budget - prepped, 0)
         STDERR.print(f"[dim]| {format_tokens(prepped)} used, ~{format_tokens(remaining)} remaining[/dim]")
@@ -2100,8 +2202,7 @@ def run(
             chosen_model,
             workspace,
             system_prompt,
-            DEFAULT_MAX_STEPS,
-            DEFAULT_MAX_TOOL_CALLS,
+            DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
             interactive,
         )
     )[0]
