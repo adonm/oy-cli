@@ -12,7 +12,7 @@
 > | `shim.py` | 2,376 lines (163 functions, 17 classes) |
 > | Tests | 391 non-empty lines across 2 files (basic unit coverage) |
 > | Provider shims | 6 (`openai`, `codex`, `gemini`, `bedrock`, `bedrock-mantle`, `claude`) |
-> | Runtime dependencies | 9 (`boto3`, `defopt`, `httpx`, `markdownify`, `msgspec`, `openai`, `rich`, `tiktoken`, `tenacity`) |
+> | Runtime dependencies | 7 (`boto3`, `defopt`, `msgspec`, `openai`, `rich`, `tiktoken`, `tenacity`) |
 >
 > **Audit lens**: CLI agent that can read/write workspace files, execute shell commands, make outbound HTTP requests, and persist local auth/config state. Priority was given to workspace-boundary safety, secret handling, least surprise, and keeping a deliberately small codebase from accreting provider-specific complexity.
 

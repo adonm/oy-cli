@@ -5,14 +5,13 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Literal, TypeAlias, cast
-from urllib.parse import urlparse
+from typing import Any, Callable, TypeAlias, cast
 import defopt
 from headroom import compress as headroom_compress
-import httpx
 import msgspec
 import tiktoken
 from shim import (
@@ -35,14 +34,12 @@ from shim import (
     ensure_api_env as ensure_shim_api_env,
     get_client as build_shim_client,
     join_model_spec,
-    list_model_ids as list_shim_model_ids,
     list_models_for_shim,
     require_api_env as require_shim_api_env,
     resolve_shim as resolve_model_shim,
     split_model_spec,
     validate_shim,
 )
-from markdownify import markdownify as html_to_md
 from openai import (
     AuthenticationError,
     BadRequestError,
@@ -69,6 +66,34 @@ MAX_BASH_CMD_BYTES = _env("MAX_BASH_CMD_BYTES", 65536)
 MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
 DEFAULT_UNATTENDED_TIMEOUT_SECONDS = _env("UNATTENDED_TIMEOUT_SECONDS", 3600)
 CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
+DEPENDENCY_TIMEOUT_SECONDS = 600
+OPTIONAL_TOOL_INSTALLERS = {
+    "rg": {
+        "label": "ripgrep",
+        "mise": "github:BurntSushi/ripgrep",
+        "brew": "ripgrep",
+    },
+    "srgn": {
+        "label": "srgn",
+        "mise": "github:alexpovel/srgn",
+        "brew": "srgn",
+    },
+    "tokei": {
+        "label": "tokei",
+        "mise": "github:XAMPPRocky/tokei",
+        "brew": "tokei",
+    },
+    "curlie": {
+        "label": "curlie",
+        "mise": "github:rs/curlie",
+        "brew": "curlie",
+    },
+    "yq": {
+        "label": "yq",
+        "mise": "github:mikefarah/yq",
+        "brew": "yq",
+    },
+}
 
 
 def _clamp_int(value: int, lower: int, upper: int) -> int:
@@ -204,8 +229,6 @@ INTERACTIVE_SYSTEM_PROMPT = _PROMPTS["interactiveappendix"]
 NONINTERACTIVE_SYSTEM_PROMPT = _PROMPTS["noninteractiveappendix"]
 AUDIT_SYSTEM_PROMPT = _PROMPTS["auditprompt"]
 STDOUT, STDERR = Console(), Console(stderr=True)
-_httpx_preset = {"type": "string", "enum": ["page", "json", "post_json"]}
-_httpx_mode = {"type": "string", "enum": ["auto", "headers", "body", "json"]}
 
 
 def _fmt(kind, value="", extra=None):
@@ -289,153 +312,6 @@ def _show_and_clip(text, lines, limit=None, tail=0):
     limit = BUDGETS.tool_output_tokens if limit is None else limit
     show(text, lines)
     return clip_tokens(text, limit=limit, tail=tail)
-
-
-def _compact_md(t):
-    """Collapse runs of 3+ newlines to 2 and normalise line endings."""
-    return re.sub(
-        r"\n{3,}", "\n\n", t.replace("\r\n", "\n").replace("\r", "\n")
-    ).strip()
-
-
-def _is_html(ct, text):
-    """Heuristic: return True if *ct* or the start of *text* looks like HTML."""
-    ct = (ct or "").lower()
-    if "text/html" in ct or "application/xhtml" in ct:
-        return True
-    p = text.lstrip()[:500].lower()
-    return (
-        p.startswith("<!doctype html")
-        or p.startswith("<html")
-        or ("<body" in p and "<p" in p)
-    )
-
-
-def _http_body(text, ct):
-    """Convert HTML responses to compact markdown; pass others through."""
-    return (
-        text
-        if not _is_html(ct, text)
-        else _compact_md(
-            html_to_md(
-                text,
-                heading_style="ATX",
-                bullets="-",
-                strip=["script", "style", "noscript", "svg", "canvas"],
-            )
-        )
-        or text
-    )
-
-
-_JSON_PATH_MAX_DEPTH = 20
-
-
-def _json_path(v, p):
-    """Walk into *v* using dot-separated *p* (supports dict keys and list indices)."""
-    for i, part in enumerate((p or "").split(".")):
-        if not part:
-            continue
-        if i >= _JSON_PATH_MAX_DEPTH:
-            raise ValueError(f"json_path exceeded max depth of {_JSON_PATH_MAX_DEPTH}")
-        if isinstance(v, list):
-            if not part.isdigit():
-                raise ValueError(f"json_path expected index, got {part}")
-            try:
-                v = v[int(part)]
-            except IndexError:
-                raise ValueError(f"json_path index {part} out of range (length {len(v)})")
-        elif isinstance(v, dict):
-            if part not in v:
-                raise ValueError(f"json_path key not found: {part}")
-            v = v[part]
-        else:
-            raise ValueError(f"json_path cannot descend into {type(v).__name__}")
-    return v
-
-
-def _norm_map(v, n):
-    """Coerce *v* to a ``{str: str}`` dict for HTTP headers/params, or return None."""
-    if v is None:
-        return None
-    if not isinstance(v, dict):
-        raise ValueError(f"{n} must be an object")
-    return {k: "" if i is None else str(i) for k, i in v.items()}
-
-
-def _redact_header(k, v):
-    """Return ``'<redacted>'`` for sensitive headers, otherwise *v*."""
-    kl = k.lower()
-    return (
-        "<redacted>"
-        if kl in {"authorization", "proxy-authorization", "cookie", "set-cookie"}
-        or any(m in kl for m in ("token", "secret", "api-key", "apikey"))
-        else v
-    )
-
-
-def _render_headers(h):
-    return "\n".join(f"{k}: {_redact_header(k, v)}" for k, v in h.items())
-
-
-def _httpx_err(e, t):
-    m = str(e).strip() or e.__class__.__name__
-    ml = m.lower()
-    if isinstance(e, httpx.TimeoutException):
-        return f"request timed out after {t}s"
-    if "certificate verify failed" in ml or "tls" in ml:
-        return "TLS verification failed"
-    return (
-        f"network error: {m}"
-        if isinstance(e, httpx.NetworkError)
-        else f"request failed: {m}"
-    )
-
-
-def render_httpx_output(response, response_mode, json_path=None):
-    """Format an httpx *response* for tool output according to *response_mode*."""
-    content_type = response.headers.get("content-type", "")
-    lines = [
-        f"url: {response.url}",
-        f"status: {response.status_code}",
-        f"reason: {response.reason_phrase}",
-        f"content-type: {content_type or '<unknown>'}",
-    ]
-    if response_mode == "auto":
-        response_mode = (
-            "json"
-            if json_path
-            or any(x in content_type.lower() for x in ("application/json", "+json"))
-            else "body"
-        )
-    if response_mode == "headers":
-        return "\n".join(
-            [*lines, "headers:", _render_headers(response.headers) or "<none>"]
-        )
-    if response_mode == "json":
-        try:
-            body = response.json()
-        except json.JSONDecodeError as exc:
-            raise ValueError("response body is not valid JSON") from exc
-        if json_path:
-            body = _json_path(body, json_path)
-            lines.append(f"json-path: {json_path}")
-        return "\n".join(
-            [
-                *lines,
-                "body-format: json",
-                "",
-                body
-                if isinstance(body, str)
-                else json.dumps(body, ensure_ascii=True, indent=2),
-            ]
-        )
-    body = _http_body(response.text, content_type)
-    return "\n".join(
-        lines
-        + (["body-format: markdown"] if body != response.text else [])
-        + ["", body]
-    )
 
 
 def show(t, n=2):
@@ -609,6 +485,116 @@ def require_runtime(cwd=None):
     require_tools(command_env(cwd), "bash")
 
 
+def _installer_recipes(tool: str):
+    spec = OPTIONAL_TOOL_INSTALLERS.get(tool, {})
+    recipes: list[tuple[str, list[str]]] = []
+    if target := spec.get("mise"):
+        recipes.append(("mise", ["mise", "use", "-g", target]))
+    if package := spec.get("brew"):
+        recipes.append(("brew", ["brew", "install", package]))
+    return recipes
+
+
+def _preferred_installer(tool: str, env: dict[str, str]):
+    for installer, command in _installer_recipes(tool):
+        if binary := which(installer, env.get("PATH")):
+            return [binary, *command[1:]], installer
+    return None, None
+
+
+def _missing_tool_install_message(tool: str, reason: str):
+    recipes = _installer_recipes(tool)
+    lines = [
+        f"Missing {_fmt('inline', tool)} for {reason}.",
+        "",
+        "Set up `mise` (preferred) or Homebrew, then rerun oy.",
+    ]
+    if recipes:
+        lines += ["", "Preferred:", f"  {shlex.join(recipes[0][1])}"]
+        if len(recipes) > 1:
+            lines += ["", "Fallback:", f"  {shlex.join(recipes[1][1])}"]
+    return "\n".join(lines)
+
+
+def ensure_optional_tool(tool: str, *, reason: str, cwd=None):
+    env = dict(command_env(cwd))
+    if which(tool, env.get("PATH")):
+        return env
+
+    command, installer = _preferred_installer(tool, env)
+    if command is None or installer is None:
+        abort(_missing_tool_install_message(tool, reason))
+
+    label = OPTIONAL_TOOL_INSTALLERS.get(tool, {}).get("label", tool)
+    _print("status", f"Installing {label} via {installer}.", err=True)
+    result = run_cmd(
+        command,
+        cwd=cwd if cwd and cwd.is_dir() else None,
+        env=env,
+        timeout=DEPENDENCY_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        extra = f"\n\nInstaller output:\n{detail}" if detail else ""
+        abort(
+            f"Failed to install {label} via {installer}.{extra}\n\n"
+            + _missing_tool_install_message(tool, reason)
+        )
+
+    command_env.cache_clear()
+    refreshed = dict(command_env(cwd))
+    if which(tool, refreshed.get("PATH")):
+        return refreshed
+
+    abort(
+        f"Installed {label}, but {_fmt('inline', tool)} is still unavailable on PATH.\n\n"
+        + _missing_tool_install_message(tool, reason)
+    )
+
+
+_MISSING_COMMAND_RE = re.compile(
+    r"(?m)(?:^|: )(?:line \d+: )?(?P<name>[^:\s]+): (?:command not found|not found)$"
+)
+
+
+def _missing_shell_command(stderr: str) -> str | None:
+    match = _MISSING_COMMAND_RE.search(stderr.strip())
+    if not match:
+        return None
+    name = Path(match.group("name")).name
+    return name if name in OPTIONAL_TOOL_INSTALLERS else None
+
+
+def run_cmd_auto_install(
+    cmd, *, cwd=None, env=None, timeout=120, stdin_text=None, reason="command"
+):
+    current_env = dict(command_env(cwd) if env is None else env)
+    installed: set[str] = set()
+    for _ in range(len(OPTIONAL_TOOL_INSTALLERS) + 1):
+        try:
+            result = run_cmd(
+                cmd,
+                cwd=cwd,
+                env=current_env,
+                timeout=timeout,
+                stdin_text=stdin_text,
+            )
+        except FileNotFoundError:
+            name = Path(cmd[0]).name if cmd else ""
+            if name not in OPTIONAL_TOOL_INSTALLERS or name in installed:
+                raise
+            current_env = ensure_optional_tool(name, reason=reason, cwd=cwd)
+            installed.add(name)
+            continue
+        if missing := _missing_shell_command(result.stderr):
+            if missing not in installed:
+                current_env = ensure_optional_tool(missing, reason=reason, cwd=cwd)
+                installed.add(missing)
+                continue
+        return result
+    raise RuntimeError("Too many helper installation attempts")
+
+
 def get_client(spec=None):
     require_api_env(Path.cwd())
     s = spec or _model()
@@ -623,33 +609,6 @@ def resolve_path(r, p):
     if path == r or r in path.parents:
         return path
     raise ValueError(f"Path traversal denied: '{p}'")
-
-
-def _replace(text, old, new, replace_all=False):
-    """Replace *old* with *new* in *text*.  Returns (updated_text, match_count)."""
-    if not old:
-        raise ValueError("old is empty")
-    n = text.count(old)
-    if n == 0:
-        raise ValueError("not found")
-    if n > 1 and not replace_all:
-        raise ValueError("multiple matches; set replace_all=true")
-    return text.replace(old, new) if replace_all else text.replace(old, new, 1), n
-
-
-def _replace_regex(text, pattern, new, replace_all=False):
-    if not pattern:
-        raise ValueError("old is empty")
-    try:
-        matches = list(re.finditer(pattern, text))
-    except re.error as exc:
-        raise ValueError(f"invalid regex pattern: {exc}") from exc
-    n = len(matches)
-    if n == 0:
-        raise ValueError("not found")
-    if n > 1 and not replace_all:
-        raise ValueError("multiple matches; set replace_all=true")
-    return re.subn(pattern, new, text, count=0 if replace_all else 1)
 
 
 def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details):
@@ -697,20 +656,6 @@ class SearchArgs(msgspec.Struct, omit_defaults=True):
     path: str = "."
     args: list[str] = []
     limit: int = BUDGETS.default_line_limit
-
-
-class HttpxArgs(msgspec.Struct, omit_defaults=True):
-    url: str
-    preset: Literal["page", "json", "post_json"] | None = None
-    method: str | None = None
-    headers: dict[str, str] | None = None
-    params: dict[str, str] | None = None
-    body: str | None = None
-    json_body: Any = None
-    timeout_seconds: int = 20
-    response_mode: Literal["auto", "headers", "body", "json"] = "auto"
-    json_path: str | None = None
-    max_tokens: int = BUDGETS.tool_output_tokens
 
 
 class AskArgs(msgspec.Struct, omit_defaults=True):
@@ -999,9 +944,6 @@ class Transcript(msgspec.Struct, omit_defaults=True):
             for (i, n, _), (_, r) in zip(calls, results, strict=False)
         )
 
-    def truncate_message(self, message: ChatMessage) -> ChatMessage:
-        return _truncate_message(message, self.max_message_tokens)
-
     def message_tokens(self, message: ChatMessage) -> int:
         return _message_tokens(message)
 
@@ -1045,10 +987,6 @@ def _join_paths(paths, root, empty="<no matches>"):
     return (
         "\n".join(_rel(root, p) + ("/" if p.is_dir() else "") for p in paths) or empty
     )
-
-
-def _has_glob(path: str) -> bool:
-    return any(ch in path for ch in "*?[")
 
 
 def _glob_paths(root: Path, pattern: str) -> list[Path]:
@@ -1118,12 +1056,12 @@ def tool_bash(state, command, timeout_seconds=120):
         command=command,
         timeout=timeout_seconds,
     )
-    env = command_env(state.root)
-    result = run_cmd(
-        [which("bash", env.get("PATH")) or "bash", "-c", command],
+    result = run_cmd_auto_install(
+        [which("bash", command_env(state.root).get("PATH")) or "bash", "-c", command],
         cwd=state.root,
-        env=env,
+        env=command_env(state.root),
         timeout=timeout_seconds,
+        reason="bash command",
     )
     out = _fmt("bash", command, (result.stdout, result.returncode, result.stderr))
     return _show_and_clip(out, 8, tail=BUDGETS.tool_tail_tokens)
@@ -1135,31 +1073,6 @@ def _search_summary(matches: int, shown: int) -> str:
     extra = f"; showing {shown} of {matches}" if shown < matches else ""
     plural = "es" if matches != 1 else ""
     return f"*({matches} match{plural}{extra})*"
-
-
-def _iter_workspace_files(root: Path, target: Path | list[Path]) -> list[Path]:
-    if isinstance(target, list):
-        return sorted(
-            [candidate for candidate in target if candidate.is_file()],
-            key=lambda item: item.as_posix(),
-        )
-    if target.is_file():
-        return [target]
-    results: list[Path] = []
-    for candidate in target.rglob("*"):
-        if ".git" in candidate.parts:
-            continue
-        try:
-            resolved = candidate.resolve()
-        except OSError:
-            continue
-        if resolved != root and root not in resolved.parents:
-            continue
-        if not resolved.is_file():
-            continue
-        results.append(resolved)
-    results.sort(key=lambda item: item.as_posix())
-    return results
 
 
 def _trim_search_lines(lines: list[str], limit: int) -> tuple[str, int, int]:
@@ -1185,8 +1098,22 @@ def _search_contents(
     if not target.exists():
         raise ValueError(f"search path does not exist: {_rel(root, target)}")
 
-    rg_args = ["rg", "--json", "--line-number", "--color", "never", *(args or []), pattern, str(target)]
-    result = run_cmd(rg_args, cwd=root, env=command_env(root))
+    rg_args = [
+        "rg",
+        "--json",
+        "--line-number",
+        "--color",
+        "never",
+        *(args or []),
+        pattern,
+        str(target),
+    ]
+    result = run_cmd_auto_install(
+        rg_args,
+        cwd=root,
+        env=command_env(root),
+        reason="search",
+    )
     if result.returncode not in (0, 1):
         err = result.stderr.strip()
         detail = f": {err}" if err else ""
@@ -1241,121 +1168,10 @@ def tool_search(state, pattern, path=".", args=None, limit=BUDGETS.default_line_
     return _show_and_clip(out, 3)
 
 
-def _enum(value, allowed, name):
-    """Validate *value* is in *allowed* or None; raise ValueError otherwise."""
-    if value is not None and value not in allowed:
-        raise ValueError(
-            f"{name} must be one of {', '.join(allowed[:-1])}, or {allowed[-1]}"
-        )
-    return value
-
-
 def _positive_int(value, name):
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
-
-
-@tool(_TOOL_DESCS["httpx"], HttpxArgs)
-def tool_httpx(
-    state,
-    url,
-    preset=None,
-    method=None,
-    headers=None,
-    params=None,
-    body=None,
-    json_body=None,
-    timeout_seconds=20,
-    response_mode="auto",
-    json_path=None,
-    max_tokens=BUDGETS.tool_output_tokens,
-):
-    preset = _enum(preset, _httpx_preset["enum"], "preset")
-    if method is not None and not isinstance(method, str):
-        raise ValueError("method must be a string")
-    if body is not None and not isinstance(body, str):
-        raise ValueError("body must be a string")
-    if json_body is not None and not isinstance(
-        json_body, (dict, list, str, int, float, bool)
-    ):
-        raise ValueError("json_body must be valid JSON-like data")
-    timeout_seconds = _positive_int(timeout_seconds, "timeout_seconds")
-    max_tokens = _positive_int(max_tokens, "max_tokens")
-    response_mode = _enum(response_mode, _httpx_mode["enum"], "response_mode") or "auto"
-    if json_path is not None and not isinstance(json_path, str):
-        raise ValueError("json_path must be a string")
-    if body is not None and json_body is not None:
-        raise ValueError("provide either body or json_body, not both")
-    method = (
-        (method or ("POST" if body is not None or json_body is not None else "GET"))
-        .strip()
-        .upper()
-    )
-    if preset == "post_json" and method == "GET":
-        method = "POST"
-    if (
-        response_mode == "auto"
-        and preset in {"json", "post_json"}
-        or response_mode == "body"
-        and json_path
-    ):
-        response_mode = "json"
-    if response_mode == "headers" and json_path:
-        raise ValueError("json_path requires body or json output")
-    note_tool(
-        state,
-        "httpx",
-        _defaults={
-            "method": "GET",
-            "response_mode": "auto",
-            "timeout": 20,
-            "max_tokens": BUDGETS.tool_output_tokens,
-        },
-        preset=preset,
-        method=method,
-        url=url,
-        response_mode=response_mode,
-        json_path=json_path,
-        timeout=timeout_seconds,
-        max_tokens=max_tokens,
-    )
-    parsed = urlparse(url if "://" in url else f"https://{url}")
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("httpx only supports http and https")
-    _print("status", "Fetching HTTP content.", err=True)
-    max_bytes = max_tokens * 16  # generous: ~16 bytes per token
-    try:
-        with httpx.Client(
-            follow_redirects=True, timeout=float(timeout_seconds), max_redirects=10,
-        ) as http:
-            with http.stream(
-                method,
-                parsed.geturl(),
-                headers=_norm_map(headers, "headers"),
-                params=_norm_map(params, "params"),
-                content=body,
-                json=json_body,
-            ) as response:
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total > max_bytes:
-                        break
-    except httpx.HTTPError as exc:
-        raise ValueError(_httpx_err(exc, timeout_seconds)) from exc
-    # Reconstruct a response with bounded content for render_httpx_output
-    bounded = httpx.Response(
-        status_code=response.status_code,
-        headers=response.headers,
-        content=b"".join(chunks)[:max_bytes],
-        request=response.request,
-    )
-    out = render_httpx_output(bounded, response_mode, json_path=json_path)
-    show(out, 1)
-    return clip_tokens(out, max_tokens)
 
 
 @tool(_TOOL_DESCS["ask"], AskArgs)
@@ -1485,15 +1301,6 @@ def list_all_model_ids() -> list[str]:
             list_models_for_shim(shim, region=default_region(), cwd=Path.cwd())
         )
     return all_models
-
-
-def list_model_ids() -> list[str]:
-    """Return model IDs for the currently configured shim only (no prefix)."""
-    require_api_env()
-    spec = _model()
-    shim = resolve_active_shim(spec)
-    _print("status", f"Loading models from {_fmt('inline', shim)}.", err=True)
-    return list_shim_model_ids(shim, region=default_region(), cwd=Path.cwd())
 
 
 async def run_turn(

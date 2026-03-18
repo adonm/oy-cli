@@ -52,10 +52,10 @@ The system prompt is short. Tool semantics live with the tool definitions; the s
 
 ```markdown
 You are oy, a coding cli with tools.
-Work by inspecting first, then making explicit changes. Prefer simple auditable solutions.
+Work by inspecting before making cohesive changes. Prefer simple auditable solutions.
 Keep going until done or blocked; if blocked, say what you tried and next steps.
-Use grugbrain-style simplicity for complexity, OWASP-minded judgment for security, and performance-aware judgment.
-Inspect with `read` for file content, `search` for regex matches, and `list` for path discovery. Use `bash` for edits, e.g. `sed -i`, and batch independent tool calls.
+Use grugbrain.dev approach for maintainability/simplicity, OWASP-minded judgment for security, and performance-aware programming (Computer, Enhance!).
+Inspect with `read` for file content, `search` for regex matches, and `list` for path discovery. Use `bash` for edits, and batch independent tool calls.
 ```
 
 ### Interactive Appendix
@@ -78,9 +78,8 @@ Each tool description is passed directly to the model:
 |------|-------------|
 | `list` | List paths by calling `Path.glob(path)`. Defaults to `path: "*"`. Use `src/*` or `src/**/*.py` exactly like pathlib glob patterns. Returns sorted entries, one per line, with / for directories. |
 | `read` | Read a file or directory. Files return line-numbered text. Directories return sorted entries, one per line, with / for directories. Use `offset` and `limit` for large files. |
-| `bash` | Run shell commands for tests, builds, git, and scripts. Use this for edits too, for example with `sed -i`, `python - <<'PY'`, `mv`, `rm`, or shell redirection. Do not use for routine file inspection. Returns stdout and stderr together. |
-| `search` | Search with ripgrep JSON output. Assumes `rg` is installed. Takes `pattern` and `path`, then passes any extra ripgrep flags from `args`, for example `pattern: 'needle', path: 'src', args: ['--glob', '*.py', '-i']`. `limit` only limits displayed results after ripgrep runs. |
-| `httpx` | Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted. |
+| `bash` | Run shell commands for tests, builds, git, and scripts. Use this for edits too: prefer `srgn` for precise search/replace, `tokei` for code-count analysis, and `curlie` for web/API interaction; pipe to `rg` or `yq` for filtering when useful. `oy` auto-installs these helpers on demand when `mise` or `brew` is available. Use shell commands when needed, but do not use for routine file inspection. Returns stdout and stderr together. |
+| `search` | Search with ripgrep JSON output. Takes `pattern` and `path`, then passes any extra ripgrep flags from `args`, for example `pattern: 'needle', path: 'src', args: ['--glob', '*.py', '-i']`. `limit` only limits displayed results after ripgrep runs. |
 | `ask` | Ask the user a question in interactive runs. Use for ambiguity or decisions. Provide choices. |
 
 **Output truncation:** tool output is clipped to preserve context window; `bash` keeps both head and tail. When clipped, narrow the next query or use `search` with a tighter `path` instead of re-running broad inspection.
@@ -103,7 +102,8 @@ header at the top of ISSUES.md that includes the current date,
 the latest Git commit reference, and a codebase summary
 using tools like `scc` or `tokei`. Next, fetch the current OWASP
 ASVS (or MASVS if more relevant) and grugbrain.dev guidelines
-using httpx, inspect the codebase against these, and write or
+using `bash` with `curlie` (pipe to `rg` or `yq` if useful),
+inspect the codebase against these, and write or
 merge prioritised findings (max 10-15) into the ISSUES.md file.
 Ensure each finding is formatted to include its location, category
 (security, complexity, or performance), standard reference, a clear
@@ -152,7 +152,7 @@ is a reference.
 
 - Python 3.14+
 - `bash`
-- (Optional) `rg` (ripgrep) for faster search
+- (Optional helper CLIs; `oy` auto-installs them on demand when `mise` or `brew` is available): `rg` (ripgrep), `srgn`, `tokei`, `curlie`, `yq`
 - OpenAI API key or Codex local auth **OR** Gemini CLI OAuth credentials
   (`~/.gemini/oauth_creds.json`) **OR** Claude Code local auth **OR**
   AWS CLI configured for Bedrock
@@ -196,6 +196,8 @@ ensure your profile has `bedrock:InvokeModel` permission.
 
 **"AWS SSO session is stale"** -> Run `aws sso login --use-device-code --no-browser`.
 
+**"Missing helper tool"** -> Install or set up `mise` (preferred) or Homebrew, then rerun `oy`; helper CLIs are auto-installed on demand once one of those package managers is available.
+
 ## Security
 
 `oy` can run shell commands and modify files with your permissions. Treat it like any other local automation tool.
@@ -206,8 +208,7 @@ Recommended:
 - avoid exposing long-lived secrets in the environment
 - review generated changes before shipping
 
-**Protections:** workspace-bound file access for built-in file tools, sensitive header redaction in `httpx`, and native boto3
-credential resolution for Bedrock.
+**Protections:** workspace-bound file access for built-in file tools and native boto3 credential resolution for Bedrock.
 
 ## Links
 

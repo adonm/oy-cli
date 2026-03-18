@@ -2854,7 +2854,3 @@ def list_all_model_ids(region: str | None = None, cwd: Path | None = None) -> li
     return models
 
 
-def list_model_ids(
-    shim: str, region: str | None = None, cwd: Path | None = None
-) -> list[str]:
-    return get_client(shim, region=region, cwd=cwd).list_models()
