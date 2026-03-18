@@ -40,8 +40,46 @@ mise run build
 - security guidance should explicitly align with OWASP thinking
 - performance guidance should reflect performance-aware programming: measure first, avoid obvious waste
 
-## Release Hygiene
+## Release Process
+
+1. **Pre-flight** — all checks must pass:
+
+   ```bash
+   mise run check        # ruff + pytest + oy model
+   mise run build        # builds wheel + sdist into dist/
+   ```
+
+2. **Bump version** in `pyproject.toml`:
+   - stable: `"0.5.0"`
+   - pre-release: `"0.5.0b1"` (PEP 440 beta)
+
+3. **Commit, tag, push, and release**:
+
+   ```bash
+   git add -A && git commit -m "Release v0.5.0"
+   git tag v0.5.0
+   git push origin main --tags
+
+   # stable
+   gh release create v0.5.0 --generate-notes
+
+   # pre-release
+   gh release create v0.5.0b1 --prerelease --generate-notes
+   ```
+
+   The `release.yml` workflow triggers on the GitHub Release event,
+   builds the wheel/sdist, and publishes to PyPI via trusted publishing.
+
+4. **Install and verify**:
+
+   ```bash
+   uv tool install --force oy-cli          # stable
+   uv tool install --force oy-cli==0.5.0b1 # pre-release
+   oy --help
+   ```
+
+### Hygiene
 
 - keep `README.md` user-focused
 - keep contributor workflow here in `CONTRIBUTING.md`
-- make sure `mise run fmt`, `mise run lint`, `mise run check`, and `mise run build` pass before shipping
+- make sure checks pass before shipping — don't skip `mise run check`
