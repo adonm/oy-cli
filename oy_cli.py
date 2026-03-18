@@ -26,6 +26,7 @@ from shim import (
     ToolSpec,
     UserMessage,
 )
+from providers import _decode_tool_call_arguments, _openai_chat_message, _tool_output_text
 from openai import (
     AuthenticationError,
     BadRequestError,
@@ -46,6 +47,10 @@ def _env(name, default, t=None):
     """Read OY_{name} from the environment, coercing to the type of *default*."""
     v = os.environ.get(f"OY_{name}")
     return default if v is None else (t or type(default))(v)
+
+
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+_FALSY_VALUES = {"0", "false", "no", "off"}
 
 
 MAX_BASH_CMD_BYTES = _env("MAX_BASH_CMD_BYTES", 65536)
@@ -183,8 +188,7 @@ def validate_shim(shim: str) -> str:
 
 def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
     """Create a debug JSONL logger if OY_DEBUG is truthy.  Called once at import."""
-    raw = os.environ.get("OY_DEBUG", "").strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
+    if os.environ.get("OY_DEBUG", "").strip().lower() not in _TRUTHY_VALUES:
         return None, None
     debug_dir = CONFIG_PATH.parent
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -687,9 +691,9 @@ def _flag(n, d=False):
     if not v or not v.strip():
         return d
     v = v.strip().lower()
-    if v in {"1", "true", "yes", "on"}:
+    if v in _TRUTHY_VALUES:
         return True
-    if v in {"0", "false", "no", "off"}:
+    if v in _FALSY_VALUES:
         return False
     abort(f"Invalid {n}={v}. Use 1/0, true/false, yes/no, on/off.")
     return d
@@ -1120,7 +1124,7 @@ class AgentState(msgspec.Struct, omit_defaults=True):
 def _message_text(message: ChatMessage) -> str:
     """Return a message body as plain text for token counting/rendering."""
     if isinstance(message, ToolMessage):
-        return _headroom_tool_output(message.content)
+        return _tool_output_text(message.content)
     return message.content
 
 
@@ -1149,64 +1153,11 @@ def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
     return message
 
 
-def _headroom_tool_output(result: ToolResult) -> str:
-    value = result.content
-    return (
-        value
-        if isinstance(value, str)
-        else json.dumps(value, ensure_ascii=True, default=str)
-    )
-
-
-def _headroom_tool_call(call: ToolCall) -> dict[str, Any]:
-    return {
-        "id": call.id,
-        "type": "function",
-        "function": {
-            "name": call.name,
-            "arguments": json.dumps(
-                call.arguments, ensure_ascii=True, separators=(",", ":")
-            ),
-        },
-    }
-
-
 def _serialize_for_headroom(message: ChatMessage) -> dict[str, Any]:
-    match message:
-        case SystemMessage():
-            return {"role": "system", "content": message.content}
-        case UserMessage():
-            return {"role": "user", "content": message.content}
-        case AssistantMessage():
-            payload: dict[str, Any] = {"role": "assistant", "content": message.content}
-            if message.tool_calls:
-                payload["tool_calls"] = [
-                    _headroom_tool_call(call) for call in message.tool_calls
-                ]
-            return payload
-        case ToolMessage():
-            return {
-                "role": "tool",
-                "tool_call_id": message.tool_call_id,
-                "name": message.name,
-                "ok": message.content.ok,
-                "content": _headroom_tool_output(message.content),
-            }
-    raise TypeError(f"Unsupported message type: {type(message).__name__}")
-
-
-def _decode_headroom_tool_arguments(arguments: Any) -> dict[str, Any]:
-    if isinstance(arguments, dict):
-        return arguments
-    if arguments in (None, ""):
-        return {}
-    if not isinstance(arguments, str):
-        raise RuntimeError("Tool arguments must be a JSON object or JSON string")
-    parsed = msgspec.json.decode(arguments)
-    parsed = msgspec.json.decode(parsed) if isinstance(parsed, str) else parsed
-    if not isinstance(parsed, dict):
-        raise RuntimeError("Tool arguments must decode to a JSON object")
-    return parsed
+    payload = _openai_chat_message(message)
+    if isinstance(message, ToolMessage):
+        payload["ok"] = message.content.ok
+    return payload
 
 
 def _deserialize_headroom_tool_call(payload: dict[str, Any]) -> ToolCall:
@@ -1215,12 +1166,12 @@ def _deserialize_headroom_tool_call(payload: dict[str, Any]) -> ToolCall:
         return ToolCall(
             id=str(payload.get("id") or ""),
             name=str(function.get("name") or ""),
-            arguments=_decode_headroom_tool_arguments(function.get("arguments")),
+            arguments=_decode_tool_call_arguments(function.get("arguments")),
         )
     return ToolCall(
         id=str(payload.get("id") or ""),
         name=str(payload.get("name") or ""),
-        arguments=_decode_headroom_tool_arguments(payload.get("arguments")),
+        arguments=_decode_tool_call_arguments(payload.get("arguments")),
     )
 
 
@@ -1600,15 +1551,6 @@ def active_tool_specs(interactive):
     )
 
 
-def chat_tools(specs):
-    return specs.specs()
-
-
-def run_tool(state: AgentState, name, args):
-    """Dispatch a single tool call and return its ToolResult."""
-    return state.tool_specs.invoke(state, name, args)
-
-
 # ---------------------------------------------------------------------------
 # Agent execution, prompt building, and context management
 # ---------------------------------------------------------------------------
@@ -1753,7 +1695,7 @@ async def run_turn(
         if calls:
             transcript.add_assistant(message)
             results = [
-                (call_id, run_tool(state, name, args)) for call_id, name, args in calls
+                (call_id, state.tool_specs.invoke(state, name, args)) for call_id, name, args in calls
             ]
             _debug_log(
                 "tool_results",
@@ -1801,7 +1743,7 @@ async def run_agent(
     transcript.add_user(prompt)
 
     async def runner(client):
-        return await run_turn(client, transcript, state, model, chat_tools(tool_specs))
+        return await run_turn(client, transcript, state, model, tool_specs.specs())
 
     try:
         return await runner(get_client(model))
@@ -1842,14 +1784,16 @@ def read_system_prompt(system_file, interactive):
         abort(f"Could not read system file {_fmt('inline', system_file)}: {exc}")
 
 
-def _print_intro(heading, workspace, model, mode, **extras):
+def _print_session_intro(heading: str, session: SessionContext, **extras) -> None:
     lines = [
         f"## {heading}",
         "",
-        f"- workspace: {_fmt('inline', workspace)}",
-        f"- model: {_fmt('inline', model)}",
-        f"- mode: {_fmt('inline', mode)}",
+        f"- workspace: {_fmt('inline', session.workspace)}",
+        f"- model: {_fmt('inline', session.model)}",
+        f"- mode: {_fmt('inline', session.mode)}",
     ]
+    if session.system_file is not None:
+        extras["system file"] = session.system_file.resolve()
     for key, value in extras.items():
         if value is not None:
             lines.append(f"- {key}: {_fmt('inline', value)}")
@@ -1880,19 +1824,6 @@ def _resolve_session(
             else system_prompt
         ),
         system_file=system_file,
-    )
-
-
-def _print_session_intro(heading: str, session: SessionContext, **extras) -> None:
-    intro_extras = dict(extras)
-    if session.system_file is not None:
-        intro_extras["system file"] = session.system_file.resolve()
-    _print_intro(
-        heading,
-        session.workspace,
-        session.model,
-        session.mode,
-        **intro_extras,
     )
 
 

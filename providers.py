@@ -1390,25 +1390,15 @@ async def _send_with_retry(
     ):
         with attempt:
             if on_retry and attempt.retry_state.attempt_number > 1:
-                exc = (
-                    attempt.retry_state.outcome.exception()
-                    if attempt.retry_state.outcome
-                    else None
+                on_retry(
+                    attempt.retry_state.attempt_number,
+                    max_attempts,
+                    _retry_error_context(
+                        attempt.retry_state.outcome.exception()
+                        if attempt.retry_state.outcome
+                        else None
+                    ),
                 )
-                if isinstance(exc, RetryableHttpError):
-                    error_ctx = (
-                        _response_error_message(exc.response)
-                        or f"HTTP {exc.response.status_code}"
-                    )
-                elif isinstance(exc, httpx.TimeoutException):
-                    error_ctx = f"timeout ({type(exc).__name__})"
-                elif isinstance(exc, httpx.TransportError):
-                    error_ctx = f"transport error ({type(exc).__name__}): {exc}"
-                elif exc is not None:
-                    error_ctx = str(exc)
-                else:
-                    error_ctx = None
-                on_retry(attempt.retry_state.attempt_number, max_attempts, error_ctx)
             response = await send()
             retryable = (
                 should_retry_response(response)
@@ -1658,6 +1648,34 @@ def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
             "extra inputs",
         )
     )
+
+
+async def _call_with_reasoning_fallback(
+    api_kind: str,
+    model: str,
+    payload: dict[str, Any],
+    create,
+    *,
+    on_retry=None,
+    bedrock: bool = False,
+):
+    """Try *create(payload)* with reasoning; on unsupported-reasoning errors,
+    strip reasoning args and retry.  Returns the provider response object."""
+    if not _should_send_reasoning(api_kind, model):
+        payload = _drop_reasoning_arg(payload)
+    try:
+        return await _call_with_retry(
+            lambda: create(payload), on_retry=on_retry, bedrock=bedrock
+        )
+    except APIStatusError as exc:
+        if not _is_reasoning_unsupported_error(exc):
+            raise
+        _mark_reasoning_unsupported(api_kind, model)
+        return await _call_with_retry(
+            lambda: create(_drop_reasoning_arg(payload)),
+            on_retry=on_retry,
+            bedrock=bedrock,
+        )
 
 
 def _responses_payload(
@@ -1933,21 +1951,10 @@ def _openai_responses_client(
             return await client.responses.create(**payload)
 
         payload = _responses_payload(model, messages, tools, tool_choice)
-        if not _should_send_reasoning("responses", model):
-            payload = _drop_reasoning_arg(payload)
-        try:
-            response = await _call_with_retry(
-                lambda: create_response(payload), on_retry=on_retry, bedrock=bedrock
-            )
-        except APIStatusError as exc:
-            if not _is_reasoning_unsupported_error(exc):
-                raise
-            _mark_reasoning_unsupported("responses", model)
-            response = await _call_with_retry(
-                lambda: create_response(_drop_reasoning_arg(payload)),
-                on_retry=on_retry,
-                bedrock=bedrock,
-            )
+        response = await _call_with_reasoning_fallback(
+            "responses", model, payload, create_response,
+            on_retry=on_retry, bedrock=bedrock,
+        )
         return _decode_responses_output(response)
 
     return CompletionClient(
@@ -1978,8 +1985,6 @@ def _openai_chat_completions_client(
             "messages": [_openai_chat_message(message) for message in messages],
             "reasoning_effort": "high",
         }
-        if not _should_send_reasoning("chat_completions", model):
-            kwargs = _drop_reasoning_arg(kwargs)
         if tools:
             kwargs["tools"] = tools_map(tools)
             kwargs["tool_choice"] = tool_choice
@@ -1987,19 +1992,10 @@ def _openai_chat_completions_client(
         async def create_response(payload: dict[str, Any]):
             return await client.chat.completions.create(**payload)
 
-        try:
-            response = await _call_with_retry(
-                lambda: create_response(kwargs), on_retry=on_retry, bedrock=bedrock
-            )
-        except APIStatusError as exc:
-            if not _is_reasoning_unsupported_error(exc):
-                raise
-            _mark_reasoning_unsupported("chat_completions", model)
-            response = await _call_with_retry(
-                lambda: create_response(_drop_reasoning_arg(kwargs)),
-                on_retry=on_retry,
-                bedrock=bedrock,
-            )
+        response = await _call_with_reasoning_fallback(
+            "chat_completions", model, kwargs, create_response,
+            on_retry=on_retry, bedrock=bedrock,
+        )
         choice = response.choices[0]
         msg = choice.message
         return AssistantMessage(
@@ -2607,26 +2603,22 @@ def _fetch_copilot_models_raw(token: str) -> list[JSONDict]:
     return data.get("data", []) if isinstance(data, dict) else []
 
 
-def _copilot_chat_model_ids(token: str) -> list[str]:
-    """Return sorted Copilot chat model IDs."""
+def _classify_copilot_models(
+    token: str,
+) -> tuple[list[str], set[str]]:
+    """Return (sorted chat model IDs, set of /responses-capable IDs) in one pass."""
     raw = _fetch_copilot_models_raw(token)
-    return sorted(
-        model["id"]
-        for model in raw
-        if isinstance(model.get("id"), str)
-        and model.get("capabilities", {}).get("type") == "chat"
-    )
-
-
-def _copilot_responses_model_ids(token: str) -> set[str]:
-    """Return model IDs that support the /responses endpoint."""
-    raw = _fetch_copilot_models_raw(token)
-    return {
-        model["id"]
-        for model in raw
-        if isinstance(model.get("id"), str)
-        and "/responses" in (model.get("supported_endpoints") or [])
-    }
+    chat_ids: list[str] = []
+    responses_ids: set[str] = set()
+    for model in raw:
+        model_id = model.get("id")
+        if not isinstance(model_id, str):
+            continue
+        if model.get("capabilities", {}).get("type") == "chat":
+            chat_ids.append(model_id)
+        if "/responses" in (model.get("supported_endpoints") or []):
+            responses_ids.add(model_id)
+    return sorted(chat_ids), responses_ids
 
 
 def _copilot_completion_client() -> CompletionClient:
@@ -2635,7 +2627,7 @@ def _copilot_completion_client() -> CompletionClient:
     async_client, sync_client = _copilot_openai_pair(token)
 
     try:
-        responses_models = _copilot_responses_model_ids(token)
+        _, responses_models = _classify_copilot_models(token)
     except Exception:
         responses_models = set()
 
@@ -2660,7 +2652,8 @@ def _copilot_completion_client() -> CompletionClient:
 
     def list_models() -> list[str]:
         try:
-            return _copilot_chat_model_ids(token)
+            chat_ids, _ = _classify_copilot_models(token)
+            return chat_ids
         except Exception:
             return sorted(
                 m.id

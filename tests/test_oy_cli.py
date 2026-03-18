@@ -662,7 +662,8 @@ class HeadroomSerializationTests(unittest.TestCase):
         self.assertEqual(payload["role"], "tool")
         self.assertFalse(payload["ok"])
         self.assertIsInstance(payload["content"], str)
-        self.assertIn('"count": 2', payload["content"])
+        parsed = json.loads(payload["content"])
+        self.assertEqual(parsed["count"], 2)
 
     def test_deserialize_from_headroom_restores_openai_tool_calls(self):
         message = oy_cli._deserialize_from_headroom(

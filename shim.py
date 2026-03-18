@@ -37,20 +37,12 @@ KNOWN_SHIMS = set(SHIM_ORDER)
 # ---------------------------------------------------------------------------
 
 
-def load_json(path, default):
-    return _providers.load_json(path, default)
-
-
-def save_json(path, data):
-    return _providers.save_json(path, data)
-
-
-def run_cmd(cmd, **kwargs):
-    return _providers.run_cmd(cmd, **kwargs)
-
-
-def which(tool, path=None):
-    return _providers.which(tool, path)
+# Keep these names in shim.py so callers and tests can patch the shim boundary
+# without importing providers directly.
+load_json = _providers.load_json
+save_json = _providers.save_json
+run_cmd = _providers.run_cmd
+which = _providers.which
 
 
 def command_env(cwd=None):
@@ -71,16 +63,9 @@ def _clear_command_env_cache() -> None:
 command_env.cache_clear = _clear_command_env_cache
 
 
-def default_region() -> str:
-    return _providers.default_region()
-
-
-def join_model_spec(shim: str, model: str) -> str:
-    return _providers.join_model_spec(shim, model)
-
-
-def split_model_spec(spec: str) -> tuple[str | None, str]:
-    return _providers.split_model_spec(spec)
+default_region = _providers.default_region
+join_model_spec = _providers.join_model_spec
+split_model_spec = _providers.split_model_spec
 
 
 # ---------------------------------------------------------------------------
@@ -97,56 +82,93 @@ def validate_shim(shim: str) -> str:
     return shim
 
 
+def _static_shim(
+    name: str,
+    *,
+    ensure_env: Callable[[], None],
+    build_client: Callable[[], CompletionClient],
+    list_models: Callable[[], list[str]] | None = None,
+) -> ShimSpec:
+    client_builder = _providers._static_client_builder(build_client)
+    return ShimSpec(
+        name=name,
+        ensure_env=_providers._static_env_checker(ensure_env),
+        build_client=client_builder,
+        list_models=(
+            _providers._static_model_lister(list_models)
+            if list_models is not None
+            else _providers._client_model_lister(client_builder)
+        ),
+    )
+
+
+def _region_shim(
+    name: str,
+    *,
+    ensure_env: Callable[[Path | None], None],
+    build_client: Callable[[str | None], CompletionClient],
+) -> ShimSpec:
+    client_builder = _providers._region_client_builder(build_client)
+    return ShimSpec(
+        name=name,
+        ensure_env=ensure_env,
+        build_client=client_builder,
+        list_models=_providers._client_model_lister(client_builder),
+    )
+
+
+def _runtime_shim(
+    name: str,
+    *,
+    ensure_env: Callable[[Path | None], None],
+    build_client: Callable[[str | None, Path | None], CompletionClient],
+) -> ShimSpec:
+    return ShimSpec(
+        name=name,
+        ensure_env=ensure_env,
+        build_client=build_client,
+        list_models=_providers._client_model_lister(build_client),
+    )
+
+
 SHIM_SPECS: dict[str, ShimSpec] = {
-    SHIM_OPENAI: ShimSpec(
-        name=SHIM_OPENAI,
-        ensure_env=_providers._static_env_checker(_providers._require_openai_env),
-        build_client=_providers._static_client_builder(_providers._openai_client),
-        list_models=_providers._static_model_lister(
-            lambda: _providers._openai_client(max_retries=0).list_models()
-        ),
+    SHIM_OPENAI: _static_shim(
+        SHIM_OPENAI,
+        ensure_env=_providers._require_openai_env,
+        build_client=_providers._openai_client,
+        list_models=lambda: _providers._openai_client(max_retries=0).list_models(),
     ),
-    SHIM_CODEX: ShimSpec(
-        name=SHIM_CODEX,
-        ensure_env=_providers._static_env_checker(_providers._require_codex_env),
-        build_client=_providers._static_client_builder(_providers._codex_client),
-        list_models=_providers._client_model_lister(
-            _providers._static_client_builder(_providers._codex_client)
-        ),
+    SHIM_CODEX: _static_shim(
+        SHIM_CODEX,
+        ensure_env=_providers._require_codex_env,
+        build_client=_providers._codex_client,
     ),
-    SHIM_GEMINI: ShimSpec(
-        name=SHIM_GEMINI,
-        ensure_env=_providers._static_env_checker(_providers._require_gemini_env),
-        build_client=_providers._static_client_builder(_providers._gemini_completion_client),
-        list_models=_providers._static_model_lister(_providers.load_gemini_model_list),
+    SHIM_GEMINI: _static_shim(
+        SHIM_GEMINI,
+        ensure_env=_providers._require_gemini_env,
+        build_client=_providers._gemini_completion_client,
+        list_models=_providers.load_gemini_model_list,
     ),
-    SHIM_BEDROCK: ShimSpec(
-        name=SHIM_BEDROCK,
+    SHIM_BEDROCK: _region_shim(
+        SHIM_BEDROCK,
         ensure_env=_providers._require_boto3_aws_env,
-        build_client=_providers._region_client_builder(_providers._bedrock_completion_client),
-        list_models=_providers._client_model_lister(
-            _providers._region_client_builder(_providers._bedrock_completion_client)
-        ),
+        build_client=_providers._bedrock_completion_client,
     ),
-    SHIM_MANTLE: ShimSpec(
-        name=SHIM_MANTLE,
+    SHIM_MANTLE: _runtime_shim(
+        SHIM_MANTLE,
         ensure_env=_providers._require_aws_env,
         build_client=_providers._mantle_completion_client,
-        list_models=_providers._client_model_lister(_providers._mantle_completion_client),
     ),
-    SHIM_CLAUDE: ShimSpec(
-        name=SHIM_CLAUDE,
-        ensure_env=_providers._static_env_checker(_providers._require_claude_env),
-        build_client=_providers._static_client_builder(_providers._claude_client_from_auth),
-        list_models=_providers._static_model_lister(_providers._claude_model_list),
+    SHIM_CLAUDE: _static_shim(
+        SHIM_CLAUDE,
+        ensure_env=_providers._require_claude_env,
+        build_client=_providers._claude_client_from_auth,
+        list_models=_providers._claude_model_list,
     ),
-    SHIM_COPILOT: ShimSpec(
-        name=SHIM_COPILOT,
-        ensure_env=_providers._static_env_checker(_providers._require_copilot_env),
-        build_client=_providers._static_client_builder(_providers._copilot_completion_client),
-        list_models=_providers._client_model_lister(
-            _providers._static_client_builder(_providers._copilot_completion_client)
-        ),
+    SHIM_COPILOT: _static_shim(
+        SHIM_COPILOT,
+        ensure_env=_providers._require_copilot_env,
+        build_client=_providers._copilot_completion_client,
     ),
 }
 
@@ -155,12 +177,23 @@ def _shim_spec(shim: str) -> ShimSpec:
     return SHIM_SPECS[validate_shim(shim)]
 
 
-def _shim_available(shim: str) -> bool:
+def _resolved_shim_spec(
+    model_spec: str | None = None, configured_shim: str | None = None
+) -> tuple[str, ShimSpec]:
+    shim = resolve_shim(model_spec, configured_shim)
+    return shim, _shim_spec(shim)
+
+
+def _shim_env_error(spec: ShimSpec, cwd: Path | None) -> str | None:
     try:
-        _shim_spec(shim).ensure_env(None)
-        return True
-    except Exception:
-        return False
+        spec.ensure_env(cwd)
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
+def _shim_available(shim: str) -> bool:
+    return _shim_env_error(_shim_spec(shim), None) is None
 
 
 def detect_available_shims() -> list[str]:
@@ -189,12 +222,27 @@ def ensure_api_env(
     configured_shim: str | None = None,
     cwd: Path | None = None,
 ) -> tuple[bool, str | None]:
-    spec = _shim_spec(resolve_shim(model_spec, configured_shim))
-    try:
-        spec.ensure_env(cwd)
-        return True, None
-    except Exception as exc:
-        return False, str(exc)
+    _, spec = _resolved_shim_spec(model_spec, configured_shim)
+    error = _shim_env_error(spec, cwd)
+    return error is None, error
+
+
+_MISSING_API_CREDENTIALS_MESSAGE = (
+    "Missing API credentials.\n\n"
+    "- set `OPENAI_API_KEY`, or\n"
+    "- sign in with Codex CLI (`codex login`), or\n"
+    "- install Gemini CLI and run `gemini` once to authenticate, or\n"
+    "- sign in with Claude Code (`claude auth login`), or\n"
+    "- configure AWS CLI for Bedrock"
+)
+
+
+def _missing_api_credentials_message(error: str | None) -> str:
+    return (
+        _MISSING_API_CREDENTIALS_MESSAGE
+        if not error
+        else f"{_MISSING_API_CREDENTIALS_MESSAGE}\n- error: {error}"
+    )
 
 
 def require_api_env(
@@ -202,20 +250,10 @@ def require_api_env(
     configured_shim: str | None = None,
     cwd: Path | None = None,
 ) -> str:
-    ok, error = ensure_api_env(model_spec, configured_shim, cwd)
-    if ok:
-        return validate_shim(resolve_shim(model_spec, configured_shim))
-    message = (
-        "Missing API credentials.\n\n"
-        "- set `OPENAI_API_KEY`, or\n"
-        "- sign in with Codex CLI (`codex login`), or\n"
-        "- install Gemini CLI and run `gemini` once to authenticate, or\n"
-        "- sign in with Claude Code (`claude auth login`), or\n"
-        "- configure AWS CLI for Bedrock"
-    )
-    if error:
-        message += f"\n- error: {error}"
-    raise RuntimeError(message)
+    shim, spec = _resolved_shim_spec(model_spec, configured_shim)
+    if error := _shim_env_error(spec, cwd):
+        raise RuntimeError(_missing_api_credentials_message(error))
+    return shim
 
 
 def get_client(
@@ -224,7 +262,6 @@ def get_client(
     region: str | None = None,
     cwd: Path | None = None,
 ) -> CompletionClient:
-    _ = model_spec
     return _shim_spec(shim).build_client(region, cwd)
 
 
@@ -239,10 +276,11 @@ def list_models_for_shim(
 
 
 def list_all_model_ids(region: str | None = None, cwd: Path | None = None) -> list[str]:
-    models: list[str] = []
-    for shim in detect_available_shims():
-        models.extend(list_models_for_shim(shim, region=region, cwd=cwd))
-    return models
+    return [
+        model
+        for shim in detect_available_shims()
+        for model in list_models_for_shim(shim, region=region, cwd=cwd)
+    ]
 
 
 # ---------------------------------------------------------------------------
