@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-import shim
+import providers
+
 
 
 class OpenAIPairTests(unittest.TestCase):
@@ -12,12 +13,12 @@ class OpenAIPairTests(unittest.TestCase):
         sync_http = object()
 
         with (
-            patch("shim.async_http_client", return_value=async_http) as make_async_http,
-            patch("shim.http_client", return_value=sync_http) as make_sync_http,
-            patch("shim.AsyncOpenAI") as async_openai,
-            patch("shim.OpenAI") as openai,
+            patch("providers.async_http_client", return_value=async_http) as make_async_http,
+            patch("providers.http_client", return_value=sync_http) as make_sync_http,
+            patch("providers.AsyncOpenAI") as async_openai,
+            patch("providers.OpenAI") as openai,
         ):
-            shim._openai_pair(
+            providers._openai_pair(
                 "test-key",
                 base_url="https://example.com/v1",
                 max_retries=7,
@@ -54,17 +55,17 @@ class OpenAIPairTests(unittest.TestCase):
         sync_http = object()
 
         with (
-            patch("shim.async_http_client", return_value=async_http) as make_async_http,
-            patch("shim.http_client", return_value=sync_http) as make_sync_http,
-            patch("shim.AsyncOpenAI") as async_openai,
-            patch("shim.OpenAI") as openai,
+            patch("providers.async_http_client", return_value=async_http) as make_async_http,
+            patch("providers.http_client", return_value=sync_http) as make_sync_http,
+            patch("providers.AsyncOpenAI") as async_openai,
+            patch("providers.OpenAI") as openai,
         ):
-            shim._copilot_openai_pair("test-token")
+            providers._copilot_openai_pair("test-token")
 
         expected = {
             "api_key": "test-token",
-            "base_url": shim._COPILOT_BASE_URL,
-            "default_headers": shim._copilot_default_headers(),
+            "base_url": providers._COPILOT_BASE_URL,
+            "default_headers": providers._copilot_default_headers(),
         }
         make_async_http.assert_called_once_with(**expected)
         make_sync_http.assert_called_once_with(**expected)

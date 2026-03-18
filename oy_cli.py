@@ -17,28 +17,14 @@ import tiktoken
 from shim import (
     AssistantMessage,
     ChatMessage,
-    command_env as shim_command_env,
-    load_json as shim_load_json,
-    run_cmd as shim_run_cmd,
-    save_json as shim_save_json,
+    CompletionClient,
+    SHIMS,
     SystemMessage,
     ToolCall,
     ToolMessage,
     ToolResult,
     ToolSpec,
     UserMessage,
-    which as shim_which,
-    CompletionClient,
-    default_region as shim_default_region,
-    detect_available_shims as shim_detect_available_shims,
-    ensure_api_env as shim_ensure_api_env,
-    get_client as shim_build_client,
-    join_model_spec as shim_join_model_spec,
-    list_models_for_shim as shim_list_models_for_shim,
-    require_api_env as shim_require_api_env,
-    resolve_shim as shim_resolve_shim,
-    split_model_spec as shim_split_model_spec,
-    validate_shim as shim_validate_shim,
 )
 from openai import (
     AuthenticationError,
@@ -130,46 +116,8 @@ BUDGETS = _derive_runtime_budgets(MAX_CONTEXT_TOKENS)
 
 # ---------------------------------------------------------------------------
 # Shim boundary -- oy_cli owns UX/orchestration and talks to shim.py through
-# this narrow bridge of shared helpers and provider/runtime operations.
+# the shared SHIMS bridge plus a small set of local wrappers.
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class ShimBridge:
-    load_json: Callable[[Path, Any], Any]
-    save_json: Callable[[Path, Any], bool]
-    run_cmd: Callable[..., Any]
-    which: Callable[[str, str | None], str | None]
-    command_env: Callable[[Path | None], Any]
-    default_region: Callable[[], str]
-    detect_available_shims: Callable[[], list[str]]
-    ensure_api_env: Callable[[str | None, str | None, Path | None], tuple[bool, str | None]]
-    require_api_env: Callable[[str | None, str | None, Path | None], str]
-    build_client: Callable[..., CompletionClient]
-    list_models_for_shim: Callable[[str, str | None, Path | None], list[str]]
-    resolve_shim: Callable[[str | None, str | None], str]
-    validate_shim: Callable[[str], str]
-    join_model_spec: Callable[[str, str], str]
-    split_model_spec: Callable[[str], tuple[str | None, str]]
-
-
-SHIMS = ShimBridge(
-    load_json=shim_load_json,
-    save_json=shim_save_json,
-    run_cmd=shim_run_cmd,
-    which=shim_which,
-    command_env=shim_command_env,
-    default_region=shim_default_region,
-    detect_available_shims=shim_detect_available_shims,
-    ensure_api_env=shim_ensure_api_env,
-    require_api_env=shim_require_api_env,
-    build_client=shim_build_client,
-    list_models_for_shim=shim_list_models_for_shim,
-    resolve_shim=shim_resolve_shim,
-    validate_shim=shim_validate_shim,
-    join_model_spec=shim_join_model_spec,
-    split_model_spec=shim_split_model_spec,
-)
 
 
 def load_json(path, default):

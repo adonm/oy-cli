@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+import providers
 import shim
 
 
@@ -27,8 +28,8 @@ def _dummy_spec(
     *,
     ensure_env=None,
     list_models=None,
-) -> shim.ShimSpec:
-    return shim.ShimSpec(
+) -> providers.ShimSpec:
+    return providers.ShimSpec(
         name=name,
         ensure_env=ensure_env or (lambda cwd: None),
         build_client=lambda region, cwd: _dummy_client(),
@@ -39,18 +40,18 @@ def _dummy_spec(
 class DecodeToolCallArgumentsTests(unittest.TestCase):
     def test_decodes_double_encoded_json(self):
         raw = json.dumps('{"count": 2}')
-        self.assertEqual(shim._decode_tool_call_arguments(raw), {"count": 2})
+        self.assertEqual(providers._decode_tool_call_arguments(raw), {"count": 2})
 
     def test_salvages_duplicated_json(self):
         self.assertEqual(
-            shim._decode_tool_call_arguments('{"ok":true}{"ok":true}'),
+            providers._decode_tool_call_arguments('{"ok":true}{"ok":true}'),
             {"ok": True},
         )
 
 
 class TranslationTests(unittest.TestCase):
     def test_decodes_responses_output(self):
-        message = shim._decode_responses_output(
+        message = providers._decode_responses_output(
             {
                 "output": [
                     {
@@ -89,7 +90,7 @@ class TranslationTests(unittest.TestCase):
                 content=shim.ToolResult(ok=False, content={"error": "second"}),
             ),
         ]
-        encoded, system = shim._encode_provider_messages(messages, shim.BEDROCK_CODEC)
+        encoded, system = providers._encode_provider_messages(messages, providers.BEDROCK_CODEC)
         self.assertIsNone(system)
         self.assertEqual([item["role"] for item in encoded], ["assistant", "user"])
         self.assertEqual(encoded[1]["content"][1]["toolResult"]["status"], "error")
@@ -97,7 +98,7 @@ class TranslationTests(unittest.TestCase):
 
 class ReasoningTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        shim._REASONING_SUPPORT_CACHE.clear()
+        providers._REASONING_SUPPORT_CACHE.clear()
 
     async def test_chat_completions_client_does_not_send_parallel_hint(self):
         message = Mock(content="done", tool_calls=None)
@@ -108,7 +109,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         async_client = Mock()
         async_client.with_options.return_value = Mock(chat=chat)
         sync_client = Mock()
-        client = shim._openai_chat_completions_client(
+        client = providers._openai_chat_completions_client(
             async_client,
             sync_client,
             tools_map=lambda tools: [
@@ -132,7 +133,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("parallel_tool_calls", create.call_args.kwargs)
 
     async def test_responses_client_falls_back_without_reasoning_when_unsupported(self):
-        unsupported = shim.APIStatusError(
+        unsupported = providers.APIStatusError(
             "bad request",
             response=httpx.Response(
                 400,
@@ -149,7 +150,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         async_client.with_options.return_value = Mock(responses=responses)
         sync_client = Mock()
 
-        client = shim._openai_responses_client(async_client, sync_client)
+        client = providers._openai_responses_client(async_client, sync_client)
         await client.chat_completion("gpt-test", [])
 
         self.assertEqual(create.call_count, 2)
@@ -161,7 +162,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_completions_client_falls_back_without_reasoning_when_unsupported(
         self,
     ):
-        unsupported = shim.APIStatusError(
+        unsupported = providers.APIStatusError(
             "bad request",
             response=httpx.Response(
                 400,
@@ -180,7 +181,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         async_client.with_options.return_value = Mock(chat=chat)
         sync_client = Mock()
 
-        client = shim._openai_chat_completions_client(
+        client = providers._openai_chat_completions_client(
             async_client,
             sync_client,
             tools_map=lambda tools: [],
@@ -199,9 +200,9 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         async_client = Mock()
         async_client.with_options.return_value = Mock(responses=responses)
         sync_client = Mock()
-        shim._mark_reasoning_unsupported("responses", "gpt-test")
+        providers._mark_reasoning_unsupported("responses", "gpt-test")
 
-        client = shim._openai_responses_client(async_client, sync_client)
+        client = providers._openai_responses_client(async_client, sync_client)
         await client.chat_completion("gpt-test", [])
 
         self.assertNotIn("reasoning", create.call_args.kwargs)
@@ -211,7 +212,7 @@ class ShimHelperTests(unittest.TestCase):
     def test_static_env_checker_ignores_cwd(self):
         calls: list[str] = []
 
-        checker = shim._static_env_checker(lambda: calls.append("ok"))
+        checker = providers._static_env_checker(lambda: calls.append("ok"))
         checker(None)
         checker(Path("/tmp/work"))
 
@@ -220,7 +221,7 @@ class ShimHelperTests(unittest.TestCase):
     def test_region_client_builder_ignores_cwd(self):
         calls: list[str | None] = []
 
-        builder = shim._region_client_builder(
+        builder = providers._region_client_builder(
             lambda region: calls.append(region) or _dummy_client([region or "default"])
         )
         client = builder("us-east-1", Path("/tmp/work"))
@@ -258,7 +259,7 @@ class ShimApiSurfaceTests(unittest.TestCase):
             "which",
         }
 
-        self.assertEqual(set(shim.__all__), expected)
+        self.assertEqual(set(shim.__all__), expected | {"APIStatusError", "SHIMS", "ShimBridge", "ShimSpec", "resolve_shim"})
 
     def test_ensure_api_env_uses_resolved_shim_spec(self):
         spec = _dummy_spec("alpha", ensure_env=lambda cwd: None)
@@ -274,7 +275,7 @@ class ShimApiSurfaceTests(unittest.TestCase):
 
     def test_get_client_uses_shim_registry_builder(self):
         sentinel = _dummy_client(["demo"])
-        spec = shim.ShimSpec(
+        spec = providers.ShimSpec(
             name="alpha",
             ensure_env=lambda cwd: None,
             build_client=lambda region, cwd: sentinel,
