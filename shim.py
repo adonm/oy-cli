@@ -28,6 +28,8 @@ SHIM_BEDROCK = _providers.SHIM_BEDROCK
 SHIM_MANTLE = _providers.SHIM_MANTLE
 SHIM_CLAUDE = _providers.SHIM_CLAUDE
 SHIM_COPILOT = _providers.SHIM_COPILOT
+SHIM_OPENCODE = _providers.SHIM_OPENCODE
+SHIM_OPENCODE_GO = _providers.SHIM_OPENCODE_GO
 SHIM_ORDER = _providers.SHIM_ORDER
 KNOWN_SHIMS = set(SHIM_ORDER)
 
@@ -170,6 +172,16 @@ SHIM_SPECS: dict[str, ShimSpec] = {
         ensure_env=_providers._require_copilot_env,
         build_client=_providers._copilot_completion_client,
     ),
+    SHIM_OPENCODE: _static_shim(
+        SHIM_OPENCODE,
+        ensure_env=_providers._require_opencode_zen_env,
+        build_client=_providers._opencode_zen_client,
+    ),
+    SHIM_OPENCODE_GO: _static_shim(
+        SHIM_OPENCODE_GO,
+        ensure_env=_providers._require_opencode_go_env,
+        build_client=_providers._opencode_go_client,
+    ),
 }
 
 
@@ -233,7 +245,8 @@ _MISSING_API_CREDENTIALS_MESSAGE = (
     "- sign in with Codex CLI (`codex login`), or\n"
     "- install Gemini CLI and run `gemini` once to authenticate, or\n"
     "- sign in with Claude Code (`claude auth login`), or\n"
-    "- configure AWS CLI for Bedrock"
+    "- configure AWS CLI for Bedrock, or\n"
+    "- authenticate with OpenCode (`opencode auth`)"
 )
 
 

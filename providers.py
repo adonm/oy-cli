@@ -37,6 +37,8 @@ SHIM_BEDROCK = "bedrock"
 SHIM_MANTLE = "bedrock-mantle"
 SHIM_CLAUDE = "claude"
 SHIM_COPILOT = "copilot"
+SHIM_OPENCODE = "opencode"
+SHIM_OPENCODE_GO = "opencode-go"
 SHIM_ORDER = (
     SHIM_OPENAI,
     SHIM_CODEX,
@@ -45,6 +47,8 @@ SHIM_ORDER = (
     SHIM_MANTLE,
     SHIM_CLAUDE,
     SHIM_COPILOT,
+    SHIM_OPENCODE,
+    SHIM_OPENCODE_GO,
 )
 KNOWN_SHIMS = set(SHIM_ORDER)
 
@@ -61,6 +65,9 @@ CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 CODEX_MODELS_CACHE_PATH = Path.home() / ".codex" / "models_cache.json"
 GEMINI_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
 CLAUDE_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
+OPENCODE_AUTH_PATH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+OPENCODE_ZEN_URL = "https://opencode.ai/zen/v1"
+OPENCODE_GO_URL = "https://opencode.ai/zen/go/v1"
 CODEX_DEFAULT_MODEL = "gpt-5-codex"
 CODEX_CHATGPT_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -263,19 +270,23 @@ def _tool_message_block(message: ToolMessage) -> ToolResultBlock:
 
 
 def _assistant_from_blocks(blocks: list[ContentBlock]) -> AssistantMessage:
-    content = ""
+    content_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     thought_signatures: dict[str, str] = {}
     for block in blocks:
         match block:
             case TextBlock():
-                content += block.text
+                if not _is_blank_chat_value(block.text):
+                    content_parts.append(block.text)
             case ToolUseBlock():
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, arguments=block.arguments)
                 )
                 if block.thought_signature:
                     thought_signatures[block.id] = block.thought_signature
+    content = "".join(content_parts)
+    if _is_blank_chat_value(content):
+        content = ""
     return AssistantMessage(
         content=content,
         tool_calls=tool_calls,
@@ -338,7 +349,8 @@ def _extract_blocks(
 ) -> list[ContentBlock]:
     blocks: list[ContentBlock] = []
     for index, item in enumerate(items):
-        if text := text_of(item):
+        text = text_of(item)
+        if isinstance(text, str) and not _is_blank_chat_value(text):
             blocks.append(TextBlock(text))
         if tool := tool_of(item, index):
             blocks.append(tool)
@@ -1719,10 +1731,12 @@ def _decode_responses_output(response: Any) -> AssistantMessage:
             for part in item.get("content") or []:
                 if not isinstance(part, dict):
                     continue
-                if isinstance(part.get("text"), str):
-                    content_parts.append(part["text"])
-                elif isinstance(part.get("refusal"), str):
-                    content_parts.append(part["refusal"])
+                text = part.get("text")
+                refusal = part.get("refusal")
+                if isinstance(text, str) and not _is_blank_chat_value(text):
+                    content_parts.append(text)
+                elif isinstance(refusal, str) and not _is_blank_chat_value(refusal):
+                    content_parts.append(refusal)
         elif item_type == "function_call":
             call_id = item.get("call_id") or item.get("id")
             if not isinstance(call_id, str) or not call_id:
@@ -1734,13 +1748,17 @@ def _decode_responses_output(response: Any) -> AssistantMessage:
                     arguments=_decode_tool_call_arguments(item.get("arguments")),
                 )
             )
-    if not content_parts and isinstance(data.get("output_text"), str):
-        content_parts.append(data["output_text"])
+    output_text = data.get("output_text")
+    if (
+        not content_parts
+        and isinstance(output_text, str)
+        and not _is_blank_chat_value(output_text)
+    ):
+        content_parts.append(output_text)
     return AssistantMessage(
-        content="\n\n".join(part for part in content_parts if part),
+        content="\n\n".join(content_parts),
         tool_calls=tool_calls,
     )
-
 
 def _http_error_message(prefix: str, response: httpx.Response) -> str:
     try:
@@ -1965,6 +1983,106 @@ def _openai_responses_client(
     )
 
 
+def _message_like_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {key: item for key, item in value.items() if item is not None}
+    if hasattr(value, "model_dump"):
+        data = value.model_dump(exclude_none=True)
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
+    if data := _message_like_dict(message):
+        return data
+    result: dict[str, Any] = {}
+    for key in (
+        "role",
+        "content",
+        "tool_calls",
+        "refusal",
+        "reasoning_text",
+        "reasoning_opaque",
+    ):
+        value = getattr(message, key, None)
+        if key == "tool_calls":
+            if isinstance(value, list):
+                result[key] = value
+        elif isinstance(value, str):
+            result[key] = value
+    return result
+
+
+def _chat_completion_tool_call(tool_call: Any) -> ToolCall | None:
+    data = _message_like_dict(tool_call)
+    if data:
+        call_id = data.get("id")
+        function = data.get("function")
+    else:
+        call_id = getattr(tool_call, "id", None)
+        function = getattr(tool_call, "function", None)
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    function_data = _message_like_dict(function)
+    if function_data:
+        name = function_data.get("name")
+        arguments = function_data.get("arguments")
+    else:
+        name = getattr(function, "name", None)
+        arguments = getattr(function, "arguments", None)
+    if not isinstance(name, str) or not name:
+        return None
+    return ToolCall(
+        id=call_id,
+        name=name,
+        arguments=_decode_tool_call_arguments(arguments),
+    )
+
+
+def _is_blank_chat_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {} or (
+        isinstance(value, str) and not value.strip()
+    )
+
+
+def _merged_chat_completion_message(choices: list[Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for choice in choices:
+        message = _chat_completion_message_dict(getattr(choice, "message", None))
+        if not message:
+            continue
+        candidate = dict(merged)
+        for key, value in message.items():
+            if key not in candidate or _is_blank_chat_value(candidate[key]):
+                candidate[key] = value
+                continue
+            if _is_blank_chat_value(value) or candidate[key] == value:
+                continue
+            return merged or message
+        merged = candidate
+    return merged
+
+
+def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
+    choices = getattr(response, "choices", None)
+    message = (
+        _merged_chat_completion_message(choices)
+        if isinstance(choices, list) and len(choices) > 1
+        else _chat_completion_message_dict(getattr(choices[0], "message", None))
+        if isinstance(choices, list) and choices
+        else {}
+    )
+    return AssistantMessage(
+        content=message.get("content") if isinstance(message.get("content"), str) else "",
+        tool_calls=[
+            call
+            for tool_call in message.get("tool_calls") or []
+            if (call := _chat_completion_tool_call(tool_call)) is not None
+        ],
+    )
+
+
 def _openai_chat_completions_client(
     async_client: AsyncOpenAI,
     sync_client: OpenAI,
@@ -1996,19 +2114,7 @@ def _openai_chat_completions_client(
             "chat_completions", model, kwargs, create_response,
             on_retry=on_retry, bedrock=bedrock,
         )
-        choice = response.choices[0]
-        msg = choice.message
-        return AssistantMessage(
-            content=msg.content or "",
-            tool_calls=[
-                ToolCall(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments=_decode_tool_call_arguments(tc.function.arguments),
-                )
-                for tc in msg.tool_calls or []
-            ],
-        )
+        return _chat_completion_to_assistant_message(response)
 
     return CompletionClient(
         chat_completion=chat_completion,
@@ -2662,6 +2768,62 @@ def _copilot_completion_client() -> CompletionClient:
             )
 
     return CompletionClient(chat_completion=chat_completion, list_models=list_models)
+
+
+# ---------------------------------------------------------------------------
+# OpenCode shims – reads credentials from ~/.local/share/opencode/auth.json
+# Zen endpoint: https://opencode.ai/zen/v1  (auth key: "opencode")
+# Go  endpoint: https://opencode.ai/zen/go/v1  (auth key: "opencode-go")
+# ---------------------------------------------------------------------------
+
+
+def _load_opencode_auth() -> dict:
+    try:
+        data = load_json(OPENCODE_AUTH_PATH, {})
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_opencode_zen_api_key() -> str | None:
+    entry = _load_opencode_auth().get("opencode", {})
+    return (entry.get("key") or None) if isinstance(entry, dict) else None
+
+
+def get_opencode_go_api_key() -> str | None:
+    entry = _load_opencode_auth().get("opencode-go", {})
+    return (entry.get("key") or None) if isinstance(entry, dict) else None
+
+
+def _require_opencode_zen_env() -> None:
+    _require_string(
+        get_opencode_zen_api_key(),
+        f"No OpenCode Zen credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
+    )
+
+
+def _require_opencode_go_env() -> None:
+    _require_string(
+        get_opencode_go_api_key(),
+        f"No OpenCode Go credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
+    )
+
+
+def _opencode_zen_client() -> CompletionClient:
+    key = _require_string(get_opencode_zen_api_key(), "No OpenCode Zen credentials found")
+    return _openai_chat_completions_client(
+        *_openai_pair(key, base_url=OPENCODE_ZEN_URL),
+        tools_map=_tool_specs_to_openai,
+    )
+
+
+def _opencode_go_client() -> CompletionClient:
+    key = _require_string(get_opencode_go_api_key(), "No OpenCode Go credentials found")
+    return _openai_chat_completions_client(
+        *_openai_pair(key, base_url=OPENCODE_GO_URL),
+        tools_map=_tool_specs_to_openai,
+    )
+
 
 __all__ = [
     "AssistantMessage",

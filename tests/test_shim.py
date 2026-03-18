@@ -74,6 +74,47 @@ class TranslationTests(unittest.TestCase):
             [shim.ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
         )
 
+    def test_decodes_responses_output_ignores_blank_text_parts(self):
+        message = providers._decode_responses_output(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"text": "\n\n"},
+                            {"text": "hello"},
+                            {"refusal": "   "},
+                            {"refusal": "nope"},
+                        ],
+                    }
+                ]
+            }
+        )
+        self.assertEqual(message.content, "hello\n\nnope")
+
+    def test_assistant_from_blocks_ignores_blank_text_blocks(self):
+        message = providers._assistant_from_blocks(
+            [
+                providers.TextBlock("\n\n"),
+                providers.TextBlock("hello"),
+                providers.ToolUseBlock(id="call_1", name="echo", arguments={"x": 1}),
+            ]
+        )
+        self.assertEqual(message.content, "hello")
+        self.assertEqual(
+            message.tool_calls,
+            [shim.ToolCall(id="call_1", name="echo", arguments={"x": 1})],
+        )
+
+    def test_extract_blocks_ignores_blank_text(self):
+        blocks = providers._extract_blocks(
+            [{"text": "\n\n"}, {"text": "hello"}],
+            text_of=lambda item: item.get("text"),
+            tool_of=lambda item, index: None,
+        )
+        self.assertEqual(blocks, [providers.TextBlock("hello")])
+
     def test_bedrock_encoding_merges_adjacent_tool_results(self):
         messages: list[shim.ChatMessage] = [
             shim.AssistantMessage(
@@ -158,6 +199,56 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
             create.call_args_list[0].kwargs["reasoning"], {"effort": "high"}
         )
         self.assertNotIn("reasoning", create.call_args_list[1].kwargs)
+
+    def test_chat_completion_merge_stops_at_duplicate_key_conflict(self):
+        response = Mock(
+            choices=[
+                Mock(message=Mock(content="\n\n", tool_calls=None, role="assistant")),
+                Mock(
+                    message=Mock(
+                        content="Let me inspect the repo.",
+                        tool_calls=None,
+                        role="assistant",
+                    )
+                ),
+                Mock(
+                    message=Mock(
+                        content=None,
+                        role="assistant",
+                        tool_calls=[
+                            {
+                                "id": "call_1",
+                                "function": {
+                                    "name": "list",
+                                    "arguments": '{"path":"*"}',
+                                },
+                            }
+                        ],
+                    )
+                ),
+            ]
+        )
+
+        message = providers._chat_completion_to_assistant_message(response)
+
+        self.assertEqual(message.content, "Let me inspect the repo.")
+        self.assertEqual(
+            message.tool_calls,
+            [shim.ToolCall(id="call_1", name="list", arguments={"path": "*"})],
+        )
+
+    def test_chat_completion_merge_returns_prefix_before_conflicting_duplicate_key(self):
+        response = Mock(
+            choices=[
+                Mock(message=Mock(content="first", tool_calls=None, role="assistant")),
+                Mock(message=Mock(content="second", tool_calls=None, role="assistant")),
+            ]
+        )
+
+        message = providers._chat_completion_to_assistant_message(response)
+
+        self.assertEqual(message.content, "first")
+        self.assertEqual(message.tool_calls, [])
 
     async def test_chat_completions_client_falls_back_without_reasoning_when_unsupported(
         self,

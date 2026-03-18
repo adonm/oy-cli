@@ -240,11 +240,15 @@ def _load_readme() -> str:
     if readme_path.exists():
         return readme_path.read_text(encoding="utf-8")
     try:
-        from importlib.metadata import metadata as _metadata
+        from importlib.metadata import Distribution
 
-        text = _metadata("oy-cli").get_payload()
-        if text:
-            return text
+        # Try METADATA (wheel/dist-info) then PKG-INFO (sdist/egg-info)
+        for meta_file in ("METADATA", "PKG-INFO"):
+            raw = Distribution.from_name("oy-cli").read_text(meta_file)
+            if raw:
+                _, _, body = raw.partition("\n\n")
+                if body:
+                    return body
     except Exception:
         pass
     raise RuntimeError("Cannot locate README.md for prompt extraction")

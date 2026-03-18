@@ -7,13 +7,13 @@
 > | Metric | Value |
 > |--------|-------|
 > | Python files | 6 |
-> | Python LoC | 5,275 code lines (6,422 total) |
+> | Python LoC | 5,503 code lines (6,692 total) |
 > | `oy_cli.py` | 2,230 lines (1,807 code, complexity 420) |
-> | `providers.py` | 2,685 lines (2,217 code, complexity 505) |
-> | `shim.py` | 359 lines (283 code, thin facade) |
-> | Tests | 1,148 lines across 3 files |
+> | `providers.py` | 2,847 lines (2,375 code) |
+> | `shim.py` | 372 lines (thin facade) |
+> | Tests | 1,239 lines across 3 files |
 > | Agent tools | 5 (`list`, `read`, `bash`, `search`, `ask`) |
-> | Provider shims | 7 (`openai`, `codex`, `gemini`, `bedrock`, `bedrock-mantle`, `claude`, `copilot`) |
+> | Provider shims | 9 (`openai`, `codex`, `gemini`, `bedrock`, `bedrock-mantle`, `claude`, `copilot`, `opencode`, `opencode-go`) |
 > | Runtime dependencies | 9 (`boto3`, `defopt`, `httpx`, `openai`, `rich`, `tiktoken`, `tenacity`, `msgspec`, `headroom-ai`) |
 >
 > **Audit lens**: CLI agent that reads/writes workspace files via `bash`, executes shell commands, and makes outbound API calls. Priority: workspace-boundary safety, secret handling, provider complexity, and keeping a deliberately small codebase from accreting unnecessary weight.
