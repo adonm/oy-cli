@@ -5,8 +5,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-import providers as _providers
-from providers import (
+from . import providers as _providers
+from .providers import (
     AssistantMessage,
     ChatMessage,
     CompletionClient,

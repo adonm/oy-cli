@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-import providers
+from oy_cli import providers
 
 
 
@@ -13,10 +13,10 @@ class OpenAIPairTests(unittest.TestCase):
         sync_http = object()
 
         with (
-            patch("providers.async_http_client", return_value=async_http) as make_async_http,
-            patch("providers.http_client", return_value=sync_http) as make_sync_http,
-            patch("providers.AsyncOpenAI") as async_openai,
-            patch("providers.OpenAI") as openai,
+            patch("oy_cli.providers.async_http_client", return_value=async_http) as make_async_http,
+            patch("oy_cli.providers.http_client", return_value=sync_http) as make_sync_http,
+            patch("oy_cli.providers.AsyncOpenAI") as async_openai,
+            patch("oy_cli.providers.OpenAI") as openai,
         ):
             providers._openai_pair(
                 "test-key",
@@ -55,10 +55,10 @@ class OpenAIPairTests(unittest.TestCase):
         sync_http = object()
 
         with (
-            patch("providers.async_http_client", return_value=async_http) as make_async_http,
-            patch("providers.http_client", return_value=sync_http) as make_sync_http,
-            patch("providers.AsyncOpenAI") as async_openai,
-            patch("providers.OpenAI") as openai,
+            patch("oy_cli.providers.async_http_client", return_value=async_http) as make_async_http,
+            patch("oy_cli.providers.http_client", return_value=sync_http) as make_sync_http,
+            patch("oy_cli.providers.AsyncOpenAI") as async_openai,
+            patch("oy_cli.providers.OpenAI") as openai,
         ):
             providers._copilot_openai_pair("test-token")
 

@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
-import providers
-import shim
+from oy_cli import providers
+from oy_cli import shim
 
 
 async def _unused_chat_completion(

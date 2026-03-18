@@ -14,7 +14,7 @@ import defopt
 from headroom import compress as headroom_compress
 import msgspec
 import tiktoken
-from shim import (
+from .shim import (
     AssistantMessage,
     ChatMessage,
     CompletionClient,
@@ -26,7 +26,7 @@ from shim import (
     ToolSpec,
     UserMessage,
 )
-from providers import _decode_tool_call_arguments, _openai_chat_message, _tool_output_text
+from .providers import _decode_tool_call_arguments, _openai_chat_message, _tool_output_text
 from openai import (
     AuthenticationError,
     BadRequestError,
@@ -230,28 +230,10 @@ def _debug_log(event: str, **data: Any) -> None:
 
 
 def _load_readme() -> str:
-    """Return the README text, preferring the file next to this module.
+    """Return the README text from the ``_oy_data`` package data."""
+    from importlib.resources import files as _files
 
-    For editable/dev installs the file is always fresher than cached metadata.
-    For proper installs the file won't exist, so we fall back to package metadata
-    (setuptools embeds README.md via the ``readme`` key in pyproject.toml).
-    """
-    readme_path = Path(__file__).resolve().parent / "README.md"
-    if readme_path.exists():
-        return readme_path.read_text(encoding="utf-8")
-    try:
-        from importlib.metadata import Distribution
-
-        # Try METADATA (wheel/dist-info) then PKG-INFO (sdist/egg-info)
-        for meta_file in ("METADATA", "PKG-INFO"):
-            raw = Distribution.from_name("oy-cli").read_text(meta_file)
-            if raw:
-                _, _, body = raw.partition("\n\n")
-                if body:
-                    return body
-    except Exception:
-        pass
-    raise RuntimeError("Cannot locate README.md for prompt extraction")
+    return (_files("oy_cli") / "README.md").read_text(encoding="utf-8")
 
 
 def _parse_prompts(readme: str) -> dict[str, str]:

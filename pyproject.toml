@@ -37,7 +37,10 @@ Repository = "https://github.com/wagov-dtt/oy-cli"
 Issues = "https://github.com/wagov-dtt/oy-cli/issues"
 
 [tool.setuptools]
-py-modules = ["oy_cli", "shim", "providers"]
+packages = ["oy_cli"]
+
+[tool.setuptools.package-data]
+oy_cli = ["README.md"]
 
 [tool.uv]
 default-groups = ["dev"]

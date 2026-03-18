@@ -10,7 +10,7 @@ from unittest.mock import patch
 import msgspec
 
 import oy_cli
-from shim import SystemMessage, ToolMessage, ToolResult, ToolSpec, UserMessage
+from oy_cli.shim import SystemMessage, ToolMessage, ToolResult, ToolSpec, UserMessage
 
 
 def make_state(root: Path, tool_specs=None, *, unattended_deadline: float = float("inf")):
