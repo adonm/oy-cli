@@ -668,81 +668,23 @@ def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details)
     )
     if _suffix:
         message += f"  {_suffix}"
-    # Use bullet for mutating tools (edit, bash), plain for inspection tools
-    if name in {"edit", "bash"}:
+    # Use bullet for mutating tools (bash), plain for inspection tools
+    if name in {"bash"}:
         _print(value=f"* {message}", err=True)
     else:
         _print(value=message, err=True)
 
 
-def _oneline(text, limit=60):
-    flat = " ".join((text or "").split())
-    return flat if len(flat) <= limit else flat[: limit - 1] + "..."
-
-
-def note_apply_ops(ops):
-    for op in ops:
-        kind, path = op.get("op", "?"), op.get("path", "?")
-        line_span = (
-            f" lines {op.get('start_line')}-{op.get('end_line') or op.get('start_line')}"
-            if op.get("start_line")
-            else ""
-        )
-        lines = {
-            "replace": [
-                "  replace "
-                + f"`{path}`{line_span}"
-                + (
-                    " *("
-                    + ", ".join(
-                        label
-                        for label, enabled in (
-                            ("all", op.get("replace_all")),
-                            ("regex", op.get("regex")),
-                        )
-                        if enabled
-                    )
-                    + ")*"
-                    if op.get("replace_all") or op.get("regex")
-                    else ""
-                ),
-                f"  - `{_oneline(op.get('old', ''))}`",
-                f"  + `{_oneline(op.get('new', ''))}`",
-            ],
-            "write": [
-                f"  write `{path}`{line_span}"
-                + (" *(overwrite)*" if op.get("overwrite") else " *(new)*"),
-                f"  + `{_oneline(op.get('content', ''))}`",
-            ],
-            "move": [f"  ! move `{path}` -> `{op.get('to', '?')}`"],
-            "delete": [f"  ! delete `{path}`"],
-        }.get(kind, [f"  {kind} `{path}`"])
-        for line in lines:
-            _print(value=line, err=True)
-
-
 # Tool schemas and argument decoding are msgspec-native now.
-class ApplyOperation(msgspec.Struct, omit_defaults=True):
-    op: Literal["replace", "write", "move", "delete"]
-    path: str
-    old: str | None = None
-    new: str | None = None
-    replace_all: bool = False
-    regex: bool = False
-    start_line: int | None = None
-    end_line: int | None = None
-    content: str | None = None
-    overwrite: bool = False
-    to: str | None = None
-
-
 class ListArgs(msgspec.Struct, omit_defaults=True):
     path: str = "*"
     limit: int = BUDGETS.default_line_limit
 
 
-class EditArgs(msgspec.Struct, omit_defaults=True):
-    operations: ApplyOperation | list[ApplyOperation]
+class ReadArgs(msgspec.Struct, omit_defaults=True):
+    path: str
+    offset: int = 1
+    limit: int = BUDGETS.default_line_limit
 
 
 class BashArgs(msgspec.Struct, omit_defaults=True):
@@ -753,8 +695,7 @@ class BashArgs(msgspec.Struct, omit_defaults=True):
 class SearchArgs(msgspec.Struct, omit_defaults=True):
     pattern: str
     path: str = "."
-    start_line: int | None = None
-    end_line: int | None = None
+    args: list[str] = []
     limit: int = BUDGETS.default_line_limit
 
 
@@ -1137,217 +1078,31 @@ def tool_list(state, path="*", limit=BUDGETS.default_line_limit):
     return _show_and_clip(text, 1)
 
 
-def _need(op, key, typ, msg):
-    """Extract and validate a typed field from an operation dict."""
-    value = op.get(key)
-    if not isinstance(value, typ) or (typ is str and not value):
-        raise ValueError(msg)
-    return value
-
-
-def _require_file(root, target, action):
-    rel = _rel(root, target)
-    if not target.exists():
-        raise ValueError(f"file does not exist: {rel}")
-    if target.is_dir():
-        raise ValueError(f"cannot {action} directory: {rel}")
-    return rel
-
-
-def _line_range(
-    text: str, *, start_line: int | None = None, end_line: int | None = None
-) -> tuple[list[str], int, int]:
-    lines = text.splitlines(keepends=True)
-    if start_line is None and end_line is None:
-        return lines, 0, len(lines)
-    start = _positive_int(start_line or 1, "start_line")
-    end = _positive_int(end_line or start, "end_line")
-    if end < start:
-        raise ValueError("end_line must be greater than or equal to start_line")
-    if start > len(lines) or end > len(lines):
-        raise ValueError(f"line range {start}-{end} is outside the file")
-    return lines, start - 1, end
-
-
-def _rewrite_line_range(
-    text: str,
-    replacer: Callable[[str], str],
-    *,
-    start_line: int | None = None,
-    end_line: int | None = None,
-) -> str:
-    lines, start, end = _line_range(text, start_line=start_line, end_line=end_line)
-    segment = "".join(lines[start:end])
-    updated = replacer(segment)
-    return "".join([*lines[:start], updated, *lines[end:]])
-
-
-def _apply_op(root, index, op):
-    if not isinstance(op, dict):
-        raise ValueError(f"operation {index} must be an object")
-    kind = _need(op, "op", str, f"operation {index} is missing a valid op")
-    path = _need(op, "path", str, f"operation {index} is missing a valid path")
-    target = resolve_path(root, path)
-    match kind:
-        case "replace":
-            rel = _require_file(root, target, "replace text in")
-            old = _need(
-                op,
-                "old",
-                str,
-                f"replace operation {index} requires string old and new",
-            )
-            new = _need(
-                op,
-                "new",
-                str,
-                f"replace operation {index} requires string old and new",
-            )
-            replace_all = (
-                _need(
-                    op,
-                    "replace_all",
-                    bool,
-                    f"replace operation {index} replace_all must be boolean",
-                )
-                if "replace_all" in op
-                else False
-            )
-            regex = (
-                _need(
-                    op,
-                    "regex",
-                    bool,
-                    f"replace operation {index} regex must be boolean",
-                )
-                if "regex" in op
-                else False
-            )
-            start_line = (
-                _need(
-                    op,
-                    "start_line",
-                    int,
-                    f"replace operation {index} start_line must be an integer",
-                )
-                if "start_line" in op
-                else None
-            )
-            end_line = (
-                _need(
-                    op,
-                    "end_line",
-                    int,
-                    f"replace operation {index} end_line must be an integer",
-                )
-                if "end_line" in op
-                else None
-            )
-            replacer = _replace_regex if regex else _replace
-            source = target.read_text(encoding="utf-8", errors="surrogateescape")
-            if start_line is not None or end_line is not None:
-                lines, start, end = _line_range(
-                    source, start_line=start_line, end_line=end_line
-                )
-                replacement, count = replacer(
-                    "".join(lines[start:end]), old, new, replace_all
-                )
-                updated = "".join([*lines[:start], replacement, *lines[end:]])
-            else:
-                updated, count = replacer(source, old, new, replace_all)
-            target.write_text(updated, encoding="utf-8", errors="surrogateescape")
-            return f"replaced {rel} ({count} match{'es' if count != 1 else ''})"
-        case "write":
-            content = _need(
-                op, "content", str, f"write operation {index} requires string content"
-            )
-            overwrite = (
-                _need(
-                    op,
-                    "overwrite",
-                    bool,
-                    f"write operation {index} overwrite must be boolean",
-                )
-                if "overwrite" in op
-                else False
-            )
-            start_line = (
-                _need(
-                    op,
-                    "start_line",
-                    int,
-                    f"write operation {index} start_line must be an integer",
-                )
-                if "start_line" in op
-                else None
-            )
-            end_line = (
-                _need(
-                    op,
-                    "end_line",
-                    int,
-                    f"write operation {index} end_line must be an integer",
-                )
-                if "end_line" in op
-                else None
-            )
-            rel = _rel(root, target)
-            if target.exists() and target.is_dir():
-                raise ValueError(f"cannot write directory: {rel}")
-            if start_line is not None or end_line is not None:
-                if not target.exists():
-                    raise ValueError(f"file does not exist: {rel}")
-                source = target.read_text(encoding="utf-8", errors="surrogateescape")
-                updated = _rewrite_line_range(
-                    source,
-                    lambda _segment: content,
-                    start_line=start_line,
-                    end_line=end_line,
-                )
-                target.write_text(updated, encoding="utf-8", errors="surrogateescape")
-                return f"wrote {rel}"
-            if target.exists() and not overwrite:
-                raise ValueError(f"file already exists: {rel}; set overwrite=true")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-            return f"wrote {rel}"
-        case "move":
-            rel = _require_file(root, target, "move")
-            dest = resolve_path(
-                root,
-                _need(
-                    op, "to", str, f"move operation {index} requires a valid to path"
-                ),
-            )
-            if dest == target:
-                raise ValueError(f"move destination matches source: {rel}")
-            if dest.exists():
-                raise ValueError(f"destination already exists: {_rel(root, dest)}")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            target.rename(dest)
-            return f"! moved {rel} -> {_rel(root, dest)}"
-        case "delete":
-            rel = _require_file(root, target, "delete")
-            target.unlink()
-            return f"! deleted {rel}"
-    raise ValueError(
-        f"operation {index} has unsupported op {_fmt('inline', kind)}; use replace, write, move, or delete"
+@tool(_TOOL_DESCS["read"], ReadArgs)
+def tool_read(state, path, offset=1, limit=BUDGETS.default_line_limit):
+    note_tool(
+        state,
+        "read",
+        _defaults={"offset": 1, "limit": BUDGETS.default_line_limit},
+        path=path,
+        offset=offset,
+        limit=limit,
     )
-
-
-@tool(_TOOL_DESCS["edit"], EditArgs)
-def tool_edit(state, operations):
-    if isinstance(operations, dict):
-        operations = [operations]
-    if not isinstance(operations, list) or not operations:
-        raise ValueError(
-            "operations must be a non-empty array or a single operation object"
+    target = resolve_path(state.root, path)
+    if not target.exists():
+        raise ValueError(f"read path does not exist: {_rel(state.root, target)}")
+    if target.is_dir():
+        text = _join_paths(
+            sorted(target.iterdir(), key=lambda item: item.as_posix())[: max(limit, 1)],
+            state.root,
+            "<empty directory>",
         )
-    note_tool(state, "edit", operations=len(operations))
-    note_apply_ops(operations)
-    out = "\n".join(_apply_op(state.root, i, op) for i, op in enumerate(operations, 1))
-    show(out, len(operations))
-    return out
+        return _show_and_clip(text, 1)
+    start = max(_positive_int(offset, "offset"), 1) - 1
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    shown = lines[start : start + max(limit, 1)]
+    text = "\n".join(f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1))
+    return _show_and_clip(text or "<empty file>", 1)
 
 
 @tool(_TOOL_DESCS["bash"], BashArgs)
@@ -1418,74 +1173,60 @@ def _trim_search_lines(lines: list[str], limit: int) -> tuple[str, int, int]:
     return out, total, len(shown)
 
 
-def _single_file_target(target: Path | list[Path]) -> Path | None:
-    if isinstance(target, list):
-        files = [candidate for candidate in target if candidate.is_file()]
-        return files[0] if len(files) == 1 else None
-    return target if target.is_file() else None
-
-
 def _search_contents(
     root: Path,
-    target: Path | list[Path],
     pattern: str,
+    path: str,
     *,
-    start_line: int | None = None,
-    end_line: int | None = None,
     limit: int,
-    ):
-    try:
-        matcher = re.compile(pattern)
-    except re.error as exc:
-        raise ValueError(f"invalid regex pattern: {exc}") from exc
-    target_file = _single_file_target(target)
-    if (start_line is not None or end_line is not None) and not target_file:
-        raise ValueError("start_line/end_line require path to resolve to exactly one file")
+    args: list[str] | None = None,
+):
+    target = resolve_path(root, path)
+    if not target.exists():
+        raise ValueError(f"search path does not exist: {_rel(root, target)}")
+
+    rg_args = ["rg", "--json", "--line-number", "--color", "never", *(args or []), pattern, str(target)]
+    result = run_cmd(rg_args, cwd=root, env=command_env(root))
+    if result.returncode not in (0, 1):
+        err = result.stderr.strip()
+        detail = f": {err}" if err else ""
+        raise ValueError(f"rg failed with exit status {result.returncode}{detail}")
+
     lines: list[str] = []
-    for candidate in _iter_workspace_files(root, target):
-        rel = _rel(root, candidate)
-        try:
-            text = candidate.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+    for raw in result.stdout.splitlines():
+        if not raw.strip():
             continue
-        raw_lines = text.splitlines()
-        start = 1
-        end = len(raw_lines)
-        if target_file == candidate and (start_line is not None or end_line is not None):
-            _, start_idx, end_idx = _line_range(
-                text, start_line=start_line, end_line=end_line
-            )
-            start, end = start_idx + 1, end_idx
-        for lineno, line in enumerate(raw_lines[start - 1 : end], start):
-            if match := matcher.search(line):
-                lines.append(f"{rel}:{lineno}:{match.start() + 1}:{line}")
+        event = json.loads(raw)
+        kind = event.get("type")
+        data = event.get("data", {})
+        if kind == "match":
+            path_text = data.get("path", {}).get("text", "")
+            line_number = data.get("line_number")
+            text_value = data.get("lines", {}).get("text", "").rstrip("\n")
+            submatches = data.get("submatches") or []
+            column = (submatches[0].get("start", 0) + 1) if submatches else 1
+            rel = _rel(root, Path(path_text)) if path_text else "."
+            lines.append(f"{rel}:{line_number}:{column}:{text_value}")
+        elif kind == "context":
+            path_text = data.get("path", {}).get("text", "")
+            line_number = data.get("line_number")
+            text_value = data.get("lines", {}).get("text", "").rstrip("\n")
+            rel = _rel(root, Path(path_text)) if path_text else "."
+            lines.append(f"{rel}-{line_number}-:{text_value}")
+
     out, total, shown = _trim_search_lines(lines, limit)
     return out, total, shown
 
 
 @tool(_TOOL_DESCS["search"], SearchArgs)
-def tool_search(
-    state,
-    pattern,
-    path=".",
-    start_line=None,
-    end_line=None,
-    limit=BUDGETS.default_line_limit,
-):
-    defaults = {"path": ".", "limit": BUDGETS.default_line_limit}
-    if _has_glob(path):
-        target: Path | list[Path] = _glob_paths(state.root, path)
-    else:
-        target = resolve_path(state.root, path)
-        if not target.exists():
-            raise ValueError(f"search path does not exist: {_rel(state.root, target)}")
+def tool_search(state, pattern, path=".", args=None, limit=BUDGETS.default_line_limit):
+    defaults = {"path": ".", "args": [], "limit": BUDGETS.default_line_limit}
     out, matches, shown = _search_contents(
         state.root,
-        target,
         pattern,
-        start_line=start_line,
-        end_line=end_line,
+        path,
         limit=limit,
+        args=args,
     )
     note_tool(
         state,
@@ -1494,8 +1235,7 @@ def tool_search(
         _suffix=_search_summary(matches, shown),
         pattern=pattern,
         path=path,
-        start_line=start_line,
-        end_line=end_line,
+        args=args,
         limit=limit,
     )
     return _show_and_clip(out, 3)

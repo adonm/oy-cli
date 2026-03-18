@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/oy-cli)](https://pypi.org/project/oy-cli/)
 
-**AI coding assistant for your shell.** Reads files, runs commands, and makes edits.
+**AI coding assistant for your shell.** Reads files, searches content, and runs commands.
 
 ```bash
 uv tool install oy-cli
@@ -55,7 +55,7 @@ You are oy, a coding cli with tools.
 Work by inspecting first, then making explicit changes. Prefer simple auditable solutions.
 Keep going until done or blocked; if blocked, say what you tried and next steps.
 Use grugbrain-style simplicity for complexity, OWASP-minded judgment for security, and performance-aware judgment.
-Inspect with `search` for content and `list` for path discovery. Batch independent tool calls.
+Inspect with `read` for file content, `search` for regex matches, and `list` for path discovery. Use `bash` for edits, e.g. `sed -i`, and batch independent tool calls.
 ```
 
 ### Interactive Appendix
@@ -77,9 +77,9 @@ Each tool description is passed directly to the model:
 | Tool | Description |
 |------|-------------|
 | `list` | List paths by calling `Path.glob(path)`. Defaults to `path: "*"`. Use `src/*` or `src/**/*.py` exactly like pathlib glob patterns. Returns sorted entries, one per line, with / for directories. |
-| `edit` | Edit files inside the workspace. Operations: replace, write, move, delete. `replace` supports literal replacement or regex replacement with `regex: true`. `replace` and `write` also accept 1-based `start_line` and `end_line` when targeting a file. |
-| `bash` | Run shell commands for tests, builds, git, and scripts. Do not use for routine file inspection. Returns stdout and stderr together. |
-| `search` | Search file contents with Python regex. Use this for content inspection. `path` limits where it searches and may be a file, directory, or pathlib-style glob. When `path` resolves to one file, `start_line` and `end_line` limit the search to that 1-based line range. |
+| `read` | Read a file or directory. Files return line-numbered text. Directories return sorted entries, one per line, with / for directories. Use `offset` and `limit` for large files. |
+| `bash` | Run shell commands for tests, builds, git, and scripts. Use this for edits too, for example with `sed -i`, `python - <<'PY'`, `mv`, `rm`, or shell redirection. Do not use for routine file inspection. Returns stdout and stderr together. |
+| `search` | Search with ripgrep JSON output. Assumes `rg` is installed. Takes `pattern` and `path`, then passes any extra ripgrep flags from `args`, for example `pattern: 'needle', path: 'src', args: ['--glob', '*.py', '-i']`. `limit` only limits displayed results after ripgrep runs. |
 | `httpx` | Fetch web pages or APIs over HTTP(S). Presets: page, json, post_json. Use json_path to extract nested fields. Sensitive headers are redacted. |
 | `ask` | Ask the user a question in interactive runs. Use for ambiguity or decisions. Provide choices. |
 
@@ -206,8 +206,7 @@ Recommended:
 - avoid exposing long-lived secrets in the environment
 - review generated changes before shipping
 
-**Protections:** workspace-bound file access, structured edits
-through `edit`, sensitive header redaction in `httpx`, and native boto3
+**Protections:** workspace-bound file access for built-in file tools, sensitive header redaction in `httpx`, and native boto3
 credential resolution for Bedrock.
 
 ## Links

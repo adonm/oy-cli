@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -130,63 +131,35 @@ class ResolvePathTests(unittest.TestCase):
                 oy_cli.resolve_path(root, "../../etc/passwd")
 
 
-class EditToolTests(unittest.TestCase):
-    def test_edit_replace_supports_regex(self):
+class ReadToolTests(unittest.TestCase):
+    def _state(self, root: Path):
+        return oy_cli.AgentState(
+            root=root,
+            tool_specs=oy_cli.TOOL_REGISTRY,
+            unattended_timeout_seconds=3600,
+            unattended_deadline=float("inf"),
+        )
+
+    def test_read_file_supports_offset_and_limit(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            path = root / "demo.txt"
-            path.write_text("alpha-1\nalpha-2\n", encoding="utf-8")
-            state = oy_cli.AgentState(
-                root=root,
-                tool_specs=oy_cli.TOOL_REGISTRY,
-                unattended_timeout_seconds=3600,
-                unattended_deadline=float("inf"),
-            )
+            (root / "demo.txt").write_text("a\nb\nc\n", encoding="utf-8")
             with patch.object(oy_cli, "_print"):
-                result = oy_cli.tool_edit(
-                    state,
-                    {
-                        "op": "replace",
-                        "path": "demo.txt",
-                        "old": r"alpha-\d",
-                        "new": "beta",
-                        "regex": True,
-                        "replace_all": True,
-                    },
-                )
-            updated = path.read_text(encoding="utf-8")
-        self.assertIn("replaced demo.txt (2 matches)", result)
-        self.assertEqual(updated, "beta\nbeta\n")
+                result = oy_cli.tool_read(self._state(root), path="demo.txt", offset=2, limit=2)
+        self.assertEqual(result, "2: b\n3: c")
 
-    def test_edit_write_can_target_line_range(self):
+    def test_read_directory_lists_entries(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            path = root / "demo.txt"
-            path.write_text("a\nb\nc\n", encoding="utf-8")
-            state = oy_cli.AgentState(
-                root=root,
-                tool_specs=oy_cli.TOOL_REGISTRY,
-                unattended_timeout_seconds=3600,
-                unattended_deadline=float("inf"),
-            )
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
             with patch.object(oy_cli, "_print"):
-                result = oy_cli.tool_edit(
-                    state,
-                    {
-                        "op": "write",
-                        "path": "demo.txt",
-                        "content": "x\ny\n",
-                        "start_line": 2,
-                        "end_line": 3,
-                    },
-                )
-            updated = path.read_text(encoding="utf-8")
-        self.assertEqual(result, "wrote demo.txt")
-        self.assertEqual(updated, "a\nx\ny\n")
+                result = oy_cli.tool_read(self._state(root), path="src")
+        self.assertEqual(result, "src/main.py")
 
 
 class ListToolTests(unittest.TestCase):
@@ -218,34 +191,119 @@ class SearchToolTests(unittest.TestCase):
             unattended_deadline=float("inf"),
         )
 
-    def test_search_path_accepts_pathlib_glob(self):
+    def test_search_uses_ripgrep_output(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
+            rg_output = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "match",
+                            "data": {
+                                "path": {"text": str(root / "src" / "main.py")},
+                                "lines": {"text": "needle\n"},
+                                "line_number": 1,
+                                "submatches": [
+                                    {"match": {"text": "needle"}, "start": 0, "end": 6}
+                                ],
+                            },
+                        }
+                    ),
+                    json.dumps({"type": "summary", "data": {"stats": {"matches": 1}}}),
+                ]
+            ).encode()
+
+            class Result:
+                returncode = 0
+                stdout = rg_output.decode()
+                stderr = ""
+
+            def fake_run_cmd(args, **kwargs):
+                self.assertEqual(args[:4], ["rg", "--json", "--line-number", "--color"])
+                self.assertIn("needle", args)
+                self.assertIn(str(root / "src"), args)
+                return Result()
+
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
-            (root / "src" / "guide.txt").write_text("needle\n", encoding="utf-8")
-            with patch.object(oy_cli, "_print"):
-                result = oy_cli.tool_search(self._state(root), "needle", path="src/*.py")
-        self.assertIn("src/main.py:1:1:needle", result)
-        self.assertNotIn("src/guide.txt", result)
+            with patch.object(oy_cli, "run_cmd", fake_run_cmd), patch.object(oy_cli, "_print"):
+                result = oy_cli.tool_search(self._state(root), "needle", path="src")
 
-    def test_search_can_target_line_range_in_single_file(self):
+        self.assertIn("src/main.py:1:1:needle", result)
+
+    def test_search_supports_rg_args_passthrough(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / "demo.txt").write_text("skip\nneedle\nskip\nneedle\n", encoding="utf-8")
-            with patch.object(oy_cli, "_print"):
+            rg_output = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "match",
+                            "data": {
+                                "path": {"text": str(root / "src" / "main.py")},
+                                "lines": {"text": "Needle\n"},
+                                "line_number": 1,
+                                "submatches": [
+                                    {"match": {"text": "Needle"}, "start": 0, "end": 6}
+                                ],
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "context",
+                            "data": {
+                                "path": {"text": str(root / "src" / "main.py")},
+                                "lines": {"text": "after\n"},
+                                "line_number": 2,
+                            },
+                        }
+                    ),
+                ]
+            ).encode()
+
+            class Result:
+                returncode = 0
+                stdout = rg_output.decode()
+                stderr = ""
+
+            def fake_run_cmd(args, **kwargs):
+                self.assertIn("--json", args)
+                self.assertIn("--line-number", args)
+                self.assertIn("--glob", args)
+                self.assertIn("*.py", args)
+                self.assertIn("--ignore-case", args)
+                self.assertIn("--word-regexp", args)
+                self.assertIn("--fixed-strings", args)
+                self.assertIn("--context", args)
+                self.assertIn("1", args)
+                return Result()
+
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("Needle\nafter\n", encoding="utf-8")
+            with patch.object(oy_cli, "run_cmd", fake_run_cmd), patch.object(oy_cli, "_print"):
                 result = oy_cli.tool_search(
                     self._state(root),
-                    "needle",
-                    path="demo.txt",
-                    start_line=4,
-                    end_line=4,
+                    "Needle",
+                    path="src",
+                    args=[
+                        "--glob",
+                        "*.py",
+                        "--ignore-case",
+                        "--word-regexp",
+                        "--fixed-strings",
+                        "--context",
+                        "1",
+                    ],
                 )
-        self.assertEqual(result, "demo.txt:4:1:needle")
+
+        self.assertIn("src/main.py:1:1:Needle", result)
+        self.assertIn("src/main.py-2-:after", result)
+
 
 
 class JsonPathTests(unittest.TestCase):
