@@ -152,7 +152,9 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         await client.chat_completion("gpt-test", [])
 
         self.assertEqual(create.call_count, 2)
-        self.assertEqual(create.call_args_list[0].kwargs["reasoning"], {"effort": "high"})
+        self.assertEqual(
+            create.call_args_list[0].kwargs["reasoning"], {"effort": "high"}
+        )
         self.assertNotIn("reasoning", create.call_args_list[1].kwargs)
 
     async def test_chat_completions_client_falls_back_without_reasoning_when_unsupported(
@@ -235,6 +237,56 @@ class ShimRegistryTests(unittest.TestCase):
         ):
             self.assertEqual(shim.detect_available_shims(), ["alpha", "gamma"])
         self.assertEqual(calls, ["alpha", "beta", "gamma"])
+
+
+class RunCmdTests(unittest.TestCase):
+    def test_run_cmd_raises_clean_error_when_binary_missing(self):
+        with self.assertRaisesRegex(
+            FileNotFoundError, r"Command `missing-tool` was not found on PATH"
+        ):
+            shim.run_cmd(["missing-tool"], env={"PATH": ""})
+
+    def test_run_cmd_allows_explicit_relative_paths(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = root / "hello.sh"
+            script.write_text("#!/bin/sh\nprintf hi\n", encoding="utf-8")
+            script.chmod(0o755)
+
+            result = shim.run_cmd(["./hello.sh"], cwd=root, env={"PATH": ""})
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "hi")
+
+
+class CommandEnvTests(unittest.TestCase):
+    def tearDown(self):
+        shim.command_env.cache_clear()
+
+    def test_command_env_requires_mise_on_path(self):
+        with patch.object(shim, "which", return_value=None):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"`mise` is required; install and activate `mise` before running `oy`",
+            ):
+                shim.command_env()
+
+    def test_command_env_returns_launch_environment_when_mise_is_available(self):
+        with (
+            patch.object(shim, "which", return_value="/usr/local/bin/mise"),
+            patch.object(shim, "run_cmd") as run_cmd,
+            patch.dict(
+                shim.os.environ, {"PATH": "/test/bin", "HOME": "/tmp/home"}, clear=True
+            ),
+        ):
+            env = shim.command_env()
+
+        run_cmd.assert_not_called()
+        self.assertEqual(env["PATH"], "/test/bin")
+        self.assertEqual(env["HOME"], "/tmp/home")
 
 
 if __name__ == "__main__":

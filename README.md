@@ -78,11 +78,11 @@ Each tool description is passed directly to the model:
 |------|-------------|
 | `list` | List paths by calling `Path.glob(path)`. Defaults to `path: "*"`. Use `src/*` or `src/**/*.py` exactly like pathlib glob patterns. Returns sorted entries, one per line, with / for directories. |
 | `read` | Read a file or directory. Files return line-numbered text. Directories return sorted entries, one per line, with / for directories. Use `offset` and `limit` for large files. |
-| `bash` | Run shell commands for tests, builds, git, and scripts. Use this for edits too: prefer `srgn` for precise search/replace, `tokei` for code-count analysis, and `curlie` for web/API interaction; pipe to `rg` or `yq` for filtering when useful. `oy` auto-installs these helpers on demand when `mise` or `brew` is available. Use shell commands when needed, but do not use for routine file inspection. Returns stdout and stderr together. |
+| `bash` | Shell commands are easy to run. For edits, prefer `srgn` for precise search/replace, `tokei` for code-count analysis, and `curlie` for web/API interaction; pipe to `rg` or `yq` for filtering when useful. These tools are effective for their niches, guaranteed to be available during an `oy` run, and their current usage docs can be checked with `--help`. For inspection, prefer the `search` tool. Returns structured results with `command`, `exit_code`, `ok`, `output_format`, `output`, and `truncated`. JSON output is parsed when possible. |
 | `search` | Search with ripgrep JSON output. Takes `pattern` and `path`, then passes any extra ripgrep flags from `args`, for example `pattern: 'needle', path: 'src', args: ['--glob', '*.py', '-i']`. `limit` only limits displayed results after ripgrep runs. |
 | `ask` | Ask the user a question in interactive runs. Use for ambiguity or decisions. Provide choices. |
 
-**Output truncation:** tool output is clipped to preserve context window; `bash` keeps both head and tail. When clipped, narrow the next query or use `search` with a tighter `path` instead of re-running broad inspection.
+**Output truncation:** tool output is clipped to preserve context window; `bash` summarizes output into a single `output` field and marks truncation with one `truncated` flag. When clipped, narrow the next query or use `search` with a tighter `path` instead of re-running broad inspection.
 
 **Conversation compaction:** interactive chat compresses prepared context with [Headroom](https://github.com/chopratejas/headroom) before each model request, then falls back to omitting the oldest messages if the transcript still does not fit.
 
@@ -152,7 +152,8 @@ is a reference.
 
 - Python 3.14+
 - `bash`
-- (Optional helper CLIs; `oy` auto-installs them on demand when `mise` or `brew` is available): `rg` (ripgrep), `srgn`, `tokei`, `curlie`, `yq`
+- `mise` installed and activated in the shell before launching `oy`
+- (Optional helper CLIs; `oy` auto-installs them on demand via `mise`): `rg` (ripgrep), `srgn`, `tokei`, `curlie`, `yq`
 - OpenAI API key or Codex local auth **OR** Gemini CLI OAuth credentials
   (`~/.gemini/oauth_creds.json`) **OR** Claude Code local auth **OR**
   AWS CLI configured for Bedrock
@@ -196,7 +197,9 @@ ensure your profile has `bedrock:InvokeModel` permission.
 
 **"AWS SSO session is stale"** -> Run `aws sso login --use-device-code --no-browser`.
 
-**"Missing helper tool"** -> Install or set up `mise` (preferred) or Homebrew, then rerun `oy`; helper CLIs are auto-installed on demand once one of those package managers is available.
+**"Missing helper tool"** -> Install or activate `mise`, then rerun `oy`; `oy` assumes a working `mise` shell activation and auto-installs missing helper CLIs together through `mise`.
+
+**"`mise` is required; install and activate `mise` before running `oy`."** -> Install `mise`, activate it in your shell, then relaunch `oy`.
 
 ## Security
 

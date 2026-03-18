@@ -71,27 +71,22 @@ OPTIONAL_TOOL_INSTALLERS = {
     "rg": {
         "label": "ripgrep",
         "mise": "github:BurntSushi/ripgrep",
-        "brew": "ripgrep",
     },
     "srgn": {
         "label": "srgn",
         "mise": "github:alexpovel/srgn",
-        "brew": "srgn",
     },
     "tokei": {
         "label": "tokei",
         "mise": "github:XAMPPRocky/tokei",
-        "brew": "tokei",
     },
     "curlie": {
         "label": "curlie",
         "mise": "github:rs/curlie",
-        "brew": "curlie",
     },
     "yq": {
         "label": "yq",
         "mise": "github:mikefarah/yq",
-        "brew": "yq",
     },
 }
 
@@ -158,6 +153,7 @@ def _debug_log(event: str, **data: Any) -> None:
     if _debug_logger is None:
         return
     import time as _time
+
     entry = {
         "ts": _time.time(),
         "event": event,
@@ -169,6 +165,7 @@ def _debug_log(event: str, **data: Any) -> None:
 # ---------------------------------------------------------------------------
 # Prompts – parsed from README.md (single source of truth)
 # ---------------------------------------------------------------------------
+
 
 def _load_readme() -> str:
     """Return the README text, preferring the file next to this module.
@@ -182,6 +179,7 @@ def _load_readme() -> str:
         return readme_path.read_text(encoding="utf-8")
     try:
         from importlib.metadata import metadata as _metadata
+
         text = _metadata("oy-cli").get_payload()
         if text:
             return text
@@ -209,7 +207,9 @@ def _parse_prompts(readme: str) -> dict[str, str]:
 
 def _parse_tool_descriptions(readme: str) -> dict[str, str]:
     """Extract tool descriptions from the first table under ``## Tools``."""
-    tools_match = re.search(r"^## Tools\b.*?\n(\|.+?\|\n)+", readme, re.MULTILINE | re.DOTALL)
+    tools_match = re.search(
+        r"^## Tools\b.*?\n(\|.+?\|\n)+", readme, re.MULTILINE | re.DOTALL
+    )
     if not tools_match:
         raise RuntimeError("Could not find ## Tools table in README")
     descs: dict[str, str] = {}
@@ -328,6 +328,161 @@ def show(t, n=2):
     if s.count("```") % 2 == 1 and t.count("```") % 2 == 0:
         s += "\n```"
     STDERR.print(Markdown(s), overflow="fold")
+
+
+_BASH_IMPORTANT_LINE_RE = re.compile(
+    r"(?i)(error|warn(?:ing)?|fail(?:ed|ure)?|exception|traceback|fatal|denied|not found|timed out)"
+)
+
+
+def _merge_bash_streams(stdout: str, stderr: str) -> str:
+    stdout = stdout.rstrip()
+    stderr = stderr.rstrip()
+    if stdout and stderr:
+        return f"[stdout]\n{stdout}\n\n[stderr]\n{stderr}"
+    if stdout:
+        return stdout
+    if stderr:
+        return f"[stderr]\n{stderr}"
+    return ""
+
+
+def _collapse_repeated_lines(lines: list[str]) -> tuple[list[str], bool]:
+    if not lines:
+        return [], False
+    collapsed: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        j = i + 1
+        while j < len(lines) and lines[j] == line:
+            j += 1
+        count = j - i
+        if count > 1:
+            collapsed.append(f"{line}  [repeated {count}x]")
+            changed = True
+        else:
+            collapsed.append(line)
+        i = j
+    return collapsed, changed
+
+
+def _render_selected_lines(lines: list[str], keep: set[int]) -> str:
+    selected: list[str] = []
+    last = -1
+    for idx in sorted(keep):
+        if idx < 0 or idx >= len(lines):
+            continue
+        if idx > last + 1:
+            omitted = idx - last - 1
+            selected.append(f"... [{omitted} lines omitted]")
+        selected.append(lines[idx])
+        last = idx
+    if last < len(lines) - 1:
+        selected.append(f"... [{len(lines) - last - 1} lines omitted]")
+    return "\n".join(selected)
+
+
+def _summarize_text_output(text: str) -> tuple[str, bool]:
+    if not text:
+        return "", False
+    lines, collapsed = _collapse_repeated_lines(text.splitlines())
+    rendered = "\n".join(lines)
+    if len(lines) > 80 or count_tokens(rendered) > BUDGETS.tool_output_tokens:
+        keep = set(range(min(30, len(lines))))
+        keep.update(range(max(len(lines) - 20, 0), len(lines)))
+        for idx, line in enumerate(lines):
+            if _BASH_IMPORTANT_LINE_RE.search(line):
+                keep.update({idx - 1, idx, idx + 1})
+        rendered = _render_selected_lines(lines, keep)
+        collapsed = True
+    clipped = clip_tokens(
+        rendered,
+        limit=BUDGETS.tool_output_tokens,
+        tail=BUDGETS.tool_tail_tokens,
+    )
+    return clipped, collapsed or clipped != rendered
+
+
+def _summarize_json_value(value: Any, *, depth: int = 0, width: int = 32):
+    if depth >= 6:
+        return "<max-depth>", True
+    if isinstance(value, dict):
+        items = list(value.items())
+        limit = width if depth == 0 else max(width // 2, 8)
+        out: dict[str, Any] = {}
+        truncated = False
+        for key, child in items[:limit]:
+            summarized, child_truncated = _summarize_json_value(
+                child, depth=depth + 1, width=width
+            )
+            out[str(key)] = summarized
+            truncated = truncated or child_truncated
+        if len(items) > limit:
+            out["..."] = f"{len(items) - limit} more keys"
+            truncated = True
+        return out, truncated
+    if isinstance(value, list):
+        limit = width if depth == 0 else max(width // 2, 8)
+        out = []
+        truncated = False
+        for child in value[:limit]:
+            summarized, child_truncated = _summarize_json_value(
+                child, depth=depth + 1, width=width
+            )
+            out.append(summarized)
+            truncated = truncated or child_truncated
+        if len(value) > limit:
+            out.append(f"... {len(value) - limit} more items")
+            truncated = True
+        return out, truncated
+    if isinstance(value, str):
+        clipped = clip_tokens(value, limit=512 if depth == 0 else 128, tail=32)
+        return clipped, clipped != value
+    return value, False
+
+
+def _summarize_json_output(value: Any) -> tuple[Any, bool, str]:
+    for width in (32, 16, 8, 4):
+        summarized, truncated = _summarize_json_value(value, width=width)
+        rendered = json.dumps(summarized, ensure_ascii=False, default=str)
+        if count_tokens(rendered) <= BUDGETS.tool_output_tokens:
+            return summarized, truncated, "json"
+    rendered = clip_tokens(
+        json.dumps(value, ensure_ascii=False, indent=2, default=str),
+        limit=BUDGETS.tool_output_tokens,
+        tail=BUDGETS.tool_tail_tokens,
+    )
+    return rendered, True, "text"
+
+
+def _parse_bash_json_output(stdout: str, stderr: str):
+    if stderr.strip() or not stdout.strip():
+        return None
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def _bash_payload(command: str, result) -> dict[str, Any]:
+    parsed = _parse_bash_json_output(result.stdout, result.stderr)
+    if parsed is not None:
+        output, truncated, output_format = _summarize_json_output(parsed)
+    else:
+        output, truncated = _summarize_text_output(
+            _merge_bash_streams(result.stdout, result.stderr)
+        )
+        output_format = "text"
+    return {
+        "command": command,
+        "exit_code": result.returncode,
+        "ok": result.returncode == 0,
+        "output_format": output_format,
+        "output": output,
+        "truncated": truncated,
+    }
 
 
 def _rel(r, p):
@@ -480,53 +635,91 @@ def require_tools(env, *tools):
         abort("Missing: " + ", ".join(m))
 
 
+def require_command_env(cwd=None):
+    return dict(_wrap_runtime_error(command_env, cwd))
+
+
 def require_runtime(cwd=None):
+    env = require_command_env(cwd)
+    require_tools(env, "bash")
     require_api_env(cwd)
-    require_tools(command_env(cwd), "bash")
 
 
-def _installer_recipes(tool: str):
-    spec = OPTIONAL_TOOL_INSTALLERS.get(tool, {})
-    recipes: list[tuple[str, list[str]]] = []
-    if target := spec.get("mise"):
-        recipes.append(("mise", ["mise", "use", "-g", target]))
-    if package := spec.get("brew"):
-        recipes.append(("brew", ["brew", "install", package]))
-    return recipes
+def _known_optional_tools(tools=None):
+    names = OPTIONAL_TOOL_INSTALLERS if tools is None else tools
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if name in OPTIONAL_TOOL_INSTALLERS and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
 
 
-def _preferred_installer(tool: str, env: dict[str, str]):
-    for installer, command in _installer_recipes(tool):
-        if binary := which(installer, env.get("PATH")):
-            return [binary, *command[1:]], installer
-    return None, None
-
-
-def _missing_tool_install_message(tool: str, reason: str):
-    recipes = _installer_recipes(tool)
-    lines = [
-        f"Missing {_fmt('inline', tool)} for {reason}.",
-        "",
-        "Set up `mise` (preferred) or Homebrew, then rerun oy.",
+def _missing_optional_tools(env: dict[str, str], tools=None):
+    return [
+        name
+        for name in _known_optional_tools(tools)
+        if not which(name, env.get("PATH"))
     ]
-    if recipes:
-        lines += ["", "Preferred:", f"  {shlex.join(recipes[0][1])}"]
-        if len(recipes) > 1:
-            lines += ["", "Fallback:", f"  {shlex.join(recipes[1][1])}"]
+
+
+def _mise_install_command(tools=None):
+    names = _known_optional_tools(tools)
+    if not names:
+        return None
+    return [
+        "mise",
+        "use",
+        "-g",
+        *(OPTIONAL_TOOL_INSTALLERS[name]["mise"] for name in names),
+    ]
+
+
+def _format_tool_list(tools):
+    return ", ".join(_fmt("inline", name) for name in tools)
+
+
+def _missing_tool_install_message(required, reason: str, missing):
+    names = _known_optional_tools(required or missing)
+    command = _mise_install_command(missing)
+    lines = [
+        (
+            f"Missing {_fmt('inline', names[0])} for {reason}."
+            if len(names) == 1
+            else f"Missing helper tools for {reason}: {_format_tool_list(names)}."
+        ),
+        "",
+        "Install or activate `mise`, then rerun oy.",
+    ]
+    if command:
+        lines += ["", "Install with:", f"  {shlex.join(command)}"]
     return "\n".join(lines)
 
 
-def ensure_optional_tool(tool: str, *, reason: str, cwd=None):
+def ensure_optional_tools(*required: str, reason: str, cwd=None):
     env = dict(command_env(cwd))
-    if which(tool, env.get("PATH")):
+    missing = _missing_optional_tools(env)
+    required_missing = _missing_optional_tools(env, required)
+    if not required_missing:
         return env
 
-    command, installer = _preferred_installer(tool, env)
-    if command is None or installer is None:
-        abort(_missing_tool_install_message(tool, reason))
+    command = _mise_install_command(missing)
+    if command is None:
+        abort(_missing_tool_install_message(required, reason, missing))
 
-    label = OPTIONAL_TOOL_INSTALLERS.get(tool, {}).get("label", tool)
-    _print("status", f"Installing {label} via {installer}.", err=True)
+    labels = [OPTIONAL_TOOL_INSTALLERS[name].get("label", name) for name in missing]
+    label_text = ", ".join(labels)
+    prefix = (
+        "Installing helper tools via mise"
+        if len(labels) > 1
+        else f"Installing {label_text} via mise"
+    )
+    _print(
+        "status",
+        f"{prefix}: {label_text}." if len(labels) > 1 else prefix + ".",
+        err=True,
+    )
     result = run_cmd(
         command,
         cwd=cwd if cwd and cwd.is_dir() else None,
@@ -537,19 +730,17 @@ def ensure_optional_tool(tool: str, *, reason: str, cwd=None):
         detail = result.stderr.strip() or result.stdout.strip()
         extra = f"\n\nInstaller output:\n{detail}" if detail else ""
         abort(
-            f"Failed to install {label} via {installer}.{extra}\n\n"
-            + _missing_tool_install_message(tool, reason)
+            f"Failed to install helper tools via mise.{extra}\n\n"
+            + _missing_tool_install_message(required, reason, missing)
         )
 
     command_env.cache_clear()
     refreshed = dict(command_env(cwd))
-    if which(tool, refreshed.get("PATH")):
+    still_missing = _missing_optional_tools(refreshed, required or missing)
+    if not still_missing:
         return refreshed
 
-    abort(
-        f"Installed {label}, but {_fmt('inline', tool)} is still unavailable on PATH.\n\n"
-        + _missing_tool_install_message(tool, reason)
-    )
+    abort(_missing_tool_install_message(still_missing, reason, still_missing))
 
 
 _MISSING_COMMAND_RE = re.compile(
@@ -569,8 +760,8 @@ def run_cmd_auto_install(
     cmd, *, cwd=None, env=None, timeout=120, stdin_text=None, reason="command"
 ):
     current_env = dict(command_env(cwd) if env is None else env)
-    installed: set[str] = set()
-    for _ in range(len(OPTIONAL_TOOL_INSTALLERS) + 1):
+    attempted_install = False
+    for _ in range(2):
         try:
             result = run_cmd(
                 cmd,
@@ -581,16 +772,17 @@ def run_cmd_auto_install(
             )
         except FileNotFoundError:
             name = Path(cmd[0]).name if cmd else ""
-            if name not in OPTIONAL_TOOL_INSTALLERS or name in installed:
+            if name not in OPTIONAL_TOOL_INSTALLERS or attempted_install:
                 raise
-            current_env = ensure_optional_tool(name, reason=reason, cwd=cwd)
-            installed.add(name)
+            current_env = ensure_optional_tools(name, reason=reason, cwd=cwd)
+            attempted_install = True
             continue
         if missing := _missing_shell_command(result.stderr):
-            if missing not in installed:
-                current_env = ensure_optional_tool(missing, reason=reason, cwd=cwd)
-                installed.add(missing)
-                continue
+            if attempted_install:
+                return result
+            current_env = ensure_optional_tools(missing, reason=reason, cwd=cwd)
+            attempted_install = True
+            continue
         return result
     raise RuntimeError("Too many helper installation attempts")
 
@@ -809,7 +1001,11 @@ def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
 
 def _headroom_tool_output(result: ToolResult) -> str:
     value = result.content
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=True, default=str)
+    return (
+        value
+        if isinstance(value, str)
+        else json.dumps(value, ensure_ascii=True, default=str)
+    )
 
 
 def _headroom_tool_call(call: ToolCall) -> dict[str, Any]:
@@ -818,7 +1014,9 @@ def _headroom_tool_call(call: ToolCall) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": call.name,
-            "arguments": json.dumps(call.arguments, ensure_ascii=True, separators=(",", ":")),
+            "arguments": json.dumps(
+                call.arguments, ensure_ascii=True, separators=(",", ":")
+            ),
         },
     }
 
@@ -832,7 +1030,9 @@ def _serialize_for_headroom(message: ChatMessage) -> dict[str, Any]:
         case AssistantMessage():
             payload: dict[str, Any] = {"role": "assistant", "content": message.content}
             if message.tool_calls:
-                payload["tool_calls"] = [_headroom_tool_call(call) for call in message.tool_calls]
+                payload["tool_calls"] = [
+                    _headroom_tool_call(call) for call in message.tool_calls
+                ]
             return payload
         case ToolMessage():
             return {
@@ -888,7 +1088,9 @@ def _deserialize_from_headroom(message: dict[str, Any]) -> ChatMessage:
                 _deserialize_headroom_tool_call(call)
                 for call in tool_calls
                 if isinstance(call, dict)
-            ] if isinstance(tool_calls, list) else [],
+            ]
+            if isinstance(tool_calls, list)
+            else [],
         )
     if role == "tool":
         return ToolMessage(
@@ -950,7 +1152,9 @@ class Transcript(msgspec.Struct, omit_defaults=True):
     def prepared_messages(self, model: str | None = None) -> list[ChatMessage]:
         msgs = [_truncate_message(m, self.max_message_tokens) for m in self.messages]
         if model:
-            msgs = _compress_messages_with_headroom(msgs, model, self.max_context_tokens)
+            msgs = _compress_messages_with_headroom(
+                msgs, model, self.max_context_tokens
+            )
         sys_msgs = [m for m in msgs if isinstance(m, SystemMessage)]
         other = [m for m in msgs if not isinstance(m, SystemMessage)]
         budget = self.max_context_tokens - sum(map(_message_tokens, sys_msgs))
@@ -1039,7 +1243,9 @@ def tool_read(state, path, offset=1, limit=BUDGETS.default_line_limit):
     start = max(_positive_int(offset, "offset"), 1) - 1
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     shown = lines[start : start + max(limit, 1)]
-    text = "\n".join(f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1))
+    text = "\n".join(
+        f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1)
+    )
     return _show_and_clip(text or "<empty file>", 1)
 
 
@@ -1056,15 +1262,21 @@ def tool_bash(state, command, timeout_seconds=120):
         command=command,
         timeout=timeout_seconds,
     )
+    env = require_command_env(state.root)
+    bash_path = which("bash", env.get("PATH"))
+    if not bash_path:
+        raise ValueError("bash is not installed or not on PATH")
     result = run_cmd_auto_install(
-        [which("bash", command_env(state.root).get("PATH")) or "bash", "-c", command],
+        [bash_path, "-c", command],
         cwd=state.root,
-        env=command_env(state.root),
+        env=env,
         timeout=timeout_seconds,
         reason="bash command",
     )
-    out = _fmt("bash", command, (result.stdout, result.returncode, result.stderr))
-    return _show_and_clip(out, 8, tail=BUDGETS.tool_tail_tokens)
+    payload = _bash_payload(command, result)
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    show(_fmt("block", rendered, "json"), 12)
+    return payload
 
 
 def _search_summary(matches: int, shown: int) -> str:
@@ -1213,7 +1425,9 @@ def active_tool_specs(interactive):
     return (
         TOOL_REGISTRY
         if interactive
-        else ToolRegistry({name: tool for name, tool in _TOOLS.items() if name != "ask"})
+        else ToolRegistry(
+            {name: tool for name, tool in _TOOLS.items() if name != "ask"}
+        )
     )
 
 
@@ -1256,9 +1470,7 @@ def count_tokens(text: str) -> int:
     return len(encode_tokens(text))
 
 
-def truncate_str_to_tokens(
-    text: str, max_tokens: int = BUDGETS.message_tokens
-) -> str:
+def truncate_str_to_tokens(text: str, max_tokens: int = BUDGETS.message_tokens) -> str:
     """Truncate *text* to at most *max_tokens* tokens.
 
     If truncation is needed, appends a note reporting how many lines and
@@ -1536,6 +1748,7 @@ def _drain_stdin(timeout: float = 0.05) -> str:
     Only works on real ttys; returns "" for piped stdin.
     """
     import select
+
     if not sys.stdin.isatty():
         return ""
     chunks: list[str] = []
@@ -1577,7 +1790,7 @@ def _read_input():
             parts = [stripped[3:]]
         while True:
             try:
-                cont = input('... ')
+                cont = input("... ")
             except EOFError:
                 break
             if cont.strip() == '"""':
@@ -1592,38 +1805,50 @@ def _read_input():
         return line + "\n" + extra.rstrip("\n")
 
     return line
+
+
 def _chat_command(cmd, transcript, system_prompt, model_spec):
     """Handle a /command.  Return True if handled, None to exit, False if unknown."""
     cmd = cmd.strip().lower()
     _, model = split_model_spec(model_spec)
     if cmd in ("/help", "/?"):
-        _print(value="\n".join([
-            "## Commands",
-            "",
-            "- `/help` -- show this help",
-            "- `/tokens` -- show context usage",
-            "- `/clear` -- reset conversation (keeps system prompt)",
-            "- `/quit` or `/exit` -- end session",
-            "",
-            "Context is compressed with Headroom before model requests.",
-            "Tip: paste multiline text — extra lines are detected automatically.",
-            'Tip: type `"""` to start a multiline block, `"""` to end it.',
-        ]), err=True)
+        _print(
+            value="\n".join(
+                [
+                    "## Commands",
+                    "",
+                    "- `/help` -- show this help",
+                    "- `/tokens` -- show context usage",
+                    "- `/clear` -- reset conversation (keeps system prompt)",
+                    "- `/quit` or `/exit` -- end session",
+                    "",
+                    "Context is compressed with Headroom before model requests.",
+                    "Tip: paste multiline text — extra lines are detected automatically.",
+                    'Tip: type `"""` to start a multiline block, `"""` to end it.',
+                ]
+            ),
+            err=True,
+        )
         return True
     if cmd == "/tokens":
         total = transcript.session_tokens()
         prepped = transcript.prepared_tokens(model=model)
         budget = transcript.max_context_tokens
         msgs = len(transcript.messages)
-        _print(value="\n".join([
-            "## Context",
-            "",
-            f"- messages: {msgs}",
-            f"- session tokens: {format_tokens(total)}",
-            f"- prepared tokens: {format_tokens(prepped)}",
-            f"- context budget: {format_tokens(budget)}",
-            f"- remaining: ~{format_tokens(max(budget - prepped, 0))}",
-        ]), err=True)
+        _print(
+            value="\n".join(
+                [
+                    "## Context",
+                    "",
+                    f"- messages: {msgs}",
+                    f"- session tokens: {format_tokens(total)}",
+                    f"- prepared tokens: {format_tokens(prepped)}",
+                    f"- context budget: {format_tokens(budget)}",
+                    f"- remaining: ~{format_tokens(max(budget - prepped, 0))}",
+                ]
+            ),
+            err=True,
+        )
         return True
     if cmd == "/clear":
         transcript.messages = [SystemMessage(system_prompt)]
@@ -1671,7 +1896,9 @@ def chat():
 
         # Slash commands
         if prompt.strip().startswith("/"):
-            result = _chat_command(prompt.strip(), transcript, system_prompt, chosen_model)
+            result = _chat_command(
+                prompt.strip(), transcript, system_prompt, chosen_model
+            )
             if result is None:
                 break
             if result:
@@ -1698,7 +1925,10 @@ def chat():
             )
         except KeyboardInterrupt:
             transcript.rollback(cp)
-            _print(value="\nCancelled — your message is in readline history (press ↑).", err=True)
+            _print(
+                value="\nCancelled — your message is in readline history (press ↑).",
+                err=True,
+            )
             continue
         except Exception as exc:
             transcript.rollback(cp)
@@ -1710,7 +1940,9 @@ def chat():
         prepped = transcript.prepared_tokens(model=model)
         budget = transcript.max_context_tokens
         remaining = max(budget - prepped, 0)
-        STDERR.print(f"[dim]| {format_tokens(prepped)} used, ~{format_tokens(remaining)} remaining[/dim]")
+        STDERR.print(
+            f"[dim]| {format_tokens(prepped)} used, ~{format_tokens(remaining)} remaining[/dim]"
+        )
     return 0
 
 
@@ -1859,6 +2091,7 @@ def model(query: str | None = None):
 
 
 def main(argv: list[str] | None = None):
+    require_command_env(Path.cwd())
     args = list(sys.argv[1:] if argv is None else argv)
     commands = {"run", "chat", "model", "audit", "-h", "--help"}
     if not args:

@@ -397,23 +397,6 @@ def save_json(p, d):
         return False
 
 
-def split_path(v):
-    """Split a PATH-style string into a list of non-empty entries."""
-    return [e for e in (v or "").split(os.pathsep) if e]
-
-
-def merge_paths(*groups):
-    """Merge PATH entry groups, deduplicating by normalised path."""
-    merged, seen = [], set()
-    for g in groups:
-        for e in g:
-            k = os.path.normcase(os.path.normpath(e))
-            if e and k not in seen:
-                seen.add(k)
-                merged.append(e)
-    return os.pathsep.join(merged)
-
-
 def unique_strings(v):
     """Deduplicate *v* preserving order, dropping falsy values."""
     return list(dict.fromkeys(x for x in v if x))
@@ -549,11 +532,28 @@ def which(t, p=None):
     return shutil.which(t, path=p)
 
 
+def _resolve_command(cmd0, *, env=None, cwd=None):
+    search_path = (os.environ if env is None else env).get("PATH")
+    has_sep = os.sep in cmd0 or (os.altsep is not None and os.altsep in cmd0)
+    if os.path.isabs(cmd0) or has_sep:
+        candidate = Path(cmd0)
+        if not candidate.is_absolute() and cwd is not None:
+            candidate = Path(cwd) / candidate
+        return str(candidate) if candidate.exists() else None
+    return which(cmd0, search_path)
+
+
 def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
     """Run *cmd* via subprocess.run, raising ValueError on timeout."""
+    if not cmd:
+        raise ValueError("command must not be empty")
+    resolved = _resolve_command(str(cmd[0]), env=env, cwd=cwd)
+    if resolved is None:
+        raise FileNotFoundError(f"Command `{cmd[0]}` was not found on PATH.")
+    exec_cmd = [resolved, *cmd[1:]]
     try:
         return subprocess.run(
-            cmd,
+            exec_cmd,
             cwd=cwd,
             env=env,
             input=stdin_text,
@@ -565,47 +565,24 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
         raise ValueError(f"command timed out after {timeout}s") from e
 
 
-# lru_cache is intentional: the environment is expected to be stable within a
-# single oy run, so we avoid re-scanning Homebrew/mise paths on every tool call.
-# If env vars change mid-process (e.g. in tests), the cache will be stale.
+# lru_cache is intentional: the launch environment is expected to be stable
+# within a single oy run. If env vars change mid-process (e.g. in tests), the
+# cache will be stale.
 @lru_cache(maxsize=8)
 def command_env(cwd=None):
-    """Build a shell environment dict, merging Homebrew and mise paths.
+    """Return the launch environment after verifying `mise` is available.
 
-    Returns a read-only ``MappingProxyType`` so the cached value cannot be
-    accidentally mutated by callers.
+    `oy` assumes `mise` was already installed and activated before launch, so we
+    rely on the current process environment instead of shelling out to
+    `mise env` on every run. Returns a read-only ``MappingProxyType`` so the
+    cached value cannot be accidentally mutated by callers.
     """
     env = os.environ.copy()
-    if brew := which("brew", env.get("PATH")):
-        prefix = Path(brew).parent.parent
-        env["HOMEBREW_PREFIX"] = str(prefix)
-        env["PATH"] = merge_paths(
-            [str(prefix / "bin"), str(prefix / "sbin")], split_path(env.get("PATH"))
+    if not which("mise", env.get("PATH")):
+        raise RuntimeError(
+            "`mise` is required; install and activate `mise` before running `oy`."
         )
-    if not (mise := which("mise", env.get("PATH"))):
-        return MappingProxyType(env)
-    try:
-        result = run_cmd(
-            [mise, "env", "--json"],
-            cwd=cwd if cwd and cwd.is_dir() else None,
-            env=env,
-            timeout=5,
-        )
-        data = json.loads(result.stdout) if result.returncode == 0 else {}
-    except OSError, ValueError, json.JSONDecodeError:
-        return env
-    if not isinstance(data, dict):
-        return env
-    merged = env.copy()
-    for key, value in data.items():
-        if not isinstance(value, str):
-            continue
-        merged[key] = (
-            merge_paths(split_path(value), split_path(env.get("PATH")))
-            if key == "PATH"
-            else value
-        )
-    return MappingProxyType(merged)
+    return MappingProxyType(env)
 
 
 def http_client(**kw):
@@ -701,8 +678,8 @@ def make_bedrock_token(
 
 
 def resolve_tool_path(t, cwd=None):
-    """Find executable *t* using the merged command environment."""
-    return which(t, command_env(cwd).get("PATH")) or which(t)
+    """Find executable *t* using the launch environment."""
+    return which(t, command_env(cwd).get("PATH"))
 
 
 def aws_cli(parts, cwd=None, timeout=10):
@@ -1726,7 +1703,6 @@ def _decode_responses_output(response: Any) -> AssistantMessage:
     )
 
 
-
 def _http_error_message(prefix: str, response: httpx.Response) -> str:
     try:
         data = response.json()
@@ -2121,9 +2097,8 @@ def _boto3_bedrock_model_ids(region: str) -> list[str]:
         resp = client.list_foundation_models()
         for summary in resp.get("modelSummaries", []):
             model_id = summary.get("modelId", "")
-            if (
-                "TEXT" in summary.get("outputModalities", [])
-                and model_id.startswith(("global.", "us."))
+            if "TEXT" in summary.get("outputModalities", []) and model_id.startswith(
+                ("global.", "us.")
             ):
                 ids.append(model_id)
     except Exception:
@@ -2166,9 +2141,7 @@ def _bedrock_converse_client(region: str) -> CompletionClient:
             "modelId": model,
             "messages": bedrock_messages,
             "inferenceConfig": {
-                "maxTokens": int(
-                    os.environ.get("OY_BEDROCK_MAX_OUTPUT_TOKENS", "4096")
-                )
+                "maxTokens": int(os.environ.get("OY_BEDROCK_MAX_OUTPUT_TOKENS", "4096"))
             },
         }
         if system_prompts:
@@ -2178,7 +2151,9 @@ def _bedrock_converse_client(region: str) -> CompletionClient:
         # boto3 is synchronous; run in executor to avoid blocking the event loop
         loop = asyncio.get_running_loop()
         try:
-            data = await loop.run_in_executor(None, lambda: rt_client.converse(**kwargs))
+            data = await loop.run_in_executor(
+                None, lambda: rt_client.converse(**kwargs)
+            )
         except Exception as exc:
             raise RuntimeError(f"Bedrock converse error: {exc}") from exc
         return _assistant_from_blocks(_bedrock_output_blocks(data))
@@ -2600,9 +2575,7 @@ def _list_mantle_models(
 # /chat/completions automatically.
 # ---------------------------------------------------------------------------
 
-_COPILOT_BASE_URL = os.environ.get(
-    "COPILOT_BASE_URL", "https://api.githubcopilot.com"
-)
+_COPILOT_BASE_URL = os.environ.get("COPILOT_BASE_URL", "https://api.githubcopilot.com")
 _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
 
@@ -2730,7 +2703,9 @@ def _build_copilot_client(
         on_retry=None,
     ) -> AssistantMessage:
         inner = responses_inner if model in responses_models else chat_inner
-        return await inner.chat_completion(model, messages, tools, tool_choice, on_retry)
+        return await inner.chat_completion(
+            model, messages, tools, tool_choice, on_retry
+        )
 
     def list_models() -> list[str]:
         try:
@@ -2852,5 +2827,3 @@ def list_all_model_ids(region: str | None = None, cwd: Path | None = None) -> li
     for shim in detect_available_shims():
         models.extend(list_models_for_shim(shim, region=region, cwd=cwd))
     return models
-
-

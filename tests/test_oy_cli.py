@@ -51,7 +51,9 @@ class ToolDispatchTests(unittest.TestCase):
             unattended_deadline=10.0,
         )
         with patch.object(oy_cli.time, "monotonic", return_value=10.0):
-            with self.assertRaisesRegex(TimeoutError, r"reached unattended timeout \(1h\)"):
+            with self.assertRaisesRegex(
+                TimeoutError, r"reached unattended timeout \(1h\)"
+            ):
                 state.note_progress()
 
 
@@ -147,7 +149,9 @@ class ReadToolTests(unittest.TestCase):
             root = Path(d)
             (root / "demo.txt").write_text("a\nb\nc\n", encoding="utf-8")
             with patch.object(oy_cli, "_print"):
-                result = oy_cli.tool_read(self._state(root), path="demo.txt", offset=2, limit=2)
+                result = oy_cli.tool_read(
+                    self._state(root), path="demo.txt", offset=2, limit=2
+                )
         self.assertEqual(result, "2: b\n3: c")
 
     def test_read_directory_lists_entries(self):
@@ -180,6 +184,78 @@ class ListToolTests(unittest.TestCase):
             with patch.object(oy_cli, "_print"):
                 result = oy_cli.tool_list(state, path="src/*.py")
         self.assertEqual(result, "src/main.py")
+
+
+class BashToolTests(unittest.TestCase):
+    def _state(self, root: Path):
+        return oy_cli.AgentState(
+            root=root,
+            tool_specs=oy_cli.TOOL_REGISTRY,
+            unattended_timeout_seconds=3600,
+            unattended_deadline=float("inf"),
+        )
+
+    def test_bash_returns_structured_text_payload(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            result = SimpleNamespace(returncode=1, stdout="out\n", stderr="err\n")
+            with (
+                patch.object(
+                    oy_cli, "require_command_env", return_value={"PATH": "/bin"}
+                ),
+                patch.object(oy_cli, "which", return_value="/bin/bash"),
+                patch.object(
+                    oy_cli, "run_cmd_auto_install", return_value=result
+                ) as run_cmd,
+                patch.object(oy_cli, "show"),
+                patch.object(oy_cli, "_print"),
+            ):
+                payload = oy_cli.tool_bash(
+                    self._state(root), "printf out; printf err >&2", timeout_seconds=30
+                )
+
+        run_cmd.assert_called_once_with(
+            ["/bin/bash", "-c", "printf out; printf err >&2"],
+            cwd=root,
+            env={"PATH": "/bin"},
+            timeout=30,
+            reason="bash command",
+        )
+        self.assertEqual(payload["command"], "printf out; printf err >&2")
+        self.assertEqual(payload["exit_code"], 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["output_format"], "text")
+        self.assertIn("[stdout]", payload["output"])
+        self.assertIn("[stderr]", payload["output"])
+        self.assertFalse(payload["truncated"])
+
+    def test_bash_parses_json_output_when_possible(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            result = SimpleNamespace(
+                returncode=0,
+                stdout='{"count": 2, "items": [1, 2]}',
+                stderr="",
+            )
+            with (
+                patch.object(
+                    oy_cli, "require_command_env", return_value={"PATH": "/bin"}
+                ),
+                patch.object(oy_cli, "which", return_value="/bin/bash"),
+                patch.object(oy_cli, "run_cmd_auto_install", return_value=result),
+                patch.object(oy_cli, "show"),
+                patch.object(oy_cli, "_print"),
+            ):
+                payload = oy_cli.tool_bash(self._state(root), "echo json")
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["output_format"], "json")
+        self.assertEqual(payload["output"], {"count": 2, "items": [1, 2]})
+        self.assertFalse(payload["truncated"])
 
 
 class SearchToolTests(unittest.TestCase):
@@ -228,7 +304,10 @@ class SearchToolTests(unittest.TestCase):
 
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
-            with patch.object(oy_cli, "run_cmd", fake_run_cmd), patch.object(oy_cli, "_print"):
+            with (
+                patch.object(oy_cli, "run_cmd", fake_run_cmd),
+                patch.object(oy_cli, "_print"),
+            ):
                 result = oy_cli.tool_search(self._state(root), "needle", path="src")
 
         self.assertIn("src/main.py:1:1:needle", result)
@@ -285,7 +364,10 @@ class SearchToolTests(unittest.TestCase):
 
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("Needle\nafter\n", encoding="utf-8")
-            with patch.object(oy_cli, "run_cmd", fake_run_cmd), patch.object(oy_cli, "_print"):
+            with (
+                patch.object(oy_cli, "run_cmd", fake_run_cmd),
+                patch.object(oy_cli, "_print"),
+            ):
                 result = oy_cli.tool_search(
                     self._state(root),
                     "Needle",
@@ -305,47 +387,42 @@ class SearchToolTests(unittest.TestCase):
         self.assertIn("src/main.py-2-:after", result)
 
 
-
 class OptionalToolInstallerTests(unittest.TestCase):
-    def test_preferred_installer_prefers_mise_over_brew(self):
-        env = {"PATH": "/test/bin"}
-
-        def fake_which(name, path=None):
-            return {
-                "mise": "/usr/local/bin/mise",
-                "brew": "/opt/homebrew/bin/brew",
-            }.get(name)
-
-        with patch.object(oy_cli, "which", side_effect=fake_which):
-            command, installer = oy_cli._preferred_installer("rg", env)
-
-        self.assertEqual(installer, "mise")
+    def test_mise_install_command_returns_all_requested_recipes(self):
         self.assertEqual(
-            command,
-            ["/usr/local/bin/mise", "use", "-g", "github:BurntSushi/ripgrep"],
+            oy_cli._mise_install_command(["rg", "srgn"]),
+            [
+                "mise",
+                "use",
+                "-g",
+                "github:BurntSushi/ripgrep",
+                "github:alexpovel/srgn",
+            ],
         )
 
-    def test_missing_tool_message_recommends_setup_when_no_installer_available(self):
-        message = oy_cli._missing_tool_install_message("rg", "search")
+    def test_missing_tool_message_recommends_installing_all_missing_tools(self):
+        with patch.object(oy_cli, "which", return_value=None):
+            message = oy_cli._missing_tool_install_message(
+                ["rg"], "search", ["rg", "srgn"]
+            )
 
-        self.assertIn("Set up `mise` (preferred) or Homebrew, then rerun oy.", message)
-        self.assertIn("mise use -g github:BurntSushi/ripgrep", message)
-        self.assertIn("brew install ripgrep", message)
+        self.assertIn("Missing `rg` for search.", message)
+        self.assertIn(
+            "mise use -g github:BurntSushi/ripgrep github:alexpovel/srgn",
+            message,
+        )
 
-    def test_ensure_optional_tool_installs_via_preferred_installer(self):
+    def test_ensure_optional_tools_installs_all_missing_via_mise(self):
         env = {"PATH": "/test/bin"}
         refreshed = {"PATH": "/test/bin:/installed/bin"}
 
         calls = []
 
         def fake_which(name, path=None):
-            if name == "mise":
-                return "/usr/local/bin/mise"
-            if name == "rg":
-                if path == env["PATH"]:
-                    return None
-                if path == refreshed["PATH"]:
-                    return "/installed/bin/rg"
+            if path == env["PATH"] and name in {"rg", "srgn"}:
+                return None
+            if path == refreshed["PATH"] and name in {"rg", "srgn"}:
+                return f"/installed/bin/{name}"
             return None
 
         class Result:
@@ -364,15 +441,24 @@ class OptionalToolInstallerTests(unittest.TestCase):
             patch.object(oy_cli, "_print"),
         ):
             oy_cli.command_env.cache_clear = lambda: None
-            result = oy_cli.ensure_optional_tool("rg", reason="search")
+            result = oy_cli.ensure_optional_tools("rg", reason="search")
 
         self.assertEqual(result, refreshed)
         self.assertEqual(
             calls[0][0],
-            ["/usr/local/bin/mise", "use", "-g", "github:BurntSushi/ripgrep"],
+            [
+                "mise",
+                "use",
+                "-g",
+                "github:BurntSushi/ripgrep",
+                "github:alexpovel/srgn",
+                "github:XAMPPRocky/tokei",
+                "github:rs/curlie",
+                "github:mikefarah/yq",
+            ],
         )
 
-    def test_run_cmd_auto_install_installs_missing_binary(self):
+    def test_run_cmd_auto_install_installs_all_missing_tools_for_missing_binary(self):
         env = {"PATH": "/test/bin"}
         refreshed = {"PATH": "/test/bin:/installed/bin"}
 
@@ -388,30 +474,66 @@ class OptionalToolInstallerTests(unittest.TestCase):
 
         with (
             patch.object(oy_cli, "command_env", return_value=env),
-            patch.object(oy_cli, "ensure_optional_tool", return_value=refreshed) as install,
+            patch.object(
+                oy_cli, "ensure_optional_tools", return_value=refreshed
+            ) as install,
             patch.object(oy_cli, "run_cmd", side_effect=fake_run_cmd),
         ):
-            result = oy_cli.run_cmd_auto_install(["rg", "needle"], env=env, reason="search")
+            result = oy_cli.run_cmd_auto_install(
+                ["rg", "needle"], env=env, reason="search"
+            )
 
         install.assert_called_once_with("rg", reason="search", cwd=None)
         self.assertEqual(result.stdout, "ok")
 
-    def test_run_cmd_auto_install_installs_missing_shell_helper(self):
+    def test_run_cmd_auto_install_installs_all_missing_tools_for_shell_helper(self):
         env = {"PATH": "/test/bin"}
         refreshed = {"PATH": "/test/bin:/installed/bin"}
-        first = iter([
-            type("Result", (), {"returncode": 127, "stdout": "", "stderr": "bash: line 1: rg: command not found"})(),
-            type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
-        ])
+        first = iter(
+            [
+                type(
+                    "Result",
+                    (),
+                    {
+                        "returncode": 127,
+                        "stdout": "",
+                        "stderr": "bash: line 1: rg: command not found",
+                    },
+                )(),
+                type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
+            ]
+        )
 
         with (
-            patch.object(oy_cli, "ensure_optional_tool", return_value=refreshed) as install,
-            patch.object(oy_cli, "run_cmd", side_effect=lambda *args, **kwargs: next(first)),
+            patch.object(
+                oy_cli, "ensure_optional_tools", return_value=refreshed
+            ) as install,
+            patch.object(
+                oy_cli, "run_cmd", side_effect=lambda *args, **kwargs: next(first)
+            ),
         ):
-            result = oy_cli.run_cmd_auto_install(["bash", "-c", "rg needle"], env=env, reason="bash command")
+            result = oy_cli.run_cmd_auto_install(
+                ["bash", "-c", "rg needle"], env=env, reason="bash command"
+            )
 
         install.assert_called_once_with("rg", reason="bash command", cwd=None)
         self.assertEqual(result.stdout, "ok")
+
+
+class MainTests(unittest.TestCase):
+    def test_main_fails_fast_when_mise_is_missing(self):
+        with patch.object(
+            oy_cli,
+            "command_env",
+            side_effect=RuntimeError(
+                "`mise` is required; install and activate `mise` before running `oy`."
+            ),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                oy_cli.main(["--version"])
+
+        self.assertEqual(ctx.exception.code, 1)
+
 
 class HeadroomSerializationTests(unittest.TestCase):
     def test_serialize_for_headroom_stringifies_tool_content(self):
