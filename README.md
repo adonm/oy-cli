@@ -78,7 +78,7 @@ Each tool description is passed directly to the model:
 |------|-------------|
 | `list` | List paths by calling `Path.glob(path)`. Defaults to `path: "*"`. Use `src/*` or `src/**/*.py` exactly like pathlib glob patterns. Returns sorted entries, one per line, with / for directories. |
 | `read` | Read a file or directory. Files return line-numbered text. Directories return sorted entries, one per line, with / for directories. Use `offset` and `limit` for large files. |
-| `bash` | Shell commands are easy to run. For edits, prefer `srgn` for precise search/replace, `tokei` for code-count analysis, and `curlie` for web/API interaction; pipe to `rg` or `yq` for filtering when useful. These tools are effective for their niches, guaranteed to be available during an `oy` run, and their current usage docs can be checked with `--help`. For inspection, prefer the `search` tool. Returns structured results with `command`, `exit_code`, `ok`, `output_format`, `output`, and `truncated`. JSON output is parsed when possible. |
+| `bash` | Shell commands are easy to run. For edits, prefer `ast-grep` for precise search/replace, `scc` for code-count analysis, and `xh` for web/API interaction; pipe to `rg` or `yq` for filtering when useful. These tools are effective for their niches, guaranteed to be available during an `oy` run, and their current usage docs can be checked with `--help`. For inspection, prefer the `search` tool. Returns structured results with `command`, `exit_code`, `ok`, `output_format`, `output`, and `truncated`. JSON output is parsed when possible. |
 | `search` | Search with ripgrep JSON output. Takes `pattern` and `path`, then passes any extra ripgrep flags from `args`, for example `pattern: 'needle', path: 'src', args: ['--glob', '*.py', '-i']`. `limit` only limits displayed results after ripgrep runs. |
 | `ask` | Ask the user a question in interactive runs. Use for ambiguity or decisions. Provide choices. |
 
@@ -100,9 +100,9 @@ performance issues, preserving project and human context.
 First read key markdown docs, then refresh or generate an audit
 header at the top of ISSUES.md that includes the current date,
 the latest Git commit reference, and a codebase summary
-using tools like `scc` or `tokei`. Next, fetch the current OWASP
+using tools like `scc`. Next, fetch the current OWASP
 ASVS (or MASVS if more relevant) and grugbrain.dev guidelines
-using `bash` with `curlie` (pipe to `rg` or `yq` if useful),
+using `bash` with `xh` (pipe to `rg` or `yq` if useful),
 inspect the codebase against these, and write or
 merge prioritised findings (max 10-15) into the ISSUES.md file.
 Ensure each finding is formatted to include its location, category
@@ -153,7 +153,7 @@ is a reference.
 - Python 3.14+
 - `bash`
 - `mise` installed and activated in the shell before launching `oy`
-- (Optional helper CLIs; `oy` auto-installs them on demand via `mise`): `rg` (ripgrep), `srgn`, `tokei`, `curlie`, `yq`
+- (Optional helper CLIs; `oy` auto-installs them on demand via `mise`): `rg` (ripgrep), `ast-grep`, `scc`, `xh`, `yq`
 - OpenAI API key or Codex local auth **OR** Gemini CLI OAuth credentials
   (`~/.gemini/oauth_creds.json`) **OR** Claude Code local auth **OR**
   AWS CLI configured for Bedrock

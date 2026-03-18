@@ -257,6 +257,25 @@ class BashToolTests(unittest.TestCase):
         self.assertEqual(payload["output"], {"count": 2, "items": [1, 2]})
         self.assertFalse(payload["truncated"])
 
+    def test_bash_preview_uses_pretty_json_block(self):
+        result = SimpleNamespace(
+            returncode=1,
+            stdout='{"count": 2, "items": [1, 2]}',
+            stderr="warn\n",
+        )
+
+        rendered = oy_cli._render_bash_preview(
+            "echo json", result, {"output_format": "json"}
+        )
+
+        self.assertIn("```bash", rendered)
+        self.assertIn("$ echo json", rendered)
+        self.assertIn("```json", rendered)
+        self.assertIn('  "count": 2,', rendered)
+        self.assertIn('  "items": [', rendered)
+        self.assertIn("- exit 1", rendered)
+        self.assertIn("**stderr**", rendered)
+
 
 class SearchToolTests(unittest.TestCase):
     def _state(self, root: Path):
@@ -390,25 +409,24 @@ class SearchToolTests(unittest.TestCase):
 class OptionalToolInstallerTests(unittest.TestCase):
     def test_mise_install_command_returns_all_requested_recipes(self):
         self.assertEqual(
-            oy_cli._mise_install_command(["rg", "srgn"]),
+            oy_cli._mise_install_command(["rg", "unknown"]),
             [
                 "mise",
                 "use",
                 "-g",
                 "github:BurntSushi/ripgrep",
-                "github:alexpovel/srgn",
             ],
         )
 
     def test_missing_tool_message_recommends_installing_all_missing_tools(self):
         with patch.object(oy_cli, "which", return_value=None):
             message = oy_cli._missing_tool_install_message(
-                ["rg"], "search", ["rg", "srgn"]
+                ["rg"], "search", ["rg", "unknown"]
             )
 
         self.assertIn("Missing `rg` for search.", message)
         self.assertIn(
-            "mise use -g github:BurntSushi/ripgrep github:alexpovel/srgn",
+            "mise use -g github:BurntSushi/ripgrep",
             message,
         )
 
@@ -419,20 +437,33 @@ class OptionalToolInstallerTests(unittest.TestCase):
         calls = []
 
         def fake_which(name, path=None):
-            if path == env["PATH"] and name in {"rg", "srgn"}:
+            if path == env["PATH"] and name == "rg":
                 return None
-            if path == refreshed["PATH"] and name in {"rg", "srgn"}:
+            if path == env["PATH"] and name == "mise":
+                return "/test/bin/mise"
+            if path == refreshed["PATH"] and name == "rg":
                 return f"/installed/bin/{name}"
+            if path == refreshed["PATH"] and name == "mise":
+                return "/installed/bin/mise"
             return None
 
-        class Result:
+        class InstallResult:
             returncode = 0
             stdout = "ok"
             stderr = ""
 
+        class EnvResult:
+            returncode = 0
+            stdout = '{"PATH": "/test/bin:/installed/bin"}'
+            stderr = ""
+
         def fake_run_cmd(args, **kwargs):
             calls.append((args, kwargs))
-            return Result()
+            return (
+                EnvResult()
+                if args[:3] == ["/test/bin/mise", "env", "-J"]
+                else InstallResult()
+            )
 
         with (
             patch.object(oy_cli, "command_env", side_effect=[env, refreshed]),
@@ -451,12 +482,13 @@ class OptionalToolInstallerTests(unittest.TestCase):
                 "use",
                 "-g",
                 "github:BurntSushi/ripgrep",
-                "github:alexpovel/srgn",
-                "github:XAMPPRocky/tokei",
-                "github:rs/curlie",
+                "github:ast-grep/ast-grep",
+                "github:boyter/scc",
+                "github:ducaale/xh",
                 "github:mikefarah/yq",
             ],
         )
+        self.assertEqual(calls[1][0], ["/test/bin/mise", "env", "-J"])
 
     def test_run_cmd_auto_install_installs_all_missing_tools_for_missing_binary(self):
         env = {"PATH": "/test/bin"}
@@ -518,6 +550,39 @@ class OptionalToolInstallerTests(unittest.TestCase):
 
         install.assert_called_once_with("rg", reason="bash command", cwd=None)
         self.assertEqual(result.stdout, "ok")
+
+    def test_refresh_mise_env_updates_process_environment(self):
+        env = {"PATH": "/test/bin"}
+        refreshed = {"PATH": "/test/bin:/installed/bin", "FOO": "bar"}
+
+        class Result:
+            returncode = 0
+            stdout = '{"PATH": "/test/bin:/installed/bin", "FOO": "bar"}'
+            stderr = ""
+
+        def fake_which(name, path=None):
+            if name == "mise":
+                return "/test/bin/mise"
+            if name == "rg" and path == refreshed["PATH"]:
+                return "/installed/bin/rg"
+            return None
+
+        original = dict(oy_cli.os.environ)
+        try:
+            with (
+                patch.object(oy_cli, "command_env", side_effect=[env, refreshed]),
+                patch.object(oy_cli, "which", side_effect=fake_which),
+                patch.object(oy_cli, "run_cmd", return_value=Result()),
+            ):
+                oy_cli.command_env.cache_clear = lambda: None
+                result = oy_cli._refresh_mise_env()
+                self.assertEqual(oy_cli.os.environ["PATH"], refreshed["PATH"])
+                self.assertEqual(oy_cli.os.environ["FOO"], "bar")
+        finally:
+            oy_cli.os.environ.clear()
+            oy_cli.os.environ.update(original)
+
+        self.assertEqual(result, refreshed)
 
 
 class MainTests(unittest.TestCase):

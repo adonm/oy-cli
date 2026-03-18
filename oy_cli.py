@@ -72,17 +72,17 @@ OPTIONAL_TOOL_INSTALLERS = {
         "label": "ripgrep",
         "mise": "github:BurntSushi/ripgrep",
     },
-    "srgn": {
-        "label": "srgn",
-        "mise": "github:alexpovel/srgn",
+    "ast-grep": {
+        "label": "ast-grep",
+        "mise": "github:ast-grep/ast-grep",
     },
-    "tokei": {
-        "label": "tokei",
-        "mise": "github:XAMPPRocky/tokei",
+    "scc": {
+        "label": "scc",
+        "mise": "github:boyter/scc",
     },
-    "curlie": {
-        "label": "curlie",
-        "mise": "github:rs/curlie",
+    "xh": {
+        "label": "xh",
+        "mise": "github:ducaale/xh",
     },
     "yq": {
         "label": "yq",
@@ -485,6 +485,32 @@ def _bash_payload(command: str, result) -> dict[str, Any]:
     }
 
 
+def _render_bash_preview(command: str, result, payload: dict[str, Any]) -> str:
+    if payload.get("output_format") != "json":
+        return _fmt("bash", command, (result.stdout, result.returncode, result.stderr))
+
+    json_value = payload.get("output")
+    if json_value is None:
+        try:
+            json_value = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            json_value = result.stdout
+    pretty_json = (
+        json_value
+        if isinstance(json_value, str)
+        else json.dumps(json_value, ensure_ascii=False, indent=2, default=str)
+    )
+    blocks = [
+        _fmt("block", f"$ {command}", "bash"),
+        _fmt("block", pretty_json, "json"),
+    ]
+    if result.returncode:
+        blocks.append(_fmt("status", f"exit {result.returncode}"))
+    if result.stderr.strip():
+        blocks.extend(["**stderr**", _fmt("block", result.stderr.rstrip(), "text")])
+    return "\n\n".join(blocks)
+
+
 def _rel(r, p):
     try:
         return p.relative_to(r).as_posix() or "."
@@ -697,6 +723,39 @@ def _missing_tool_install_message(required, reason: str, missing):
     return "\n".join(lines)
 
 
+def _refresh_mise_env(cwd=None, *, env=None):
+    current_env = dict(command_env(cwd) if env is None else env)
+    mise = which("mise", current_env.get("PATH"))
+    if not mise:
+        raise RuntimeError(
+            "`mise` is required; install and activate `mise` before running `oy`."
+        )
+    result = run_cmd(
+        [mise, "env", "-J"],
+        cwd=cwd if cwd and cwd.is_dir() else None,
+        env=current_env,
+        timeout=DEPENDENCY_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        extra = f"\n\nActivation output:\n{detail}" if detail else ""
+        raise RuntimeError(f"Failed to refresh mise activation.{extra}")
+    try:
+        updates = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Failed to parse `mise env -J` output as JSON.") from exc
+    if not isinstance(updates, dict):
+        raise RuntimeError("`mise env -J` returned unexpected data.")
+    for key, value in updates.items():
+        key_text = str(key)
+        if value is None:
+            os.environ.pop(key_text, None)
+        else:
+            os.environ[key_text] = str(value)
+    command_env.cache_clear()
+    return dict(command_env(cwd))
+
+
 def ensure_optional_tools(*required: str, reason: str, cwd=None):
     env = dict(command_env(cwd))
     missing = _missing_optional_tools(env)
@@ -734,8 +793,13 @@ def ensure_optional_tools(*required: str, reason: str, cwd=None):
             + _missing_tool_install_message(required, reason, missing)
         )
 
-    command_env.cache_clear()
-    refreshed = dict(command_env(cwd))
+    try:
+        refreshed = _refresh_mise_env(cwd, env=env)
+    except RuntimeError as exc:
+        abort(
+            "Installed helper tools via mise, but failed to refresh the active mise environment.\n\n"
+            f"{exc}\n\n" + _missing_tool_install_message(required, reason, missing)
+        )
     still_missing = _missing_optional_tools(refreshed, required or missing)
     if not still_missing:
         return refreshed
@@ -1274,8 +1338,7 @@ def tool_bash(state, command, timeout_seconds=120):
         reason="bash command",
     )
     payload = _bash_payload(command, result)
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-    show(_fmt("block", rendered, "json"), 12)
+    show(_render_bash_preview(command, result, payload), 12)
     return payload
 
 
