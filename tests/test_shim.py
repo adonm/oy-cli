@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -204,6 +205,86 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         await client.chat_completion("gpt-test", [])
 
         self.assertNotIn("reasoning", create.call_args.kwargs)
+
+
+class ShimHelperTests(unittest.TestCase):
+    def test_static_env_checker_ignores_cwd(self):
+        calls: list[str] = []
+
+        checker = shim._static_env_checker(lambda: calls.append("ok"))
+        checker(None)
+        checker(Path("/tmp/work"))
+
+        self.assertEqual(calls, ["ok", "ok"])
+
+    def test_region_client_builder_ignores_cwd(self):
+        calls: list[str | None] = []
+
+        builder = shim._region_client_builder(
+            lambda region: calls.append(region) or _dummy_client([region or "default"])
+        )
+        client = builder("us-east-1", Path("/tmp/work"))
+
+        self.assertEqual(calls, ["us-east-1"])
+        self.assertEqual(client.list_models(), ["us-east-1"])
+
+
+class ShimApiSurfaceTests(unittest.TestCase):
+    def test_module_all_exports_public_boundary(self):
+        expected = {
+            "AssistantMessage",
+            "ChatMessage",
+            "CompletionClient",
+            "SystemMessage",
+            "ToolCall",
+            "ToolMessage",
+            "ToolResult",
+            "ToolSpec",
+            "UserMessage",
+            "command_env",
+            "default_region",
+            "detect_available_shims",
+            "ensure_api_env",
+            "get_client",
+            "join_model_spec",
+            "list_all_model_ids",
+            "list_models_for_shim",
+            "load_json",
+            "require_api_env",
+            "run_cmd",
+            "save_json",
+            "split_model_spec",
+            "validate_shim",
+            "which",
+        }
+
+        self.assertEqual(set(shim.__all__), expected)
+
+    def test_ensure_api_env_uses_resolved_shim_spec(self):
+        spec = _dummy_spec("alpha", ensure_env=lambda cwd: None)
+        with (
+            patch.object(shim, "resolve_shim", return_value="alpha") as resolve_shim,
+            patch.object(shim, "_shim_spec", return_value=spec) as shim_spec,
+        ):
+            ok, error = shim.ensure_api_env("alpha:model", None, Path("/workspace"))
+
+        resolve_shim.assert_called_once_with("alpha:model", None)
+        shim_spec.assert_called_once_with("alpha")
+        self.assertEqual((ok, error), (True, None))
+
+    def test_get_client_uses_shim_registry_builder(self):
+        sentinel = _dummy_client(["demo"])
+        spec = shim.ShimSpec(
+            name="alpha",
+            ensure_env=lambda cwd: None,
+            build_client=lambda region, cwd: sentinel,
+            list_models=lambda region, cwd: ["demo"],
+        )
+        with patch.object(shim, "_shim_spec", return_value=spec) as shim_spec:
+            client = shim.get_client("alpha", model_spec="alpha:demo", region="us-east-1")
+
+        shim_spec.assert_called_once_with("alpha")
+        self.assertIs(client, sentinel)
 
 
 class ShimRegistryTests(unittest.TestCase):

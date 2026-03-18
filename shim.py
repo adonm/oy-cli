@@ -108,6 +108,11 @@ JSONDict: TypeAlias = dict[str, Any]
 ProviderItem: TypeAlias = JSONDict | str
 
 
+# ---------------------------------------------------------------------------
+# Shared message, tool, and transport types
+# ---------------------------------------------------------------------------
+
+
 class ToolCall(msgspec.Struct, omit_defaults=True):
     id: str
     name: str
@@ -372,6 +377,11 @@ def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
                 "content": _tool_output_text(message.content),
             }
     raise TypeError(f"Unsupported message type: {type(message).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# Local persistence and shell/runtime helpers
+# ---------------------------------------------------------------------------
 
 
 def load_json(p, d):
@@ -796,6 +806,11 @@ def require_api_env(
     raise RuntimeError(message)
 
 
+# ---------------------------------------------------------------------------
+# Credential loading and model discovery helpers
+# ---------------------------------------------------------------------------
+
+
 @lru_cache(maxsize=1)
 def gemini_cli_package_root() -> Path:
     exe = resolve_tool_path("gemini")
@@ -1115,6 +1130,11 @@ def _refresh_claude_token(refresh_token: str) -> str:
     return access_token
 
 
+# ---------------------------------------------------------------------------
+# Provider client factories and protocol adapters
+# ---------------------------------------------------------------------------
+
+
 def _openai_client_pair(**kwargs: Any) -> tuple[AsyncOpenAI, OpenAI]:
     """Create OpenAI async/sync SDK clients backed by owned httpx clients."""
     http_client_kwargs = dict(kwargs)
@@ -1165,8 +1185,13 @@ class CompletionClient:
     list_models: Callable[[], list[str]]
 
 
+# ---------------------------------------------------------------------------
+# Shim registry glue and retry plumbing
+# ---------------------------------------------------------------------------
+
+
 ShimEnvChecker: TypeAlias = Callable[[Path | None], None]
-ShimClientBuilder: TypeAlias = Callable[[str | None, Path | None], CompletionClient]
+ShimClientBuilder: TypeAlias = Callable[..., CompletionClient]
 ShimModelLister: TypeAlias = Callable[[str | None, Path | None], list[str]]
 
 
@@ -1176,6 +1201,43 @@ class ShimSpec:
     ensure_env: ShimEnvChecker
     build_client: ShimClientBuilder
     list_models: ShimModelLister
+
+
+def _static_env_checker(check: Callable[[], None]) -> ShimEnvChecker:
+    def wrapper(_cwd: Path | None = None) -> None:
+        check()
+
+    return wrapper
+
+
+def _region_client_builder(
+    build: Callable[[str | None], CompletionClient],
+) -> ShimClientBuilder:
+    def wrapper(region: str | None, _cwd: Path | None) -> CompletionClient:
+        return build(region)
+
+    return wrapper
+
+
+def _static_client_builder(build: Callable[[], CompletionClient]) -> ShimClientBuilder:
+    def wrapper(_region: str | None, _cwd: Path | None) -> CompletionClient:
+        return build()
+
+    return wrapper
+
+
+def _client_model_lister(build_client: ShimClientBuilder) -> ShimModelLister:
+    def list_models(region: str | None, cwd: Path | None) -> list[str]:
+        return build_client(region, cwd).list_models()
+
+    return list_models
+
+
+def _static_model_lister(load_models: Callable[[], list[str]]) -> ShimModelLister:
+    def list_models(_region: str | None, _cwd: Path | None) -> list[str]:
+        return load_models()
+
+    return list_models
 
 
 def _is_retryable_status(status_code: int) -> bool:
@@ -2427,19 +2489,24 @@ def _try_bool(fn) -> bool:
         return False
 
 
-def _require_openai_env(_: Path | None = None) -> None:
+# ---------------------------------------------------------------------------
+# Shim-specific environment checks and registry entries
+# ---------------------------------------------------------------------------
+
+
+def _require_openai_env() -> None:
     _require_string(get_openai_api_key(), "OPENAI_API_KEY is not set")
 
 
-def _require_codex_env(_: Path | None = None) -> None:
+def _require_codex_env() -> None:
     load_codex_session()
 
 
-def _require_gemini_env(_: Path | None = None) -> None:
+def _require_gemini_env() -> None:
     load_gemini_oauth_creds()
 
 
-def _require_claude_env(_: Path | None = None) -> None:
+def _require_claude_env() -> None:
     load_claude_auth_status()
 
 
@@ -2450,7 +2517,6 @@ def _require_aws_env(cwd: Path | None = None) -> None:
 
 def _require_boto3_aws_env(cwd: Path | None = None) -> None:
     """Validate that boto3 can resolve AWS credentials."""
-    _ = cwd
     import boto3
     from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 
@@ -2467,10 +2533,7 @@ def _require_boto3_aws_env(cwd: Path | None = None) -> None:
         raise RuntimeError(f"AWS credentials incomplete: {exc}") from exc
 
 
-def _build_openai_client(
-    region: str | None = None, cwd: Path | None = None, *, max_retries: int = 3
-) -> CompletionClient:
-    _ = region, cwd
+def _openai_client(max_retries: int = 3) -> CompletionClient:
     return _openai_responses_client(
         *_openai_pair(
             _require_string(get_openai_api_key(), "No OpenAI credentials found"),
@@ -2480,10 +2543,7 @@ def _build_openai_client(
     )
 
 
-def _build_codex_client(
-    region: str | None = None, cwd: Path | None = None
-) -> CompletionClient:
-    _ = region, cwd
+def _codex_client() -> CompletionClient:
     if api_key := get_codex_api_key():
         return _openai_responses_client(
             *_openai_pair(api_key),
@@ -2493,21 +2553,15 @@ def _build_codex_client(
     return _codex_chatgpt_client()
 
 
-def _build_gemini_client(
-    region: str | None = None, cwd: Path | None = None
-) -> CompletionClient:
-    _ = region, cwd
+def _gemini_completion_client() -> CompletionClient:
     return _gemini_client(resolve_gemini_project(), get_gemini_access_token())
 
 
-def _build_bedrock_client(
-    region: str | None = None, cwd: Path | None = None
-) -> CompletionClient:
-    _ = cwd
+def _bedrock_completion_client(region: str | None = None) -> CompletionClient:
     return _bedrock_converse_client(current_region(region))
 
 
-def _build_mantle_client(
+def _mantle_completion_client(
     region: str | None = None, cwd: Path | None = None
 ) -> CompletionClient:
     current = current_region(region)
@@ -2523,57 +2577,19 @@ def _build_mantle_client(
     )
 
 
-def _build_claude_shim(
-    region: str | None = None, cwd: Path | None = None
-) -> CompletionClient:
-    _ = region, cwd
+def _claude_client_from_auth() -> CompletionClient:
     return _claude_client(get_claude_access_token())
 
 
-def _list_openai_models(
-    region: str | None = None, cwd: Path | None = None
-) -> list[str]:
-    return _build_openai_client(region, cwd, max_retries=0).list_models()
-
-
-def _list_gemini_models(
-    region: str | None = None, cwd: Path | None = None
-) -> list[str]:
-    _require_gemini_env(cwd)
-    return load_gemini_model_list()
-
-
-def _list_codex_models(region: str | None = None, cwd: Path | None = None) -> list[str]:
-    return _build_codex_client(region, cwd).list_models()
-
-
-def _list_claude_models(
-    region: str | None = None, cwd: Path | None = None
-) -> list[str]:
-    _ = region, cwd
+def _claude_model_list() -> list[str]:
     return _fetch_claude_models(get_claude_access_token())
-
-
-def _list_bedrock_models(
-    region: str | None = None, cwd: Path | None = None
-) -> list[str]:
-    _ = cwd
-    return _bedrock_converse_client(current_region(region)).list_models()
-
-
-def _list_mantle_models(
-    region: str | None = None, cwd: Path | None = None
-) -> list[str]:
-    return _build_mantle_client(region, cwd).list_models()
 
 
 # ---------------------------------------------------------------------------
 # Copilot shim – uses the GitHub Copilot API (api.githubcopilot.com)
 # with a GitHub PAT obtained from COPILOT_GITHUB_TOKEN / GH_TOKEN /
-# GITHUB_TOKEN / `gh auth token`.  Set COPILOT_BASE_URL to override
+# GITHUB_TOKEN / `gh auth token`. Set COPILOT_BASE_URL to override
 # (e.g. https://api.business.githubcopilot.com for enterprise).
-# Models that support /responses use that API; others fall back to
-# /chat/completions automatically.
 # ---------------------------------------------------------------------------
 
 _COPILOT_BASE_URL = os.environ.get("COPILOT_BASE_URL", "https://api.githubcopilot.com")
@@ -2582,11 +2598,7 @@ _COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
 
 
 def _get_github_token() -> str | None:
-    """Return a GitHub PAT from env vars or the ``gh`` CLI, or *None*.
-
-    Checks (in order): ``COPILOT_GITHUB_TOKEN``, ``GH_TOKEN``,
-    ``GITHUB_TOKEN``, then ``gh auth token``.
-    """
+    """Return a GitHub PAT from env vars or `gh auth token`, or None."""
     for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         val = os.environ.get(var)
         if isinstance(val, str) and val:
@@ -2601,10 +2613,10 @@ def _get_github_token() -> str | None:
             text=True,
             timeout=10,
         )
-        token = proc.stdout.strip()
-        return token if proc.returncode == 0 and token else None
     except Exception:
         return None
+    token = proc.stdout.strip()
+    return token if proc.returncode == 0 and token else None
 
 
 def _copilot_default_headers() -> dict[str, str]:
@@ -2615,16 +2627,15 @@ def _copilot_default_headers() -> dict[str, str]:
 
 
 def _copilot_openai_pair(token: str) -> tuple[AsyncOpenAI, OpenAI]:
-    kwargs: dict[str, Any] = {
-        "api_key": token,
-        "base_url": _COPILOT_BASE_URL,
-        "max_retries": 0,
-        "default_headers": _copilot_default_headers(),
-    }
-    return _openai_client_pair(**kwargs)
+    return _openai_client_pair(
+        api_key=token,
+        base_url=_COPILOT_BASE_URL,
+        max_retries=0,
+        default_headers=_copilot_default_headers(),
+    )
 
 
-def _require_copilot_env(_: Path | None = None) -> None:
+def _require_copilot_env() -> None:
     _require_string(
         _get_github_token(),
         "No GitHub token found (set GH_TOKEN, GITHUB_TOKEN, or run `gh auth login`)",
@@ -2632,8 +2643,8 @@ def _require_copilot_env(_: Path | None = None) -> None:
 
 
 def _fetch_copilot_models_raw(token: str) -> list[JSONDict]:
-    """Fetch the full model metadata list from the Copilot API."""
-    resp = httpx.get(
+    """Fetch full model metadata from the Copilot API."""
+    response = httpx.get(
         f"{_COPILOT_BASE_URL}/models",
         headers={
             "Authorization": f"Bearer {token}",
@@ -2641,19 +2652,19 @@ def _fetch_copilot_models_raw(token: str) -> list[JSONDict]:
         },
         timeout=15,
     )
-    resp.raise_for_status()
-    data = resp.json()
+    response.raise_for_status()
+    data = response.json()
     return data.get("data", []) if isinstance(data, dict) else []
 
 
 def _copilot_chat_model_ids(token: str) -> list[str]:
-    """Return sorted model IDs that support chat (not embeddings)."""
+    """Return sorted Copilot chat model IDs."""
     raw = _fetch_copilot_models_raw(token)
     return sorted(
-        m["id"]
-        for m in raw
-        if isinstance(m.get("id"), str)
-        and m.get("capabilities", {}).get("type") == "chat"
+        model["id"]
+        for model in raw
+        if isinstance(model.get("id"), str)
+        and model.get("capabilities", {}).get("type") == "chat"
     )
 
 
@@ -2661,22 +2672,18 @@ def _copilot_responses_model_ids(token: str) -> set[str]:
     """Return model IDs that support the /responses endpoint."""
     raw = _fetch_copilot_models_raw(token)
     return {
-        m["id"]
-        for m in raw
-        if isinstance(m.get("id"), str)
-        and "/responses" in (m.get("supported_endpoints") or [])
+        model["id"]
+        for model in raw
+        if isinstance(model.get("id"), str)
+        and "/responses" in (model.get("supported_endpoints") or [])
     }
 
 
-def _build_copilot_client(
-    region: str | None = None, cwd: Path | None = None
-) -> CompletionClient:
+def _copilot_completion_client() -> CompletionClient:
     """Build a Copilot client that routes to /responses or /chat/completions."""
-    _ = region, cwd
     token = _require_string(_get_github_token(), "No GitHub token found")
     async_client, sync_client = _copilot_openai_pair(token)
 
-    # Probe which models support /responses vs /chat/completions
     try:
         responses_models = _copilot_responses_model_ids(token)
     except Exception:
@@ -2714,55 +2721,53 @@ def _build_copilot_client(
     return CompletionClient(chat_completion=chat_completion, list_models=list_models)
 
 
-def _list_copilot_models(
-    region: str | None = None, cwd: Path | None = None
-) -> list[str]:
-    _ = region, cwd
-    return _build_copilot_client(region, cwd).list_models()
+_CODEX_CLIENT_BUILDER = _static_client_builder(_codex_client)
+_BEDROCK_CLIENT_BUILDER = _region_client_builder(_bedrock_completion_client)
+_COPILOT_CLIENT_BUILDER = _static_client_builder(_copilot_completion_client)
 
 
 SHIM_SPECS: dict[str, ShimSpec] = {
     SHIM_OPENAI: ShimSpec(
         name=SHIM_OPENAI,
-        ensure_env=_require_openai_env,
-        build_client=_build_openai_client,
-        list_models=_list_openai_models,
+        ensure_env=_static_env_checker(_require_openai_env),
+        build_client=_static_client_builder(_openai_client),
+        list_models=_static_model_lister(lambda: _openai_client(max_retries=0).list_models()),
     ),
     SHIM_CODEX: ShimSpec(
         name=SHIM_CODEX,
-        ensure_env=_require_codex_env,
-        build_client=_build_codex_client,
-        list_models=_list_codex_models,
+        ensure_env=_static_env_checker(_require_codex_env),
+        build_client=_CODEX_CLIENT_BUILDER,
+        list_models=_client_model_lister(_CODEX_CLIENT_BUILDER),
     ),
     SHIM_GEMINI: ShimSpec(
         name=SHIM_GEMINI,
-        ensure_env=_require_gemini_env,
-        build_client=_build_gemini_client,
-        list_models=_list_gemini_models,
+        ensure_env=_static_env_checker(_require_gemini_env),
+        build_client=_static_client_builder(_gemini_completion_client),
+        list_models=_static_model_lister(load_gemini_model_list),
     ),
     SHIM_BEDROCK: ShimSpec(
         name=SHIM_BEDROCK,
         ensure_env=_require_boto3_aws_env,
-        build_client=_build_bedrock_client,
-        list_models=_list_bedrock_models,
+        build_client=_BEDROCK_CLIENT_BUILDER,
+        list_models=_client_model_lister(_BEDROCK_CLIENT_BUILDER),
     ),
     SHIM_MANTLE: ShimSpec(
         name=SHIM_MANTLE,
         ensure_env=_require_aws_env,
-        build_client=_build_mantle_client,
-        list_models=_list_mantle_models,
+        build_client=_mantle_completion_client,
+        list_models=_client_model_lister(_mantle_completion_client),
     ),
     SHIM_CLAUDE: ShimSpec(
         name=SHIM_CLAUDE,
-        ensure_env=_require_claude_env,
-        build_client=_build_claude_shim,
-        list_models=_list_claude_models,
+        ensure_env=_static_env_checker(_require_claude_env),
+        build_client=_static_client_builder(_claude_client_from_auth),
+        list_models=_static_model_lister(_claude_model_list),
     ),
     SHIM_COPILOT: ShimSpec(
         name=SHIM_COPILOT,
-        ensure_env=_require_copilot_env,
-        build_client=_build_copilot_client,
-        list_models=_list_copilot_models,
+        ensure_env=_static_env_checker(_require_copilot_env),
+        build_client=_COPILOT_CLIENT_BUILDER,
+        list_models=_client_model_lister(_COPILOT_CLIENT_BUILDER),
     ),
 }
 
@@ -2802,7 +2807,6 @@ def get_client(
     region: str | None = None,
     cwd: Path | None = None,
 ) -> CompletionClient:
-    _ = model_spec
     return _shim_spec(shim).build_client(region, cwd)
 
 
@@ -2821,3 +2825,31 @@ def list_all_model_ids(region: str | None = None, cwd: Path | None = None) -> li
     for shim in detect_available_shims():
         models.extend(list_models_for_shim(shim, region=region, cwd=cwd))
     return models
+
+
+__all__ = [
+    "AssistantMessage",
+    "ChatMessage",
+    "CompletionClient",
+    "SystemMessage",
+    "ToolCall",
+    "ToolMessage",
+    "ToolResult",
+    "ToolSpec",
+    "UserMessage",
+    "command_env",
+    "default_region",
+    "detect_available_shims",
+    "ensure_api_env",
+    "get_client",
+    "join_model_spec",
+    "list_all_model_ids",
+    "list_models_for_shim",
+    "load_json",
+    "require_api_env",
+    "run_cmd",
+    "save_json",
+    "split_model_spec",
+    "validate_shim",
+    "which",
+]

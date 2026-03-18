@@ -17,28 +17,28 @@ import tiktoken
 from shim import (
     AssistantMessage,
     ChatMessage,
-    command_env,
-    load_json,
-    run_cmd,
-    save_json,
+    command_env as shim_command_env,
+    load_json as shim_load_json,
+    run_cmd as shim_run_cmd,
+    save_json as shim_save_json,
     SystemMessage,
     ToolCall,
     ToolMessage,
     ToolResult,
     ToolSpec,
     UserMessage,
-    which,
+    which as shim_which,
     CompletionClient,
-    default_region,
-    detect_available_shims,
-    ensure_api_env as ensure_shim_api_env,
-    get_client as build_shim_client,
-    join_model_spec,
-    list_models_for_shim,
-    require_api_env as require_shim_api_env,
-    resolve_shim as resolve_model_shim,
-    split_model_spec,
-    validate_shim,
+    default_region as shim_default_region,
+    detect_available_shims as shim_detect_available_shims,
+    ensure_api_env as shim_ensure_api_env,
+    get_client as shim_build_client,
+    join_model_spec as shim_join_model_spec,
+    list_models_for_shim as shim_list_models_for_shim,
+    require_api_env as shim_require_api_env,
+    resolve_shim as shim_resolve_shim,
+    split_model_spec as shim_split_model_spec,
+    validate_shim as shim_validate_shim,
 )
 from openai import (
     AuthenticationError,
@@ -103,6 +103,19 @@ class RuntimeBudgets:
     default_line_limit: int
 
 
+@dataclass(frozen=True, slots=True)
+class SessionContext:
+    workspace: Path
+    model: str
+    interactive: bool
+    system_prompt: str
+    system_file: Path | None = None
+
+    @property
+    def mode(self) -> str:
+        return "interactive" if self.interactive else "non-interactive"
+
+
 def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
     tool_output_tokens = _clamp_int(context_tokens // 24, 2048, 8192)
     return RuntimeBudgets(
@@ -114,6 +127,103 @@ def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
 
 
 BUDGETS = _derive_runtime_budgets(MAX_CONTEXT_TOKENS)
+
+# ---------------------------------------------------------------------------
+# Shim boundary -- oy_cli owns UX/orchestration and talks to shim.py through
+# this narrow bridge of shared helpers and provider/runtime operations.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ShimBridge:
+    load_json: Callable[[Path, Any], Any]
+    save_json: Callable[[Path, Any], bool]
+    run_cmd: Callable[..., Any]
+    which: Callable[[str, str | None], str | None]
+    command_env: Callable[[Path | None], Any]
+    default_region: Callable[[], str]
+    detect_available_shims: Callable[[], list[str]]
+    ensure_api_env: Callable[[str | None, str | None, Path | None], tuple[bool, str | None]]
+    require_api_env: Callable[[str | None, str | None, Path | None], str]
+    build_client: Callable[..., CompletionClient]
+    list_models_for_shim: Callable[[str, str | None, Path | None], list[str]]
+    resolve_shim: Callable[[str | None, str | None], str]
+    validate_shim: Callable[[str], str]
+    join_model_spec: Callable[[str, str], str]
+    split_model_spec: Callable[[str], tuple[str | None, str]]
+
+
+SHIMS = ShimBridge(
+    load_json=shim_load_json,
+    save_json=shim_save_json,
+    run_cmd=shim_run_cmd,
+    which=shim_which,
+    command_env=shim_command_env,
+    default_region=shim_default_region,
+    detect_available_shims=shim_detect_available_shims,
+    ensure_api_env=shim_ensure_api_env,
+    require_api_env=shim_require_api_env,
+    build_client=shim_build_client,
+    list_models_for_shim=shim_list_models_for_shim,
+    resolve_shim=shim_resolve_shim,
+    validate_shim=shim_validate_shim,
+    join_model_spec=shim_join_model_spec,
+    split_model_spec=shim_split_model_spec,
+)
+
+
+def load_json(path, default):
+    return SHIMS.load_json(path, default)
+
+
+def save_json(path, data):
+    return SHIMS.save_json(path, data)
+
+
+def run_cmd(cmd, **kwargs):
+    return SHIMS.run_cmd(cmd, **kwargs)
+
+
+def which(tool, path=None):
+    return SHIMS.which(tool, path)
+
+
+def command_env(cwd=None):
+    return SHIMS.command_env(cwd)
+
+
+def _clear_command_env_cache() -> None:
+    cache_clear = getattr(SHIMS.command_env, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
+
+
+command_env.cache_clear = _clear_command_env_cache
+
+
+def default_region():
+    return SHIMS.default_region()
+
+
+def detect_available_shims() -> list[str]:
+    return SHIMS.detect_available_shims()
+
+
+def list_models_for_shim(shim: str, region: str | None = None, cwd: Path | None = None):
+    return SHIMS.list_models_for_shim(shim, region, cwd)
+
+
+def join_model_spec(shim: str, model: str) -> str:
+    return SHIMS.join_model_spec(shim, model)
+
+
+def split_model_spec(spec: str) -> tuple[str | None, str]:
+    return SHIMS.split_model_spec(spec)
+
+
+def validate_shim(shim: str) -> str:
+    return SHIMS.validate_shim(shim)
+
 
 # ---------------------------------------------------------------------------
 # Debug logging -- activated by OY_DEBUG=1
@@ -163,7 +273,7 @@ def _debug_log(event: str, **data: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Prompts – parsed from README.md (single source of truth)
+# Prompt/config loading and local formatting helpers
 # ---------------------------------------------------------------------------
 
 
@@ -515,6 +625,11 @@ def _render_bash_preview(command: str, result, payload: dict[str, Any]) -> str:
     return "\n\n".join(blocks)
 
 
+# ---------------------------------------------------------------------------
+# Config, environment, and runtime bootstrap
+# ---------------------------------------------------------------------------
+
+
 def _rel(r, p):
     try:
         return p.relative_to(r).as_posix() or "."
@@ -648,16 +763,16 @@ def _wrap_runtime_error(fn, *args):
 
 
 def resolve_active_shim(spec=None):
-    return _wrap_runtime_error(validate_shim, resolve_model_shim(spec, _shim()))
+    return _wrap_runtime_error(validate_shim, SHIMS.resolve_shim(spec, _shim()))
 
 
 def ensure_api_env(cwd=None):
     """Return True if API credentials are available."""
-    return ensure_shim_api_env(_model(), _shim(), cwd)[0]
+    return SHIMS.ensure_api_env(_model(), _shim(), cwd)[0]
 
 
 def require_api_env(cwd=None):
-    _wrap_runtime_error(require_shim_api_env, _model(), _shim(), cwd)
+    _wrap_runtime_error(SHIMS.require_api_env, _model(), _shim(), cwd)
 
 
 def require_tools(env, *tools):
@@ -858,7 +973,7 @@ def run_cmd_auto_install(
 def get_client(spec=None):
     require_api_env(Path.cwd())
     s = spec or _model()
-    return build_shim_client(
+    return SHIMS.build_client(
         resolve_active_shim(s), model_spec=s, region=default_region(), cwd=Path.cwd()
     )
 
@@ -894,6 +1009,10 @@ def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details)
         _print(value=message, err=True)
 
 
+# ---------------------------------------------------------------------------
+# Tool registry and tool argument schemas
+# ---------------------------------------------------------------------------
+
 # Tool schemas and argument decoding are msgspec-native now.
 class ListArgs(msgspec.Struct, omit_defaults=True):
     path: str = "*"
@@ -914,7 +1033,7 @@ class BashArgs(msgspec.Struct, omit_defaults=True):
 class SearchArgs(msgspec.Struct, omit_defaults=True):
     pattern: str
     path: str = "."
-    args: list[str] = []
+    args: list[str] = msgspec.field(default_factory=list)
     limit: int = BUDGETS.default_line_limit
 
 
@@ -1203,11 +1322,21 @@ class Transcript(msgspec.Struct, omit_defaults=True):
     max_context_tokens: int = MAX_CONTEXT_TOKENS
     max_message_tokens: int = BUDGETS.message_tokens
 
+    @classmethod
+    def with_system_prompt(cls, system_prompt: str) -> "Transcript":
+        transcript = cls()
+        transcript.set_system_prompt(system_prompt)
+        return transcript
+
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and isinstance(self.messages[0], SystemMessage):
             self.messages[0] = SystemMessage(system_prompt)
         else:
             self.messages[:0] = [SystemMessage(system_prompt)]
+
+    def clear(self, system_prompt: str) -> None:
+        self.messages.clear()
+        self.set_system_prompt(system_prompt)
 
     def checkpoint(self) -> int:
         """Save the current message count so we can rollback on failure."""
@@ -1276,6 +1405,14 @@ def _join_paths(paths, root, empty="<no matches>"):
     )
 
 
+def _shown_line_limit(limit: int) -> int:
+    return max(limit, 1)
+
+
+def _path_listing(paths, root, *, limit: int, empty="<no matches>"):
+    return _join_paths(paths[: _shown_line_limit(limit)], root, empty)
+
+
 def _glob_paths(root: Path, pattern: str) -> list[Path]:
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
         raise ValueError(f"Path traversal denied: '{pattern}'")
@@ -1299,7 +1436,7 @@ def tool_list(state, path="*", limit=BUDGETS.default_line_limit):
         path=path,
         limit=limit,
     )
-    text = _join_paths(_glob_paths(state.root, path)[: max(limit, 1)], state.root)
+    text = _path_listing(_glob_paths(state.root, path), state.root, limit=limit)
     return _show_and_clip(text, 1)
 
 
@@ -1317,15 +1454,16 @@ def tool_read(state, path, offset=1, limit=BUDGETS.default_line_limit):
     if not target.exists():
         raise ValueError(f"read path does not exist: {_rel(state.root, target)}")
     if target.is_dir():
-        text = _join_paths(
-            sorted(target.iterdir(), key=lambda item: item.as_posix())[: max(limit, 1)],
+        text = _path_listing(
+            sorted(target.iterdir(), key=lambda item: item.as_posix()),
             state.root,
-            "<empty directory>",
+            limit=limit,
+            empty="<empty directory>",
         )
         return _show_and_clip(text, 1)
     start = max(_positive_int(offset, "offset"), 1) - 1
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    shown = lines[start : start + max(limit, 1)]
+    shown = lines[start : start + _shown_line_limit(limit)]
     text = "\n".join(
         f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1)
     )
@@ -1371,13 +1509,29 @@ def _search_summary(matches: int, shown: int) -> str:
 
 def _trim_search_lines(lines: list[str], limit: int) -> tuple[str, int, int]:
     total = len(lines)
-    shown = lines[: max(limit, 1)]
+    shown = lines[: _shown_line_limit(limit)]
     if not shown:
         return "<no matches>", total, 0
     out = "\n".join(shown)
     if total > len(shown):
         out += f"\n... [{total - len(shown)} more matches omitted]"
     return out, total, len(shown)
+
+
+def _search_event_line(root: Path, event: dict[str, Any]) -> str | None:
+    kind = event.get("type")
+    data = event.get("data")
+    if kind not in {"match", "context"} or not isinstance(data, dict):
+        return None
+    path_text = data.get("path", {}).get("text", "")
+    line_number = data.get("line_number")
+    text_value = data.get("lines", {}).get("text", "").rstrip("\n")
+    rel = _rel(root, Path(path_text)) if path_text else "."
+    if kind == "match":
+        submatches = data.get("submatches") or []
+        column = (submatches[0].get("start", 0) + 1) if submatches else 1
+        return f"{rel}:{line_number}:{column}:{text_value}"
+    return f"{rel}-{line_number}-:{text_value}"
 
 
 def _search_contents(
@@ -1417,23 +1571,8 @@ def _search_contents(
     for raw in result.stdout.splitlines():
         if not raw.strip():
             continue
-        event = json.loads(raw)
-        kind = event.get("type")
-        data = event.get("data", {})
-        if kind == "match":
-            path_text = data.get("path", {}).get("text", "")
-            line_number = data.get("line_number")
-            text_value = data.get("lines", {}).get("text", "").rstrip("\n")
-            submatches = data.get("submatches") or []
-            column = (submatches[0].get("start", 0) + 1) if submatches else 1
-            rel = _rel(root, Path(path_text)) if path_text else "."
-            lines.append(f"{rel}:{line_number}:{column}:{text_value}")
-        elif kind == "context":
-            path_text = data.get("path", {}).get("text", "")
-            line_number = data.get("line_number")
-            text_value = data.get("lines", {}).get("text", "").rstrip("\n")
-            rel = _rel(root, Path(path_text)) if path_text else "."
-            lines.append(f"{rel}-{line_number}-:{text_value}")
+        if rendered := _search_event_line(root, json.loads(raw)):
+            lines.append(rendered)
 
     out, total, shown = _trim_search_lines(lines, limit)
     return out, total, shown
@@ -1523,7 +1662,7 @@ def run_tool(state: AgentState, name, args):
 
 
 # ---------------------------------------------------------------------------
-# Token counting and context management
+# Agent execution, prompt building, and context management
 # ---------------------------------------------------------------------------
 
 _tokenizer: tiktoken.Encoding | None = None
@@ -1684,6 +1823,7 @@ async def run_turn(
         return 0, output
 
 
+
 def _api_error_kind(e):
     return "authentication" if isinstance(e, AuthenticationError) else "permission"
 
@@ -1706,8 +1846,10 @@ async def run_agent(
         tool_specs=tool_specs,
         unattended_timeout_seconds=unattended_timeout_seconds,
     )
-    transcript = transcript or Transcript()
-    transcript.set_system_prompt(system_prompt)
+    if transcript is None:
+        transcript = Transcript.with_system_prompt(system_prompt)
+    else:
+        transcript.set_system_prompt(system_prompt)
     transcript.add_user(prompt)
 
     async def runner(client):
@@ -1731,6 +1873,11 @@ async def run_agent(
         return fail(f"API bad request: {exc}"), ""
     except Exception as exc:
         return fail(str(exc)), ""
+
+
+# ---------------------------------------------------------------------------
+# CLI session setup and commands
+# ---------------------------------------------------------------------------
 
 
 def read_system_prompt(system_file, interactive):
@@ -1763,6 +1910,44 @@ def _print_intro(heading, workspace, model, mode, **extras):
     _print(value="\n".join(lines), err=True)
 
 
+def _resolve_session(
+    *,
+    interactive: bool | None = None,
+    system_prompt: str | None = None,
+    include_system_file: bool = True,
+) -> SessionContext:
+    resolved_interactive = (
+        sys.stdin.isatty() and not _flag("OY_NON_INTERACTIVE", False)
+        if interactive is None
+        else interactive
+    )
+    system_file = _sys_file() if include_system_file else None
+    return SessionContext(
+        workspace=_workspace(),
+        model=_model(None),
+        interactive=resolved_interactive,
+        system_prompt=(
+            read_system_prompt(system_file, resolved_interactive)
+            if system_prompt is None
+            else system_prompt
+        ),
+        system_file=system_file,
+    )
+
+
+def _print_session_intro(heading: str, session: SessionContext, **extras) -> None:
+    intro_extras = dict(extras)
+    if session.system_file is not None:
+        intro_extras["system file"] = session.system_file.resolve()
+    _print_intro(
+        heading,
+        session.workspace,
+        session.model,
+        session.mode,
+        **intro_extras,
+    )
+
+
 def _workspace():
     workspace = _ws().resolve()
     if not workspace.is_dir():
@@ -1777,24 +1962,21 @@ def audit(prompt: str = ""):
     :param prompt: Additional audit focus instructions.
     """
 
-    workspace = _workspace()
-    chosen_model = _model(None)
+    session = _resolve_session(
+        interactive=False,
+        system_prompt=AUDIT_SYSTEM_PROMPT,
+        include_system_file=False,
+    )
     audit_prompt = "Conduct a security and complexity audit."
     if prompt:
         audit_prompt += f" Additional focus: {prompt}"
-    _print_intro(
-        "Audit",
-        workspace,
-        chosen_model,
-        "non-interactive",
-        focus=preview(prompt, 100) if prompt else None,
-    )
+    _print_session_intro("Audit", session, focus=preview(prompt, 100) if prompt else None)
     code, _ = asyncio.run(
         run_agent(
             audit_prompt,
-            chosen_model,
-            workspace,
-            AUDIT_SYSTEM_PROMPT,
+            session.model,
+            session.workspace,
+            session.system_prompt,
             DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
             interactive=False,
         )
@@ -1932,7 +2114,7 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
         )
         return True
     if cmd == "/clear":
-        transcript.messages = [SystemMessage(system_prompt)]
+        transcript.clear(system_prompt)
         _print(value="Conversation cleared.", err=True)
         return True
     if cmd in ("/quit", "/exit"):
@@ -1944,21 +2126,11 @@ def chat():
     """Start an interactive anonymous session."""
 
     _setup_readline()
-    workspace = _workspace()
-    chosen_model = _model(None)
-    interactive = True
-    system_file = _sys_file()
-    system_prompt = read_system_prompt(system_file, interactive)
-    _print_intro(
-        "Chat",
-        workspace,
-        chosen_model,
-        "interactive",
-        **({"system file": system_file.resolve()} if system_file else {}),
-    )
+    session = _resolve_session(interactive=True)
+    _print_session_intro("Chat", session)
     _print(value="Type `/help` for commands.", err=True)
 
-    transcript = Transcript(messages=[SystemMessage(system_prompt)])
+    transcript = Transcript.with_system_prompt(session.system_prompt)
 
     while True:
         try:
@@ -1978,7 +2150,7 @@ def chat():
         # Slash commands
         if prompt.strip().startswith("/"):
             result = _chat_command(
-                prompt.strip(), transcript, system_prompt, chosen_model
+                prompt.strip(), transcript, session.system_prompt, session.model
             )
             if result is None:
                 break
@@ -1996,11 +2168,11 @@ def chat():
             code, _ = asyncio.run(
                 run_agent(
                     prompt,
-                    chosen_model,
-                    workspace,
-                    system_prompt,
+                    session.model,
+                    session.workspace,
+                    session.system_prompt,
                     DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
-                    interactive,
+                    session.interactive,
                     transcript=transcript,
                 )
             )
@@ -2017,7 +2189,7 @@ def chat():
             _print(value="Your message is in readline history (press ↑).", err=True)
             continue
 
-        _, model = split_model_spec(chosen_model)
+        _, model = split_model_spec(session.model)
         prepped = transcript.prepared_tokens(model=model)
         budget = transcript.max_context_tokens
         remaining = max(budget - prepped, 0)
@@ -2043,27 +2215,16 @@ def run(
     if not task:
         return chat()
 
-    workspace = _workspace()
-    chosen_model = _model(None)
-    system_file = _sys_file()
-    interactive = sys.stdin.isatty() and not _flag("OY_NON_INTERACTIVE", False)
-    system_prompt = read_system_prompt(system_file, interactive)
-    _print_intro(
-        "Run",
-        workspace,
-        chosen_model,
-        "interactive" if interactive else "non-interactive",
-        prompt=preview(task, 100),
-        **({"system file": system_file.resolve()} if system_file else {}),
-    )
+    session = _resolve_session()
+    _print_session_intro("Run", session, prompt=preview(task, 100))
     return asyncio.run(
         run_agent(
             task,
-            chosen_model,
-            workspace,
-            system_prompt,
+            session.model,
+            session.workspace,
+            session.system_prompt,
             DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
-            interactive,
+            session.interactive,
         )
     )[0]
 
@@ -2082,6 +2243,15 @@ def render_model_list(items, *, title, query=None, current=None, err=False, limi
     if len(items) > len(shown):
         lines += ["", f"- showing {len(shown)} of {len(items)} matches"]
     _print(value="\n".join(lines), err=err)
+
+
+def _current_model_text(model_spec: str) -> str:
+    shim = resolve_active_shim(model_spec)
+    _, bare = split_model_spec(model_spec)
+    return (
+        f"## Current Model\n\n- model: {_fmt('inline', bare)}\n"
+        f"- shim: {_fmt('inline', shim)}"
+    )
 
 
 def resolve_model_choice(model_id=None):
@@ -2136,20 +2306,11 @@ def model(query: str | None = None):
     """
     current = _model(None)
     if query is None and not sys.stdin.isatty():
-        shim = resolve_active_shim(current)
-        _, bare = split_model_spec(current)
-        _print(
-            value=f"## Current Model\n\n- model: {_fmt('inline', bare)}\n- shim: {_fmt('inline', shim)}"
-        )
+        _print(value=_current_model_text(current))
         return 0
     # Interactive mode: show current model first if set
     if current:
-        shim = resolve_active_shim(current)
-        _, bare = split_model_spec(current)
-        _print(
-            value=f"## Current Model\n\n- model: {_fmt('inline', bare)}\n- shim: {_fmt('inline', shim)}",
-            err=True,
-        )
+        _print(value=_current_model_text(current), err=True)
         if (
             not Prompt.ask(
                 "\nPick a new model?", console=STDERR, choices=["y", "n"], default="n"

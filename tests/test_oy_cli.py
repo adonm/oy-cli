@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,6 +28,58 @@ class EchoArgs(msgspec.Struct, omit_defaults=True):
 
 def _echo(state, text):
     return f"{state.root.name}:{text}"
+
+
+class ShimBridgeTests(unittest.TestCase):
+    def test_command_env_cache_clear_delegates_to_shim_cache(self):
+        calls: list[str] = []
+
+        def fake_command_env(cwd=None):
+            _ = cwd
+            return {"PATH": "/tmp/bin"}
+
+        fake_command_env.cache_clear = lambda: calls.append("cleared")
+        bridge = replace(oy_cli.SHIMS, command_env=fake_command_env)
+
+        with patch.object(oy_cli, "SHIMS", bridge):
+            oy_cli.command_env.cache_clear()
+
+        self.assertEqual(calls, ["cleared"])
+
+    def test_get_client_uses_shim_bridge_only(self):
+        sentinel = object()
+        bridge = replace(oy_cli.SHIMS, build_client=lambda *args, **kwargs: sentinel)
+        with (
+            patch.object(oy_cli, "SHIMS", bridge),
+            patch.object(oy_cli, "require_api_env") as require_api_env,
+            patch.object(oy_cli, "resolve_active_shim", return_value="openai") as resolve,
+            patch.object(oy_cli, "default_region", return_value="ap-southeast-2") as default_region,
+            patch.object(oy_cli.Path, "cwd", return_value=Path("/workspace")),
+        ):
+            client = oy_cli.get_client("openai:gpt-test")
+
+        require_api_env.assert_called_once_with(Path("/workspace"))
+        resolve.assert_called_once_with("openai:gpt-test")
+        default_region.assert_called_once_with()
+        self.assertIs(client, sentinel)
+
+    def test_ensure_api_env_uses_bridge_result(self):
+        calls: list[tuple[str | None, str | None, Path | None]] = []
+
+        def fake_ensure(model_spec, configured_shim, cwd):
+            calls.append((model_spec, configured_shim, cwd))
+            return True, None
+
+        bridge = replace(oy_cli.SHIMS, ensure_api_env=fake_ensure)
+        with (
+            patch.object(oy_cli, "SHIMS", bridge),
+            patch.object(oy_cli, "_model", return_value="openai:gpt-test"),
+            patch.object(oy_cli, "_shim", return_value="openai"),
+        ):
+            result = oy_cli.ensure_api_env(Path("/workspace"))
+
+        self.assertEqual(calls, [("openai:gpt-test", "openai", Path("/workspace"))])
+        self.assertTrue(result)
 
 
 class ToolDispatchTests(unittest.TestCase):
@@ -56,6 +109,21 @@ class ToolDispatchTests(unittest.TestCase):
                 TimeoutError, r"reached unattended timeout \(1h\)"
             ):
                 state.note_progress()
+
+
+class TranscriptLifecycleTests(unittest.TestCase):
+    def test_with_system_prompt_initializes_transcript(self):
+        transcript = oy_cli.Transcript.with_system_prompt("sys")
+
+        self.assertEqual(transcript.messages, [SystemMessage("sys")])
+
+    def test_clear_resets_to_fresh_system_prompt(self):
+        transcript = oy_cli.Transcript.with_system_prompt("sys")
+        transcript.add_user("hello")
+
+        transcript.clear("next")
+
+        self.assertEqual(transcript.messages, [SystemMessage("next")])
 
 
 class TranscriptTests(unittest.TestCase):
@@ -305,6 +373,7 @@ class SearchToolTests(unittest.TestCase):
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
             with (
+                patch.object(oy_cli, "command_env", return_value={"PATH": "/test/bin"}),
                 patch.object(oy_cli, "run_cmd", fake_run_cmd),
                 patch.object(oy_cli, "_print"),
             ):
@@ -365,6 +434,7 @@ class SearchToolTests(unittest.TestCase):
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("Needle\nafter\n", encoding="utf-8")
             with (
+                patch.object(oy_cli, "command_env", return_value={"PATH": "/test/bin"}),
                 patch.object(oy_cli, "run_cmd", fake_run_cmd),
                 patch.object(oy_cli, "_print"),
             ):
