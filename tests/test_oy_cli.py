@@ -12,6 +12,15 @@ import oy_cli
 from shim import SystemMessage, ToolMessage, ToolResult, ToolSpec, UserMessage
 
 
+def make_state(root: Path, tool_specs=None, *, unattended_deadline: float = float("inf")):
+    return oy_cli.AgentState(
+        root=root,
+        tool_specs=oy_cli.TOOL_REGISTRY if tool_specs is None else tool_specs,
+        unattended_timeout_seconds=3600,
+        unattended_deadline=unattended_deadline,
+    )
+
+
 class EchoArgs(msgspec.Struct, omit_defaults=True):
     text: str
 
@@ -32,23 +41,15 @@ class ToolDispatchTests(unittest.TestCase):
                 )
             }
         )
-        state = oy_cli.AgentState(
-            root=Path("/tmp/ok"),
-            tool_specs=registry,
-            unattended_timeout_seconds=3600,
-            unattended_deadline=float("inf"),
-        )
+        state = make_state(Path("/tmp/ok"), registry)
         result = registry.invoke(state, "echo", {})
         self.assertFalse(result.ok)
         self.assertEqual(result.content["tool"], "echo")
         self.assertIn("error_type", result.content)
 
     def test_agent_state_enforces_unattended_timeout(self):
-        state = oy_cli.AgentState(
-            root=Path("/tmp/ok"),
-            tool_specs=oy_cli.ToolRegistry(),
-            unattended_timeout_seconds=3600,
-            unattended_deadline=10.0,
+        state = make_state(
+            Path("/tmp/ok"), oy_cli.ToolRegistry(), unattended_deadline=10.0
         )
         with patch.object(oy_cli.time, "monotonic", return_value=10.0):
             with self.assertRaisesRegex(
@@ -135,12 +136,7 @@ class ResolvePathTests(unittest.TestCase):
 
 class ReadToolTests(unittest.TestCase):
     def _state(self, root: Path):
-        return oy_cli.AgentState(
-            root=root,
-            tool_specs=oy_cli.TOOL_REGISTRY,
-            unattended_timeout_seconds=3600,
-            unattended_deadline=float("inf"),
-        )
+        return make_state(root)
 
     def test_read_file_supports_offset_and_limit(self):
         import tempfile
@@ -175,12 +171,7 @@ class ListToolTests(unittest.TestCase):
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
             (root / "src" / "util.txt").write_text("helper\n", encoding="utf-8")
-            state = oy_cli.AgentState(
-                root=root,
-                tool_specs=oy_cli.TOOL_REGISTRY,
-                unattended_timeout_seconds=3600,
-                unattended_deadline=float("inf"),
-            )
+            state = make_state(root)
             with patch.object(oy_cli, "_print"):
                 result = oy_cli.tool_list(state, path="src/*.py")
         self.assertEqual(result, "src/main.py")
@@ -188,12 +179,7 @@ class ListToolTests(unittest.TestCase):
 
 class BashToolTests(unittest.TestCase):
     def _state(self, root: Path):
-        return oy_cli.AgentState(
-            root=root,
-            tool_specs=oy_cli.TOOL_REGISTRY,
-            unattended_timeout_seconds=3600,
-            unattended_deadline=float("inf"),
-        )
+        return make_state(root)
 
     def test_bash_returns_structured_text_payload(self):
         import tempfile
@@ -279,12 +265,7 @@ class BashToolTests(unittest.TestCase):
 
 class SearchToolTests(unittest.TestCase):
     def _state(self, root: Path):
-        return oy_cli.AgentState(
-            root=root,
-            tool_specs=oy_cli.TOOL_REGISTRY,
-            unattended_timeout_seconds=3600,
-            unattended_deadline=float("inf"),
-        )
+        return make_state(root)
 
     def test_search_uses_ripgrep_output(self):
         import tempfile

@@ -307,6 +307,20 @@ def _format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def _render_preview(text: str, lines: int) -> str:
+    if not text:
+        return ""
+    preview_lines = text.splitlines()
+    if len(preview_lines) <= lines:
+        return text
+    rendered = "\n".join(preview_lines[:lines])
+    omitted = len(preview_lines) - lines
+    rendered += f"\n... [{omitted} more {'line' if omitted == 1 else 'lines'}]"
+    if rendered.count("```") % 2 == 1 and text.count("```") % 2 == 0:
+        rendered += "\n```"
+    return rendered
+
+
 def _show_and_clip(text, lines, limit=None, tail=0):
     """Render tool output, then return a clipped version for the model."""
     limit = BUDGETS.tool_output_tokens if limit is None else limit
@@ -316,18 +330,8 @@ def _show_and_clip(text, lines, limit=None, tail=0):
 
 def show(t, n=2):
     """Print the first *n* lines of *t* to stderr as a preview."""
-    if not t:
-        return
-    lines = t.splitlines()
-    if len(lines) <= n:
-        STDERR.print(Markdown(t), overflow="fold")
-        return
-    s = "\n".join(lines[:n])
-    omitted = len(lines) - n
-    s += f"\n... [{omitted} more {'line' if omitted == 1 else 'lines'}]"
-    if s.count("```") % 2 == 1 and t.count("```") % 2 == 0:
-        s += "\n```"
-    STDERR.print(Markdown(s), overflow="fold")
+    if rendered := _render_preview(t, n):
+        STDERR.print(Markdown(rendered), overflow="fold")
 
 
 _BASH_IMPORTANT_LINE_RE = re.compile(
@@ -1020,6 +1024,21 @@ class AgentState(msgspec.Struct, omit_defaults=True):
     unattended_timeout_seconds: int
     unattended_deadline: float
 
+    @classmethod
+    def new(
+        cls,
+        *,
+        root: Path,
+        tool_specs: ToolRegistry,
+        unattended_timeout_seconds: int,
+    ) -> "AgentState":
+        return cls(
+            root=root,
+            tool_specs=tool_specs,
+            unattended_timeout_seconds=unattended_timeout_seconds,
+            unattended_deadline=time.monotonic() + unattended_timeout_seconds,
+        )
+
     def remaining_unattended_seconds(self) -> float:
         return self.unattended_deadline - time.monotonic()
 
@@ -1682,11 +1701,10 @@ async def run_agent(
     unattended_timeout_seconds = _positive_int(
         unattended_timeout_seconds, "unattended_timeout_seconds"
     )
-    state = AgentState(
+    state = AgentState.new(
         root=root,
         tool_specs=tool_specs,
         unattended_timeout_seconds=unattended_timeout_seconds,
-        unattended_deadline=time.monotonic() + unattended_timeout_seconds,
     )
     transcript = transcript or Transcript()
     transcript.set_system_prompt(system_prompt)

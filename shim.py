@@ -585,25 +585,33 @@ def command_env(cwd=None):
     return MappingProxyType(env)
 
 
+_OPENAI_HTTPX_ONLY_KWARGS = (
+    "api_key",
+    "max_retries",
+    "default_headers",
+    "default_query",
+    "organization",
+    "project",
+    "webhook_secret",
+    "_strict_response_validation",
+)
+
+
+def _httpx_client_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return httpx-safe kwargs from a shared OpenAI/httpx config dict."""
+    httpx_kwargs = dict(kwargs)
+    for key in _OPENAI_HTTPX_ONLY_KWARGS:
+        httpx_kwargs.pop(key, None)
+    return httpx_kwargs
+
+
 def http_client(**kw):
     """Create a synchronous httpx client with redirects enabled.
 
     OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so strip
     them when callers pass through shared config dicts.
     """
-    httpx_kw = dict(kw)
-    for key in (
-        "api_key",
-        "max_retries",
-        "default_headers",
-        "default_query",
-        "organization",
-        "project",
-        "webhook_secret",
-        "_strict_response_validation",
-    ):
-        httpx_kw.pop(key, None)
-    return httpx.Client(follow_redirects=True, **httpx_kw)
+    return httpx.Client(follow_redirects=True, **_httpx_client_kwargs(kw))
 
 
 def async_http_client(**kw):
@@ -612,19 +620,7 @@ def async_http_client(**kw):
     OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so strip
     them when callers pass through shared config dicts.
     """
-    httpx_kw = dict(kw)
-    for key in (
-        "api_key",
-        "max_retries",
-        "default_headers",
-        "default_query",
-        "organization",
-        "project",
-        "webhook_secret",
-        "_strict_response_validation",
-    ):
-        httpx_kw.pop(key, None)
-    return httpx.AsyncClient(follow_redirects=True, **httpx_kw)
+    return httpx.AsyncClient(follow_redirects=True, **_httpx_client_kwargs(kw))
 
 
 def _sigv4_sign(key: bytes, msg: str) -> bytes:
@@ -1119,6 +1115,18 @@ def _refresh_claude_token(refresh_token: str) -> str:
     return access_token
 
 
+def _openai_client_pair(**kwargs: Any) -> tuple[AsyncOpenAI, OpenAI]:
+    """Create OpenAI async/sync SDK clients backed by owned httpx clients."""
+    http_client_kwargs = dict(kwargs)
+    http_client_kwargs.pop("max_retries", None)
+    async_http = async_http_client(**http_client_kwargs)
+    sync_http = http_client(**http_client_kwargs)
+    return (
+        AsyncOpenAI(http_client=async_http, **kwargs),
+        OpenAI(http_client=sync_http, **kwargs),
+    )
+
+
 def _openai_pair(
     api_key: str,
     *,
@@ -1131,14 +1139,7 @@ def _openai_pair(
         kwargs["base_url"] = base_url
     if timeout is not None:
         kwargs["timeout"] = timeout
-    http_client_kwargs = dict(kwargs)
-    http_client_kwargs.pop("max_retries", None)
-    async_http = async_http_client(**http_client_kwargs)
-    sync_http = http_client(**http_client_kwargs)
-    return (
-        AsyncOpenAI(http_client=async_http, **kwargs),
-        OpenAI(http_client=sync_http, **kwargs),
-    )
+    return _openai_client_pair(**kwargs)
 
 
 def split_model_spec(spec: str) -> tuple[str | None, str]:
@@ -2620,14 +2621,7 @@ def _copilot_openai_pair(token: str) -> tuple[AsyncOpenAI, OpenAI]:
         "max_retries": 0,
         "default_headers": _copilot_default_headers(),
     }
-    http_client_kwargs = dict(kwargs)
-    http_client_kwargs.pop("max_retries", None)
-    async_http = async_http_client(**http_client_kwargs)
-    sync_http = http_client(**http_client_kwargs)
-    return (
-        AsyncOpenAI(http_client=async_http, **kwargs),
-        OpenAI(http_client=sync_http, **kwargs),
-    )
+    return _openai_client_pair(**kwargs)
 
 
 def _require_copilot_env(_: Path | None = None) -> None:
