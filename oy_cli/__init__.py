@@ -5,11 +5,14 @@ import json
 import logging
 import os
 import re
+import ipaddress
+import socket
+from urllib.parse import urlparse
 import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, TypeAlias, cast
+from typing import Any, Callable, cast
 import defopt
 from headroom import compress as headroom_compress
 import msgspec
@@ -18,15 +21,24 @@ from .shim import (
     AssistantMessage,
     ChatMessage,
     CompletionClient,
-    SHIMS,
     SystemMessage,
     ToolCall,
     ToolMessage,
     ToolResult,
     ToolSpec,
     UserMessage,
+    ensure_api_env as _shim_ensure_api_env,
+    get_client as _shim_get_client,
+    require_api_env as _shim_require_api_env,
+    resolve_shim as _shim_resolve_shim,
 )
 from .providers import _decode_tool_call_arguments, _openai_chat_message, _tool_output_text
+from .providers import (
+    command_env, default_region, join_model_spec, load_json, run_cmd,
+    save_json, split_model_spec, which,
+)
+from .shim import detect_available_shims, list_models_for_shim, validate_shim
+from headroom.hooks import CompressionHooks, CompressContext
 from openai import (
     AuthenticationError,
     BadRequestError,
@@ -34,7 +46,9 @@ from openai import (
     RateLimitError,
 )
 from rich.console import Console
+from rich.theme import Theme
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.prompt import Prompt
 from rich.status import Status
 
@@ -79,6 +93,10 @@ OPTIONAL_TOOL_INSTALLERS = {
         "label": "yq",
         "mise": "github:mikefarah/yq",
     },
+    "starship": {
+        "label": "starship",
+        "mise": "github:starship/starship",
+    },
 }
 
 
@@ -102,10 +120,6 @@ class SessionContext:
     system_prompt: str
     system_file: Path | None = None
 
-    @property
-    def mode(self) -> str:
-        return "interactive" if self.interactive else "non-interactive"
-
 
 def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
     tool_output_tokens = _clamp_int(context_tokens // 24, 2048, 8192)
@@ -119,63 +133,7 @@ def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
 
 BUDGETS = _derive_runtime_budgets(MAX_CONTEXT_TOKENS)
 
-# ---------------------------------------------------------------------------
-# Shim boundary -- oy_cli owns UX/orchestration and talks to shim.py through
-# the shared SHIMS bridge plus a small set of local wrappers.
-# ---------------------------------------------------------------------------
 
-
-def load_json(path, default):
-    return SHIMS.load_json(path, default)
-
-
-def save_json(path, data):
-    return SHIMS.save_json(path, data)
-
-
-def run_cmd(cmd, **kwargs):
-    return SHIMS.run_cmd(cmd, **kwargs)
-
-
-def which(tool, path=None):
-    return SHIMS.which(tool, path)
-
-
-def command_env(cwd=None):
-    return SHIMS.command_env(cwd)
-
-
-def _clear_command_env_cache() -> None:
-    cache_clear = getattr(SHIMS.command_env, "cache_clear", None)
-    if callable(cache_clear):
-        cache_clear()
-
-
-command_env.cache_clear = _clear_command_env_cache
-
-
-def default_region():
-    return SHIMS.default_region()
-
-
-def detect_available_shims() -> list[str]:
-    return SHIMS.detect_available_shims()
-
-
-def list_models_for_shim(shim: str, region: str | None = None, cwd: Path | None = None):
-    return SHIMS.list_models_for_shim(shim, region, cwd)
-
-
-def join_model_spec(shim: str, model: str) -> str:
-    return SHIMS.join_model_spec(shim, model)
-
-
-def split_model_spec(spec: str) -> tuple[str | None, str]:
-    return SHIMS.split_model_spec(spec)
-
-
-def validate_shim(shim: str) -> str:
-    return SHIMS.validate_shim(shim)
 
 
 # ---------------------------------------------------------------------------
@@ -186,20 +144,39 @@ def validate_shim(shim: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_private_dir(path: Path) -> Path:
+    """Create *path* if needed and harden it to owner-only directory access."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
+
+
 def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
-    """Create a debug JSONL logger if OY_DEBUG is truthy.  Called once at import."""
+    """Create a debug JSONL logger if OY_DEBUG is truthy.  Called once at import.
+
+    The debug log captures full LLM request/response payloads which may
+    include secrets or sensitive repository content.  The file is created
+    with mode 0o600 (owner-only read/write) and existing files are
+    chmod'd on every startup so that a permissive umask cannot expose it.
+    """
     if os.environ.get("OY_DEBUG", "").strip().lower() not in _TRUTHY_VALUES:
         return None, None
-    debug_dir = CONFIG_PATH.parent
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    path = str(debug_dir / "debug.jsonl")
+    debug_dir = _ensure_private_dir(CONFIG_PATH.parent)
+    log_path = debug_dir / "debug.jsonl"
+    # Ensure restrictive permissions (OWASP ASVS V14.2.4) —
+    # create via os.open to avoid umask races, or fix existing files.
+    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.close(fd)
+    log_path.chmod(0o600)
     logger = logging.getLogger("oy.debug")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
-    handler = logging.FileHandler(path, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(handler)
-    return logger, path
+    # Guard against duplicate handlers on reload or repeated calls.
+    if not logger.handlers:
+        handler = logging.FileHandler(str(log_path), encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    return logger, str(log_path)
 
 
 _debug_logger, _debug_log_path = _init_debug_log()
@@ -214,10 +191,9 @@ def _debug_log(event: str, **data: Any) -> None:
     """Write a timestamped JSON-lines entry to the debug log (no-op if disabled)."""
     if _debug_logger is None:
         return
-    import time as _time
 
     entry = {
-        "ts": _time.time(),
+        "ts": time.time(),
         "event": event,
         **data,
     }
@@ -276,7 +252,11 @@ BASE_SYSTEM_PROMPT = _PROMPTS["baseprompt"]
 INTERACTIVE_SYSTEM_PROMPT = _PROMPTS["interactiveappendix"]
 NONINTERACTIVE_SYSTEM_PROMPT = _PROMPTS["noninteractiveappendix"]
 AUDIT_SYSTEM_PROMPT = _PROMPTS["auditprompt"]
-STDOUT, STDERR = Console(), Console(stderr=True)
+_THEME = Theme({
+    "markdown.code": "bold cyan",
+    "markdown.code_block": "cyan",
+})
+STDOUT, STDERR = Console(theme=_THEME), Console(stderr=True, theme=_THEME)
 
 
 def _fmt(kind, value="", extra=None):
@@ -307,7 +287,7 @@ def _fmt(kind, value="", extra=None):
 
 def _print(kind="md", value="", *, err=False, extra=None):
     console = STDERR if err else STDOUT
-    console.print(Markdown(_fmt(kind, value, extra))) if value else console.print()
+    console.print(Markdown(_fmt(kind, value, extra), code_theme="ansi_dark")) if value else console.print()
 
 
 def fail(m, c=1):
@@ -355,31 +335,79 @@ def _format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def _render_preview(text: str, lines: int) -> str:
-    if not text:
-        return ""
-    preview_lines = text.splitlines()
-    if len(preview_lines) <= lines:
-        return text
-    rendered = "\n".join(preview_lines[:lines])
-    omitted = len(preview_lines) - lines
-    rendered += f"\n... [{omitted} more {'line' if omitted == 1 else 'lines'}]"
-    if rendered.count("```") % 2 == 1 and text.count("```") % 2 == 0:
-        rendered += "\n```"
-    return rendered
-
-
-def _show_and_clip(text, lines, limit=None, tail=0):
-    """Render tool output, then return a clipped version for the model."""
+def _show_and_clip(text, limit=None, tail=0):
+    """Show tool output to user, then return a token-clipped version for the model."""
     limit = BUDGETS.tool_output_tokens if limit is None else limit
-    show(text, lines)
+    show(text)
     return clip_tokens(text, limit=limit, tail=tail)
 
 
-def show(t, n=2):
-    """Print the first *n* lines of *t* to stderr as a preview."""
-    if rendered := _render_preview(t, n):
-        STDERR.print(Markdown(rendered), overflow="fold")
+_MAX_SHOW_LINES = 10
+
+
+# Individual lines longer than this are truncated to prevent a single
+# minified/binary/base64 line from filling the screen or burning tokens.
+_MAX_LINE_WIDTH = 512
+
+
+def _truncate_long_lines(text: str, limit: int = _MAX_LINE_WIDTH) -> str:
+    """Shorten any line longer than *limit* chars, noting the omission."""
+    lines = text.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        if len(line) > limit:
+            lines[i] = line[:limit] + f"... [{len(line) - limit} chars truncated]"
+            changed = True
+    return "\n".join(lines) if changed else text
+
+
+def _wrap_code_block(text: str) -> str:
+    """Wrap *text* in a fenced code block if it doesn't already contain one."""
+    if "```" in text:
+        return text
+    return f"```text\n{text.rstrip()}\n```"
+
+
+def show(t):
+    """Print tool output to stderr, focusing on the most useful lines."""
+    if not t:
+        return
+    t = _truncate_long_lines(t)
+    lines = t.splitlines()
+    if len(lines) <= _MAX_SHOW_LINES:
+        STDERR.print(Markdown(_wrap_code_block(t), code_theme="ansi_dark"), overflow="fold")
+        return
+    # Show head + tail, with important lines (errors/warnings) prioritised
+    head_n = max(_MAX_SHOW_LINES // 2, 2)
+    tail_n = max(_MAX_SHOW_LINES - head_n, 2)
+    keep: list[int] = []
+    keep.extend(range(head_n))
+    # Pull in any error/warning lines from the middle
+    for idx in range(head_n, len(lines) - tail_n):
+        if _BASH_IMPORTANT_LINE_RE.search(lines[idx]):
+            keep.append(idx)
+    keep.extend(range(len(lines) - tail_n, len(lines)))
+    # Deduplicate and cap at _MAX_SHOW_LINES
+    keep = sorted(set(keep))
+    if len(keep) > _MAX_SHOW_LINES:
+        # Keep head, tail, and trim excess from middle important lines
+        important_mid = [i for i in keep if head_n <= i < len(lines) - tail_n]
+        budget = _MAX_SHOW_LINES - head_n - tail_n
+        important_mid = important_mid[:budget]
+        keep = sorted(set(list(range(head_n)) + important_mid + list(range(len(lines) - tail_n, len(lines)))))
+    # Render with omission markers
+    selected: list[str] = []
+    last = -1
+    for idx in keep:
+        if idx > last + 1:
+            omitted = idx - last - 1
+            selected.append(f"... [{omitted} lines hidden]")
+        selected.append(lines[idx])
+        last = idx
+    summary = "\n".join(selected)
+    wrapped = _wrap_code_block(summary)
+    wrapped += f"\n\n*[{len(lines)} lines total]*"
+    STDERR.print(Markdown(wrapped, code_theme="ansi_dark"), overflow="fold")
 
 
 _BASH_IMPORTANT_LINE_RE = re.compile(
@@ -439,6 +467,7 @@ def _render_selected_lines(lines: list[str], keep: set[int]) -> str:
 def _summarize_text_output(text: str) -> tuple[str, bool]:
     if not text:
         return "", False
+    text = _truncate_long_lines(text)
     lines, collapsed = _collapse_repeated_lines(text.splitlines())
     rendered = "\n".join(lines)
     if len(lines) > 80 or count_tokens(rendered) > BUDGETS.tool_output_tokens:
@@ -600,7 +629,7 @@ def _pick_model():
             "Pick one interactively:\n"
             "  oy model\n\n"
             "Or set directly:\n"
-            "  OY_MODEL=bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0 oy ...\n"
+            "  OY_MODEL=openai:gpt-4o oy ...\n"
         )
     try:
         avail = list_all_model_ids()
@@ -658,7 +687,7 @@ def _env_or_cfg(c, e, k, d=None):
     return c or os.environ.get(e) or _load_cfg().get(k, d)
 
 
-def _shim(c=None):
+def _shim_name(c=None):
     return _env_or_cfg(c, "OY_SHIM", "shim")
 
 
@@ -666,7 +695,7 @@ def _model(c=None):
     if v := _env_or_cfg(c, "OY_MODEL", "model"):
         return (
             join_model_spec(s, v)
-            if isinstance(v, str) and ":" not in v and (s := _shim())
+            if isinstance(v, str) and ":" not in v and (s := _shim_name())
             else v
         )
     return _pick_model()
@@ -682,11 +711,6 @@ def _flag(n, d=False):
     if v in _FALSY_VALUES:
         return False
     abort(f"Invalid {n}={v}. Use 1/0, true/false, yes/no, on/off.")
-    return d
-
-
-def _ws():
-    return Path(os.environ.get("OY_ROOT", ".")).expanduser()
 
 
 def _sys_file():
@@ -701,21 +725,16 @@ def _wrap_runtime_error(fn, *args):
 
 
 def resolve_active_shim(spec=None):
-    return _wrap_runtime_error(validate_shim, SHIMS.resolve_shim(spec, _shim()))
+    return _wrap_runtime_error(validate_shim, _shim_resolve_shim(spec, _shim_name()))
 
 
 def ensure_api_env(cwd=None):
     """Return True if API credentials are available."""
-    return SHIMS.ensure_api_env(_model(), _shim(), cwd)[0]
+    return _shim_ensure_api_env(_model(), _shim_name(), cwd)[0]
 
 
 def require_api_env(cwd=None):
-    _wrap_runtime_error(SHIMS.require_api_env, _model(), _shim(), cwd)
-
-
-def require_tools(env, *tools):
-    if m := [t for t in tools if not which(t, env.get("PATH"))]:
-        abort("Missing: " + ", ".join(m))
+    _wrap_runtime_error(_shim_require_api_env, _model(), _shim_name(), cwd)
 
 
 def require_command_env(cwd=None):
@@ -724,19 +743,14 @@ def require_command_env(cwd=None):
 
 def require_runtime(cwd=None):
     env = require_command_env(cwd)
-    require_tools(env, "bash")
+    if not which("bash", env.get("PATH")):
+        abort("Missing: bash")
     require_api_env(cwd)
 
 
 def _known_optional_tools(tools=None):
     names = OPTIONAL_TOOL_INSTALLERS if tools is None else tools
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for name in names:
-        if name in OPTIONAL_TOOL_INSTALLERS and name not in seen:
-            seen.add(name)
-            ordered.append(name)
-    return ordered
+    return [name for name in dict.fromkeys(names) if name in OPTIONAL_TOOL_INSTALLERS]
 
 
 def _missing_optional_tools(env: dict[str, str], tools=None):
@@ -781,6 +795,16 @@ def _missing_tool_install_message(required, reason: str, missing):
 
 
 def _refresh_mise_env(cwd=None, *, env=None):
+    """Re-run ``mise env -J`` and apply the result to ``os.environ``.
+
+    **Side effect**: mutates the global ``os.environ`` in-place — adding,
+    updating, and deleting keys so that subsequent ``command_env()`` calls
+    (and child processes) pick up the latest mise-managed PATH entries and
+    tool shims.  Callers that cache environment snapshots should refresh
+    them after this function returns.
+
+    Also clears the ``command_env`` lru_cache so the next call rebuilds.
+    """
     current_env = dict(command_env(cwd) if env is None else env)
     mise = which("mise", current_env.get("PATH"))
     if not mise:
@@ -911,7 +935,7 @@ def run_cmd_auto_install(
 def get_client(spec=None):
     require_api_env(Path.cwd())
     s = spec or _model()
-    return SHIMS.build_client(
+    return _shim_get_client(
         resolve_active_shim(s), model_spec=s, region=default_region(), cwd=Path.cwd()
     )
 
@@ -928,23 +952,22 @@ def note_tool(state: AgentState, name, *, _defaults=None, _suffix="", **details)
     state.note_progress()
     defaults = _defaults or {}
     parts = [
-        _fmt("inline", key.replace("_", "-"))
+        key.replace("_", "-")
         if value is True
-        else f"{key.replace('_', '-')}: {_fmt('inline', preview(value, 50))}"
+        else f"{key.replace('_', '-')}: {value if isinstance(value, str) else preview(value)}"
         for key, value in details.items()
         if value not in (None, "", False) and value != defaults.get(key)
     ]
     detail_text = ", ".join(parts)
-    message = f"tool {_fmt('inline', name)}" + (
-        f": {detail_text}" if detail_text else ""
-    )
+    label = f"[bold]{name}[/bold]"
+    if detail_text:
+        label += f" {escape(detail_text)}"
     if _suffix:
-        message += f"  {_suffix}"
-    # Use bullet for mutating tools (bash), plain for inspection tools
-    if name in {"bash"}:
-        _print(value=f"* {message}", err=True)
+        label += f"  {escape(_suffix)}"
+    if name == "bash":
+        STDERR.print(f"[dim]{'─' * 2} ▶ {label}[/dim]", highlight=False)
     else:
-        _print(value=message, err=True)
+        STDERR.print(f"[dim]{'─' * 2} {label}[/dim]", highlight=False)
 
 
 # ---------------------------------------------------------------------------
@@ -980,13 +1003,29 @@ class AskArgs(msgspec.Struct, omit_defaults=True):
     choices: list[str] | None = None
 
 
-ToolCallable: TypeAlias = Callable[..., Any]
+class WebfetchArgs(msgspec.Struct, omit_defaults=True):
+    url: str
+    method: str = "GET"
+    headers: dict[str, str] = msgspec.field(default_factory=dict)
+
+
+_TODO_STATUSES = {"pending", "in_progress", "done"}
+
+
+class TodoItem(msgspec.Struct, frozen=True):
+    id: str
+    task: str
+    status: str = "pending"
+
+
+class TodowriteArgs(msgspec.Struct, omit_defaults=True):
+    todos: list[TodoItem]
 
 
 @dataclass(frozen=True, slots=True)
 class ToolHandler:
     name: str
-    fn: ToolCallable
+    fn: Callable[..., Any]
     spec: ToolSpec
     args_type: Any
 
@@ -1032,12 +1071,23 @@ def _tool_schema(args_type):
                 if k not in {"$defs", "$ref"}
             }
             if isinstance(resolved, dict):
-                resolved.update(extras)
+                resolved = {**resolved, **extras}
                 resolved.pop("title", None)
+            else:
                 return resolved
-            return resolved
-        resolved = {k: resolve(v, defs) for k, v in node.items() if k != "$defs"}
-        resolved.pop("title", None)
+        else:
+            resolved = {k: resolve(v, defs) for k, v in node.items() if k != "$defs"}
+            resolved.pop("title", None)
+
+        if isinstance(resolved, dict):
+            if "enum" in resolved and "type" not in resolved:
+                if all(isinstance(v, str) for v in resolved["enum"]):
+                    resolved["type"] = "string"
+                elif all(isinstance(v, int) for v in resolved["enum"]):
+                    resolved["type"] = "integer"
+            if "properties" in resolved and "type" not in resolved:
+                resolved["type"] = "object"
+
         return resolved
 
     return resolve(schema, schema.get("$defs", {}))
@@ -1080,6 +1130,7 @@ class AgentState(msgspec.Struct, omit_defaults=True):
     tool_specs: ToolRegistry
     unattended_timeout_seconds: int
     unattended_deadline: float
+    todos: list[TodoItem] = msgspec.field(default_factory=list)
 
     @classmethod
     def new(
@@ -1178,6 +1229,7 @@ def _deserialize_from_headroom(message: dict[str, Any]) -> ChatMessage:
             ]
             if isinstance(tool_calls, list)
             else [],
+            thought_signatures=message.get("thought_signatures", {})
         )
     if role == "tool":
         return ToolMessage(
@@ -1191,15 +1243,48 @@ def _deserialize_from_headroom(message: dict[str, Any]) -> ChatMessage:
     raise RuntimeError(f"Unsupported headroom message role: {role!r}")
 
 
+
+class _HeadroomHooks(CompressionHooks):
+    def compute_biases(self, messages: list[dict[str, Any]], ctx: CompressContext) -> dict[int, float]:
+        biases = {}
+        for i, msg in enumerate(messages):
+            # If the message has thought signatures, protect it from compression
+            if msg.get("thought_signatures"):
+                biases[i] = 1000.0
+        return biases
+
+
 def _compress_messages_with_headroom(
     messages: list[ChatMessage], model: str, model_limit: int
 ) -> list[ChatMessage]:
+    all_signatures: dict[str, str] = {}
+    for msg in messages:
+        if isinstance(msg, AssistantMessage) and msg.thought_signatures:
+            all_signatures.update(msg.thought_signatures)
+
+    # Use optimize=False if there are any signatures to avoid breaking them.
+    # Lossy compression can invalidate the cryptographic state in the signature.
+    optimize = not bool(all_signatures)
+
     result = headroom_compress(
         [_serialize_for_headroom(message) for message in messages],
         model=model,
         model_limit=model_limit,
+        optimize=optimize,
+        hooks=_HeadroomHooks(),
     )
-    return [_deserialize_from_headroom(message) for message in result.messages]
+    
+    compressed_messages = []
+    for msg_dict in result.messages:
+        msg = _deserialize_from_headroom(msg_dict)
+        if isinstance(msg, AssistantMessage) and msg.tool_calls:
+            msg.thought_signatures = {
+                call.id: all_signatures[call.id]
+                for call in msg.tool_calls
+                if call.id in all_signatures
+            }
+        compressed_messages.append(msg)
+    return compressed_messages
 
 
 class Transcript(msgspec.Struct, omit_defaults=True):
@@ -1243,16 +1328,19 @@ class Transcript(msgspec.Struct, omit_defaults=True):
             for (i, n, _), (_, r) in zip(calls, results, strict=False)
         )
 
-    def message_tokens(self, message: ChatMessage) -> int:
-        return _message_tokens(message)
-
-    def prepared_messages(self, model: str | None = None) -> list[ChatMessage]:
+    def prepared_messages(
+        self, model: str | None = None, todos: list | None = None
+    ) -> list[ChatMessage]:
         msgs = [_truncate_message(m, self.max_message_tokens) for m in self.messages]
         if model:
             msgs = _compress_messages_with_headroom(
                 msgs, model, self.max_context_tokens
             )
         sys_msgs = [m for m in msgs if isinstance(m, SystemMessage)]
+        # Inject current todo list as a system message so it survives compaction
+        if todos:
+            todo_text = "Current todo list:\n" + _format_todos(todos)
+            sys_msgs.append(SystemMessage(todo_text))
         other = [m for m in msgs if not isinstance(m, SystemMessage)]
         budget = self.max_context_tokens - sum(map(_message_tokens, sys_msgs))
         if budget <= 0:
@@ -1280,8 +1368,8 @@ class Transcript(msgspec.Struct, omit_defaults=True):
     def session_tokens(self) -> int:
         return sum(map(_message_tokens, self.messages))
 
-    def prepared_tokens(self, model: str | None = None) -> int:
-        return sum(map(_message_tokens, self.prepared_messages(model=model)))
+    def prepared_tokens(self, model: str | None = None, todos: list | None = None) -> int:
+        return sum(map(_message_tokens, self.prepared_messages(model=model, todos=todos)))
 
 
 def _join_paths(paths, root, empty="<no matches>"):
@@ -1322,7 +1410,7 @@ def tool_list(state, path="*", limit=BUDGETS.default_line_limit):
         limit=limit,
     )
     text = _path_listing(_glob_paths(state.root, path), state.root, limit=limit)
-    return _show_and_clip(text, 1)
+    return _show_and_clip(text)
 
 
 @tool(_TOOL_DESCS["read"], ReadArgs)
@@ -1345,14 +1433,14 @@ def tool_read(state, path, offset=1, limit=BUDGETS.default_line_limit):
             limit=limit,
             empty="<empty directory>",
         )
-        return _show_and_clip(text, 1)
+        return _show_and_clip(text)
     start = max(_positive_int(offset, "offset"), 1) - 1
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     shown = lines[start : start + _shown_line_limit(limit)]
     text = "\n".join(
         f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1)
     )
-    return _show_and_clip(text or "<empty file>", 1)
+    return _show_and_clip(text or "<empty file>")
 
 
 @tool(_TOOL_DESCS["bash"], BashArgs)
@@ -1380,16 +1468,16 @@ def tool_bash(state, command, timeout_seconds=120):
         reason="bash command",
     )
     payload = _bash_payload(command, result)
-    show(_render_bash_preview(command, result, payload), 12)
+    show(_render_bash_preview(command, result, payload))
     return payload
 
 
 def _search_summary(matches: int, shown: int) -> str:
     if not matches:
-        return "*(no matches)*"
+        return "(no matches)"
     extra = f"; showing {shown} of {matches}" if shown < matches else ""
     plural = "es" if matches != 1 else ""
-    return f"*({matches} match{plural}{extra})*"
+    return f"({matches} match{plural}{extra})"
 
 
 def _trim_search_lines(lines: list[str], limit: int) -> tuple[str, int, int]:
@@ -1483,7 +1571,7 @@ def tool_search(state, pattern, path=".", args=None, limit=BUDGETS.default_line_
         args=args,
         limit=limit,
     )
-    return _show_and_clip(out, 3)
+    return _show_and_clip(out)
 
 
 def _positive_int(value, name):
@@ -1518,6 +1606,131 @@ def tool_ask(state, question, choices=None):
             f"Enter a number 1-{len(choices)} or type the choice exactly.",
             err=True,
         )
+
+
+def _validate_url_safe(url: str) -> str:
+    """Validate a URL is safe to fetch — SSRF protection (OWASP ASVS V5.2.6).
+
+    Blocks private/reserved IPs, non-HTTP schemes, and resolves the hostname
+    to prevent DNS rebinding attacks.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Only http/https URLs are allowed, got: {parsed.scheme!r}")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"No hostname in URL: {url!r}")
+    # Block obvious local hostnames
+    _LOCAL_HOSTS = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+    if hostname.lower() in _LOCAL_HOSTS:
+        raise ValueError(f"Local addresses are not allowed: {hostname!r}")
+    # Resolve hostname and check all addresses
+    try:
+        addrinfos = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve hostname {hostname!r}: {exc}") from exc
+    for family, _type, _proto, _canonname, sockaddr in addrinfos:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_reserved or ip.is_loopback or ip.is_link_local:
+            raise ValueError(
+                f"URL resolves to non-public address ({ip}); "
+                f"private/reserved/loopback/link-local addresses are blocked"
+            )
+    return url
+
+
+_WEBFETCH_ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS"}
+# Headers the model must not be able to set — prevents credential
+# leakage and host-header attacks (OWASP ASVS V1.2.5).
+_WEBFETCH_BLOCKED_HEADERS = frozenset({
+    "authorization", "cookie", "host", "proxy-authorization",
+    "x-forwarded-for", "x-real-ip",
+})
+
+
+def _sanitize_webfetch_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    """Validate and sanitize model-supplied HTTP headers.
+
+    Blocks sensitive header names and rejects values containing CRLF
+    sequences that could cause header injection.
+    """
+    if not headers:
+        return {}
+    clean: dict[str, str] = {}
+    for key, value in headers.items():
+        key_str, val_str = str(key), str(value)
+        if key_str.lower() in _WEBFETCH_BLOCKED_HEADERS:
+            raise ValueError(f"Header {key_str!r} is not allowed in webfetch requests")
+        if "\r" in val_str or "\n" in val_str:
+            raise ValueError(f"Header value for {key_str!r} contains invalid CRLF characters")
+        clean[key_str] = val_str
+    return clean
+
+
+@tool(_TOOL_DESCS["webfetch"], WebfetchArgs)
+def tool_webfetch(state, url, method="GET", headers=None):
+    method = method.upper()
+    if method not in _WEBFETCH_ALLOWED_METHODS:
+        raise ValueError(
+            f"Only {', '.join(sorted(_WEBFETCH_ALLOWED_METHODS))} methods are allowed, got: {method!r}"
+        )
+    _validate_url_safe(url)
+    headers = _sanitize_webfetch_headers(headers)
+    note_tool(
+        state,
+        "webfetch",
+        _defaults={"method": "GET", "headers": {}},
+        url=url,
+        method=method,
+        headers=headers,
+    )
+    xh_args = ["xh", "--print=hb", "--timeout=30", method, url]
+    if headers:
+        for key, value in headers.items():
+            xh_args.append(f"{key}:{value}")
+    result = run_cmd_auto_install(
+        xh_args,
+        cwd=state.root,
+        env=command_env(state.root),
+        timeout=60,
+        reason="webfetch",
+    )
+    payload = _bash_payload(f"xh {method} {url}", result)
+    show(_render_bash_preview(f"xh {method} {url}", result, payload))
+    return payload
+
+
+def _format_todos(todos: list[TodoItem]) -> str:
+    """Render the todo list as a compact text block."""
+    if not todos:
+        return "<empty todo list>"
+    status_icons = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
+    lines = []
+    for item in todos:
+        icon = status_icons.get(item.status, "[ ]")
+        lines.append(f"{icon} {item.id}: {item.task}")
+    return "\n".join(lines)
+
+
+@tool(_TOOL_DESCS["todowrite"], TodowriteArgs)
+def tool_todowrite(state, todos=None):
+    if todos is None:
+        todos = []
+    validated: list[TodoItem] = []
+    for item in todos:
+        if isinstance(item, dict):
+            item = msgspec.convert(item, TodoItem)
+        if item.status not in _TODO_STATUSES:
+            raise ValueError(
+                f"Invalid status {item.status!r} for todo {item.id!r}. "
+                f"Use one of: {', '.join(sorted(_TODO_STATUSES))}"
+            )
+        validated.append(item)
+    state.todos = validated
+    result = _format_todos(state.todos)
+    note_tool(state, "todowrite", _suffix=f"({len(state.todos)} items)")
+    show(result)
+    return result
 
 
 def active_system_prompt(interactive):
@@ -1601,7 +1814,7 @@ def list_all_model_ids() -> list[str]:
     if not shims:
         abort(
             "No shims are configured. Set OPENAI_API_KEY, sign in with Codex CLI, "
-            "authenticate with Gemini CLI, sign in with Claude Code, or configure AWS CLI."
+            "or configure AWS CLI."
         )
     all_models: list[str] = []
     for shim in shims:
@@ -1610,6 +1823,36 @@ def list_all_model_ids() -> list[str]:
             list_models_for_shim(shim, region=default_region(), cwd=Path.cwd())
         )
     return all_models
+
+
+
+
+class _WaitIndicator:
+    """Context manager: live spinner while waiting for LLM response."""
+
+    def __init__(self, label: str):
+        self._label = label
+        self._spinner: Status | None = None
+
+    def start(self):
+        self._spinner = Status(self._label, console=STDERR, spinner="dots")
+        self._spinner.start()
+
+    def stop(self):
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+
+    def update(self, label: str):
+        self._label = label
+        if self._spinner is not None:
+            self._spinner.update(label)
+
+    def log(self, msg: str):
+        if self._spinner is not None:
+            self._spinner.console.log(msg)
+        else:
+            STDERR.print(msg)
 
 
 async def run_turn(
@@ -1624,7 +1867,7 @@ async def run_turn(
     step = 0
     while True:
         state.note_progress()
-        prepared = transcript.prepared_messages(model=model)
+        prepared = transcript.prepared_messages(model=model, todos=state.todos)
         _debug_log(
             "request",
             model=model_spec,
@@ -1633,11 +1876,7 @@ async def run_turn(
             tool_count=len(tool_defs),
         )
         size_str = format_tokens(sum(map(_message_tokens, prepared)))
-        spinner = Status(
-            f"Waiting for {model_spec} | {size_str}",
-            console=STDERR,
-            spinner="dots",
-        )
+        spinner = _WaitIndicator(f"Waiting for {model_spec} | {size_str}")
         spinner.start()
 
         def on_retry(attempt, max_attempts, error_ctx=None):
@@ -1645,7 +1884,7 @@ async def run_turn(
             if error_ctx:
                 lines = error_ctx.strip().splitlines()
                 excerpt = " | ".join(line.strip() for line in lines[:3] if line.strip())
-            spinner.console.log(
+            spinner.log(
                 f"[dim]\\-> retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}[/dim]"
             )
             spinner.update(
@@ -1699,11 +1938,6 @@ async def run_turn(
         return 0, output
 
 
-
-def _api_error_kind(e):
-    return "authentication" if isinstance(e, AuthenticationError) else "permission"
-
-
 async def run_agent(
     prompt,
     model,
@@ -1735,12 +1969,12 @@ async def run_agent(
         return await runner(get_client(model))
     except (AuthenticationError, PermissionDeniedError) as exc:
         if not ensure_api_env(root):
-            return fail(f"API {_api_error_kind(exc)} error: {exc}"), ""
+            return fail(f"API {"authentication" if isinstance(exc, AuthenticationError) else "permission"} error: {exc}"), ""
         _print("warning", "Credentials expired. Refreshing.", err=True)
         try:
             return await runner(get_client(model))
         except (AuthenticationError, PermissionDeniedError) as exc:
-            return fail(f"API {_api_error_kind(exc)} error: {exc}"), ""
+            return fail(f"API {"authentication" if isinstance(exc, AuthenticationError) else "permission"} error: {exc}"), ""
         except Exception as exc:
             return fail(str(exc)), ""
     except RateLimitError as exc:
@@ -1770,13 +2004,20 @@ def read_system_prompt(system_file, interactive):
         abort(f"Could not read system file {_fmt('inline', system_file)}: {exc}")
 
 
+def _set_terminal_title(title: str) -> None:
+    """Set the terminal window/tab title via OSC escape sequence."""
+    if sys.stderr.isatty():
+        sys.stderr.write(f"\033]0;{title}\007")
+        sys.stderr.flush()
+
+
 def _print_session_intro(heading: str, session: SessionContext, **extras) -> None:
     lines = [
         f"## {heading}",
         "",
         f"- workspace: {_fmt('inline', session.workspace)}",
         f"- model: {_fmt('inline', session.model)}",
-        f"- mode: {_fmt('inline', session.mode)}",
+        f"- mode: {_fmt('inline', 'interactive' if session.interactive else 'non-interactive')}",
     ]
     if session.system_file is not None:
         extras["system file"] = session.system_file.resolve()
@@ -1786,6 +2027,10 @@ def _print_session_intro(heading: str, session: SessionContext, **extras) -> Non
     if _debug_log_path:
         lines.append(f"- debug log: {_fmt('inline', _debug_log_path)}")
     _print(value="\n".join(lines), err=True)
+    # Set terminal title
+    _, model = split_model_spec(session.model)
+    ws = session.workspace.name
+    _set_terminal_title(f"oy · {model} · {ws}")
 
 
 def _resolve_session(
@@ -1814,7 +2059,7 @@ def _resolve_session(
 
 
 def _workspace():
-    workspace = _ws().resolve()
+    workspace = Path(os.environ.get("OY_ROOT", ".")).expanduser().resolve()
     if not workspace.is_dir():
         abort(f"Workspace root is not a directory: {_fmt('inline', workspace)}")
     require_runtime(workspace)
@@ -1849,97 +2094,73 @@ def audit(prompt: str = ""):
     return code
 
 
-def _setup_readline():
-    """Configure readline with persistent history for shell-like UX."""
-    try:
-        import readline
-    except ImportError:
-        return  # no readline on minimal builds (Alpine, WASM)
+def _create_prompt_session():
+    """Create a prompt_toolkit session with history, completion, and bracketed paste."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.completion import WordCompleter
+
     history_path = CONFIG_PATH.parent / "history"
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        readline.read_history_file(history_path)
-    except FileNotFoundError:
-        pass
-    readline.set_history_length(1000)
-    # Ensure history file has restrictive permissions (M2: OWASP ASVS V8.3.4)
+    _ensure_private_dir(history_path.parent)
+    # Ensure history file has restrictive permissions (OWASP ASVS V8.3.4)
     history_path.touch(mode=0o600, exist_ok=True)
-    import atexit
+    history_path.chmod(0o600)
 
-    atexit.register(readline.write_history_file, str(history_path))
+    commands = [
+        "/help", "/tokens", "/model", "/debug",
+        "/ask", "/audit", "/save", "/load",
+        "/clear", "/quit", "/exit",
+    ]
+    completer = WordCompleter(commands, sentence=True)
 
-
-def _drain_stdin(timeout: float = 0.05) -> str:
-    """Read any data already buffered on stdin (e.g. the tail of a paste).
-
-    Uses select() with a short timeout.  Returns the extra text, or "".
-    Only works on real ttys; returns "" for piped stdin.
-    """
-    import select
-
-    if not sys.stdin.isatty():
-        return ""
-    chunks: list[str] = []
-    while True:
-        ready, _, _ = select.select([sys.stdin], [], [], timeout)
-        if not ready:
-            break
-        chunk = os.read(sys.stdin.fileno(), 4096)
-        if not chunk:
-            break
-        chunks.append(chunk.decode("utf-8", errors="replace"))
-        # After first chunk, use a tighter timeout for the rest.
-        timeout = 0.01
-    return "".join(chunks)
+    return PromptSession(
+        history=FileHistory(str(history_path)),
+        completer=completer,
+        multiline=False,     # Enter sends; bracketed paste handles multiline
+        enable_open_in_editor=True,  # Meta+E opens $EDITOR for long prompts
+    )
 
 
-def _read_input():
-    '''Read user input, with automatic paste detection.
+def _starship_prompt(workspace: Path) -> str | None:
+    """Run starship prompt and return the ANSI-formatted status line, or None."""
+    starship = which("starship")
+    if not starship:
+        return None
+    try:
+        result = run_cmd(
+            [starship, "prompt", "--path", str(workspace)],
+            env={**os.environ, "STARSHIP_SHELL": "plain"},
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        # Starship outputs two lines: status line + prompt character.
+        # We want only the first line (status) as context above the input.
+        lines = result.stdout.rstrip("\n").split("\n")
+        return lines[0] if lines else None
+    except Exception:
+        return None
 
-    Input modes:
-    1. Single line  -- type and press Enter.
-    2. Paste        -- paste multiline text; lines that arrive within a
-       few milliseconds of Enter are collected automatically.
-    3. Block mode   -- start with ``"""`` to open a fenced block;
-       close it with ``"""`` on its own line.
 
-    Paste detection works by draining stdin right after readline returns.
-    During normal typing there is nothing buffered, so it is a no-op.
-    During a paste, the remaining lines are already queued up.
-    '''
-    line = input("oy > ")
+def _read_input(prompt_session, workspace: Path):
+    """Read user input via prompt_toolkit with starship status line."""
+    from prompt_toolkit.formatted_text import ANSI
 
-    # --- block mode: triple-quote fence (still supported) ------------------
-    stripped = line.strip()
-    if stripped == '"""' or stripped.startswith('"""'):
-        if stripped == '"""':
-            parts: list[str] = []
-        else:
-            parts = [stripped[3:]]
-        while True:
-            try:
-                cont = input("... ")
-            except EOFError:
-                break
-            if cont.strip() == '"""':
-                break
-            parts.append(cont)
-        return "\n".join(parts)
-
-    # --- paste detection: drain any remaining buffered input ---------------
-    extra = _drain_stdin()
-    if extra:
-        # Strip trailing newline that the terminal added from the final Enter.
-        return line + "\n" + extra.rstrip("\n")
-
-    return line
+    status = _starship_prompt(workspace)
+    if status:
+        # Embed starship as the first line of the prompt itself so
+        # prompt_toolkit manages it and it survives redraws.
+        return prompt_session.prompt(ANSI(status + "\n\x1b[1;32moy ❯\x1b[0m "))
+    return prompt_session.prompt(ANSI("\x1b[1;32moy ❯\x1b[0m "))
 
 
 def _chat_command(cmd, transcript, system_prompt, model_spec):
     """Handle a /command.  Return True if handled, None to exit, False if unknown."""
-    cmd = cmd.strip().lower()
+    parts = cmd.strip().split(None, 1)
+    name = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
     _, model = split_model_spec(model_spec)
-    if cmd in ("/help", "/?"):
+    if name in ("/help", "/?"):
         _print(
             value="\n".join(
                 [
@@ -1947,18 +2168,24 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
                     "",
                     "- `/help` -- show this help",
                     "- `/tokens` -- show context usage",
+                    "- `/model [query]` -- show or switch model",
+                    "- `/debug` -- toggle debug logging",
+                    "- `/ask <question>` -- research-only query (read-only, no changes)",
+                    "- `/audit [focus]` -- run a security/complexity audit",
+                    "- `/save [name]` -- save session transcript",
+                    "- `/load [name]` -- load a saved session",
                     "- `/clear` -- reset conversation (keeps system prompt)",
                     "- `/quit` or `/exit` -- end session",
                     "",
                     "Context is compressed with Headroom before model requests.",
-                    "Tip: paste multiline text — extra lines are detected automatically.",
-                    'Tip: type `"""` to start a multiline block, `"""` to end it.',
+                    "Paste multiline text directly — bracketed paste keeps it intact.",
+                    "Press Meta+E to open your $EDITOR for longer prompts.",
                 ]
             ),
             err=True,
         )
         return True
-    if cmd == "/tokens":
+    if name == "/tokens":
         total = transcript.session_tokens()
         prepped = transcript.prepared_tokens(model=model)
         budget = transcript.max_context_tokens
@@ -1978,30 +2205,256 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
             err=True,
         )
         return True
-    if cmd == "/clear":
+    if name == "/model":
+        return ("model", arg)
+    if name == "/debug":
+        return ("debug",)
+    if name == "/ask":
+        return ("ask", arg)
+    if name == "/audit":
+        return ("audit", arg)
+    if name == "/save":
+        return ("save", arg)
+    if name == "/load":
+        return ("load", arg)
+    if name == "/clear":
         transcript.clear(system_prompt)
         _print(value="Conversation cleared.", err=True)
         return True
-    if cmd in ("/quit", "/exit"):
+    if name in ("/quit", "/exit"):
         return None  # sentinel: exit
     return False
 
 
+def _handle_model_switch(arg, current_model):
+    """Handle /model command. Returns new model_spec or current if cancelled."""
+    if not arg:
+        _print(value=f"Current model: {_fmt('inline', current_model)}", err=True)
+        _print(value="Usage: `/model <name>` to switch, or `/model list` to browse.", err=True)
+        return current_model
+    if arg.lower() == "list":
+        try:
+            chosen = resolve_model_choice()
+        except SystemExit:
+            return current_model
+        return chosen if chosen else current_model
+    # Try exact match or fuzzy
+    try:
+        all_models = list_all_model_ids()
+    except SystemExit:
+        _print("warning", "Could not load model list.", err=True)
+        return current_model
+    if arg in all_models:
+        _print(value=f"Switched to {_fmt('inline', arg)}", err=True)
+        return arg
+    matches = [m for m in all_models if arg.lower() in m.lower()]
+    if len(matches) == 1:
+        _print(value=f"Switched to {_fmt('inline', matches[0])}", err=True)
+        return matches[0]
+    if matches:
+        render_model_list(matches, title="## Matching Models", query=arg, current=current_model, err=True)
+        _print(value="Be more specific or use `/model list` to choose interactively.", err=True)
+    else:
+        _print("warning", f"No models matching {_fmt('inline', arg)}.", err=True)
+    return current_model
+
+
+def _handle_debug_toggle():
+    """Toggle debug logging on/off at runtime."""
+    global _debug_logger, _debug_log_path
+    if _debug_logger is not None:
+        _debug_logger.handlers.clear()
+        _debug_logger = None
+        _debug_log_path = None
+        _print(value="Debug logging **disabled**.", err=True)
+    else:
+        os.environ["OY_DEBUG"] = "1"
+        _debug_logger, _debug_log_path = _init_debug_log()
+        _print(value=f"Debug logging **enabled** → {_fmt('inline', _debug_log_path)}", err=True)
+
+
+_ASK_SYSTEM_SUFFIX = (
+    "\nYou are in RESEARCH-ONLY mode. Answer the user's question thoroughly using "
+    "the available read-only tools (list, read, search, webfetch). Do NOT run bash commands, "
+    "do NOT modify any files, and do NOT suggest changes. Focus entirely on "
+    "understanding the codebase and providing a clear, well-researched answer.\n"
+)
+
+_READ_ONLY_TOOLS = {"list", "read", "search", "webfetch"}
+
+
+def _handle_ask(question, current_model, session, transcript):
+    """Run a research-only query synchronously — read-only tools, no mutations."""
+    if not question:
+        _print(value="Usage: `/ask <question>` — research the codebase without making changes.", err=True)
+        return
+    read_only_registry = ToolRegistry(
+        {name: t for name, t in _TOOLS.items() if name in _READ_ONLY_TOOLS}
+    )
+    ask_system = session.system_prompt + _ASK_SYSTEM_SUFFIX
+    # Use a temporary transcript branch so /ask doesn't pollute main conversation
+    ask_transcript = Transcript.with_system_prompt(ask_system)
+    # Copy recent context for awareness (last few user/assistant exchanges)
+    for msg in transcript.messages[-6:]:
+        if not isinstance(msg, SystemMessage):
+            ask_transcript.messages.append(msg)
+
+    _print(value="*Researching (read-only)…*", err=True)
+
+    tool_specs = read_only_registry
+    state = AgentState.new(
+        root=session.workspace,
+        tool_specs=tool_specs,
+        unattended_timeout_seconds=DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+    )
+    ask_transcript.add_user(question)
+
+    async def _run():
+        client = get_client(current_model)
+        return await run_turn(client, ask_transcript, state, current_model, tool_specs.specs())
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        _print(value="\nResearch cancelled.", err=True)
+    except Exception as exc:
+        _print("error", f"Research error: {exc}", err=True)
+
+
+def _handle_audit(focus, current_model, session, transcript):
+    """Run an inline audit synchronously — uses the audit system prompt."""
+    audit_prompt = "Conduct a security and complexity audit of this repository."
+    if focus:
+        audit_prompt += f" Additional focus: {focus}"
+
+    _print(value="*Running audit…*", err=True)
+
+    # Use a separate transcript so audit doesn't pollute the main conversation
+    audit_transcript = Transcript.with_system_prompt(AUDIT_SYSTEM_PROMPT)
+
+    try:
+        asyncio.run(
+            run_agent(
+                audit_prompt,
+                current_model,
+                session.workspace,
+                AUDIT_SYSTEM_PROMPT,
+                DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+                interactive=False,
+                transcript=audit_transcript,
+            )
+        )
+    except KeyboardInterrupt:
+        _print(value="\nAudit cancelled.", err=True)
+    except Exception as exc:
+        _print("error", f"Audit error: {exc}", err=True)
+
+
+_SESSIONS_DIR = CONFIG_PATH.parent / "sessions"
+
+
+def _handle_save(name, transcript, current_model):
+    """Save the current transcript to a JSON file."""
+    _ensure_private_dir(_SESSIONS_DIR)
+    if not name:
+        # Auto-generate name from timestamp
+        name = time.strftime("%Y%m%d-%H%M%S")
+    # Sanitize filename
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
+    path = _SESSIONS_DIR / f"{safe_name}.json"
+    data = {
+        "model": current_model,
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "transcript": msgspec.to_builtins(transcript),
+    }
+    save_json(path, data)
+    _print(value=f"Session saved to {_fmt('inline', path.name)}", err=True)
+
+
+def _handle_load(name, transcript, current_model, system_prompt):
+    """Load a transcript from a saved session. Returns (transcript, model) or originals on failure."""
+    _ensure_private_dir(_SESSIONS_DIR)
+    sessions = sorted(_SESSIONS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not sessions:
+        _print("warning", "No saved sessions found.", err=True)
+        return transcript, current_model
+    if not name:
+        # List available sessions
+        lines = ["## Saved Sessions", ""]
+        for i, p in enumerate(sessions[:20], 1):
+            try:
+                meta = load_json(p, {})
+                model = meta.get("model", "?")
+                saved = meta.get("saved_at", "?")
+                msgs = len(meta.get("transcript", {}).get("messages", []))
+                lines.append(f"{i}. {_fmt('inline', p.stem)} — {model}, {msgs} msgs, {saved}")
+            except Exception:
+                lines.append(f"{i}. {_fmt('inline', p.stem)} — (unreadable)")
+        lines.append("")
+        lines.append("Usage: `/load <name>` or `/load <number>`")
+        _print(value="\n".join(lines), err=True)
+        return transcript, current_model
+    # Resolve by number or name
+    target = None
+    if name.isdigit():
+        idx = int(name) - 1
+        if 0 <= idx < len(sessions):
+            target = sessions[idx]
+    if target is None:
+        safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
+        candidate = _SESSIONS_DIR / f"{safe_name}.json"
+        if candidate.exists():
+            target = candidate
+    if target is None:
+        # Fuzzy match
+        matches = [p for p in sessions if name.lower() in p.stem.lower()]
+        if len(matches) == 1:
+            target = matches[0]
+        elif matches:
+            _print("warning", f"Ambiguous — {len(matches)} sessions match. Be more specific.", err=True)
+            return transcript, current_model
+    if target is None:
+        _print("warning", f"No session found matching {_fmt('inline', name)}.", err=True)
+        return transcript, current_model
+    try:
+        data = load_json(target, None)
+        if data is None:
+            raise ValueError("Empty or invalid session file")
+        loaded = msgspec.convert(data["transcript"], Transcript)
+        loaded_model = data.get("model", current_model)
+        # Restore system prompt to current one
+        loaded.set_system_prompt(system_prompt)
+        _print(
+            value=f"Loaded session {_fmt('inline', target.stem)} — "
+                  f"{len(loaded.messages)} messages, model: {_fmt('inline', loaded_model)}",
+            err=True,
+        )
+        return loaded, loaded_model
+    except Exception as exc:
+        _print("error", f"Failed to load session: {exc}", err=True)
+        return transcript, current_model
+
+
 def chat():
     """Start an interactive anonymous session."""
-
-    _setup_readline()
+    prompt_session = _create_prompt_session()
     session = _resolve_session(interactive=True)
     _print_session_intro("Chat", session)
     _print(value="Type `/help` for commands.", err=True)
 
     transcript = Transcript.with_system_prompt(session.system_prompt)
+    current_model = session.model
+
 
     while True:
+        # Clean up finished background tasks
+
+
         try:
             STDERR.print()
             STDERR.rule(style="dim")
-            prompt = _read_input()
+
+            prompt = _read_input(prompt_session, session.workspace)
         except KeyboardInterrupt:
             STDERR.print()
             continue
@@ -2015,10 +2468,30 @@ def chat():
         # Slash commands
         if prompt.strip().startswith("/"):
             result = _chat_command(
-                prompt.strip(), transcript, session.system_prompt, session.model
+                prompt.strip(), transcript, session.system_prompt, current_model
             )
             if result is None:
                 break
+            if isinstance(result, tuple):
+                if result[0] == "model":
+                    current_model = _handle_model_switch(result[1], current_model)
+                    _, _m = split_model_spec(current_model)
+                    _set_terminal_title(f"oy · {_m} · {session.workspace.name}")
+                elif result[0] == "debug":
+                    _handle_debug_toggle()
+                elif result[0] == "ask":
+                    _handle_ask(result[1], current_model, session, transcript)
+                elif result[0] == "audit":
+                    _handle_audit(result[1], current_model, session, transcript)
+                elif result[0] == "save":
+                    _handle_save(result[1], transcript, current_model)
+                elif result[0] == "load":
+                    transcript, current_model = _handle_load(
+                        result[1], transcript, current_model, session.system_prompt
+                    )
+                    _, _m = split_model_spec(current_model)
+                    _set_terminal_title(f"oy · {_m} · {session.workspace.name}")
+                continue
             if result:
                 continue
             _print("warning", f"Unknown command: {prompt.strip().split()[0]}", err=True)
@@ -2033,7 +2506,7 @@ def chat():
             code, _ = asyncio.run(
                 run_agent(
                     prompt,
-                    session.model,
+                    current_model,
                     session.workspace,
                     session.system_prompt,
                     DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
@@ -2044,25 +2517,26 @@ def chat():
         except KeyboardInterrupt:
             transcript.rollback(cp)
             _print(
-                value="\nCancelled — your message is in readline history (press ↑).",
+                value="\nCancelled — your message is in history (press ↑).",
                 err=True,
             )
             continue
         except Exception as exc:
             transcript.rollback(cp)
             _print("error", f"Agent error: {exc}", err=True)
-            _print(value="Your message is in readline history (press ↑).", err=True)
+            _print(value="Your message is in history (press ↑).", err=True)
             continue
 
-        _, model = split_model_spec(session.model)
+        _, model = split_model_spec(current_model)
         prepped = transcript.prepared_tokens(model=model)
         budget = transcript.max_context_tokens
         remaining = max(budget - prepped, 0)
         STDERR.print(
             f"[dim]| {format_tokens(prepped)} used, ~{format_tokens(remaining)} remaining[/dim]"
         )
-    return 0
 
+    _set_terminal_title("")  # Reset title on exit
+    return 0
 
 def run(
     *prompt: str,

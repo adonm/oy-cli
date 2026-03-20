@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-import os
 from pathlib import Path
-from typing import Any, Callable
+import os
+from typing import Callable
 
 from . import providers as _providers
 from .providers import (
@@ -19,14 +18,11 @@ from .providers import (
     UserMessage,
 )
 
-APIStatusError = _providers.APIStatusError
 
 SHIM_OPENAI = _providers.SHIM_OPENAI
 SHIM_CODEX = _providers.SHIM_CODEX
-SHIM_GEMINI = _providers.SHIM_GEMINI
 SHIM_BEDROCK = _providers.SHIM_BEDROCK
 SHIM_MANTLE = _providers.SHIM_MANTLE
-SHIM_CLAUDE = _providers.SHIM_CLAUDE
 SHIM_COPILOT = _providers.SHIM_COPILOT
 SHIM_OPENCODE = _providers.SHIM_OPENCODE
 SHIM_OPENCODE_GO = _providers.SHIM_OPENCODE_GO
@@ -47,22 +43,7 @@ run_cmd = _providers.run_cmd
 which = _providers.which
 
 
-def command_env(cwd=None):
-    env = os.environ.copy()
-    if not which("mise", env.get("PATH")):
-        raise RuntimeError(
-            "`mise` is required; install and activate `mise` before running `oy`."
-        )
-    return _providers.MappingProxyType(env)
-
-
-def _clear_command_env_cache() -> None:
-    cache_clear = getattr(_providers.command_env, "cache_clear", None)
-    if callable(cache_clear):
-        cache_clear()
-
-
-command_env.cache_clear = _clear_command_env_cache
+command_env = _providers.command_env
 
 
 default_region = _providers.default_region
@@ -145,12 +126,6 @@ SHIM_SPECS: dict[str, ShimSpec] = {
         ensure_env=_providers._require_codex_env,
         build_client=_providers._codex_client,
     ),
-    SHIM_GEMINI: _static_shim(
-        SHIM_GEMINI,
-        ensure_env=_providers._require_gemini_env,
-        build_client=_providers._gemini_completion_client,
-        list_models=_providers.load_gemini_model_list,
-    ),
     SHIM_BEDROCK: _region_shim(
         SHIM_BEDROCK,
         ensure_env=_providers._require_boto3_aws_env,
@@ -160,12 +135,6 @@ SHIM_SPECS: dict[str, ShimSpec] = {
         SHIM_MANTLE,
         ensure_env=_providers._require_aws_env,
         build_client=_providers._mantle_completion_client,
-    ),
-    SHIM_CLAUDE: _static_shim(
-        SHIM_CLAUDE,
-        ensure_env=_providers._require_claude_env,
-        build_client=_providers._claude_client_from_auth,
-        list_models=_providers._claude_model_list,
     ),
     SHIM_COPILOT: _static_shim(
         SHIM_COPILOT,
@@ -243,9 +212,7 @@ _MISSING_API_CREDENTIALS_MESSAGE = (
     "Missing API credentials.\n\n"
     "- set `OPENAI_API_KEY`, or\n"
     "- sign in with Codex CLI (`codex login`), or\n"
-    "- install Gemini CLI and run `gemini` once to authenticate, or\n"
-    "- sign in with Claude Code (`claude auth login`), or\n"
-    "- configure AWS CLI for Bedrock, or\n"
+        "- configure AWS CLI for Bedrock, or\n"
     "- authenticate with OpenCode (`opencode auth`)"
 )
 
@@ -288,64 +255,12 @@ def list_models_for_shim(
         return []
 
 
-def list_all_model_ids(region: str | None = None, cwd: Path | None = None) -> list[str]:
-    return [
-        model
-        for shim in detect_available_shims()
-        for model in list_models_for_shim(shim, region=region, cwd=cwd)
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Narrow bridge consumed by oy_cli
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class ShimBridge:
-    load_json: Callable[[Path, Any], Any]
-    save_json: Callable[[Path, Any], bool]
-    run_cmd: Callable[..., Any]
-    which: Callable[[str, str | None], str | None]
-    command_env: Callable[[Path | None], Any]
-    default_region: Callable[[], str]
-    detect_available_shims: Callable[[], list[str]]
-    ensure_api_env: Callable[[str | None, str | None, Path | None], tuple[bool, str | None]]
-    require_api_env: Callable[[str | None, str | None, Path | None], str]
-    build_client: Callable[..., CompletionClient]
-    list_models_for_shim: Callable[[str, str | None, Path | None], list[str]]
-    resolve_shim: Callable[[str | None, str | None], str]
-    validate_shim: Callable[[str], str]
-    join_model_spec: Callable[[str, str], str]
-    split_model_spec: Callable[[str], tuple[str | None, str]]
-
-
-SHIMS = ShimBridge(
-    load_json=load_json,
-    save_json=save_json,
-    run_cmd=run_cmd,
-    which=which,
-    command_env=command_env,
-    default_region=default_region,
-    detect_available_shims=detect_available_shims,
-    ensure_api_env=ensure_api_env,
-    require_api_env=require_api_env,
-    build_client=get_client,
-    list_models_for_shim=list_models_for_shim,
-    resolve_shim=resolve_shim,
-    validate_shim=validate_shim,
-    join_model_spec=join_model_spec,
-    split_model_spec=split_model_spec,
-)
 
 
 __all__ = [
-    "APIStatusError",
     "AssistantMessage",
     "ChatMessage",
     "CompletionClient",
-    "SHIMS",
-    "ShimBridge",
     "ShimSpec",
     "SystemMessage",
     "ToolCall",
@@ -359,7 +274,6 @@ __all__ = [
     "ensure_api_env",
     "get_client",
     "join_model_spec",
-    "list_all_model_ids",
     "list_models_for_shim",
     "load_json",
     "require_api_env",

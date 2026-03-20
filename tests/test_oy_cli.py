@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,31 +30,15 @@ def _echo(state, text):
     return f"{state.root.name}:{text}"
 
 
-class ShimBridgeTests(unittest.TestCase):
-    def test_command_env_cache_clear_delegates_to_shim_cache(self):
-        calls: list[str] = []
-
-        def fake_command_env(cwd=None):
-            _ = cwd
-            return {"PATH": "/tmp/bin"}
-
-        fake_command_env.cache_clear = lambda: calls.append("cleared")
-        bridge = replace(oy_cli.SHIMS, command_env=fake_command_env)
-
-        with patch.object(oy_cli, "SHIMS", bridge):
-            oy_cli.command_env.cache_clear()
-
-        self.assertEqual(calls, ["cleared"])
-
-    def test_get_client_uses_shim_bridge_only(self):
+class ShimDirectTests(unittest.TestCase):
+    def test_get_client_uses_shim_module(self):
         sentinel = object()
-        bridge = replace(oy_cli.SHIMS, build_client=lambda *args, **kwargs: sentinel)
         with (
-            patch.object(oy_cli, "SHIMS", bridge),
             patch.object(oy_cli, "require_api_env") as require_api_env,
             patch.object(oy_cli, "resolve_active_shim", return_value="openai") as resolve,
             patch.object(oy_cli, "default_region", return_value="ap-southeast-2") as default_region,
             patch.object(oy_cli.Path, "cwd", return_value=Path("/workspace")),
+            patch.object(oy_cli, "_shim_get_client", return_value=sentinel),
         ):
             client = oy_cli.get_client("openai:gpt-test")
 
@@ -63,18 +47,17 @@ class ShimBridgeTests(unittest.TestCase):
         default_region.assert_called_once_with()
         self.assertIs(client, sentinel)
 
-    def test_ensure_api_env_uses_bridge_result(self):
+    def test_ensure_api_env_calls_shim_directly(self):
         calls: list[tuple[str | None, str | None, Path | None]] = []
 
         def fake_ensure(model_spec, configured_shim, cwd):
             calls.append((model_spec, configured_shim, cwd))
             return True, None
 
-        bridge = replace(oy_cli.SHIMS, ensure_api_env=fake_ensure)
         with (
-            patch.object(oy_cli, "SHIMS", bridge),
+            patch.object(oy_cli, "_shim_ensure_api_env", side_effect=fake_ensure),
             patch.object(oy_cli, "_model", return_value="openai:gpt-test"),
-            patch.object(oy_cli, "_shim", return_value="openai"),
+            patch.object(oy_cli, "_shim_name", return_value="openai"),
         ):
             result = oy_cli.ensure_api_env(Path("/workspace"))
 
@@ -457,6 +440,84 @@ class SearchToolTests(unittest.TestCase):
         self.assertIn("src/main.py-2-:after", result)
 
 
+class PrivatePathPermissionTests(unittest.TestCase):
+    def test_save_cfg_hardens_config_directory_permissions(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            config_path = Path(d) / "config" / "oy" / "config.json"
+            config_dir = config_path.parent
+            config_dir.mkdir(parents=True, mode=0o755, exist_ok=True)
+            config_dir.chmod(0o755)
+
+            with patch.dict(oy_cli.os.environ, {"OY_CONFIG": str(config_path)}, clear=False):
+                oy_cli._save_cfg({"model": "gpt-test"})
+
+            self.assertEqual(config_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+
+    def test_create_prompt_session_hardens_history_path_permissions(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            config_path = Path(d) / "config" / "oy" / "config.json"
+            history_dir = config_path.parent
+            history_dir.mkdir(parents=True, mode=0o755, exist_ok=True)
+            history_dir.chmod(0o755)
+            history_path = history_dir / "history"
+            history_path.write_text("hello\n", encoding="utf-8")
+            history_path.chmod(0o644)
+
+            with patch.object(oy_cli, "CONFIG_PATH", config_path):
+                oy_cli._create_prompt_session()
+
+            self.assertEqual(history_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(history_path.stat().st_mode & 0o777, 0o600)
+
+    def test_handle_save_hardens_sessions_directory_permissions(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            sessions_dir = Path(d) / "sessions"
+            sessions_dir.mkdir(parents=True, mode=0o755, exist_ok=True)
+            sessions_dir.chmod(0o755)
+            transcript = oy_cli.Transcript.with_system_prompt("sys")
+
+            with (
+                patch.object(oy_cli, "_SESSIONS_DIR", sessions_dir),
+                patch.object(oy_cli, "_print"),
+            ):
+                oy_cli._handle_save("demo", transcript, "openai:gpt-test")
+
+            self.assertEqual(sessions_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((sessions_dir / "demo.json").stat().st_mode & 0o777, 0o600)
+
+    def test_init_debug_log_hardens_debug_directory_permissions(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            config_path = Path(d) / "config" / "oy" / "config.json"
+            debug_dir = config_path.parent
+            debug_dir.mkdir(parents=True, mode=0o755, exist_ok=True)
+            debug_dir.chmod(0o755)
+            logger = logging.Logger("oy.test.debug")
+
+            try:
+                with (
+                    patch.dict(oy_cli.os.environ, {"OY_DEBUG": "1"}, clear=False),
+                    patch.object(oy_cli, "CONFIG_PATH", config_path),
+                    patch.object(oy_cli.logging, "getLogger", return_value=logger),
+                ):
+                    _, log_path = oy_cli._init_debug_log()
+            finally:
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers.clear()
+
+            self.assertEqual(debug_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(Path(log_path).stat().st_mode & 0o777, 0o600)
+
+
 class OptionalToolInstallerTests(unittest.TestCase):
     def test_mise_install_command_returns_all_requested_recipes(self):
         self.assertEqual(
@@ -537,6 +598,7 @@ class OptionalToolInstallerTests(unittest.TestCase):
                 "github:boyter/scc",
                 "github:ducaale/xh",
                 "github:mikefarah/yq",
+                "github:starship/starship",
             ],
         )
         self.assertEqual(calls[1][0], ["/test/bin/mise", "env", "-J"])
@@ -690,3 +752,69 @@ class HeadroomSerializationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWebfetch(unittest.TestCase):
+    """Tests for the webfetch tool and SSRF protection."""
+
+    def test_validate_url_safe_allows_public_https(self):
+        from oy_cli import _validate_url_safe
+        # Should not raise
+        result = _validate_url_safe("https://example.com")
+        self.assertEqual(result, "https://example.com")
+
+    def test_validate_url_safe_blocks_localhost(self):
+        from oy_cli import _validate_url_safe
+        with self.assertRaises(ValueError, msg="Local addresses are not allowed"):
+            _validate_url_safe("http://localhost/secret")
+
+    def test_validate_url_safe_blocks_loopback_ip(self):
+        from oy_cli import _validate_url_safe
+        with self.assertRaises(ValueError):
+            _validate_url_safe("http://127.0.0.1/secret")
+
+    def test_validate_url_safe_blocks_private_rfc1918(self):
+        from oy_cli import _validate_url_safe
+        for addr in ("10.0.0.1", "172.16.0.1", "192.168.1.1"):
+            with self.assertRaises(ValueError, msg=f"{addr} should be blocked"):
+                _validate_url_safe(f"http://{addr}/")
+
+    def test_validate_url_safe_blocks_non_http_schemes(self):
+        from oy_cli import _validate_url_safe
+        for scheme in ("ftp", "file", "gopher", "dict", "ssh"):
+            with self.assertRaises(ValueError, msg=f"{scheme}:// should be blocked"):
+                _validate_url_safe(f"{scheme}://example.com/")
+
+    def test_validate_url_safe_blocks_link_local(self):
+        from oy_cli import _validate_url_safe
+        with self.assertRaises(ValueError):
+            _validate_url_safe("http://169.254.169.254/latest/meta-data/")
+
+    def test_webfetch_rejects_post_method(self):
+        from oy_cli import _WEBFETCH_ALLOWED_METHODS
+        self.assertNotIn("POST", _WEBFETCH_ALLOWED_METHODS)
+        self.assertNotIn("PUT", _WEBFETCH_ALLOWED_METHODS)
+        self.assertNotIn("DELETE", _WEBFETCH_ALLOWED_METHODS)
+
+    def test_webfetch_allows_safe_methods(self):
+        from oy_cli import _WEBFETCH_ALLOWED_METHODS
+        self.assertIn("GET", _WEBFETCH_ALLOWED_METHODS)
+        self.assertIn("HEAD", _WEBFETCH_ALLOWED_METHODS)
+        self.assertIn("OPTIONS", _WEBFETCH_ALLOWED_METHODS)
+
+    def test_webfetch_tool_registered(self):
+        from oy_cli import TOOL_REGISTRY
+        names = [s.name for s in TOOL_REGISTRY.specs()]
+        self.assertIn("webfetch", names)
+
+    def test_webfetch_in_read_only_tools(self):
+        from oy_cli import _READ_ONLY_TOOLS
+        self.assertIn("webfetch", _READ_ONLY_TOOLS)
+
+    def test_webfetch_args_schema_has_url(self):
+        from oy_cli import WebfetchArgs
+        import msgspec
+        schema = msgspec.json.schema(WebfetchArgs)
+        defs = schema.get("$defs", {})
+        props = defs.get("WebfetchArgs", schema).get("properties", {})
+        self.assertIn("url", props)

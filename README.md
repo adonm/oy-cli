@@ -61,6 +61,9 @@ Keep going until done or blocked; if blocked, say what you tried and next
 steps.
 Use grugbrain.dev approach for maintainability/simplicity, OWASP-minded
 judgment for security, and performance-aware programming (Computer, Enhance!).
+Use `webfetch` to pull in documentation or references when needed.
+Use `todowrite` at the start of multi-step work to plan, and update it as
+you go — it persists across context compaction so you won't lose your place.
 ```
 
 ### Interactive Appendix
@@ -83,9 +86,11 @@ Each tool description is passed directly to the model:
 |------|-------------|
 | `list` | List paths by calling `Path.glob(path)`. Defaults to `path: "*"`. Use `src/*` or `src/**/*.py` exactly like pathlib glob patterns. Returns sorted entries, one per line, with / for directories. |
 | `read` | Read a file or directory. Files return line-numbered text. Directories return sorted entries, one per line, with / for directories. Use `offset` and `limit` for large files. |
-| `bash` | Shell commands are easy to run. For edits, prefer `ast-grep` for precise search/replace, `scc` for code-count analysis, and `xh` for web/API interaction; pipe to `rg` or `yq` for filtering when useful. These tools are effective for their niches, guaranteed to be available during an `oy` run, and their current usage docs can be checked with `--help`. For inspection, prefer the `search` tool. Returns structured results with `command`, `exit_code`, `ok`, `output_format`, `output`, and `truncated`. JSON output is parsed when possible. |
+| `bash` | Shell commands are easy to run. For edits, prefer `ast-grep` for precise search/replace, `scc` for code-count analysis, and `xh` for web/API interaction (or use the `webfetch` tool directly for simple fetches); pipe to `rg` or `yq` for filtering when useful. These tools are effective for their niches, guaranteed to be available during an `oy` run, and their current usage docs can be checked with `--help`. For inspection, prefer the `search` tool. Returns structured results with `command`, `exit_code`, `ok`, `output_format`, `output`, and `truncated`. JSON output is parsed when possible. |
 | `search` | Search with ripgrep JSON output. Takes `pattern` and `path`, then passes any extra ripgrep flags from `args`, for example `pattern: 'needle', path: 'src', args: ['--glob', '*.py', '-i']`. `limit` only limits displayed results after ripgrep runs. |
 | `ask` | Ask the user a question in interactive runs. Use for ambiguity or decisions. Provide choices. |
+| `webfetch` | Fetch a URL over the web. Takes `url`, optional `method` (GET/HEAD/OPTIONS, default GET), and optional `headers` dict. Built on `xh`. Restricted to public addresses only (no localhost/private IPs) for safety. Returns response headers and body. Use for fetching documentation, APIs, or web content. |
+| `todowrite` | Update the in-memory todo list. Takes `todos`: a list of `{id, task, status}` objects (status: pending/in_progress/done). Replaces the full list each call. Use to plan multi-step work, track progress, and stay on course — the list persists in context even when earlier messages are compacted. Returns the current list. |
 
 **Output truncation:** tool output is clipped to preserve context window; `bash` summarizes output into a single `output` field and marks truncation with one `truncated` flag. When clipped, narrow the next query or use `search` with a tighter `path` instead of re-running broad inspection.
 
@@ -102,14 +107,15 @@ Each tool description is passed directly to the model:
 ```markdown
 Audit the repo for security, unnecessary complexity, and major
 performance issues, preserving project and human context.
+Use `todowrite` to plan audit steps and track progress.
 First read key markdown docs, then refresh or generate an audit
 header at the top of ISSUES.md that includes the current date,
 the latest Git commit reference, and a codebase summary
 using tools like `scc`. Next, fetch the current OWASP
 ASVS (or MASVS if more relevant) and grugbrain.dev guidelines
-using `bash` with `xh` (pipe to `rg` or `yq` if useful),
-inspect the codebase against these, and write or
-merge prioritised findings (max 10-15) into the ISSUES.md file.
+using `webfetch`, inspect the codebase against these, and write or
+merge prioritised findings (max 10-15) into the ISSUES.md file. Check
+each link or reference carefully to make sure ids and links are accurate.
 Ensure each finding is formatted to include its location, category
 (security, complexity, or performance), standard reference, a clear
 recommendation, and has a Status, if existing findings have been
@@ -129,7 +135,7 @@ OY_ROOT=./src oy audit      # Audit specific directory
 | Variable | Purpose |
 |----------|---------|
 | `OY_MODEL` | Override model for this session (bare name or `shim:model`) |
-| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `gemini`, `claude`, `copilot`, `bedrock`, or `bedrock-mantle` |
+| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `copilot`, `bedrock`, or `bedrock-mantle` |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable checkpoints |
 | `OY_ROOT` | Run against different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
@@ -155,12 +161,11 @@ is a reference.
 
 ## Requirements
 
-- Python 3.14+
+- Python 3.13+
 - `bash`
 - `mise` installed and activated in the shell before launching `oy`
 - (Optional helper CLIs; `oy` auto-installs them on demand via `mise`): `rg` (ripgrep), `ast-grep`, `scc`, `xh`, `yq`
-- OpenAI API key or Codex local auth **OR** Gemini CLI OAuth credentials
-  (`~/.gemini/oauth_creds.json`) **OR** Claude Code local auth **OR**
+- OpenAI API key or Codex local auth **OR**
   AWS CLI configured for Bedrock
 
 ## Installation
@@ -183,7 +188,7 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1
 export OPENAI_API_KEY=...
 ```
 
-Gemini, Claude, Copilot, and Codex (OpenAI) creds are introspected
+Copilot and Codex (OpenAI) creds are introspected
 and used, if creds are available `oy model` will show them in the model list.
 
 **AWS Bedrock:** Uses your default AWS profile/region. Supports auto-refresh of stale SSO sessions.
@@ -195,7 +200,7 @@ export AWS_REGION=us-west-2
 ## Troubleshooting
 
 **"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`,
-`gemini` or `claude`, or configure AWS CLI (`aws configure`). For Bedrock:
+or configure AWS CLI (`aws configure`). For Bedrock:
 ensure your profile has `bedrock:InvokeModel` permission.
 
 **"stdin is not a TTY"** -> Piping input disables `ask`. Set `OY_NON_INTERACTIVE=1` to make explicit.

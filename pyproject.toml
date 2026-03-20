@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oy-cli"
-version = "0.4.1b1"
+version = "0.4.2"
 description = "Tiny local coding CLI with a small tool surface"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "oy-cli contributors" }]
 dependencies = [
@@ -20,6 +20,7 @@ dependencies = [
   "tenacity>=9.0.0",
   "msgspec>=0.20.0",
   "headroom-ai>=0.4.6",
+  "prompt-toolkit>=3.0.50",
 ]
 
 [dependency-groups]
@@ -47,3 +48,7 @@ default-groups = ["dev"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+

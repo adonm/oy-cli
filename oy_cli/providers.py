@@ -4,11 +4,10 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
-import time
+import threading as _threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -32,29 +31,21 @@ from tenacity.wait import wait_base
 
 SHIM_OPENAI = "openai"
 SHIM_CODEX = "codex"
-SHIM_GEMINI = "gemini"
 SHIM_BEDROCK = "bedrock"
 SHIM_MANTLE = "bedrock-mantle"
-SHIM_CLAUDE = "claude"
 SHIM_COPILOT = "copilot"
 SHIM_OPENCODE = "opencode"
 SHIM_OPENCODE_GO = "opencode-go"
 SHIM_ORDER = (
     SHIM_OPENAI,
     SHIM_CODEX,
-    SHIM_GEMINI,
     SHIM_BEDROCK,
     SHIM_MANTLE,
-    SHIM_CLAUDE,
     SHIM_COPILOT,
     SHIM_OPENCODE,
     SHIM_OPENCODE_GO,
 )
-KNOWN_SHIMS = set(SHIM_ORDER)
 
-DEFAULT_REGION = (
-    os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-)
 SSO_MARKERS = (
     "error loading sso token",
     "the sso session associated with this profile has expired",
@@ -63,8 +54,6 @@ SSO_MARKERS = (
 )
 CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 CODEX_MODELS_CACHE_PATH = Path.home() / ".codex" / "models_cache.json"
-GEMINI_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
-CLAUDE_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
 OPENCODE_AUTH_PATH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
 OPENCODE_ZEN_URL = "https://opencode.ai/zen/v1"
 OPENCODE_GO_URL = "https://opencode.ai/zen/go/v1"
@@ -72,32 +61,12 @@ CODEX_DEFAULT_MODEL = "gpt-5-codex"
 CODEX_CHATGPT_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 # --- Public OAuth2 "installed app" credentials ---
-# These are NOT confidential server secrets. Google and OpenAI/Anthropic embed
-# client IDs (and, for installed apps, client secrets) directly in CLI/mobile
-# binaries by design. They are safe to publish in source code. See:
-#   - https://developers.google.com/identity/protocols/oauth2/native-app
-#   - https://datatracker.ietf.org/doc/html/rfc8252#section-8.5
-# Override via env: CODEX_OAUTH_CLIENT_ID, GEMINI_OAUTH_CLIENT_ID,
-#   GEMINI_OAUTH_CLIENT_SECRET, CLAUDE_OAUTH_CLIENT_ID
+# These are NOT confidential server secrets. OpenAI embeds client IDs in
+# CLI binaries by design (RFC 8252 §8.5). Safe to publish in source code.
+# Override via env: CODEX_OAUTH_CLIENT_ID
 CODEX_OAUTH_CLIENT_ID = (
     os.environ.get("CODEX_OAUTH_CLIENT_ID") or "app_EMoamEEZ73f0CkXaXp7hrann"
 )
-GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
-GEMINI_CODE_ASSIST_VERSION = "v1internal"
-GEMINI_OAUTH_CLIENT_ID = (
-    os.environ.get("GEMINI_OAUTH_CLIENT_ID")
-    or "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-)
-GEMINI_OAUTH_CLIENT_SECRET = (
-    os.environ.get("GEMINI_OAUTH_CLIENT_SECRET")
-    or "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"  # installed-app secret; not confidential
-)
-CLAUDE_API_URL = "https://api.anthropic.com"
-CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-CLAUDE_OAUTH_CLIENT_ID = (
-    os.environ.get("CLAUDE_OAUTH_CLIENT_ID") or "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-)
-ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_RETRY_MAX_ATTEMPTS = 10
 DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 5.0
 DEFAULT_RETRY_MAX_DELAY_SECONDS = 30.0
@@ -186,12 +155,6 @@ ProviderToolUseEncoder: TypeAlias = Callable[[ToolUseBlock], ProviderItem]
 ProviderToolResultEncoder: TypeAlias = Callable[[ToolResultBlock], ProviderItem]
 ProviderSystemItem: TypeAlias = Callable[[str], ProviderItem]
 ProviderSystemFinalizer: TypeAlias = Callable[[list[ProviderItem]], ProviderSystem]
-HttpRequestBuilder: TypeAlias = Callable[
-    [str, list[ChatMessage], list[ToolSpec] | None, str], "HttpRequest"
-]
-HttpResponseDecoder: TypeAlias = Callable[[JSONDict], AssistantMessage]
-HttpErrorFormatter: TypeAlias = Callable[[httpx.Response], str]
-HttpRetryDecider: TypeAlias = Callable[[httpx.Response], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,26 +168,6 @@ class ProviderCodec:
     encode_tool_use: ProviderToolUseEncoder
     encode_tool_result: ProviderToolResultEncoder
     merge_tool_results: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class HttpRequest:
-    url: str
-    json_body: Any = None
-    content_body: str | None = None
-    headers: dict[str, str] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class HttpChatEndpoint:
-    make_client: Callable[[], httpx.AsyncClient]
-    build_request: HttpRequestBuilder
-    decode: HttpResponseDecoder
-    error: HttpErrorFormatter
-    timeout: Any
-    should_retry_response: HttpRetryDecider | None = None
-    refresh_auth: Callable[[], None] | None = None
-    bedrock: bool = False
 
 
 def _normalize_jsonlike(value: Any) -> JSONLike:
@@ -251,12 +194,13 @@ def _tool_output_text(result: ToolResult) -> str:
 
 def _assistant_blocks(message: AssistantMessage) -> list[ContentBlock]:
     blocks: list[ContentBlock] = [TextBlock(message.content)] if message.content else []
+    fallback_signature = next(iter(message.thought_signatures.values()), "")
     blocks.extend(
         ToolUseBlock(
             id=call.id,
             name=call.name,
             arguments=call.arguments,
-            thought_signature=message.thought_signatures.get(call.id, ""),
+            thought_signature=message.thought_signatures.get(call.id, fallback_signature),
         )
         for call in message.tool_calls
     )
@@ -380,6 +324,8 @@ def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
                 payload["tool_calls"] = [
                     _openai_tool_call(tool_call) for tool_call in message.tool_calls
                 ]
+            if message.thought_signatures:
+                payload["thought_signatures"] = message.thought_signatures
             return payload
         case ToolMessage():
             return {
@@ -400,18 +346,24 @@ def load_json(p, d):
     """Read JSON from path *p*, returning *d* on any error."""
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return d
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Create *path* if needed and harden it to owner-only access."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
 
 
 def save_json(p, d):
     """Write *d* as pretty-printed JSON to path *p*, creating parents.
 
-    Sets file permissions to 0o600 (owner-only) since these files may
-    contain OAuth tokens or other credentials.
+    Sets parent directory permissions to 0o700 and file permissions to
+    0o600 since these files may contain OAuth tokens or other credentials.
     """
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(p.parent)
         p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         p.chmod(0o600)
         return True
@@ -422,16 +374,6 @@ def save_json(p, d):
 def unique_strings(v):
     """Deduplicate *v* preserving order, dropping falsy values."""
     return list(dict.fromkeys(x for x in v if x))
-
-
-def _read_json_dict(path: Path, error_prefix: str) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"{error_prefix}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{error_prefix}: expected a JSON object")
-    return data
 
 
 def _first_nonempty_string(data: dict[str, Any], *keys: str) -> str | None:
@@ -446,26 +388,6 @@ def _require_string(value: Any, error: str) -> str:
     if not isinstance(value, str) or not value:
         raise RuntimeError(error)
     return value
-
-
-def _valid_access_token(
-    access_token: Any, expires_at_ms: Any, *, skew_ms: int = 0
-) -> str | None:
-    if (
-        isinstance(access_token, str)
-        and access_token
-        and isinstance(expires_at_ms, (int, float))
-        and expires_at_ms > time.time() * 1000 + skew_ms
-    ):
-        return access_token
-    return None
-
-
-def _persist_json_dict(path: Path, update: Callable[[dict[str, Any]], None]) -> None:
-    existing = load_json(path, {})
-    if isinstance(existing, dict):
-        update(existing)
-        save_json(path, existing)
 
 
 def _post_form_json(
@@ -493,61 +415,6 @@ def _extract_model_ids(items: Any, *keys: str) -> list[str]:
     return unique_strings(
         _first_nonempty_string(item, *keys) for item in items if isinstance(item, dict)
     )
-
-
-def _fetch_json_ids(
-    client: httpx.Client,
-    url: str,
-    *,
-    items_key: str,
-    id_key: str,
-    headers: dict[str, str] | None = None,
-    params: dict[str, Any] | None = None,
-    has_more_key: str | None = None,
-    cursor_key: str | None = None,
-    cursor_param: str | None = None,
-    item_filter: Callable[[dict[str, Any]], bool] | None = None,
-    raise_errors: bool = False,
-) -> list[str]:
-    request_params = dict(params or {})
-    ids: list[str] = []
-    while True:
-        response = client.get(url, headers=headers, params=request_params or None)
-        if response.is_error:
-            if raise_errors:
-                response.raise_for_status()
-            return []
-        try:
-            data = response.json()
-        except ValueError:
-            if raise_errors:
-                raise
-            return []
-        if not isinstance(data, dict):
-            if raise_errors:
-                raise RuntimeError(f"Invalid JSON response from {url}")
-            return []
-        ids.extend(
-            item[id_key]
-            for item in data.get(items_key, [])
-            if isinstance(item, dict)
-            and isinstance(item.get(id_key), str)
-            and (item_filter(item) if item_filter else True)
-        )
-        if not has_more_key or not data.get(has_more_key):
-            return ids
-        cursor = data.get(cursor_key or "")
-        if not isinstance(cursor, str) or not cursor:
-            return ids
-        request_params[cursor_param or cursor_key or "cursor"] = cursor
-
-
-def expiry_ms(s, *, skew=60):
-    """Convert an expires-in-seconds value to a UTC-epoch millisecond timestamp."""
-    try:
-        return int((time.time() + float(s) - skew) * 1000)
-    except TypeError, ValueError:
-        return int((time.time() + 3600.0 - skew) * 1000)
 
 
 def which(t, p=None):
@@ -628,21 +495,25 @@ def _httpx_client_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def http_client(**kw):
-    """Create a synchronous httpx client with redirects enabled.
+    """Create a synchronous httpx client.
 
-    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so strip
-    them when callers pass through shared config dicts.
+    Redirects are disabled by default to prevent provider responses from
+    leaking bearer tokens to unexpected hosts (OWASP ASVS V15.3.2).
+    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so
+    strip them when callers pass through shared config dicts.
     """
-    return httpx.Client(follow_redirects=True, **_httpx_client_kwargs(kw))
+    return httpx.Client(follow_redirects=False, **_httpx_client_kwargs(kw))
 
 
 def async_http_client(**kw):
-    """Create an asynchronous httpx client with redirects enabled.
+    """Create an asynchronous httpx client.
 
-    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so strip
-    them when callers pass through shared config dicts.
+    Redirects are disabled by default to prevent provider responses from
+    leaking bearer tokens to unexpected hosts (OWASP ASVS V15.3.2).
+    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so
+    strip them when callers pass through shared config dicts.
     """
-    return httpx.AsyncClient(follow_redirects=True, **_httpx_client_kwargs(kw))
+    return httpx.AsyncClient(follow_redirects=False, **_httpx_client_kwargs(kw))
 
 
 def _sigv4_sign(key: bytes, msg: str) -> bytes:
@@ -693,11 +564,6 @@ def make_bedrock_token(
     ).hexdigest()
     raw = f"bedrock.amazonaws.com/?{canonical}&X-Amz-Signature={signature}&Version=1"
     return f"bedrock-api-key-{base64.b64encode(raw.encode()).decode()}"
-
-
-def resolve_tool_path(t, cwd=None):
-    """Find executable *t* using the launch environment."""
-    return which(t, command_env(cwd).get("PATH"))
 
 
 def aws_cli(parts, cwd=None, timeout=10):
@@ -762,149 +628,18 @@ def load_aws_credentials(
     return creds
 
 
-def current_region(choice: str | None = None) -> str:
+def default_region(choice: str | None = None) -> str:
     return (
         choice
         or os.environ.get("AWS_REGION")
         or os.environ.get("AWS_DEFAULT_REGION")
-        or DEFAULT_REGION
+        or "us-east-1"
     )
-
-
-def default_region() -> str:
-    return current_region()
-
 
 
 # ---------------------------------------------------------------------------
 # Credential loading and model discovery helpers
 # ---------------------------------------------------------------------------
-
-
-@lru_cache(maxsize=1)
-def gemini_cli_package_root() -> Path:
-    exe = resolve_tool_path("gemini")
-    if not exe:
-        raise RuntimeError(
-            "Gemini CLI is not installed or not on PATH. "
-            "Install it with `npm i -g @google/gemini-cli` and run `gemini` once to authenticate."
-        )
-    real = Path(exe).resolve()
-    root = real.parent.parent
-    core = root / "node_modules" / "@google" / "gemini-cli-core"
-    if not core.is_dir():
-        raise RuntimeError(
-            f"Gemini CLI package structure not recognised at {root}. "
-            "Re-install with `npm i -g @google/gemini-cli`."
-        )
-    return root
-
-
-def _read_gemini_cli_file(relative: str) -> str:
-    root = gemini_cli_package_root()
-    path = (
-        root
-        / "node_modules"
-        / "@google"
-        / "gemini-cli-core"
-        / "dist"
-        / "src"
-        / relative
-    )
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"Cannot read Gemini CLI file {path}: {exc}") from exc
-
-
-@lru_cache(maxsize=1)
-def load_gemini_oauth_client() -> tuple[str, str]:
-    # Env-override is handled at the constant level (GEMINI_OAUTH_CLIENT_ID, etc.)
-    return GEMINI_OAUTH_CLIENT_ID, GEMINI_OAUTH_CLIENT_SECRET
-
-
-@lru_cache(maxsize=1)
-def load_gemini_model_list() -> list[str]:
-    text = _read_gemini_cli_file("config/models.js")
-    result = unique_strings(re.findall(r"=\s*'(gemini-[^']+)'", text))
-    if not result:
-        raise RuntimeError(
-            "Could not parse model list from Gemini CLI. "
-            "Re-install with `npm i -g @google/gemini-cli`."
-        )
-    return result
-
-
-def load_gemini_oauth_creds() -> dict[str, Any]:
-    data = _read_json_dict(GEMINI_CREDS_PATH, "Cannot read Gemini OAuth credentials")
-    _require_string(
-        data.get("refresh_token"), "Gemini OAuth credentials missing refresh_token"
-    )
-    return data
-
-
-def refresh_gemini_token(refresh_token: str) -> str:
-    client_id, client_secret = load_gemini_oauth_client()
-    data = _post_form_json(
-        "https://oauth2.googleapis.com/token",
-        {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        },
-        error_prefix="Gemini token refresh failed",
-    )
-    access_token = _require_string(
-        data.get("access_token"),
-        "Gemini token refresh did not return an access_token",
-    )
-    _persist_json_dict(
-        GEMINI_CREDS_PATH,
-        lambda existing: existing.update(
-            {
-                "access_token": access_token,
-                "expiry_date": expiry_ms(data.get("expires_in", 3600)),
-            }
-        ),
-    )
-    return access_token
-
-
-def get_gemini_access_token() -> str:
-    creds = load_gemini_oauth_creds()
-    if access_token := _valid_access_token(
-        creds.get("access_token"), creds.get("expiry_date", 0)
-    ):
-        return access_token
-    return refresh_gemini_token(
-        _require_string(
-            creds.get("refresh_token"), "Gemini OAuth credentials missing refresh_token"
-        )
-    )
-
-
-def resolve_gemini_project() -> str:
-    token = get_gemini_access_token()
-    url = f"{GEMINI_CODE_ASSIST_ENDPOINT}/{GEMINI_CODE_ASSIST_VERSION}:loadCodeAssist"
-    try:
-        with http_client(timeout=20) as client:
-            resp = client.post(
-                url,
-                json={},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Gemini loadCodeAssist failed: {exc}") from exc
-    project_id = data.get("cloudaicompanionProject")
-    if not isinstance(project_id, str) or not project_id:
-        raise RuntimeError("Gemini loadCodeAssist did not return a project ID")
-    return project_id
 
 
 def load_codex_auth() -> dict[str, Any]:
@@ -945,7 +680,7 @@ def _jwt_expiry_epoch(token: str) -> float | None:
         payload = parts[1]
         payload += "=" * (-len(payload) % 4)
         data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-    except OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError:
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return None
     exp = data.get("exp")
     if isinstance(exp, (int, float)):
@@ -1038,68 +773,6 @@ def load_codex_model_list() -> list[str]:
     )
 
 
-def load_claude_auth_status() -> dict[str, Any]:
-    oauth = _read_json_dict(CLAUDE_CREDS_PATH, "Cannot read Claude credentials").get(
-        "claudeAiOauth"
-    )
-    if not isinstance(oauth, dict) or not _first_nonempty_string(oauth, "accessToken"):
-        raise RuntimeError(
-            "Claude Code is not logged in. Run `claude` to authenticate."
-        )
-    return {"loggedIn": True, "oauth": oauth}
-
-
-def get_claude_access_token() -> str:
-    oauth = _read_json_dict(CLAUDE_CREDS_PATH, "Cannot read Claude credentials").get(
-        "claudeAiOauth"
-    )
-    if not isinstance(oauth, dict):
-        raise RuntimeError(
-            "Claude credentials not found. Run `claude` to authenticate."
-        )
-    access_token = _first_nonempty_string(oauth, "accessToken")
-    if not access_token:
-        raise RuntimeError(
-            "Claude credentials missing accessToken. Run `claude` to authenticate."
-        )
-    if _valid_access_token(access_token, oauth.get("expiresAt", 0), skew_ms=30_000):
-        return access_token
-    refresh_token = _first_nonempty_string(oauth, "refreshToken")
-    if not refresh_token:
-        raise RuntimeError(
-            "Claude session expired and no refresh token available. Run `claude` to re-authenticate."
-        )
-    return _refresh_claude_token(refresh_token)
-
-
-def _refresh_claude_token(refresh_token: str) -> str:
-    data = _post_form_json(
-        CLAUDE_TOKEN_URL,
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": CLAUDE_OAUTH_CLIENT_ID,
-        },
-        error_prefix="Claude token refresh failed",
-    )
-    access_token = _require_string(
-        data.get("access_token"),
-        "Claude token refresh did not return an access_token",
-    )
-
-    def update(existing: dict[str, Any]) -> None:
-        oauth = existing.get("claudeAiOauth")
-        if not isinstance(oauth, dict):
-            return
-        oauth["accessToken"] = access_token
-        oauth["expiresAt"] = expiry_ms(data.get("expires_in", 3600))
-        if token := _first_nonempty_string(data, "refresh_token"):
-            oauth["refreshToken"] = token
-
-    _persist_json_dict(CLAUDE_CREDS_PATH, update)
-    return access_token
-
-
 # ---------------------------------------------------------------------------
 # Provider client factories and protocol adapters
 # ---------------------------------------------------------------------------
@@ -1136,7 +809,7 @@ def split_model_spec(spec: str) -> tuple[str | None, str]:
     """Split ``"shim:model"`` into ``(shim, model)``; bare names return ``(None, spec)``."""
     if ":" in spec:
         shim, _, model = spec.partition(":")
-        if shim in KNOWN_SHIMS:
+        if shim in set(SHIM_ORDER):
             return shim, model
     return None, spec
 
@@ -1228,28 +901,12 @@ def _parse_retry_after_seconds(value: str | None) -> float | None:
     except ValueError:
         try:
             retry_at = parsedate_to_datetime(value)
-        except TypeError, ValueError, IndexError, OverflowError:
+        except (TypeError, ValueError, IndexError, OverflowError):
             return None
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
         seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
     return max(0.0, seconds)
-
-
-def _parse_duration_seconds(value: Any) -> float | None:
-    if not isinstance(value, str):
-        return None
-    if value.endswith("ms"):
-        try:
-            return float(value[:-2]) / 1000.0
-        except ValueError:
-            return None
-    if value.endswith("s"):
-        try:
-            return float(value[:-1])
-        except ValueError:
-            return None
-    return None
 
 
 def _response_json(response: httpx.Response) -> dict[str, Any] | None:
@@ -1258,89 +915,6 @@ def _response_json(response: httpx.Response) -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
-
-
-def _google_error_payload(response: httpx.Response) -> dict[str, Any] | None:
-    payload = _response_json(response)
-    if not payload:
-        return None
-    error = payload.get("error")
-    return error if isinstance(error, dict) else None
-
-
-def _should_retry_google_response(response: httpx.Response) -> bool:
-    if not _is_retryable_status(response.status_code):
-        return False
-    error = _google_error_payload(response)
-    if not error:
-        return True
-    details = error.get("details")
-    if not isinstance(details, list):
-        return True
-    for detail in details:
-        if not isinstance(detail, dict):
-            continue
-        if detail.get("@type") == "type.googleapis.com/google.rpc.QuotaFailure":
-            violations = detail.get("violations")
-            if not isinstance(violations, list):
-                continue
-            for violation in violations:
-                if not isinstance(violation, dict):
-                    continue
-                quota_id = str(violation.get("quotaId") or "")
-                if "PerDay" in quota_id or "Daily" in quota_id:
-                    return False
-        if detail.get("@type") == "type.googleapis.com/google.rpc.ErrorInfo":
-            reason = str(detail.get("reason") or "")
-            if reason in {"QUOTA_EXHAUSTED", "INSUFFICIENT_G1_CREDITS_BALANCE"}:
-                return False
-    return True
-
-
-def _google_retry_delay_seconds(response: httpx.Response) -> float | None:
-    error = _google_error_payload(response)
-    if error:
-        details = error.get("details")
-        if isinstance(details, list):
-            for detail in details:
-                if (
-                    isinstance(detail, dict)
-                    and detail.get("@type")
-                    == "type.googleapis.com/google.rpc.RetryInfo"
-                ):
-                    retry_delay = _parse_duration_seconds(detail.get("retryDelay"))
-                    if retry_delay is not None:
-                        return retry_delay
-            for detail in details:
-                if not isinstance(detail, dict):
-                    continue
-                if detail.get("@type") == "type.googleapis.com/google.rpc.QuotaFailure":
-                    violations = detail.get("violations")
-                    if not isinstance(violations, list):
-                        continue
-                    for violation in violations:
-                        if not isinstance(violation, dict):
-                            continue
-                        quota_id = str(violation.get("quotaId") or "")
-                        if "PerMinute" in quota_id:
-                            return 60.0
-                if detail.get("@type") == "type.googleapis.com/google.rpc.ErrorInfo":
-                    metadata = detail.get("metadata")
-                    quota_limit = (
-                        str(metadata.get("quota_limit") or "")
-                        if isinstance(metadata, dict)
-                        else ""
-                    )
-                    if "PerMinute" in quota_limit:
-                        return 60.0
-                    if str(detail.get("reason") or "") == "RATE_LIMIT_EXCEEDED":
-                        return 10.0
-        message = error.get("message")
-        if isinstance(message, str):
-            match = re.search(r"Please retry in ([0-9.]+(?:ms|s))", message)
-            if match:
-                return _parse_duration_seconds(match.group(1))
-    return None
 
 
 class WaitForRetryableResponse(wait_base):
@@ -1363,7 +937,6 @@ class WaitForRetryableResponse(wait_base):
             retry_after_seconds = _parse_retry_after_seconds(
                 exc.response.headers.get("retry-after")
             )
-            google_delay = _google_retry_delay_seconds(exc.response)
             # Bedrock encodes retryAfter in the JSON body, not the HTTP header.
             bedrock_delay = (
                 _bedrock_retry_delay_seconds(exc.response) if self.bedrock else None
@@ -1371,7 +944,6 @@ class WaitForRetryableResponse(wait_base):
             chosen = max(
                 base,
                 retry_after_seconds or 0.0,
-                google_delay or 0.0,
                 bedrock_delay or 0.0,
             )
             return min(self.maximum, chosen)
@@ -1381,46 +953,6 @@ class WaitForRetryableResponse(wait_base):
         if isinstance(exc, (httpx.TransportError, APIConnectionError, APITimeoutError)):
             return max(TRANSPORT_ERROR_RETRY_DELAY, min(base, self.maximum))
         return base
-
-
-async def _send_with_retry(
-    send,
-    *,
-    max_attempts: int = DEFAULT_RETRY_MAX_ATTEMPTS,
-    should_retry_response=None,
-    on_retry=None,
-    bedrock: bool = False,
-) -> httpx.Response:
-    maximum = (
-        BEDROCK_RETRY_MAX_DELAY_SECONDS if bedrock else DEFAULT_RETRY_MAX_DELAY_SECONDS
-    )
-    async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(max_attempts),
-        wait=WaitForRetryableResponse(maximum=maximum, bedrock=bedrock),
-        retry=retry_if_exception_type((httpx.TransportError, RetryableHttpError)),
-        reraise=True,
-    ):
-        with attempt:
-            if on_retry and attempt.retry_state.attempt_number > 1:
-                on_retry(
-                    attempt.retry_state.attempt_number,
-                    max_attempts,
-                    _retry_error_context(
-                        attempt.retry_state.outcome.exception()
-                        if attempt.retry_state.outcome
-                        else None
-                    ),
-                )
-            response = await send()
-            retryable = (
-                should_retry_response(response)
-                if should_retry_response is not None
-                else _is_retryable_status(response.status_code)
-            )
-            if retryable:
-                raise RetryableHttpError(response)
-            return response
-    raise RuntimeError("request retry loop exited unexpectedly")
 
 
 def _retry_error_context(exc: BaseException | None) -> str | None:
@@ -1506,30 +1038,6 @@ def _bedrock_retry_delay_seconds(response: httpx.Response) -> float | None:
     return None
 
 
-def _anthropic_rate_limit_detail(response: httpx.Response) -> str:
-    headers = [
-        "retry-after",
-        "anthropic-ratelimit-requests-limit",
-        "anthropic-ratelimit-requests-remaining",
-        "anthropic-ratelimit-requests-reset",
-        "anthropic-ratelimit-input-tokens-reset",
-        "anthropic-ratelimit-tokens-limit",
-        "anthropic-ratelimit-tokens-remaining",
-        "anthropic-ratelimit-tokens-reset",
-        "anthropic-ratelimit-input-tokens-limit",
-        "anthropic-ratelimit-input-tokens-remaining",
-        "anthropic-ratelimit-output-tokens-limit",
-        "anthropic-ratelimit-output-tokens-remaining",
-        "anthropic-ratelimit-output-tokens-reset",
-    ]
-    parts = [
-        f"{header}={value}"
-        for header in headers
-        if (value := response.headers.get(header))
-    ]
-    return f" [{', '.join(parts)}]" if parts else ""
-
-
 def _responses_instructions(messages: list[ChatMessage]) -> str | None:
     parts = [msg.content for msg in messages if isinstance(msg, SystemMessage)]
     joined = "\n\n".join(part for part in parts if part)
@@ -1611,14 +1119,15 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
     try:
         return decode(arguments)
     except (msgspec.DecodeError, RuntimeError) as exc:
-        # Some providers duplicate a JSON blob instead of returning one object.
-        # Scan near the midpoint for the start of a second object and salvage that.
+        # Some providers duplicate a JSON blob — the first copy is often
+        # truncated (missing close brace) and the second is the valid one.
+        # Scan near the midpoint for `{` and try decoding from there.
         mid = len(arguments) // 2
-        for i in range(max(0, mid - 15), min(len(arguments), mid + 15)):
+        for i in range(max(0, mid - 40), min(len(arguments), mid + 40)):
             if arguments[i] == "{":
                 try:
                     return decode(arguments[i:])
-                except msgspec.DecodeError, RuntimeError:
+                except (msgspec.DecodeError, RuntimeError):
                     pass
         raise RuntimeError(f"Could not parse tool arguments JSON: {exc}") from exc
 
@@ -1630,19 +1139,20 @@ def _drop_reasoning_arg(payload: dict[str, Any]) -> dict[str, Any]:
     return stripped
 
 
+# Thread-safe cache for reasoning support per (api_kind, model).
+# Background threads (/ask, /audit) may probe this concurrently.
 _REASONING_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
-
-
-def _reasoning_cache_key(api_kind: str, model: str) -> tuple[str, str]:
-    return (api_kind, model)
+_REASONING_CACHE_LOCK = _threading.Lock()
 
 
 def _should_send_reasoning(api_kind: str, model: str) -> bool:
-    return _REASONING_SUPPORT_CACHE.get(_reasoning_cache_key(api_kind, model), True)
+    with _REASONING_CACHE_LOCK:
+        return _REASONING_SUPPORT_CACHE.get((api_kind, model), True)
 
 
 def _mark_reasoning_unsupported(api_kind: str, model: str) -> None:
-    _REASONING_SUPPORT_CACHE[_reasoning_cache_key(api_kind, model)] = False
+    with _REASONING_CACHE_LOCK:
+        _REASONING_SUPPORT_CACHE[(api_kind, model)] = False
 
 
 def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
@@ -1820,10 +1330,6 @@ async def _read_sse_completed_response(response: httpx.Response) -> dict[str, An
     raise RuntimeError("Codex ChatGPT stream ended before response.completed")
 
 
-def _bearer_headers(token: str, **headers: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}", **headers}
-
-
 BEDROCK_CODEC = ProviderCodec(
     user_role="user",
     assistant_role="assistant",
@@ -1849,69 +1355,6 @@ BEDROCK_CODEC = ProviderCodec(
     },
 )
 
-VERTEX_CODEC = ProviderCodec(
-    user_role="user",
-    assistant_role="model",
-    content_key="parts",
-    system_item=lambda text: {"text": text},
-    finalize_system=lambda parts: {"parts": parts} if parts else None,
-    encode_text=lambda text: {"text": text},
-    encode_tool_use=lambda block: (
-        {
-            "functionCall": {"name": block.name, "args": block.arguments},
-            **(
-                {"thoughtSignature": block.thought_signature}
-                if block.thought_signature
-                else {}
-            ),
-        }
-    ),
-    encode_tool_result=lambda block: {
-        "functionResponse": {
-            "name": block.name or "tool",
-            "response": (
-                {"error": payload}
-                if not block.result.ok
-                and isinstance(
-                    payload := (
-                        block.result.content
-                        if isinstance(block.result.content, dict)
-                        else {"output": block.result.content}
-                    ),
-                    dict,
-                )
-                and "error" not in payload
-                else (
-                    block.result.content
-                    if isinstance(block.result.content, dict)
-                    else {"output": block.result.content}
-                )
-            ),
-        }
-    },
-)
-
-ANTHROPIC_CODEC = ProviderCodec(
-    user_role="user",
-    assistant_role="assistant",
-    content_key="content",
-    system_item=lambda text: text,
-    finalize_system=lambda parts: "\n\n".join(parts) if parts else "",
-    encode_text=lambda text: {"type": "text", "text": text},
-    encode_tool_use=lambda block: {
-        "type": "tool_use",
-        "id": block.id,
-        "name": block.name,
-        "input": block.arguments,
-    },
-    encode_tool_result=lambda block: {
-        "type": "tool_result",
-        "tool_use_id": block.id,
-        "content": _tool_output_text(block.result),
-        **({"is_error": True} if not block.result.ok else {}),
-    },
-)
-
 
 def _sync_model_ids(
     sync_client: OpenAI,
@@ -1929,23 +1372,6 @@ def _sync_model_ids(
         if default is not None:
             return default
         raise
-
-
-def _http_completion_client(
-    endpoint: HttpChatEndpoint, list_models: Callable[[], list[str]]
-) -> CompletionClient:
-    async def chat_completion(
-        model: str,
-        messages: list[ChatMessage],
-        tools: list[ToolSpec] | None = None,
-        tool_choice: str = "auto",
-        on_retry=None,
-    ) -> AssistantMessage:
-        return await _run_http_chat_endpoint(
-            endpoint, model, messages, tools, tool_choice, on_retry
-        )
-
-    return CompletionClient(chat_completion=chat_completion, list_models=list_models)
 
 
 def _openai_responses_client(
@@ -2122,56 +1548,6 @@ def _openai_chat_completions_client(
     )
 
 
-async def _run_http_chat_endpoint(
-    endpoint: HttpChatEndpoint,
-    model: str,
-    messages: list[ChatMessage],
-    tools: list[ToolSpec] | None = None,
-    tool_choice: str = "auto",
-    on_retry=None,
-) -> AssistantMessage:
-    request = endpoint.build_request(model, messages, tools, tool_choice)
-    refreshed = False
-
-    async with endpoint.make_client() as client:
-
-        async def send_request() -> httpx.Response:
-            nonlocal request, refreshed
-            response = await client.post(
-                request.url,
-                json=request.json_body,
-                content=request.content_body,
-                headers=request.headers,
-                timeout=endpoint.timeout,
-            )
-            if (
-                response.status_code == 401
-                and endpoint.refresh_auth is not None
-                and not refreshed
-            ):
-                endpoint.refresh_auth()
-                refreshed = True
-                request = endpoint.build_request(model, messages, tools, tool_choice)
-                response = await client.post(
-                    request.url,
-                    json=request.json_body,
-                    content=request.content_body,
-                    headers=request.headers,
-                    timeout=endpoint.timeout,
-                )
-            return response
-
-        response = await _send_with_retry(
-            send_request,
-            should_retry_response=endpoint.should_retry_response,
-            on_retry=on_retry,
-            bedrock=endpoint.bedrock,
-        )
-    if response.is_error:
-        raise RuntimeError(endpoint.error(response))
-    return endpoint.decode(response.json())
-
-
 def _bedrock_tools(tools: list[ToolSpec], tool_choice: str) -> dict[str, Any] | None:
     bedrock_tools = [
         {
@@ -2304,169 +1680,6 @@ def _tool_specs_to_openai(tools: list[ToolSpec]) -> list[dict[str, Any]]:
     ]
 
 
-def _vertex_output_blocks(response: dict[str, Any]) -> list[ContentBlock]:
-    candidates = response.get("response", {}).get("candidates", [])
-    if not candidates:
-        return []
-    return _extract_blocks(
-        candidates[0].get("content", {}).get("parts", []),
-        text_of=lambda item: (
-            item.get("text") if isinstance(item.get("text"), str) else None
-        ),
-        tool_of=lambda item, index: (
-            ToolUseBlock(
-                id=f"call_{index}",
-                name=item["functionCall"]["name"],
-                arguments=item["functionCall"].get("args", {}),
-                thought_signature=item.get("thoughtSignature", ""),
-            )
-            if "functionCall" in item
-            else None
-        ),
-    )
-
-
-def _gemini_client(project_id: str, initial_access_token: str) -> CompletionClient:
-    access_token = initial_access_token
-    base_url = f"{GEMINI_CODE_ASSIST_ENDPOINT}/{GEMINI_CODE_ASSIST_VERSION}"
-
-    def auth_headers() -> dict[str, str]:
-        return _bearer_headers(access_token, **{"Content-Type": "application/json"})
-
-    def refresh_auth() -> None:
-        nonlocal access_token
-        access_token = refresh_gemini_token(load_gemini_oauth_creds()["refresh_token"])
-
-    def make_request(
-        model: str,
-        messages: list[ChatMessage],
-        tools: list[ToolSpec] | None,
-        tool_choice: str,
-    ) -> HttpRequest:
-        contents, system_instruction = _encode_provider_messages(messages, VERTEX_CODEC)
-        request_body: dict[str, Any] = {"contents": contents}
-        if system_instruction:
-            request_body["systemInstruction"] = system_instruction
-        if tools:
-            request_body["tools"] = [
-                {
-                    "functionDeclarations": [
-                        {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                        }
-                        for tool in tools
-                    ]
-                }
-            ]
-            request_body["toolConfig"] = {
-                "functionCallingConfig": {
-                    "mode": "AUTO" if tool_choice == "auto" else "ANY"
-                }
-            }
-        return HttpRequest(
-            url=f"{base_url}:generateContent",
-            json_body={"model": model, "project": project_id, "request": request_body},
-            headers=auth_headers(),
-        )
-
-    endpoint = HttpChatEndpoint(
-        make_client=lambda: async_http_client(timeout=120),
-        build_request=make_request,
-        decode=lambda data: _assistant_from_blocks(_vertex_output_blocks(data)),
-        error=lambda resp: (
-            f"Gemini Code Assist error ({resp.status_code}): {_response_error_message(resp)}"
-        ),
-        timeout=120,
-        should_retry_response=_should_retry_google_response,
-        refresh_auth=refresh_auth,
-    )
-    return _http_completion_client(endpoint, list_models=load_gemini_model_list)
-
-
-def _anthropic_output_blocks(data: dict[str, Any]) -> list[ContentBlock]:
-    return _extract_blocks(
-        data.get("content", []),
-        text_of=lambda item: item["text"] if item.get("type") == "text" else None,
-        tool_of=lambda item, _: (
-            ToolUseBlock(
-                id=item["id"],
-                name=item["name"],
-                arguments=item.get("input", {}),
-            )
-            if item.get("type") == "tool_use"
-            else None
-        ),
-    )
-
-
-def _claude_client(initial_access_token: str) -> CompletionClient:
-    access_token = initial_access_token
-
-    def auth_headers() -> dict[str, str]:
-        return _bearer_headers(
-            access_token,
-            **{
-                "anthropic-version": ANTHROPIC_VERSION,
-                "anthropic-beta": "oauth-2025-04-20",
-                "content-type": "application/json",
-            },
-        )
-
-    def refresh_auth() -> None:
-        nonlocal access_token
-        access_token = get_claude_access_token()
-
-    def make_request(
-        model: str,
-        messages: list[ChatMessage],
-        tools: list[ToolSpec] | None,
-        tool_choice: str,
-    ) -> HttpRequest:
-        anthropic_payload, system = _encode_provider_messages(messages, ANTHROPIC_CODEC)
-        body: dict[str, Any] = {
-            "model": model,
-            "max_tokens": 8192,
-            "messages": anthropic_payload,
-        }
-        if system:
-            body["system"] = system
-        if tools:
-            body["tools"] = [
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.parameters,
-                }
-                for tool in tools
-            ]
-            body["tool_choice"] = (
-                {"type": "auto"} if tool_choice == "auto" else {"type": "any"}
-            )
-        return HttpRequest(
-            url=f"{CLAUDE_API_URL}/v1/messages",
-            json_body=body,
-            headers=auth_headers(),
-        )
-
-    endpoint = HttpChatEndpoint(
-        make_client=lambda: async_http_client(timeout=120),
-        build_request=make_request,
-        decode=lambda data: _assistant_from_blocks(_anthropic_output_blocks(data)),
-        error=lambda resp: (
-            f"Anthropic API error ({resp.status_code}): "
-            f"{_response_error_message(resp)}"
-            f"{_anthropic_rate_limit_detail(resp) if resp.status_code == 429 else ''}"
-        ),
-        timeout=120,
-        refresh_auth=refresh_auth,
-    )
-    return _http_completion_client(
-        endpoint, list_models=lambda: _fetch_claude_models(access_token)
-    )
-
-
 def _codex_chatgpt_client() -> CompletionClient:
     async def chat_completion(
         model: str,
@@ -2519,28 +1732,6 @@ def _codex_chatgpt_client() -> CompletionClient:
     )
 
 
-def _fetch_claude_models(access_token: str) -> list[str]:
-    with http_client(timeout=15) as client:
-        return _fetch_json_ids(
-            client,
-            f"{CLAUDE_API_URL}/v1/models",
-            headers=_bearer_headers(
-                access_token,
-                **{
-                    "anthropic-version": ANTHROPIC_VERSION,
-                    "anthropic-beta": "oauth-2025-04-20",
-                },
-            ),
-            params={"limit": 1000},
-            items_key="data",
-            id_key="id",
-            has_more_key="has_more",
-            cursor_key="last_id",
-            cursor_param="after_id",
-            raise_errors=True,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Shim-specific environment checks and registry entries
 # ---------------------------------------------------------------------------
@@ -2554,16 +1745,8 @@ def _require_codex_env() -> None:
     load_codex_session()
 
 
-def _require_gemini_env() -> None:
-    load_gemini_oauth_creds()
-
-
-def _require_claude_env() -> None:
-    load_claude_auth_status()
-
-
 def _require_aws_env(cwd: Path | None = None) -> None:
-    current_region(None)
+    default_region(None)
     load_aws_credentials(cwd, allow_login=False)
 
 
@@ -2605,18 +1788,14 @@ def _codex_client() -> CompletionClient:
     return _codex_chatgpt_client()
 
 
-def _gemini_completion_client() -> CompletionClient:
-    return _gemini_client(resolve_gemini_project(), get_gemini_access_token())
-
-
 def _bedrock_completion_client(region: str | None = None) -> CompletionClient:
-    return _bedrock_converse_client(current_region(region))
+    return _bedrock_converse_client(default_region(region))
 
 
 def _mantle_completion_client(
     region: str | None = None, cwd: Path | None = None
 ) -> CompletionClient:
-    current = current_region(region)
+    current = default_region(region)
     return _openai_chat_completions_client(
         *_openai_pair(
             make_bedrock_token(current, cwd),
@@ -2627,14 +1806,6 @@ def _mantle_completion_client(
         tools_map=_tool_specs_to_openai,
         bedrock=True,
     )
-
-
-def _claude_client_from_auth() -> CompletionClient:
-    return _claude_client(get_claude_access_token())
-
-
-def _claude_model_list() -> list[str]:
-    return _fetch_claude_models(get_claude_access_token())
 
 
 # ---------------------------------------------------------------------------

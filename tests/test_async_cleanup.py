@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import unittest
+
 from unittest.mock import patch
 
 from oy_cli import providers
-
 
 
 class OpenAIPairTests(unittest.TestCase):
@@ -79,3 +79,5 @@ class OpenAIPairTests(unittest.TestCase):
             max_retries=0,
             http_client=sync_http,
         )
+
+

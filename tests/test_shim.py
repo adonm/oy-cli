@@ -339,7 +339,6 @@ class ShimApiSurfaceTests(unittest.TestCase):
             "ensure_api_env",
             "get_client",
             "join_model_spec",
-            "list_all_model_ids",
             "list_models_for_shim",
             "load_json",
             "require_api_env",
@@ -350,7 +349,7 @@ class ShimApiSurfaceTests(unittest.TestCase):
             "which",
         }
 
-        self.assertEqual(set(shim.__all__), expected | {"APIStatusError", "SHIMS", "ShimBridge", "ShimSpec", "resolve_shim"})
+        self.assertEqual(set(shim.__all__), expected | {"ShimSpec", "resolve_shim"})
 
     def test_ensure_api_env_uses_resolved_shim_spec(self):
         spec = _dummy_spec("alpha", ensure_env=lambda cwd: None)
@@ -440,7 +439,7 @@ class CommandEnvTests(unittest.TestCase):
         shim.command_env.cache_clear()
 
     def test_command_env_requires_mise_on_path(self):
-        with patch.object(shim, "which", return_value=None):
+        with patch.object(providers, "which", return_value=None):
             with self.assertRaisesRegex(
                 RuntimeError,
                 r"`mise` is required; install and activate `mise` before running `oy`",
@@ -449,15 +448,13 @@ class CommandEnvTests(unittest.TestCase):
 
     def test_command_env_returns_launch_environment_when_mise_is_available(self):
         with (
-            patch.object(shim, "which", return_value="/usr/local/bin/mise"),
-            patch.object(shim, "run_cmd") as run_cmd,
+            patch.object(providers, "which", return_value="/usr/local/bin/mise"),
             patch.dict(
-                shim.os.environ, {"PATH": "/test/bin", "HOME": "/tmp/home"}, clear=True
+                providers.os.environ, {"PATH": "/test/bin", "HOME": "/tmp/home"}, clear=True
             ),
         ):
             env = shim.command_env()
 
-        run_cmd.assert_not_called()
         self.assertEqual(env["PATH"], "/test/bin")
         self.assertEqual(env["HOME"], "/tmp/home")
 
