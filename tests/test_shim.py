@@ -28,8 +28,8 @@ def _dummy_spec(
     *,
     ensure_env=None,
     list_models=None,
-) -> providers.ShimSpec:
-    return providers.ShimSpec(
+) -> shim.ShimSpec:
+    return shim.ShimSpec(
         name=name,
         ensure_env=ensure_env or (lambda cwd: None),
         build_client=lambda region, cwd: _dummy_client(),
@@ -50,6 +50,52 @@ class DecodeToolCallArgumentsTests(unittest.TestCase):
 
 
 class TranslationTests(unittest.TestCase):
+    def test_tool_output_text_uses_toon_for_structured_values(self):
+        rendered = providers._tool_output_text(
+            shim.ToolResult(content={"count": 2, "items": [1, 2]})
+        )
+
+        self.assertIsInstance(rendered, str)
+        self.assertIn("count", rendered)
+        self.assertIn("items", rendered)
+        self.assertNotIn('{"count":2', rendered)
+
+    def test_openai_chat_message_uses_toon_for_tool_output(self):
+        message = providers._openai_chat_message(
+            shim.ToolMessage(
+                tool_call_id="call_1",
+                name="echo",
+                content=shim.ToolResult(content={"count": 2}),
+            )
+        )
+
+        self.assertEqual(message["role"], "tool")
+        self.assertIsInstance(message["content"], str)
+        self.assertIn("count", message["content"])
+        self.assertNotIn('{"count":2', message["content"])
+
+    def test_responses_input_uses_toon_for_tool_outputs(self):
+        items = providers._responses_input_from_messages(
+            [
+                shim.ToolMessage(
+                    tool_call_id="call_1",
+                    name="echo",
+                    content=shim.ToolResult(content={"count": 2}),
+                )
+            ]
+        )
+
+        self.assertEqual(items[0]["type"], "function_call_output")
+        self.assertIn("count", items[0]["output"])
+        self.assertNotIn('{"count":2', items[0]["output"])
+
+    def test_openai_tool_call_keeps_json_arguments(self):
+        tool_call = providers._openai_tool_call(
+            shim.ToolCall(id="call_1", name="echo", arguments={"count": 2})
+        )
+
+        self.assertEqual(tool_call["function"]["arguments"], '{"count":2}')
+
     def test_decodes_responses_output(self):
         message = providers._decode_responses_output(
             {
@@ -135,6 +181,10 @@ class TranslationTests(unittest.TestCase):
         self.assertIsNone(system)
         self.assertEqual([item["role"] for item in encoded], ["assistant", "user"])
         self.assertEqual(encoded[1]["content"][1]["toolResult"]["status"], "error")
+        tool_text = encoded[1]["content"][0]["toolResult"]["content"][0]["text"]
+        self.assertIn("first", tool_text)
+        self.assertNotIn('{"error":"second"', encoded[1]["content"][1]["toolResult"]["content"][0]["text"])
+        self.assertIn("error", encoded[1]["content"][1]["toolResult"]["content"][0]["text"])
 
 
 class ReasoningTests(unittest.IsolatedAsyncioTestCase):
@@ -299,28 +349,6 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reasoning", create.call_args.kwargs)
 
 
-class ShimHelperTests(unittest.TestCase):
-    def test_static_env_checker_ignores_cwd(self):
-        calls: list[str] = []
-
-        checker = providers._static_env_checker(lambda: calls.append("ok"))
-        checker(None)
-        checker(Path("/tmp/work"))
-
-        self.assertEqual(calls, ["ok", "ok"])
-
-    def test_region_client_builder_ignores_cwd(self):
-        calls: list[str | None] = []
-
-        builder = providers._region_client_builder(
-            lambda region: calls.append(region) or _dummy_client([region or "default"])
-        )
-        client = builder("us-east-1", Path("/tmp/work"))
-
-        self.assertEqual(calls, ["us-east-1"])
-        self.assertEqual(client.list_models(), ["us-east-1"])
-
-
 class ShimApiSurfaceTests(unittest.TestCase):
     def test_module_all_exports_public_boundary(self):
         expected = {
@@ -365,14 +393,14 @@ class ShimApiSurfaceTests(unittest.TestCase):
 
     def test_get_client_uses_shim_registry_builder(self):
         sentinel = _dummy_client(["demo"])
-        spec = providers.ShimSpec(
+        spec = shim.ShimSpec(
             name="alpha",
             ensure_env=lambda cwd: None,
             build_client=lambda region, cwd: sentinel,
             list_models=lambda region, cwd: ["demo"],
         )
         with patch.object(shim, "_shim_spec", return_value=spec) as shim_spec:
-            client = shim.get_client("alpha", model_spec="alpha:demo", region="us-east-1")
+            client = shim.get_client("alpha", region="us-east-1")
 
         shim_spec.assert_called_once_with("alpha")
         self.assertIs(client, sentinel)
@@ -414,7 +442,7 @@ class ShimRegistryTests(unittest.TestCase):
 class RunCmdTests(unittest.TestCase):
     def test_run_cmd_raises_clean_error_when_binary_missing(self):
         with self.assertRaisesRegex(
-            FileNotFoundError, r"Command `missing-tool` was not found on PATH"
+            FileNotFoundError, r"\[Errno 2\] No such file or directory: 'missing-tool'"
         ):
             shim.run_cmd(["missing-tool"], env={"PATH": ""})
 
@@ -438,20 +466,9 @@ class CommandEnvTests(unittest.TestCase):
     def tearDown(self):
         shim.command_env.cache_clear()
 
-    def test_command_env_requires_mise_on_path(self):
-        with patch.object(providers, "which", return_value=None):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                r"`mise` is required; install and activate `mise` before running `oy`",
-            ):
-                shim.command_env()
-
-    def test_command_env_returns_launch_environment_when_mise_is_available(self):
-        with (
-            patch.object(providers, "which", return_value="/usr/local/bin/mise"),
-            patch.dict(
-                providers.os.environ, {"PATH": "/test/bin", "HOME": "/tmp/home"}, clear=True
-            ),
+    def test_command_env_returns_launch_environment(self):
+        with patch.dict(
+            providers.os.environ, {"PATH": "/test/bin", "HOME": "/tmp/home"}, clear=True
         ):
             env = shim.command_env()
 

@@ -14,7 +14,7 @@ from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from types import MappingProxyType
 from pathlib import Path
-from typing import Any, Awaitable, Callable, TypeAlias
+from typing import Any, Callable, TypeAlias
 from urllib.parse import quote
 import httpx
 import msgspec
@@ -28,6 +28,18 @@ from openai import (
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 from tenacity.wait import wait_base
 
+from .protocol import (
+    AssistantMessage,
+    ChatMessage,
+    CompletionClient,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+    ToolResult,
+    ToolSpec,
+    UserMessage,
+)
+from .serialization import JSONLike, normalize_jsonlike, serialize_json, serialize_toon
 
 SHIM_OPENAI = "openai"
 SHIM_CODEX = "codex"
@@ -79,61 +91,11 @@ BEDROCK_TIMEOUT = httpx.Timeout(
 )
 TRANSPORT_ERROR_RETRY_DELAY = 3.0
 
-JSONLike: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 JSONDict: TypeAlias = dict[str, Any]
 ProviderItem: TypeAlias = JSONDict | str
 
-
-# ---------------------------------------------------------------------------
-# Shared message, tool, and transport types
-# ---------------------------------------------------------------------------
-
-
-class ToolCall(msgspec.Struct, omit_defaults=True):
-    id: str
-    name: str
-    arguments: dict[str, Any] = msgspec.field(default_factory=dict)
-
-
-class ToolResult(msgspec.Struct, omit_defaults=True):
-    ok: bool = True
-    content: JSONLike = None
-
-
-class ToolSpec(msgspec.Struct, omit_defaults=True):
-    name: str
-    description: str
-    parameters: dict[str, Any]
-
-
-class SystemMessage(msgspec.Struct, tag="system", tag_field="role", omit_defaults=True):
-    content: str
-
-
-class UserMessage(msgspec.Struct, tag="user", tag_field="role", omit_defaults=True):
-    content: str
-
-
-class AssistantMessage(
-    msgspec.Struct, tag="assistant", tag_field="role", omit_defaults=True
-):
-    content: str = ""
-    tool_calls: list[ToolCall] = msgspec.field(default_factory=list)
-    thought_signatures: dict[str, str] = msgspec.field(default_factory=dict)
-
-
-class ToolMessage(msgspec.Struct, tag="tool", tag_field="role", omit_defaults=True):
-    tool_call_id: str
-    name: str = ""
-    content: ToolResult = msgspec.field(default_factory=ToolResult)
-
-
-ChatMessage: TypeAlias = SystemMessage | UserMessage | AssistantMessage | ToolMessage
-
-
 class TextBlock(msgspec.Struct, omit_defaults=True):
     text: str
-
 
 class ToolUseBlock(msgspec.Struct, omit_defaults=True):
     id: str
@@ -141,12 +103,10 @@ class ToolUseBlock(msgspec.Struct, omit_defaults=True):
     arguments: dict[str, Any] = msgspec.field(default_factory=dict)
     thought_signature: str = ""
 
-
 class ToolResultBlock(msgspec.Struct, omit_defaults=True):
     id: str
     name: str = ""
     result: ToolResult = msgspec.field(default_factory=ToolResult)
-
 
 ContentBlock: TypeAlias = TextBlock | ToolUseBlock | ToolResultBlock
 ProviderSystem: TypeAlias = ProviderItem | list[ProviderItem] | None
@@ -155,7 +115,6 @@ ProviderToolUseEncoder: TypeAlias = Callable[[ToolUseBlock], ProviderItem]
 ProviderToolResultEncoder: TypeAlias = Callable[[ToolResultBlock], ProviderItem]
 ProviderSystemItem: TypeAlias = Callable[[str], ProviderItem]
 ProviderSystemFinalizer: TypeAlias = Callable[[list[ProviderItem]], ProviderSystem]
-
 
 @dataclass(frozen=True, slots=True)
 class ProviderCodec:
@@ -169,28 +128,11 @@ class ProviderCodec:
     encode_tool_result: ProviderToolResultEncoder
     merge_tool_results: bool = True
 
-
-def _normalize_jsonlike(value: Any) -> JSONLike:
-    return (
-        value
-        if isinstance(value, (dict, list, str, int, float, bool)) or value is None
-        else str(value)
-    )
-
-
-def _json_text(value: Any) -> str:
-    return (
-        value if isinstance(value, str) else msgspec.json.encode(value).decode("utf-8")
-    )
-
-
 def _tool_output_value(result: ToolResult) -> JSONLike:
-    return _normalize_jsonlike(result.content)
-
+    return normalize_jsonlike(result.content)
 
 def _tool_output_text(result: ToolResult) -> str:
-    return _json_text(_tool_output_value(result))
-
+    return serialize_toon(_tool_output_value(result))
 
 def _assistant_blocks(message: AssistantMessage) -> list[ContentBlock]:
     blocks: list[ContentBlock] = [TextBlock(message.content)] if message.content else []
@@ -206,12 +148,10 @@ def _assistant_blocks(message: AssistantMessage) -> list[ContentBlock]:
     )
     return blocks
 
-
 def _tool_message_block(message: ToolMessage) -> ToolResultBlock:
     return ToolResultBlock(
         id=message.tool_call_id, name=message.name, result=message.content
     )
-
 
 def _assistant_from_blocks(blocks: list[ContentBlock]) -> AssistantMessage:
     content_parts: list[str] = []
@@ -237,7 +177,6 @@ def _assistant_from_blocks(blocks: list[ContentBlock]) -> AssistantMessage:
         thought_signatures=thought_signatures,
     )
 
-
 def _encode_provider_block(block: ContentBlock, codec: ProviderCodec):
     match block:
         case TextBlock():
@@ -247,7 +186,6 @@ def _encode_provider_block(block: ContentBlock, codec: ProviderCodec):
         case ToolResultBlock():
             return codec.encode_tool_result(block)
     raise TypeError(f"Unsupported content block: {type(block).__name__}")
-
 
 def _encode_provider_messages(
     messages: list[ChatMessage], codec: ProviderCodec
@@ -284,7 +222,6 @@ def _encode_provider_messages(
             encoded.append({"role": role, codec.content_key: items})
     return encoded, codec.finalize_system(system_parts)
 
-
 def _extract_blocks(
     items: list[Any],
     *,
@@ -300,17 +237,15 @@ def _extract_blocks(
             blocks.append(tool)
     return blocks
 
-
 def _openai_tool_call(tool_call: ToolCall) -> dict[str, Any]:
     return {
         "id": tool_call.id,
         "type": "function",
         "function": {
             "name": tool_call.name,
-            "arguments": _json_text(tool_call.arguments),
+            "arguments": serialize_json(tool_call.arguments),
         },
     }
-
 
 def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
     match message:
@@ -336,32 +271,21 @@ def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
             }
     raise TypeError(f"Unsupported message type: {type(message).__name__}")
 
-
 # ---------------------------------------------------------------------------
 # Local persistence and shell/runtime helpers
 # ---------------------------------------------------------------------------
 
-
 def load_json(p, d):
-    """Read JSON from path *p*, returning *d* on any error."""
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return d
 
-
 def _ensure_private_dir(path: Path) -> None:
-    """Create *path* if needed and harden it to owner-only access."""
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
 
-
 def save_json(p, d):
-    """Write *d* as pretty-printed JSON to path *p*, creating parents.
-
-    Sets parent directory permissions to 0o700 and file permissions to
-    0o600 since these files may contain OAuth tokens or other credentials.
-    """
     try:
         _ensure_private_dir(p.parent)
         p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -370,11 +294,8 @@ def save_json(p, d):
     except OSError:
         return False
 
-
 def unique_strings(v):
-    """Deduplicate *v* preserving order, dropping falsy values."""
     return list(dict.fromkeys(x for x in v if x))
-
 
 def _first_nonempty_string(data: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
@@ -383,12 +304,10 @@ def _first_nonempty_string(data: dict[str, Any], *keys: str) -> str | None:
             return value
     return None
 
-
 def _require_string(value: Any, error: str) -> str:
     if not isinstance(value, str) or not value:
         raise RuntimeError(error)
     return value
-
 
 def _post_form_json(
     url: str, data: dict[str, str], *, error_prefix: str
@@ -408,7 +327,6 @@ def _post_form_json(
         raise RuntimeError(f"{error_prefix}: invalid JSON response")
     return payload
 
-
 def _extract_model_ids(items: Any, *keys: str) -> list[str]:
     if not isinstance(items, list):
         return []
@@ -416,33 +334,15 @@ def _extract_model_ids(items: Any, *keys: str) -> list[str]:
         _first_nonempty_string(item, *keys) for item in items if isinstance(item, dict)
     )
 
-
 def which(t, p=None):
     return shutil.which(t, path=p)
 
-
-def _resolve_command(cmd0, *, env=None, cwd=None):
-    search_path = (os.environ if env is None else env).get("PATH")
-    has_sep = os.sep in cmd0 or (os.altsep is not None and os.altsep in cmd0)
-    if os.path.isabs(cmd0) or has_sep:
-        candidate = Path(cmd0)
-        if not candidate.is_absolute() and cwd is not None:
-            candidate = Path(cwd) / candidate
-        return str(candidate) if candidate.exists() else None
-    return which(cmd0, search_path)
-
-
 def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
-    """Run *cmd* via subprocess.run, raising ValueError on timeout."""
     if not cmd:
         raise ValueError("command must not be empty")
-    resolved = _resolve_command(str(cmd[0]), env=env, cwd=cwd)
-    if resolved is None:
-        raise FileNotFoundError(f"Command `{cmd[0]}` was not found on PATH.")
-    exec_cmd = [resolved, *cmd[1:]]
     try:
         return subprocess.run(
-            exec_cmd,
+            cmd,
             cwd=cwd,
             env=env,
             input=stdin_text,
@@ -453,26 +353,12 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
     except subprocess.TimeoutExpired as e:
         raise ValueError(f"command timed out after {timeout}s") from e
 
-
 # lru_cache is intentional: the launch environment is expected to be stable
 # within a single oy run. If env vars change mid-process (e.g. in tests), the
 # cache will be stale.
 @lru_cache(maxsize=8)
-def command_env(cwd=None):
-    """Return the launch environment after verifying `mise` is available.
-
-    `oy` assumes `mise` was already installed and activated before launch, so we
-    rely on the current process environment instead of shelling out to
-    `mise env` on every run. Returns a read-only ``MappingProxyType`` so the
-    cached value cannot be accidentally mutated by callers.
-    """
-    env = os.environ.copy()
-    if not which("mise", env.get("PATH")):
-        raise RuntimeError(
-            "`mise` is required; install and activate `mise` before running `oy`."
-        )
-    return MappingProxyType(env)
-
+def command_env(_cwd=None):
+    return MappingProxyType(os.environ.copy())
 
 _OPENAI_HTTPX_ONLY_KWARGS = (
     "api_key",
@@ -485,40 +371,24 @@ _OPENAI_HTTPX_ONLY_KWARGS = (
     "_strict_response_validation",
 )
 
-
 def _httpx_client_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Return httpx-safe kwargs from a shared OpenAI/httpx config dict."""
     httpx_kwargs = dict(kwargs)
     for key in _OPENAI_HTTPX_ONLY_KWARGS:
         httpx_kwargs.pop(key, None)
     return httpx_kwargs
 
-
 def http_client(**kw):
-    """Create a synchronous httpx client.
-
-    Redirects are disabled by default to prevent provider responses from
-    leaking bearer tokens to unexpected hosts (OWASP ASVS V15.3.2).
-    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so
-    strip them when callers pass through shared config dicts.
-    """
-    return httpx.Client(follow_redirects=False, **_httpx_client_kwargs(kw))
-
+    httpx_kwargs = _httpx_client_kwargs(kw)
+    httpx_kwargs.setdefault("follow_redirects", False)
+    return httpx.Client(**httpx_kwargs)
 
 def async_http_client(**kw):
-    """Create an asynchronous httpx client.
-
-    Redirects are disabled by default to prevent provider responses from
-    leaking bearer tokens to unexpected hosts (OWASP ASVS V15.3.2).
-    OpenAI client kwargs like ``api_key`` are not valid httpx kwargs, so
-    strip them when callers pass through shared config dicts.
-    """
-    return httpx.AsyncClient(follow_redirects=False, **_httpx_client_kwargs(kw))
-
+    httpx_kwargs = _httpx_client_kwargs(kw)
+    httpx_kwargs.setdefault("follow_redirects", False)
+    return httpx.AsyncClient(**httpx_kwargs)
 
 def _sigv4_sign(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
-
 
 def _sigv4_key(secret_key: str, date_stamp: str, region: str, service: str) -> bytes:
     key = _sigv4_sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
@@ -526,15 +396,12 @@ def _sigv4_key(secret_key: str, date_stamp: str, region: str, service: str) -> b
         key = _sigv4_sign(key, part)
     return key
 
-
 def bedrock_base_url(region: str) -> str:
     return f"https://bedrock-mantle.{region}.api.aws/v1"
-
 
 def make_bedrock_token(
     region: str, cwd: Path | None = None, expires: int = 43200
 ) -> str:
-    """Generate a SigV4 pre-signed Bedrock bearer token for *region*."""
     creds = load_aws_credentials(cwd)
     now = datetime.now(timezone.utc)
     amz_date, date_stamp = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
@@ -565,14 +432,11 @@ def make_bedrock_token(
     raw = f"bedrock.amazonaws.com/?{canonical}&X-Amz-Signature={signature}&Version=1"
     return f"bedrock-api-key-{base64.b64encode(raw.encode()).decode()}"
 
-
 def aws_cli(parts, cwd=None, timeout=10):
-    """Run an AWS CLI command and return the subprocess result."""
     env = command_env(cwd)
     if not (aws := which("aws", env.get("PATH"))):
         raise RuntimeError("AWS CLI is not installed or not on PATH")
     return run_cmd([aws, *parts], cwd=cwd, env=env, timeout=timeout)
-
 
 def run_aws_sso_login(cwd=None):
     env = command_env(cwd)
@@ -590,7 +454,6 @@ def run_aws_sso_login(cwd=None):
     )
     if r.returncode:
         raise RuntimeError(f"AWS SSO login failed with exit code {r.returncode}")
-
 
 def load_aws_credentials(
     cwd: Path | None = None, allow_login: bool = True
@@ -627,7 +490,6 @@ def load_aws_credentials(
         creds["session_token"] = token
     return creds
 
-
 def default_region(choice: str | None = None) -> str:
     return (
         choice
@@ -636,20 +498,16 @@ def default_region(choice: str | None = None) -> str:
         or "us-east-1"
     )
 
-
 # ---------------------------------------------------------------------------
 # Credential loading and model discovery helpers
 # ---------------------------------------------------------------------------
-
 
 def load_codex_auth() -> dict[str, Any]:
     data = load_json(CODEX_AUTH_PATH, {})
     return data if isinstance(data, dict) else {}
 
-
 def get_openai_api_key() -> str | None:
     return os.environ.get("OPENAI_API_KEY")
-
 
 def load_codex_session() -> dict[str, Any]:
     auth = load_codex_auth()
@@ -665,12 +523,10 @@ def load_codex_session() -> dict[str, Any]:
         return auth
     raise RuntimeError("Codex CLI auth file does not contain a usable session")
 
-
 def get_codex_api_key() -> str | None:
     auth = load_codex_auth()
     key = auth.get("OPENAI_API_KEY")
     return key if isinstance(key, str) and key else None
-
 
 def _jwt_expiry_epoch(token: str) -> float | None:
     try:
@@ -687,7 +543,6 @@ def _jwt_expiry_epoch(token: str) -> float | None:
         return float(exp)
     return None
 
-
 def _codex_tokens(auth: dict[str, Any]) -> dict[str, str]:
     tokens = auth.get("tokens")
     if not isinstance(tokens, dict):
@@ -698,7 +553,6 @@ def _codex_tokens(auth: dict[str, Any]) -> dict[str, str]:
         if isinstance(value, str) and value:
             result[key] = value
     return result
-
 
 def refresh_codex_chatgpt_session(refresh_token: str) -> dict[str, Any]:
     data = _post_form_json(
@@ -726,7 +580,6 @@ def refresh_codex_chatgpt_session(refresh_token: str) -> dict[str, Any]:
     )
     save_json(CODEX_AUTH_PATH, auth)
     return auth
-
 
 def get_codex_chatgpt_session(force_refresh: bool = False) -> dict[str, str]:
     auth = load_codex_session()
@@ -760,7 +613,6 @@ def get_codex_chatgpt_session(force_refresh: bool = False) -> dict[str, str]:
         "account_id": account_id,
     }
 
-
 def load_codex_model_list() -> list[str]:
     data = load_json(CODEX_MODELS_CACHE_PATH, {})
     return _extract_model_ids(
@@ -772,14 +624,11 @@ def load_codex_model_list() -> list[str]:
         "model_id",
     )
 
-
 # ---------------------------------------------------------------------------
 # Provider client factories and protocol adapters
 # ---------------------------------------------------------------------------
 
-
 def _openai_client_pair(**kwargs: Any) -> tuple[AsyncOpenAI, OpenAI]:
-    """Create OpenAI async/sync SDK clients backed by owned httpx clients."""
     http_client_kwargs = dict(kwargs)
     http_client_kwargs.pop("max_retries", None)
     async_http = async_http_client(**http_client_kwargs)
@@ -788,7 +637,6 @@ def _openai_client_pair(**kwargs: Any) -> tuple[AsyncOpenAI, OpenAI]:
         AsyncOpenAI(http_client=async_http, **kwargs),
         OpenAI(http_client=sync_http, **kwargs),
     )
-
 
 def _openai_pair(
     api_key: str,
@@ -804,94 +652,27 @@ def _openai_pair(
         kwargs["timeout"] = timeout
     return _openai_client_pair(**kwargs)
 
-
 def split_model_spec(spec: str) -> tuple[str | None, str]:
-    """Split ``"shim:model"`` into ``(shim, model)``; bare names return ``(None, spec)``."""
     if ":" in spec:
         shim, _, model = spec.partition(":")
         if shim in set(SHIM_ORDER):
             return shim, model
     return None, spec
 
-
 def join_model_spec(shim: str, model: str) -> str:
-    """Combine a shim name and model ID into a ``"shim:model"`` spec."""
     return f"{shim}:{model}"
 
-
-@dataclass(frozen=True, slots=True)
-class CompletionClient:
-    chat_completion: Callable[
-        [str, list[ChatMessage], list[ToolSpec] | None, str, Any],
-        Awaitable[AssistantMessage],
-    ]
-    list_models: Callable[[], list[str]]
-
-
 # ---------------------------------------------------------------------------
-# Shim registry glue and retry plumbing
+# Retry plumbing
 # ---------------------------------------------------------------------------
-
-
-ShimEnvChecker: TypeAlias = Callable[[Path | None], None]
-ShimClientBuilder: TypeAlias = Callable[..., CompletionClient]
-ShimModelLister: TypeAlias = Callable[[str | None, Path | None], list[str]]
-
-
-@dataclass(frozen=True, slots=True)
-class ShimSpec:
-    name: str
-    ensure_env: ShimEnvChecker
-    build_client: ShimClientBuilder
-    list_models: ShimModelLister
-
-
-def _static_env_checker(check: Callable[[], None]) -> ShimEnvChecker:
-    def wrapper(_cwd: Path | None = None) -> None:
-        check()
-
-    return wrapper
-
-
-def _region_client_builder(
-    build: Callable[[str | None], CompletionClient],
-) -> ShimClientBuilder:
-    def wrapper(region: str | None, _cwd: Path | None) -> CompletionClient:
-        return build(region)
-
-    return wrapper
-
-
-def _static_client_builder(build: Callable[[], CompletionClient]) -> ShimClientBuilder:
-    def wrapper(_region: str | None, _cwd: Path | None) -> CompletionClient:
-        return build()
-
-    return wrapper
-
-
-def _client_model_lister(build_client: ShimClientBuilder) -> ShimModelLister:
-    def list_models(region: str | None, cwd: Path | None) -> list[str]:
-        return build_client(region, cwd).list_models()
-
-    return list_models
-
-
-def _static_model_lister(load_models: Callable[[], list[str]]) -> ShimModelLister:
-    def list_models(_region: str | None, _cwd: Path | None) -> list[str]:
-        return load_models()
-
-    return list_models
-
 
 def _is_retryable_status(status_code: int) -> bool:
     return status_code in {429, 499} or 500 <= status_code < 600
-
 
 class RetryableHttpError(RuntimeError):
     def __init__(self, response: httpx.Response):
         self.response = response
         super().__init__(f"retryable HTTP {response.status_code}")
-
 
 def _parse_retry_after_seconds(value: str | None) -> float | None:
     if not value:
@@ -908,14 +689,12 @@ def _parse_retry_after_seconds(value: str | None) -> float | None:
         seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
     return max(0.0, seconds)
 
-
 def _response_json(response: httpx.Response) -> dict[str, Any] | None:
     try:
         payload = response.json()
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
-
 
 class WaitForRetryableResponse(wait_base):
     def __init__(
@@ -954,7 +733,6 @@ class WaitForRetryableResponse(wait_base):
             return max(TRANSPORT_ERROR_RETRY_DELAY, min(base, self.maximum))
         return base
 
-
 def _retry_error_context(exc: BaseException | None) -> str | None:
     if isinstance(exc, RetryableHttpError):
         msg = _response_error_message(exc.response)
@@ -973,7 +751,6 @@ def _retry_error_context(exc: BaseException | None) -> str | None:
     if exc is not None:
         return str(exc)
     return None
-
 
 async def _call_with_retry(
     call,
@@ -1012,7 +789,6 @@ async def _call_with_retry(
                 raise
     raise RuntimeError("SDK retry loop exited unexpectedly")
 
-
 def _response_error_message(response: httpx.Response) -> str:
     payload = _response_json(response)
     if isinstance(payload, dict):
@@ -1027,7 +803,6 @@ def _response_error_message(response: httpx.Response) -> str:
             return f"{error_type}: {top_msg}" if error_type else top_msg
     return response.text
 
-
 def _bedrock_retry_delay_seconds(response: httpx.Response) -> float | None:
     payload = _response_json(response)
     if not isinstance(payload, dict):
@@ -1037,12 +812,10 @@ def _bedrock_retry_delay_seconds(response: httpx.Response) -> float | None:
         return float(retry_after)
     return None
 
-
 def _responses_instructions(messages: list[ChatMessage]) -> str | None:
     parts = [msg.content for msg in messages if isinstance(msg, SystemMessage)]
     joined = "\n\n".join(part for part in parts if part)
     return joined or None
-
 
 def _responses_input_from_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
@@ -1068,7 +841,7 @@ def _responses_input_from_messages(messages: list[ChatMessage]) -> list[dict[str
                         "type": "function_call",
                         "call_id": call.id,
                         "name": call.name,
-                        "arguments": _json_text(call.arguments),
+                        "arguments": serialize_json(call.arguments),
                         "status": "completed",
                     }
                     for call in msg.tool_calls
@@ -1083,7 +856,6 @@ def _responses_input_from_messages(messages: list[ChatMessage]) -> list[dict[str
                 )
     return items
 
-
 def _responses_tools(tools: list[ToolSpec] | None) -> list[dict[str, Any]] | None:
     result = [
         {
@@ -1096,7 +868,6 @@ def _responses_tools(tools: list[ToolSpec] | None) -> list[dict[str, Any]] | Non
         for tool in tools or []
     ]
     return result or None
-
 
 def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
     # Provider boundaries are loose here: some SDKs hand back dicts, some
@@ -1131,29 +902,24 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
                     pass
         raise RuntimeError(f"Could not parse tool arguments JSON: {exc}") from exc
 
-
 def _drop_reasoning_arg(payload: dict[str, Any]) -> dict[str, Any]:
     stripped = dict(payload)
     stripped.pop("reasoning", None)
     stripped.pop("reasoning_effort", None)
     return stripped
 
-
 # Thread-safe cache for reasoning support per (api_kind, model).
 # Background threads (/ask, /audit) may probe this concurrently.
 _REASONING_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
 _REASONING_CACHE_LOCK = _threading.Lock()
 
-
 def _should_send_reasoning(api_kind: str, model: str) -> bool:
     with _REASONING_CACHE_LOCK:
         return _REASONING_SUPPORT_CACHE.get((api_kind, model), True)
 
-
 def _mark_reasoning_unsupported(api_kind: str, model: str) -> None:
     with _REASONING_CACHE_LOCK:
         _REASONING_SUPPORT_CACHE[(api_kind, model)] = False
-
 
 def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
     if exc.response.status_code != 400:
@@ -1171,7 +937,6 @@ def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
         )
     )
 
-
 async def _call_with_reasoning_fallback(
     api_kind: str,
     model: str,
@@ -1181,8 +946,6 @@ async def _call_with_reasoning_fallback(
     on_retry=None,
     bedrock: bool = False,
 ):
-    """Try *create(payload)* with reasoning; on unsupported-reasoning errors,
-    strip reasoning args and retry.  Returns the provider response object."""
     if not _should_send_reasoning(api_kind, model):
         payload = _drop_reasoning_arg(payload)
     try:
@@ -1198,7 +961,6 @@ async def _call_with_reasoning_fallback(
             on_retry=on_retry,
             bedrock=bedrock,
         )
-
 
 def _responses_payload(
     model: str,
@@ -1221,7 +983,6 @@ def _responses_payload(
         payload["tool_choice"] = tool_choice
         payload["parallel_tool_calls"] = True
     return payload
-
 
 def _decode_responses_output(response: Any) -> AssistantMessage:
     data = (
@@ -1288,7 +1049,6 @@ def _http_error_message(prefix: str, response: httpx.Response) -> str:
         message = json.dumps(detail, ensure_ascii=True)
     return f"{prefix} error {response.status_code}: {message}"
 
-
 async def _read_sse_completed_response(response: httpx.Response) -> dict[str, Any]:
     event_name = ""
     data_lines: list[str] = []
@@ -1329,7 +1089,6 @@ async def _read_sse_completed_response(response: httpx.Response) -> dict[str, An
         return completed
     raise RuntimeError("Codex ChatGPT stream ended before response.completed")
 
-
 BEDROCK_CODEC = ProviderCodec(
     user_role="user",
     assistant_role="assistant",
@@ -1355,7 +1114,6 @@ BEDROCK_CODEC = ProviderCodec(
     },
 )
 
-
 def _sync_model_ids(
     sync_client: OpenAI,
     *,
@@ -1372,7 +1130,6 @@ def _sync_model_ids(
         if default is not None:
             return default
         raise
-
 
 def _openai_responses_client(
     async_client: AsyncOpenAI,
@@ -1408,7 +1165,6 @@ def _openai_responses_client(
         ),
     )
 
-
 def _message_like_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return {key: item for key, item in value.items() if item is not None}
@@ -1417,7 +1173,6 @@ def _message_like_dict(value: Any) -> dict[str, Any]:
         if isinstance(data, dict):
             return data
     return {}
-
 
 def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
     if data := _message_like_dict(message):
@@ -1438,7 +1193,6 @@ def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
         elif isinstance(value, str):
             result[key] = value
     return result
-
 
 def _chat_completion_tool_call(tool_call: Any) -> ToolCall | None:
     data = _message_like_dict(tool_call)
@@ -1465,12 +1219,10 @@ def _chat_completion_tool_call(tool_call: Any) -> ToolCall | None:
         arguments=_decode_tool_call_arguments(arguments),
     )
 
-
 def _is_blank_chat_value(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {} or (
         isinstance(value, str) and not value.strip()
     )
-
 
 def _merged_chat_completion_message(choices: list[Any]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
@@ -1489,7 +1241,6 @@ def _merged_chat_completion_message(choices: list[Any]) -> dict[str, Any]:
         merged = candidate
     return merged
 
-
 def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
     choices = getattr(response, "choices", None)
     message = (
@@ -1507,7 +1258,6 @@ def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
             if (call := _chat_completion_tool_call(tool_call)) is not None
         ],
     )
-
 
 def _openai_chat_completions_client(
     async_client: AsyncOpenAI,
@@ -1547,7 +1297,6 @@ def _openai_chat_completions_client(
         list_models=lambda: _sync_model_ids(sync_client, fallback=None),
     )
 
-
 def _bedrock_tools(tools: list[ToolSpec], tool_choice: str) -> dict[str, Any] | None:
     bedrock_tools = [
         {
@@ -1566,7 +1315,6 @@ def _bedrock_tools(tools: list[ToolSpec], tool_choice: str) -> dict[str, Any] | 
         "toolChoice": {"any": {}} if tool_choice == "required" else {"auto": {}},
     }
 
-
 def _bedrock_output_blocks(data: dict[str, Any]) -> list[ContentBlock]:
     return _extract_blocks(
         data["output"]["message"]["content"],
@@ -1584,9 +1332,7 @@ def _bedrock_output_blocks(data: dict[str, Any]) -> list[ContentBlock]:
         ),
     )
 
-
 def _boto3_bedrock_model_ids(region: str) -> list[str]:
-    """List available Bedrock model IDs using boto3."""
     import boto3
 
     client = boto3.client("bedrock", region_name=region)
@@ -1612,7 +1358,6 @@ def _boto3_bedrock_model_ids(region: str) -> list[str]:
     except Exception:
         pass
     return ids
-
 
 def _bedrock_converse_client(region: str) -> CompletionClient:
     import asyncio
@@ -1665,7 +1410,6 @@ def _bedrock_converse_client(region: str) -> CompletionClient:
         list_models=list_models,
     )
 
-
 def _tool_specs_to_openai(tools: list[ToolSpec]) -> list[dict[str, Any]]:
     return [
         {
@@ -1678,7 +1422,6 @@ def _tool_specs_to_openai(tools: list[ToolSpec]) -> list[dict[str, Any]]:
         }
         for tool in tools
     ]
-
 
 def _codex_chatgpt_client() -> CompletionClient:
     async def chat_completion(
@@ -1731,282 +1474,7 @@ def _codex_chatgpt_client() -> CompletionClient:
         list_models=lambda: load_codex_model_list() or [CODEX_DEFAULT_MODEL],
     )
 
-
-# ---------------------------------------------------------------------------
-# Shim-specific environment checks and registry entries
-# ---------------------------------------------------------------------------
-
-
-def _require_openai_env() -> None:
-    _require_string(get_openai_api_key(), "OPENAI_API_KEY is not set")
-
-
-def _require_codex_env() -> None:
-    load_codex_session()
-
-
-def _require_aws_env(cwd: Path | None = None) -> None:
-    default_region(None)
-    load_aws_credentials(cwd, allow_login=False)
-
-
-def _require_boto3_aws_env(cwd: Path | None = None) -> None:
-    """Validate that boto3 can resolve AWS credentials."""
-    import boto3
-    from botocore.exceptions import NoCredentialsError, PartialCredentialsError
-
-    session = boto3.Session()
-    credentials = session.get_credentials()
-    if credentials is None:
-        raise RuntimeError(
-            "No AWS credentials found. Configure via environment variables, "
-            "~/.aws/credentials, IAM role, or AWS SSO."
-        )
-    try:
-        credentials.get_frozen_credentials()
-    except (NoCredentialsError, PartialCredentialsError) as exc:
-        raise RuntimeError(f"AWS credentials incomplete: {exc}") from exc
-
-
-def _openai_client(max_retries: int = 3) -> CompletionClient:
-    return _openai_responses_client(
-        *_openai_pair(
-            _require_string(get_openai_api_key(), "No OpenAI credentials found"),
-            base_url=os.environ.get("OPENAI_BASE_URL"),
-            max_retries=max_retries,
-        )
-    )
-
-
-def _codex_client() -> CompletionClient:
-    if api_key := get_codex_api_key():
-        return _openai_responses_client(
-            *_openai_pair(api_key),
-            fallback_models=load_codex_model_list,
-            default_models=[CODEX_DEFAULT_MODEL],
-        )
-    return _codex_chatgpt_client()
-
-
-def _bedrock_completion_client(region: str | None = None) -> CompletionClient:
-    return _bedrock_converse_client(default_region(region))
-
-
-def _mantle_completion_client(
-    region: str | None = None, cwd: Path | None = None
-) -> CompletionClient:
-    current = default_region(region)
-    return _openai_chat_completions_client(
-        *_openai_pair(
-            make_bedrock_token(current, cwd),
-            base_url=bedrock_base_url(current),
-            max_retries=0,
-            timeout=BEDROCK_TIMEOUT.read,
-        ),
-        tools_map=_tool_specs_to_openai,
-        bedrock=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Copilot shim – uses the GitHub Copilot API (api.githubcopilot.com)
-# with a GitHub PAT obtained from COPILOT_GITHUB_TOKEN / GH_TOKEN /
-# GITHUB_TOKEN / `gh auth token`. Set COPILOT_BASE_URL to override
-# (e.g. https://api.business.githubcopilot.com for enterprise).
-# ---------------------------------------------------------------------------
-
-_COPILOT_BASE_URL = os.environ.get("COPILOT_BASE_URL", "https://api.githubcopilot.com")
-_COPILOT_INTEGRATION_ID = "copilot-developer-cli"
-_COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
-
-
-def _get_github_token() -> str | None:
-    """Return a GitHub PAT from env vars or `gh auth token`, or None."""
-    for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
-        val = os.environ.get(var)
-        if isinstance(val, str) and val:
-            return val
-    gh = which("gh")
-    if not gh:
-        return None
-    try:
-        proc = subprocess.run(
-            [gh, "auth", "token"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except Exception:
-        return None
-    token = proc.stdout.strip()
-    return token if proc.returncode == 0 and token else None
-
-
-def _copilot_default_headers() -> dict[str, str]:
-    return {
-        "Copilot-Integration-Id": _COPILOT_INTEGRATION_ID,
-        "Editor-Version": _COPILOT_EDITOR_VERSION,
-    }
-
-
-def _copilot_openai_pair(token: str) -> tuple[AsyncOpenAI, OpenAI]:
-    return _openai_client_pair(
-        api_key=token,
-        base_url=_COPILOT_BASE_URL,
-        max_retries=0,
-        default_headers=_copilot_default_headers(),
-    )
-
-
-def _require_copilot_env() -> None:
-    _require_string(
-        _get_github_token(),
-        "No GitHub token found (set GH_TOKEN, GITHUB_TOKEN, or run `gh auth login`)",
-    )
-
-
-def _fetch_copilot_models_raw(token: str) -> list[JSONDict]:
-    """Fetch full model metadata from the Copilot API."""
-    response = httpx.get(
-        f"{_COPILOT_BASE_URL}/models",
-        headers={
-            "Authorization": f"Bearer {token}",
-            **_copilot_default_headers(),
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    data = response.json()
-    return data.get("data", []) if isinstance(data, dict) else []
-
-
-def _classify_copilot_models(
-    token: str,
-) -> tuple[list[str], set[str]]:
-    """Return (sorted chat model IDs, set of /responses-capable IDs) in one pass."""
-    raw = _fetch_copilot_models_raw(token)
-    chat_ids: list[str] = []
-    responses_ids: set[str] = set()
-    for model in raw:
-        model_id = model.get("id")
-        if not isinstance(model_id, str):
-            continue
-        if model.get("capabilities", {}).get("type") == "chat":
-            chat_ids.append(model_id)
-        if "/responses" in (model.get("supported_endpoints") or []):
-            responses_ids.add(model_id)
-    return sorted(chat_ids), responses_ids
-
-
-def _copilot_completion_client() -> CompletionClient:
-    """Build a Copilot client that routes to /responses or /chat/completions."""
-    token = _require_string(_get_github_token(), "No GitHub token found")
-    async_client, sync_client = _copilot_openai_pair(token)
-
-    try:
-        _, responses_models = _classify_copilot_models(token)
-    except Exception:
-        responses_models = set()
-
-    responses_inner = _openai_responses_client(
-        async_client, sync_client, fallback_models=None, default_models=None
-    )
-    chat_inner = _openai_chat_completions_client(
-        async_client, sync_client, tools_map=_tool_specs_to_openai
-    )
-
-    async def chat_completion(
-        model: str,
-        messages: list[ChatMessage],
-        tools: list[ToolSpec] | None = None,
-        tool_choice: str = "auto",
-        on_retry=None,
-    ) -> AssistantMessage:
-        inner = responses_inner if model in responses_models else chat_inner
-        return await inner.chat_completion(
-            model, messages, tools, tool_choice, on_retry
-        )
-
-    def list_models() -> list[str]:
-        try:
-            chat_ids, _ = _classify_copilot_models(token)
-            return chat_ids
-        except Exception:
-            return sorted(
-                m.id
-                for m in sync_client.models.list()
-                if not m.id.startswith("text-embedding")
-            )
-
-    return CompletionClient(chat_completion=chat_completion, list_models=list_models)
-
-
-# ---------------------------------------------------------------------------
-# OpenCode shims – reads credentials from ~/.local/share/opencode/auth.json
-# Zen endpoint: https://opencode.ai/zen/v1  (auth key: "opencode")
-# Go  endpoint: https://opencode.ai/zen/go/v1  (auth key: "opencode-go")
-# ---------------------------------------------------------------------------
-
-
-def _load_opencode_auth() -> dict:
-    try:
-        data = load_json(OPENCODE_AUTH_PATH, {})
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def get_opencode_zen_api_key() -> str | None:
-    entry = _load_opencode_auth().get("opencode", {})
-    return (entry.get("key") or None) if isinstance(entry, dict) else None
-
-
-def get_opencode_go_api_key() -> str | None:
-    entry = _load_opencode_auth().get("opencode-go", {})
-    return (entry.get("key") or None) if isinstance(entry, dict) else None
-
-
-def _require_opencode_zen_env() -> None:
-    _require_string(
-        get_opencode_zen_api_key(),
-        f"No OpenCode Zen credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
-    )
-
-
-def _require_opencode_go_env() -> None:
-    _require_string(
-        get_opencode_go_api_key(),
-        f"No OpenCode Go credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
-    )
-
-
-def _opencode_zen_client() -> CompletionClient:
-    key = _require_string(get_opencode_zen_api_key(), "No OpenCode Zen credentials found")
-    return _openai_chat_completions_client(
-        *_openai_pair(key, base_url=OPENCODE_ZEN_URL),
-        tools_map=_tool_specs_to_openai,
-    )
-
-
-def _opencode_go_client() -> CompletionClient:
-    key = _require_string(get_opencode_go_api_key(), "No OpenCode Go credentials found")
-    return _openai_chat_completions_client(
-        *_openai_pair(key, base_url=OPENCODE_GO_URL),
-        tools_map=_tool_specs_to_openai,
-    )
-
-
 __all__ = [
-    "AssistantMessage",
-    "ChatMessage",
-    "CompletionClient",
-    "ShimSpec",
-    "SystemMessage",
-    "ToolCall",
-    "ToolMessage",
-    "ToolResult",
-    "ToolSpec",
-    "UserMessage",
     "command_env",
     "default_region",
     "join_model_spec",

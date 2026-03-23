@@ -12,7 +12,7 @@
 > | `providers.py` | 1,608 code lines, complexity 397 |
 > | `shim.py` | 223 code lines (thin facade) |
 > | Tests | 1,086 lines across 3 files |
-> | Agent tools | 7 (`list`, `read`, `bash`, `search`, `ask`, `webfetch`, `todowrite`) |
+> | Agent tools | 7 (`list`, `read`, `bash`, `search`, `ask`, `webfetch`, `todo`) |
 > | Provider shims | 7 (`openai`, `codex`, `bedrock`, `bedrock-mantle`, `copilot`, `opencode`, `opencode-go`) |
 > | Runtime dependencies | 10 (`boto3`, `defopt`, `httpx`, `openai`, `rich`, `tiktoken`, `tenacity`, `msgspec`, `headroom-ai`, `prompt-toolkit`) |
 >
@@ -192,7 +192,7 @@ When a provider returns duplicated JSON (e.g., `{"ok":true}{"ok":true}`), the fu
 | **Standard** | [OWASP ASVS 5.0 §V15.1.1](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x24-V15-Secure-Coding-and-Architecture.md) — remediation timeframes for component vulnerabilities |
 | **Status** | Open (improved — background thread lifecycle concern eliminated) |
 
-Current tests cover path traversal, tool dispatch, JSON summarization, transcript lifecycle, shim bridge delegation, reasoning fallback, provider encoding, SSRF URL validation, `todowrite` schema validation, webfetch header blocklist, and `_refresh_mise_env` global mutation. Good. But there is no visible direct test coverage for:
+Current tests cover path traversal, tool dispatch, JSON summarization, transcript lifecycle, shim bridge delegation, reasoning fallback, provider encoding, SSRF URL validation, `todo` schema validation, webfetch header blocklist, and `_refresh_mise_env` global mutation. Good. But there is no visible direct test coverage for:
 - DNS rebinding / TOCTOU in `_validate_url_safe` → `xh` flow
 - Debug log permissions (`0o600` enforcement)
 - Provider OAuth refresh error paths (Codex token refresh failures)
@@ -252,6 +252,6 @@ The `~/.config/oy/` directory, its `sessions/` subdirectory, and parent director
   - `except A, B:` bare syntax fully resolved across providers.py.
   - All 13 findings carried forward; 1 new finding (M8); 13 total (within 10-15 target).
   - 5 high findings, 8 medium findings.
-- 2026-03-19: Previous audit for commit `c0a0300`, version 0.4.1b1. Added `todowrite` tool review; all 12 findings stable.
+- 2026-03-19: Previous audit for commit `c0a0300`, version 0.4.1b1. Added `todo` tool review; all 12 findings stable.
 - 2026-03-19: Previous audit for commit `3f8cfad`, version 0.4.1b1. New findings: H3 (SSRF TOCTOU), H5 (header injection in webfetch).
 - 2026-03-18: Previous audit for commit `e7d77b1`, version 0.4.0.

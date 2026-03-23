@@ -1,11 +1,30 @@
+# Python bytecode
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Packaging/build artifacts
 *.egg-info/
 .eggs/
-.venv/
-.pytest_cache/
-.ruff_cache/
-.cache/
 dist/
 build/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches and test output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Logs
 *.log

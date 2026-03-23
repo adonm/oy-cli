@@ -14,13 +14,18 @@ dependencies = [
   "boto3>=1.35.0",
   "defopt>=7.0.0",
   "httpx>=0.28.1",
+  "markdownify>=1.2.0",
   "openai>=1.68.0",
   "rich>=14.3.0",
   "tiktoken>=0.7.0",
   "tenacity>=9.0.0",
   "msgspec>=0.20.0",
-  "headroom-ai>=0.4.6",
+  "toons>=0.5.3",
   "prompt-toolkit>=3.0.50",
+  "regex>=2026.0.0",
+  "pathspec>=0.12.1",
+  "zstandard>=0.23.0",
+  "pygount>=3.0.0",
 ]
 
 [dependency-groups]
@@ -30,18 +35,19 @@ dev = [
 ]
 
 [project.scripts]
-oy = "oy_cli:main"
+oy = "oy_cli.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/wagov-dtt/oy-cli"
 Repository = "https://github.com/wagov-dtt/oy-cli"
 Issues = "https://github.com/wagov-dtt/oy-cli/issues"
 
-[tool.setuptools]
-packages = ["oy_cli"]
-
 [tool.setuptools.package-data]
-oy_cli = ["README.md"]
+oy_cli = ["session_text.toml"]
+
+[tool.setuptools.packages.find]
+include = ["oy_cli", "oy_cli.*"]
+
 
 [tool.uv]
 default-groups = ["dev"]

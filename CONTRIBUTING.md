@@ -4,24 +4,27 @@ Thanks for contributing to `oy-cli`.
 
 ## Development Setup
 
-`mise` manages local tooling and `uv` handles Python environments and packaging.
+Use `uv` for Python environment management, installs, linting, testing, and builds.
+Do not use bare `pytest`, `ruff`, `pip`, or ad-hoc virtualenv commands for normal repo workflows.
+Prefer `uv sync` and `uv run ...` consistently.
 
 If you use Dev Containers, this repo includes `.devcontainer/devcontainer.json` based on [`wagov-dtt/devcontainer-base`](https://github.com/wagov-dtt/devcontainer-base).
 
 ```bash
-mise install
 uv sync
 ```
 
 ## Common Commands
 
+Always run checks through `uv`:
+
 ```bash
-mise run fmt
-mise run lint
-mise run check
+uv sync
+uv run ruff format .
+uv run ruff check .
 uv run python -m pytest tests/ -v
 uv run oy --help
-mise run build
+uv build
 ```
 
 ## Project Notes
@@ -35,7 +38,7 @@ mise run build
 - tuning env vars: `OY_MAX_CONTEXT_TOKENS`, `OY_UNATTENDED_TIMEOUT_SECONDS`, `OY_MAX_BASH_CMD_BYTES`, `OY_BEDROCK_READ_TIMEOUT`, `OY_BEDROCK_MAX_OUTPUT_TOKENS`
 - prefer simple, direct changes over abstraction-heavy rewrites
 - `except A, B:` syntax is valid Python 3.14+ (PEP 758) -- ruff formats it this way; parenthesised form also works
-- keep system prompts tight; avoid duplicating tool docs inside prompts when tool definitions already provide them
+- keep system prompts and tool descriptions in `oy_cli/session_text.toml`
 - complexity guidance should favor grugbrain.dev style simplicity
 - security guidance should explicitly align with OWASP thinking
 - performance guidance should reflect performance-aware programming: measure first, avoid obvious waste
@@ -45,8 +48,10 @@ mise run build
 1. **Pre-flight** — all checks must pass:
 
    ```bash
-   mise run check        # ruff + pytest + oy model
-   mise run build        # builds wheel + sdist into dist/
+   uv run ruff check .
+   uv run python -m pytest tests/ -v
+   uv run oy model
+   uv build              # builds wheel + sdist into dist/
    ```
 
 2. **Bump version** in `pyproject.toml`:
@@ -82,4 +87,4 @@ mise run build
 
 - keep `README.md` user-focused
 - keep contributor workflow here in `CONTRIBUTING.md`
-- make sure checks pass before shipping — don't skip `mise run check`
+- make sure checks pass before shipping — use the `uv` commands above before release

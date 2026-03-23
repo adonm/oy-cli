@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import json
 import logging
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+import httpx
 from unittest.mock import patch
 
 import msgspec
 
 import oy_cli
-from oy_cli.shim import SystemMessage, ToolMessage, ToolResult, ToolSpec, UserMessage
+from oy_cli.shim import AssistantMessage, SystemMessage, ToolCall, ToolMessage, ToolResult, ToolSpec, UserMessage
 
 
 def make_state(root: Path, tool_specs=None, *, unattended_deadline: float = float("inf")):
@@ -34,11 +34,11 @@ class ShimDirectTests(unittest.TestCase):
     def test_get_client_uses_shim_module(self):
         sentinel = object()
         with (
-            patch.object(oy_cli, "require_api_env") as require_api_env,
-            patch.object(oy_cli, "resolve_active_shim", return_value="openai") as resolve,
-            patch.object(oy_cli, "default_region", return_value="ap-southeast-2") as default_region,
-            patch.object(oy_cli.Path, "cwd", return_value=Path("/workspace")),
-            patch.object(oy_cli, "_shim_get_client", return_value=sentinel),
+            patch.object(oy_cli.runtime, "require_api_env") as require_api_env,
+            patch.object(oy_cli.runtime, "resolve_active_shim", return_value="openai") as resolve,
+            patch.object(oy_cli.runtime, "default_region", return_value="ap-southeast-2") as default_region,
+            patch.object(oy_cli.runtime.Path, "cwd", return_value=Path("/workspace")),
+            patch.object(oy_cli.runtime, "_shim_get_client", return_value=sentinel),
         ):
             client = oy_cli.get_client("openai:gpt-test")
 
@@ -55,9 +55,9 @@ class ShimDirectTests(unittest.TestCase):
             return True, None
 
         with (
-            patch.object(oy_cli, "_shim_ensure_api_env", side_effect=fake_ensure),
-            patch.object(oy_cli, "_model", return_value="openai:gpt-test"),
-            patch.object(oy_cli, "_shim_name", return_value="openai"),
+            patch.object(oy_cli.runtime, "_shim_ensure_api_env", side_effect=fake_ensure),
+            patch.object(oy_cli.runtime, "_model", return_value="openai:gpt-test"),
+            patch.object(oy_cli.runtime, "_shim_name", return_value="openai"),
         ):
             result = oy_cli.ensure_api_env(Path("/workspace"))
 
@@ -87,7 +87,7 @@ class ToolDispatchTests(unittest.TestCase):
         state = make_state(
             Path("/tmp/ok"), oy_cli.ToolRegistry(), unattended_deadline=10.0
         )
-        with patch.object(oy_cli.time, "monotonic", return_value=10.0):
+        with patch.object(oy_cli.agent.time, "monotonic", return_value=10.0):
             with self.assertRaisesRegex(
                 TimeoutError, r"reached unattended timeout \(1h\)"
             ):
@@ -121,46 +121,66 @@ class TranscriptTests(unittest.TestCase):
             max_context_tokens=18,
             max_message_tokens=100,
         )
-        with patch.object(oy_cli, "count_tokens", side_effect=lambda text: len(text)):
+        with patch.object(oy_cli.agent, "count_tokens", side_effect=lambda text: len(text)):
             prepared = transcript.prepared_messages()
         self.assertEqual(prepared[0], SystemMessage("sys"))
         self.assertIsInstance(prepared[1], UserMessage)
         self.assertIn("earlier messages omitted", prepared[1].content)
         self.assertEqual(prepared[-1], UserMessage("kl"))
 
-    def test_prepared_messages_uses_headroom_before_dropping_history(self):
+    def test_prepared_messages_keeps_tool_calls_and_outputs_together(self):
+        transcript = oy_cli.Transcript(
+            messages=[
+                SystemMessage("sys"),
+                UserMessage("earlier"),
+                AssistantMessage(
+                    "",
+                    tool_calls=[ToolCall(id="call_1", name="bash", arguments={})],
+                ),
+                ToolMessage(
+                    "call_1",
+                    "bash",
+                    ToolResult(ok=True, content="tool output"),
+                ),
+                UserMessage("tail"),
+            ],
+            max_context_tokens=23,
+            max_message_tokens=100,
+        )
+        with patch.object(oy_cli.agent, "count_tokens", side_effect=lambda text: len(text)):
+            prepared = transcript.prepared_messages()
+
+        self.assertEqual(
+            prepared,
+            [
+                SystemMessage("sys"),
+                UserMessage("... [3 earlier messages omitted to fit context limit]"),
+                UserMessage("tail"),
+            ],
+        )
+
+    def test_prepared_messages_packs_older_history_with_toons_before_dropping(self):
         transcript = oy_cli.Transcript(
             messages=[
                 SystemMessage("sys"),
                 UserMessage("abcdef"),
                 UserMessage("ghij"),
+                UserMessage("mnop"),
+                UserMessage("kl"),
             ],
-            max_context_tokens=21,
+            max_context_tokens=80,
             max_message_tokens=100,
         )
+        packed_note = SystemMessage("packed")
         with (
-            patch.object(oy_cli, "count_tokens", side_effect=lambda text: len(text)),
-            patch.object(
-                oy_cli,
-                "headroom_compress",
-                return_value=SimpleNamespace(
-                    messages=[
-                        {"role": "system", "content": "sys"},
-                        {"role": "user", "content": ""},
-                        {"role": "user", "content": "ghij"},
-                    ]
-                ),
-            ) as mock_headroom,
+            patch.object(oy_cli.agent, "count_tokens", side_effect=lambda text: len(text)),
+            patch.object(oy_cli.agent, "_packed_history_note", return_value=packed_note),
         ):
             prepared = transcript.prepared_messages(model="gpt-4o")
-        mock_headroom.assert_called_once()
+
         self.assertEqual(
             prepared,
-            [
-                SystemMessage("sys"),
-                UserMessage(""),
-                UserMessage("ghij"),
-            ],
+            [SystemMessage("sys"), packed_note, UserMessage("mnop"), UserMessage("kl")],
         )
 
 
@@ -195,7 +215,7 @@ class ReadToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "demo.txt").write_text("a\nb\nc\n", encoding="utf-8")
-            with patch.object(oy_cli, "_print"):
+            with patch.object(oy_cli.runtime, "show"):
                 result = oy_cli.tool_read(
                     self._state(root), path="demo.txt", offset=2, limit=2
                 )
@@ -208,7 +228,7 @@ class ReadToolTests(unittest.TestCase):
             root = Path(d)
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
-            with patch.object(oy_cli, "_print"):
+            with patch.object(oy_cli.runtime, "show"):
                 result = oy_cli.tool_read(self._state(root), path="src")
         self.assertEqual(result, "src/main.py")
 
@@ -223,7 +243,7 @@ class ListToolTests(unittest.TestCase):
             (root / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
             (root / "src" / "util.txt").write_text("helper\n", encoding="utf-8")
             state = make_state(root)
-            with patch.object(oy_cli, "_print"):
+            with patch.object(oy_cli.runtime, "show"):
                 result = oy_cli.tool_list(state, path="src/*.py")
         self.assertEqual(result, "src/main.py")
 
@@ -240,14 +260,12 @@ class BashToolTests(unittest.TestCase):
             result = SimpleNamespace(returncode=1, stdout="out\n", stderr="err\n")
             with (
                 patch.object(
-                    oy_cli, "require_command_env", return_value={"PATH": "/bin"}
+                    oy_cli.runtime, "require_command_env", return_value={"PATH": "/bin"}
                 ),
-                patch.object(oy_cli, "which", return_value="/bin/bash"),
-                patch.object(
-                    oy_cli, "run_cmd_auto_install", return_value=result
-                ) as run_cmd,
-                patch.object(oy_cli, "show"),
-                patch.object(oy_cli, "_print"),
+                patch.object(oy_cli.runtime, "which", return_value="/bin/bash"),
+                patch.object(oy_cli.runtime, "run_cmd", return_value=result) as run_cmd,
+                patch.object(oy_cli.runtime, "show"),
+                patch.object(oy_cli.runtime, "_print"),
             ):
                 payload = oy_cli.tool_bash(
                     self._state(root), "printf out; printf err >&2", timeout_seconds=30
@@ -258,14 +276,13 @@ class BashToolTests(unittest.TestCase):
             cwd=root,
             env={"PATH": "/bin"},
             timeout=30,
-            reason="bash command",
         )
         self.assertEqual(payload["command"], "printf out; printf err >&2")
         self.assertEqual(payload["exit_code"], 1)
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["output_format"], "text")
-        self.assertIn("[stdout]", payload["output"])
-        self.assertIn("[stderr]", payload["output"])
+        self.assertEqual(payload["content_format"], "text")
+        self.assertIn("[stdout]", payload["content"])
+        self.assertIn("[stderr]", payload["content"])
         self.assertFalse(payload["truncated"])
 
     def test_bash_parses_json_output_when_possible(self):
@@ -280,21 +297,23 @@ class BashToolTests(unittest.TestCase):
             )
             with (
                 patch.object(
-                    oy_cli, "require_command_env", return_value={"PATH": "/bin"}
+                    oy_cli.runtime, "require_command_env", return_value={"PATH": "/bin"}
                 ),
-                patch.object(oy_cli, "which", return_value="/bin/bash"),
-                patch.object(oy_cli, "run_cmd_auto_install", return_value=result),
-                patch.object(oy_cli, "show"),
-                patch.object(oy_cli, "_print"),
+                patch.object(oy_cli.runtime, "which", return_value="/bin/bash"),
+                patch.object(oy_cli.runtime, "run_cmd", return_value=result),
+                patch.object(oy_cli.runtime, "show"),
+                patch.object(oy_cli.runtime, "_print"),
             ):
                 payload = oy_cli.tool_bash(self._state(root), "echo json")
 
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["output_format"], "json")
-        self.assertEqual(payload["output"], {"count": 2, "items": [1, 2]})
+        self.assertEqual(payload["content_format"], "toon")
+        self.assertIsInstance(payload["content"], str)
+        self.assertIn("count", payload["content"])
+        self.assertIn("items", payload["content"])
         self.assertFalse(payload["truncated"])
 
-    def test_bash_preview_uses_pretty_json_block(self):
+    def test_bash_preview_uses_toon_block(self):
         result = SimpleNamespace(
             returncode=1,
             stdout='{"count": 2, "items": [1, 2]}',
@@ -302,142 +321,285 @@ class BashToolTests(unittest.TestCase):
         )
 
         rendered = oy_cli._render_bash_preview(
-            "echo json", result, {"output_format": "json"}
+            "echo json", result, {"content_format": "toon"}
         )
 
         self.assertIn("```bash", rendered)
         self.assertIn("$ echo json", rendered)
-        self.assertIn("```json", rendered)
-        self.assertIn('  "count": 2,', rendered)
-        self.assertIn('  "items": [', rendered)
+        self.assertIn("count", rendered)
+        self.assertIn("items", rendered)
+        self.assertNotIn("```json", rendered)
         self.assertIn("- exit 1", rendered)
         self.assertIn("**stderr**", rendered)
+
+    def test_bash_preview_prefers_existing_toon_output(self):
+        result = SimpleNamespace(returncode=0, stdout='{"count": 2}', stderr="")
+
+        rendered = oy_cli._render_bash_preview(
+            "echo json", result, {"content_format": "toon", "content": "count: 2"}
+        )
+
+        self.assertIn("count: 2", rendered)
+        self.assertNotIn('{"count": 2}', rendered)
 
 
 class SearchToolTests(unittest.TestCase):
     def _state(self, root: Path):
         return make_state(root)
 
-    def test_search_uses_ripgrep_output(self):
+    def test_search_returns_structured_matches(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            rg_output = "\n".join(
-                [
-                    json.dumps(
-                        {
-                            "type": "match",
-                            "data": {
-                                "path": {"text": str(root / "src" / "main.py")},
-                                "lines": {"text": "needle\n"},
-                                "line_number": 1,
-                                "submatches": [
-                                    {"match": {"text": "needle"}, "start": 0, "end": 6}
-                                ],
-                            },
-                        }
-                    ),
-                    json.dumps({"type": "summary", "data": {"stats": {"matches": 1}}}),
-                ]
-            ).encode()
-
-            class Result:
-                returncode = 0
-                stdout = rg_output.decode()
-                stderr = ""
-
-            def fake_run_cmd(args, **kwargs):
-                self.assertEqual(args[:4], ["rg", "--json", "--line-number", "--color"])
-                self.assertIn("needle", args)
-                self.assertIn(str(root / "src"), args)
-                return Result()
-
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
-            with (
-                patch.object(oy_cli, "command_env", return_value={"PATH": "/test/bin"}),
-                patch.object(oy_cli, "run_cmd", fake_run_cmd),
-                patch.object(oy_cli, "_print"),
-            ):
+
+            with patch.object(oy_cli.runtime, "show"):
                 result = oy_cli.tool_search(self._state(root), "needle", path="src")
 
-        self.assertIn("src/main.py:1:1:needle", result)
+        self.assertEqual(result["match_count"], 1)
+        self.assertFalse(result["truncated"])
+        self.assertEqual(
+            result["matches"],
+            [{"path": "src/main.py", "line_number": 1, "column": 1, "text": "needle"}],
+        )
 
-    def test_search_supports_rg_args_passthrough(self):
+    def test_search_respects_requested_file_path(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            rg_output = "\n".join(
-                [
-                    json.dumps(
-                        {
-                            "type": "match",
-                            "data": {
-                                "path": {"text": str(root / "src" / "main.py")},
-                                "lines": {"text": "Needle\n"},
-                                "line_number": 1,
-                                "submatches": [
-                                    {"match": {"text": "Needle"}, "start": 0, "end": 6}
-                                ],
-                            },
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "type": "context",
-                            "data": {
-                                "path": {"text": str(root / "src" / "main.py")},
-                                "lines": {"text": "after\n"},
-                                "line_number": 2,
-                            },
-                        }
-                    ),
-                ]
-            ).encode()
-
-            class Result:
-                returncode = 0
-                stdout = rg_output.decode()
-                stderr = ""
-
-            def fake_run_cmd(args, **kwargs):
-                self.assertIn("--json", args)
-                self.assertIn("--line-number", args)
-                self.assertIn("--glob", args)
-                self.assertIn("*.py", args)
-                self.assertIn("--ignore-case", args)
-                self.assertIn("--word-regexp", args)
-                self.assertIn("--fixed-strings", args)
-                self.assertIn("--context", args)
-                self.assertIn("1", args)
-                return Result()
-
             (root / "src").mkdir()
-            (root / "src" / "main.py").write_text("Needle\nafter\n", encoding="utf-8")
-            with (
-                patch.object(oy_cli, "command_env", return_value={"PATH": "/test/bin"}),
-                patch.object(oy_cli, "run_cmd", fake_run_cmd),
-                patch.object(oy_cli, "_print"),
-            ):
-                result = oy_cli.tool_search(
+            (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
+            (root / "src" / "other.py").write_text("needle\n", encoding="utf-8")
+
+            with patch.object(oy_cli.runtime, "show"):
+                result = oy_cli.tool_search(self._state(root), "needle", path="src/main.py")
+
+        self.assertEqual(result["match_count"], 1)
+        self.assertEqual(result["matches"][0]["path"], "src/main.py")
+
+    def test_search_respects_gitignore_and_limit(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("needle\nneedle again\n", encoding="utf-8")
+            (root / "ignored.txt").write_text("needle\n", encoding="utf-8")
+
+            with patch.object(oy_cli.runtime, "show"):
+                result = oy_cli.tool_search(self._state(root), "needle", limit=1)
+
+        self.assertEqual(result["match_count"], 2)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["matches"]), 1)
+        self.assertEqual(result["matches"][0]["path"], "src/main.py")
+
+    def test_search_uses_workspace_gitignore_for_subpaths(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
+            (root / "src" / "generated").mkdir(parents=True)
+            (root / "src" / "generated" / "artifact.py").write_text(
+                "needle\n", encoding="utf-8"
+            )
+            (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
+
+            with patch.object(oy_cli.runtime, "show"):
+                result = oy_cli.tool_search(self._state(root), "needle", path="src")
+
+        self.assertEqual(result["match_count"], 1)
+        self.assertEqual(result["matches"][0]["path"], "src/main.py")
+
+
+class ReplaceToolTests(unittest.TestCase):
+    def _state(self, root: Path):
+        return make_state(root)
+
+    def test_replace_tool_registered(self):
+        names = [spec.name for spec in oy_cli.TOOL_REGISTRY.specs()]
+        self.assertIn("replace", names)
+
+    def test_replace_args_schema_has_replacement(self):
+        schema = msgspec.json.schema(oy_cli.ReplaceArgs)
+        defs = schema.get("$defs", {})
+        props = defs.get("ReplaceArgs", schema).get("properties", {})
+        self.assertIn("pattern", props)
+        self.assertIn("replacement", props)
+
+    def test_replace_updates_matching_files(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "src").mkdir()
+            target = root / "src" / "main.py"
+            target.write_text("alpha needle beta needle\n", encoding="utf-8")
+
+            with patch.object(oy_cli.runtime, "show"):
+                result = oy_cli.tool_replace(
                     self._state(root),
-                    "Needle",
+                    "needle",
+                    "thread",
                     path="src",
-                    args=[
-                        "--glob",
-                        "*.py",
-                        "--ignore-case",
-                        "--word-regexp",
-                        "--fixed-strings",
-                        "--context",
-                        "1",
-                    ],
                 )
 
-        self.assertIn("src/main.py:1:1:Needle", result)
-        self.assertIn("src/main.py-2-:after", result)
+            self.assertEqual(target.read_text(encoding="utf-8"), "alpha thread beta thread\n")
+            self.assertEqual(result["changed_file_count"], 1)
+            self.assertEqual(result["replacement_count"], 2)
+            self.assertFalse(result["truncated"])
+            self.assertEqual(
+                result["changed_files"],
+                [{"path": "src/main.py", "replacements": 2}],
+            )
+
+    def test_replace_respects_gitignore_and_skips_archives(self):
+        import tempfile
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+            (root / "src").mkdir()
+            target = root / "src" / "main.txt"
+            target.write_text("needle\n", encoding="utf-8")
+            (root / "ignored.txt").write_text("needle\n", encoding="utf-8")
+            with zipfile.ZipFile(root / "bundle.zip", "w") as archive:
+                archive.writestr("inner.txt", "needle\n")
+
+            with patch.object(oy_cli.runtime, "show"):
+                result = oy_cli.tool_replace(
+                    self._state(root),
+                    "needle",
+                    "thread",
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "thread\n")
+            self.assertEqual((root / "ignored.txt").read_text(encoding="utf-8"), "needle\n")
+            self.assertEqual(result["changed_file_count"], 1)
+            self.assertEqual(result["replacement_count"], 1)
+            self.assertEqual(result["skipped_count"], 1)
+            self.assertEqual(
+                result["skipped"],
+                [{"path": "bundle.zip", "reason": "archive"}],
+            )
+
+    def test_replace_uses_workspace_gitignore_for_subpaths(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
+            (root / "src" / "generated").mkdir(parents=True)
+            generated = root / "src" / "generated" / "artifact.txt"
+            generated.write_text("needle\n", encoding="utf-8")
+            main = root / "src" / "main.txt"
+            main.write_text("needle\n", encoding="utf-8")
+
+            with patch.object(oy_cli.runtime, "show"):
+                result = oy_cli.tool_replace(
+                    self._state(root),
+                    "needle",
+                    "thread",
+                    path="src",
+                )
+
+            self.assertEqual(main.read_text(encoding="utf-8"), "thread\n")
+            self.assertEqual(generated.read_text(encoding="utf-8"), "needle\n")
+            self.assertEqual(result["changed_file_count"], 1)
+            self.assertEqual(
+                result["changed_files"],
+                [{"path": "src/main.txt", "replacements": 1}],
+            )
+
+    def test_replace_rejects_invalid_pattern(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            state = self._state(root)
+
+            with self.assertRaisesRegex(ValueError, "Invalid replace pattern"):
+                oy_cli.tool_replace(state, "(", "thread")
+
+
+class SlocToolTests(unittest.TestCase):
+    def _state(self, root: Path):
+        return make_state(root)
+
+    def test_sloc_tool_registered(self):
+        names = [spec.name for spec in oy_cli.TOOL_REGISTRY.specs()]
+        self.assertIn("sloc", names)
+
+    def test_sloc_args_schema_has_path(self):
+        schema = msgspec.json.schema(oy_cli.SlocArgs)
+        defs = schema.get("$defs", {})
+        props = defs.get("SlocArgs", schema).get("properties", {})
+        self.assertIn("path", props)
+
+    def test_sloc_counts_source_lines(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "pkg").mkdir()
+            (root / "pkg" / "main.py").write_text(
+                '"""docs"""\n\nprint("hi")\n', encoding="utf-8"
+            )
+            (root / "pkg" / "util.js").write_text(
+                '// docs\nconst value = 1;\n', encoding="utf-8"
+            )
+
+            with patch.object(oy_cli.runtime, "show"):
+                payload = oy_cli.tool_sloc(self._state(root), path="pkg")
+
+        self.assertEqual(payload["path"], "pkg")
+        self.assertEqual(payload["total_file_count"], 2)
+        self.assertGreaterEqual(payload["total_code_count"], 2)
+        self.assertEqual(payload["language_count"], 2)
+        languages = {item["language"] for item in payload["languages"]}
+        self.assertEqual(languages, {"Python", "JavaScript"})
+        self.assertFalse(payload["truncated"])
+
+    def test_sloc_reports_non_countable_files(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bad = root / "broken.py"
+            bad.write_bytes(b'print("ok")\n\x80\n')
+
+            with patch.object(oy_cli.runtime, "show"):
+                payload = oy_cli.tool_sloc(self._state(root), path="broken.py")
+
+        self.assertEqual(payload["total_file_count"], 1)
+        self.assertEqual(payload["total_code_count"], 0)
+        self.assertEqual(payload["error_count"], 1)
+        self.assertEqual(payload["state_counts"], [{"state": "error", "file_count": 1}])
+        self.assertEqual(payload["errors"][0]["path"], "broken.py")
+
+    def test_sloc_uses_workspace_gitignore_for_subpaths(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".gitignore").write_text("pkg/generated/\n", encoding="utf-8")
+            (root / "pkg" / "generated").mkdir(parents=True)
+            (root / "pkg" / "generated" / "artifact.py").write_text(
+                'print("skip")\n', encoding="utf-8"
+            )
+            (root / "pkg" / "main.py").write_text('print("keep")\n', encoding="utf-8")
+
+            with patch.object(oy_cli.runtime, "show"):
+                payload = oy_cli.tool_sloc(self._state(root), path="pkg")
+
+        self.assertEqual(payload["total_file_count"], 1)
+        self.assertEqual(payload["languages"][0]["file_count"], 1)
 
 
 class PrivatePathPermissionTests(unittest.TestCase):
@@ -450,7 +612,7 @@ class PrivatePathPermissionTests(unittest.TestCase):
             config_dir.mkdir(parents=True, mode=0o755, exist_ok=True)
             config_dir.chmod(0o755)
 
-            with patch.dict(oy_cli.os.environ, {"OY_CONFIG": str(config_path)}, clear=False):
+            with patch.dict(oy_cli.runtime.os.environ, {"OY_CONFIG": str(config_path)}, clear=False):
                 oy_cli._save_cfg({"model": "gpt-test"})
 
             self.assertEqual(config_dir.stat().st_mode & 0o777, 0o700)
@@ -468,11 +630,55 @@ class PrivatePathPermissionTests(unittest.TestCase):
             history_path.write_text("hello\n", encoding="utf-8")
             history_path.chmod(0o644)
 
-            with patch.object(oy_cli, "CONFIG_PATH", config_path):
+            with patch.object(oy_cli.runtime, "CONFIG_PATH", config_path):
                 oy_cli._create_prompt_session()
 
             self.assertEqual(history_dir.stat().st_mode & 0o777, 0o700)
             self.assertEqual(history_path.stat().st_mode & 0o777, 0o600)
+
+    def test_git_diff_shortstat_reports_clean_repo(self):
+        result = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(oy_cli.cli, "run_cmd", return_value=result) as run_cmd:
+            summary = oy_cli._git_diff_shortstat(Path("/workspace"))
+
+        run_cmd.assert_called_once_with(
+            [
+                "git",
+                "-C",
+                "/workspace",
+                "diff",
+                "--shortstat",
+                "--no-ext-diff",
+                "HEAD",
+                "--",
+            ],
+            timeout=5,
+        )
+        self.assertEqual(summary, "git diff: clean")
+
+    def test_read_input_includes_git_diff_context(self):
+        prompts: list[object] = []
+
+        class PromptSessionStub:
+            def prompt(self, value):
+                prompts.append(value)
+                return "hello"
+
+        with (
+            patch.object(oy_cli.cli, "_git_diff_shortstat", return_value="1 file changed, 2 insertions(+)"),
+            patch("prompt_toolkit.formatted_text.ANSI", side_effect=lambda text: text),
+        ):
+            result = oy_cli._read_input(PromptSessionStub(), Path("/workspace"))
+
+        self.assertEqual(result, "hello")
+        self.assertEqual(
+            prompts,
+            [
+                "\x1b[2m1 file changed, 2 insertions(+)\x1b[0m\n"
+                "\x1b[1;32moy ❯\x1b[0m "
+            ],
+        )
 
     def test_handle_save_hardens_sessions_directory_permissions(self):
         import tempfile
@@ -484,8 +690,8 @@ class PrivatePathPermissionTests(unittest.TestCase):
             transcript = oy_cli.Transcript.with_system_prompt("sys")
 
             with (
-                patch.object(oy_cli, "_SESSIONS_DIR", sessions_dir),
-                patch.object(oy_cli, "_print"),
+                patch.object(oy_cli.cli, "_SESSIONS_DIR", sessions_dir),
+                patch.object(oy_cli.runtime, "_print"),
             ):
                 oy_cli._handle_save("demo", transcript, "openai:gpt-test")
 
@@ -504,9 +710,9 @@ class PrivatePathPermissionTests(unittest.TestCase):
 
             try:
                 with (
-                    patch.dict(oy_cli.os.environ, {"OY_DEBUG": "1"}, clear=False),
-                    patch.object(oy_cli, "CONFIG_PATH", config_path),
-                    patch.object(oy_cli.logging, "getLogger", return_value=logger),
+                    patch.dict(oy_cli.runtime.os.environ, {"OY_DEBUG": "1"}, clear=False),
+                    patch.object(oy_cli.runtime, "CONFIG_PATH", config_path),
+                    patch.object(oy_cli.runtime.logging, "getLogger", return_value=logger),
                 ):
                     _, log_path = oy_cli._init_debug_log()
             finally:
@@ -518,240 +724,30 @@ class PrivatePathPermissionTests(unittest.TestCase):
             self.assertEqual(Path(log_path).stat().st_mode & 0o777, 0o600)
 
 
-class OptionalToolInstallerTests(unittest.TestCase):
-    def test_mise_install_command_returns_all_requested_recipes(self):
-        self.assertEqual(
-            oy_cli._mise_install_command(["rg", "unknown"]),
-            [
-                "mise",
-                "use",
-                "-g",
-                "github:BurntSushi/ripgrep",
-            ],
+class ToonsPackingTests(unittest.TestCase):
+    def test_packed_history_note_uses_toon_text(self):
+        note = oy_cli._packed_history_note(
+            [UserMessage("hello"), UserMessage("world")]
         )
 
-    def test_missing_tool_message_recommends_installing_all_missing_tools(self):
-        with patch.object(oy_cli, "which", return_value=None):
-            message = oy_cli._missing_tool_install_message(
-                ["rg"], "search", ["rg", "unknown"]
-            )
+        self.assertIn("Packed earlier conversation history in TOON.", note.content)
+        self.assertIn("messages", note.content)
+        self.assertIn("role", note.content)
+        self.assertIn("content", note.content)
 
-        self.assertIn("Missing `rg` for search.", message)
-        self.assertIn(
-            "mise use -g github:BurntSushi/ripgrep",
-            message,
-        )
+    def test_pack_messages_with_toons_skips_tool_state(self):
+        messages = [
+            SystemMessage("sys"),
+            UserMessage("hello"),
+            AssistantMessage("", tool_calls=[ToolCall(id="call_1", name="bash", arguments={})]),
+            ToolMessage("call_1", "bash", ToolResult(ok=True, content={"ok": True})),
+            UserMessage("after"),
+        ]
 
-    def test_ensure_optional_tools_installs_all_missing_via_mise(self):
-        env = {"PATH": "/test/bin"}
-        refreshed = {"PATH": "/test/bin:/installed/bin"}
+        packed = oy_cli._pack_messages_with_toons(messages)
 
-        calls = []
+        self.assertEqual(packed, messages)
 
-        def fake_which(name, path=None):
-            if path == env["PATH"] and name == "rg":
-                return None
-            if path == env["PATH"] and name == "mise":
-                return "/test/bin/mise"
-            if path == refreshed["PATH"] and name == "rg":
-                return f"/installed/bin/{name}"
-            if path == refreshed["PATH"] and name == "mise":
-                return "/installed/bin/mise"
-            return None
-
-        class InstallResult:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
-
-        class EnvResult:
-            returncode = 0
-            stdout = '{"PATH": "/test/bin:/installed/bin"}'
-            stderr = ""
-
-        def fake_run_cmd(args, **kwargs):
-            calls.append((args, kwargs))
-            return (
-                EnvResult()
-                if args[:3] == ["/test/bin/mise", "env", "-J"]
-                else InstallResult()
-            )
-
-        with (
-            patch.object(oy_cli, "command_env", side_effect=[env, refreshed]),
-            patch.object(oy_cli, "which", side_effect=fake_which),
-            patch.object(oy_cli, "run_cmd", side_effect=fake_run_cmd),
-            patch.object(oy_cli, "_print"),
-        ):
-            oy_cli.command_env.cache_clear = lambda: None
-            result = oy_cli.ensure_optional_tools("rg", reason="search")
-
-        self.assertEqual(result, refreshed)
-        self.assertEqual(
-            calls[0][0],
-            [
-                "mise",
-                "use",
-                "-g",
-                "github:BurntSushi/ripgrep",
-                "github:ast-grep/ast-grep",
-                "github:boyter/scc",
-                "github:ducaale/xh",
-                "github:mikefarah/yq",
-                "github:starship/starship",
-            ],
-        )
-        self.assertEqual(calls[1][0], ["/test/bin/mise", "env", "-J"])
-
-    def test_run_cmd_auto_install_installs_all_missing_tools_for_missing_binary(self):
-        env = {"PATH": "/test/bin"}
-        refreshed = {"PATH": "/test/bin:/installed/bin"}
-
-        class Result:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
-
-        def fake_run_cmd(args, **kwargs):
-            if kwargs["env"] == env:
-                raise FileNotFoundError(args[0])
-            return Result()
-
-        with (
-            patch.object(oy_cli, "command_env", return_value=env),
-            patch.object(
-                oy_cli, "ensure_optional_tools", return_value=refreshed
-            ) as install,
-            patch.object(oy_cli, "run_cmd", side_effect=fake_run_cmd),
-        ):
-            result = oy_cli.run_cmd_auto_install(
-                ["rg", "needle"], env=env, reason="search"
-            )
-
-        install.assert_called_once_with("rg", reason="search", cwd=None)
-        self.assertEqual(result.stdout, "ok")
-
-    def test_run_cmd_auto_install_installs_all_missing_tools_for_shell_helper(self):
-        env = {"PATH": "/test/bin"}
-        refreshed = {"PATH": "/test/bin:/installed/bin"}
-        first = iter(
-            [
-                type(
-                    "Result",
-                    (),
-                    {
-                        "returncode": 127,
-                        "stdout": "",
-                        "stderr": "bash: line 1: rg: command not found",
-                    },
-                )(),
-                type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
-            ]
-        )
-
-        with (
-            patch.object(
-                oy_cli, "ensure_optional_tools", return_value=refreshed
-            ) as install,
-            patch.object(
-                oy_cli, "run_cmd", side_effect=lambda *args, **kwargs: next(first)
-            ),
-        ):
-            result = oy_cli.run_cmd_auto_install(
-                ["bash", "-c", "rg needle"], env=env, reason="bash command"
-            )
-
-        install.assert_called_once_with("rg", reason="bash command", cwd=None)
-        self.assertEqual(result.stdout, "ok")
-
-    def test_refresh_mise_env_updates_process_environment(self):
-        env = {"PATH": "/test/bin"}
-        refreshed = {"PATH": "/test/bin:/installed/bin", "FOO": "bar"}
-
-        class Result:
-            returncode = 0
-            stdout = '{"PATH": "/test/bin:/installed/bin", "FOO": "bar"}'
-            stderr = ""
-
-        def fake_which(name, path=None):
-            if name == "mise":
-                return "/test/bin/mise"
-            if name == "rg" and path == refreshed["PATH"]:
-                return "/installed/bin/rg"
-            return None
-
-        original = dict(oy_cli.os.environ)
-        try:
-            with (
-                patch.object(oy_cli, "command_env", side_effect=[env, refreshed]),
-                patch.object(oy_cli, "which", side_effect=fake_which),
-                patch.object(oy_cli, "run_cmd", return_value=Result()),
-            ):
-                oy_cli.command_env.cache_clear = lambda: None
-                result = oy_cli._refresh_mise_env()
-                self.assertEqual(oy_cli.os.environ["PATH"], refreshed["PATH"])
-                self.assertEqual(oy_cli.os.environ["FOO"], "bar")
-        finally:
-            oy_cli.os.environ.clear()
-            oy_cli.os.environ.update(original)
-
-        self.assertEqual(result, refreshed)
-
-
-class MainTests(unittest.TestCase):
-    def test_main_fails_fast_when_mise_is_missing(self):
-        with patch.object(
-            oy_cli,
-            "command_env",
-            side_effect=RuntimeError(
-                "`mise` is required; install and activate `mise` before running `oy`."
-            ),
-        ):
-            with self.assertRaises(SystemExit) as ctx:
-                oy_cli.main(["--version"])
-
-        self.assertEqual(ctx.exception.code, 1)
-
-
-class HeadroomSerializationTests(unittest.TestCase):
-    def test_serialize_for_headroom_stringifies_tool_content(self):
-        message = ToolMessage(
-            tool_call_id="call_1",
-            name="bash",
-            content=ToolResult(ok=False, content={"count": 2, "ok": True}),
-        )
-        payload = oy_cli._serialize_for_headroom(message)
-        self.assertEqual(payload["role"], "tool")
-        self.assertFalse(payload["ok"])
-        self.assertIsInstance(payload["content"], str)
-        parsed = json.loads(payload["content"])
-        self.assertEqual(parsed["count"], 2)
-
-    def test_deserialize_from_headroom_restores_openai_tool_calls(self):
-        message = oy_cli._deserialize_from_headroom(
-            {
-                "role": "assistant",
-                "content": "checking",
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "bash",
-                            "arguments": '{"command":"pytest"}',
-                        },
-                    }
-                ],
-            }
-        )
-        self.assertEqual(message.content, "checking")
-        self.assertEqual(len(message.tool_calls), 1)
-        self.assertEqual(message.tool_calls[0].name, "bash")
-        self.assertEqual(message.tool_calls[0].arguments, {"command": "pytest"})
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestWebfetch(unittest.TestCase):
@@ -759,62 +755,338 @@ class TestWebfetch(unittest.TestCase):
 
     def test_validate_url_safe_allows_public_https(self):
         from oy_cli import _validate_url_safe
-        # Should not raise
+
         result = _validate_url_safe("https://example.com")
         self.assertEqual(result, "https://example.com")
 
     def test_validate_url_safe_blocks_localhost(self):
         from oy_cli import _validate_url_safe
+
         with self.assertRaises(ValueError, msg="Local addresses are not allowed"):
             _validate_url_safe("http://localhost/secret")
 
     def test_validate_url_safe_blocks_loopback_ip(self):
         from oy_cli import _validate_url_safe
+
         with self.assertRaises(ValueError):
             _validate_url_safe("http://127.0.0.1/secret")
 
     def test_validate_url_safe_blocks_private_rfc1918(self):
         from oy_cli import _validate_url_safe
+
         for addr in ("10.0.0.1", "172.16.0.1", "192.168.1.1"):
             with self.assertRaises(ValueError, msg=f"{addr} should be blocked"):
                 _validate_url_safe(f"http://{addr}/")
 
     def test_validate_url_safe_blocks_non_http_schemes(self):
         from oy_cli import _validate_url_safe
+
         for scheme in ("ftp", "file", "gopher", "dict", "ssh"):
             with self.assertRaises(ValueError, msg=f"{scheme}:// should be blocked"):
                 _validate_url_safe(f"{scheme}://example.com/")
 
     def test_validate_url_safe_blocks_link_local(self):
         from oy_cli import _validate_url_safe
+
         with self.assertRaises(ValueError):
             _validate_url_safe("http://169.254.169.254/latest/meta-data/")
 
     def test_webfetch_rejects_post_method(self):
         from oy_cli import _WEBFETCH_ALLOWED_METHODS
+
         self.assertNotIn("POST", _WEBFETCH_ALLOWED_METHODS)
         self.assertNotIn("PUT", _WEBFETCH_ALLOWED_METHODS)
         self.assertNotIn("DELETE", _WEBFETCH_ALLOWED_METHODS)
 
     def test_webfetch_allows_safe_methods(self):
         from oy_cli import _WEBFETCH_ALLOWED_METHODS
+
         self.assertIn("GET", _WEBFETCH_ALLOWED_METHODS)
         self.assertIn("HEAD", _WEBFETCH_ALLOWED_METHODS)
         self.assertIn("OPTIONS", _WEBFETCH_ALLOWED_METHODS)
 
     def test_webfetch_tool_registered(self):
         from oy_cli import TOOL_REGISTRY
+
         names = [s.name for s in TOOL_REGISTRY.specs()]
         self.assertIn("webfetch", names)
 
     def test_webfetch_in_read_only_tools(self):
-        from oy_cli import _READ_ONLY_TOOLS
+        from oy_cli.modes import _READ_ONLY_TOOLS
+
         self.assertIn("webfetch", _READ_ONLY_TOOLS)
 
-    def test_webfetch_args_schema_has_url(self):
-        from oy_cli import WebfetchArgs
+    def test_sloc_in_read_only_tools(self):
+        from oy_cli.modes import _READ_ONLY_TOOLS
+
+        self.assertIn("sloc", _READ_ONLY_TOOLS)
+
+    def test_noninteractive_tool_registry_excludes_ask(self):
+        from oy_cli.modes import active_tool_specs
+
+        names = [spec.name for spec in active_tool_specs(False).specs()]
+        self.assertNotIn("ask", names)
+
+    def test_read_only_tool_registry_matches_declared_names(self):
+        from oy_cli.modes import _READ_ONLY_TOOLS, read_only_tool_specs
+
+        self.assertEqual({spec.name for spec in read_only_tool_specs().specs()}, _READ_ONLY_TOOLS)
+
+    def test_webfetch_args_schema_has_url_and_options(self):
+        from oy_cli.tools import WebfetchArgs
         import msgspec
+
         schema = msgspec.json.schema(WebfetchArgs)
         defs = schema.get("$defs", {})
         props = defs.get("WebfetchArgs", schema).get("properties", {})
         self.assertIn("url", props)
+        self.assertIn("options", props)
+
+    def test_webfetch_uses_httpx_client_options(self):
+        state = make_state(Path("/tmp/ok"))
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            text="hello world",
+            request=httpx.Request("GET", "https://example.com"),
+        )
+
+        class DummyClient:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.called = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, headers=None):
+                self.called = (method, url, headers)
+                return response
+
+        created: list[DummyClient] = []
+
+        def fake_http_client(**kwargs):
+            client = DummyClient(**kwargs)
+            created.append(client)
+            return client
+
+        with (
+            patch.object(oy_cli.providers.httpx, "Client", side_effect=fake_http_client),
+            patch.object(oy_cli.runtime, "show"),
+        ):
+            payload = oy_cli.tool_webfetch(
+                state,
+                url="https://example.com",
+                method="GET",
+                headers={"Accept": "text/plain"},
+                options={"timeout_seconds": 12, "follow_redirects": True},
+            )
+
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].kwargs, {"timeout": 12, "follow_redirects": True})
+        self.assertEqual(created[0].called, ("GET", "https://example.com", {"Accept": "text/plain"}))
+        self.assertEqual(payload["method"], "GET")
+        self.assertEqual(payload["url"], "https://example.com")
+        self.assertEqual(payload["status_code"], 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["content"], "hello world")
+        self.assertEqual(payload["content_format"], "text")
+        self.assertIn("hello world", oy_cli._webfetch_structured_text(payload))
+
+    def test_html_to_markdown_keeps_useful_structure(self):
+        html = """
+        <html>
+          <head><title>ignore me</title><style>.hidden { display: none; }</style></head>
+          <body>
+            <h1>Title</h1>
+            <p>Hello <a href="/docs">docs</a>.</p>
+            <ul><li>One</li><li>Two</li></ul>
+            <pre>print("hi")</pre>
+          </body>
+        </html>
+        """
+
+        markdown = oy_cli._html_to_markdown(html)
+
+        self.assertIn("Title\n=====", markdown)
+        self.assertIn("Hello [docs](/docs).", markdown)
+        self.assertIn("* One", markdown)
+        self.assertIn("* Two", markdown)
+        self.assertIn('```\nprint("hi")\n```', markdown)
+        self.assertIn("ignore me", markdown)
+        self.assertNotIn("display: none", markdown)
+
+    def test_webfetch_converts_oversized_html_to_markdown(self):
+        state = make_state(Path("/tmp/ok"))
+        html = "<html><body><h1>Title</h1>" + "".join(
+            f"<p>Paragraph {i} with <a href='/doc/{i}'>link {i}</a>.</p>"
+            for i in range(20)
+        ) + "</body></html>"
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text=html,
+            request=httpx.Request("GET", "https://example.com/page"),
+        )
+
+        class DummyClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, headers=None):
+                self.called = (method, url, headers)
+                return response
+
+        budgets = oy_cli.RuntimeBudgets(
+            message_tokens=64,
+            tool_output_tokens=40,
+            tool_tail_tokens=10,
+            default_line_limit=20,
+        )
+        client = DummyClient()
+        with (
+            patch.object(oy_cli.runtime, "BUDGETS", budgets),
+            patch.object(oy_cli.runtime, "http_client", return_value=client),
+            patch.object(oy_cli.runtime, "show"),
+        ):
+            payload = oy_cli.tool_webfetch(state, url="https://example.com/page")
+
+        self.assertEqual(payload["content_format"], "markdown")
+        self.assertIn("Title\n=====", payload["content"])
+        self.assertIn("Paragraph 0 with [link 0](/doc/0).", payload["content"])
+        self.assertNotIn("<html", payload["content"].lower())
+        self.assertIn("content_format", oy_cli._webfetch_structured_text(payload))
+
+    def test_webfetch_redacts_sensitive_response_headers(self):
+        response = httpx.Response(
+            302,
+            headers={
+                "Location": "https://secret.example/next",
+                "Set-Cookie": "session=secret",
+                "Content-Type": "text/plain",
+            },
+            text="redirecting",
+            request=httpx.Request("GET", "https://example.com"),
+        )
+
+        headers = oy_cli._webfetch_response_headers(response)
+
+        self.assertEqual(headers["Location"], "<redacted>")
+        self.assertEqual(headers["Set-Cookie"], "<redacted>")
+        self.assertEqual(headers["Content-Type"], "text/plain")
+
+    def test_webfetch_structured_text_uses_toon(self):
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            text="hello world",
+            request=httpx.Request("GET", "https://example.com"),
+        )
+
+        payload = {
+            "method": "GET",
+            "url": "https://example.com",
+            "status_code": 200,
+            "reason_phrase": "OK",
+            "http_version": "HTTP/1.1",
+            "headers": oy_cli._webfetch_response_headers(response),
+            "content": "hello world",
+            "content_format": "text",
+            "truncated": False,
+        }
+        rendered = oy_cli._webfetch_structured_text(payload)
+
+        self.assertIn("content", rendered)
+        self.assertIn("hello world", rendered)
+        self.assertNotIn("HTTP/1.1 200 OK", rendered)
+
+    def test_webfetch_non_2xx_keeps_status_code(self):
+        response = httpx.Response(
+            404,
+            headers={"content-type": "text/plain"},
+            text="missing",
+            request=httpx.Request("GET", "https://example.com/missing"),
+        )
+
+        payload = oy_cli._webfetch_payload(
+            response, method="GET", text="missing", truncated=False
+        )
+
+        self.assertEqual(payload["status_code"], 404)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["content"], "missing")
+        self.assertEqual(payload["content_format"], "text")
+        self.assertIn("missing", oy_cli._webfetch_structured_text(payload))
+
+    def test_webfetch_request_error_returns_structured_payload(self):
+        state = make_state(Path("/tmp/ok"))
+
+        class DummyClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, headers=None):
+                raise httpx.ConnectError("boom", request=httpx.Request(method, url))
+
+        with (
+            patch.object(oy_cli.runtime, "http_client", return_value=DummyClient()),
+            patch.object(oy_cli.runtime, "show"),
+        ):
+            payload = oy_cli.tool_webfetch(state, url="https://example.com")
+
+        self.assertEqual(payload["method"], "GET")
+        self.assertEqual(payload["url"], "https://example.com")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_type"], "ConnectError")
+        self.assertIn("boom", payload["message"])
+
+
+class TestModuleExecution(unittest.TestCase):
+    def test_python_m_oy_cli_help(self):
+        result = oy_cli.run_cmd(
+            ["uv", "run", "python", "-m", "oy_cli", "--help"],
+            cwd=Path.cwd(),
+            env=oy_cli.command_env(Path.cwd()),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("usage:", result.stdout)
+        self.assertIn("{run,chat,model,audit}", result.stdout)
+
+
+class TestTodo(unittest.TestCase):
+    def test_todo_tool_registered(self):
+        from oy_cli import TOOL_REGISTRY
+
+        names = [s.name for s in TOOL_REGISTRY.specs()]
+        self.assertIn("todo", names)
+
+    def test_todo_args_schema_has_todos(self):
+        from oy_cli.tools import TodoArgs
+
+        schema = msgspec.json.schema(TodoArgs)
+        defs = schema.get("$defs", {})
+        props = defs.get("TodoArgs", schema).get("properties", {})
+        self.assertIn("todos", props)
+
+    def test_todo_tool_rejects_invalid_status(self):
+        state = make_state(Path("/tmp/ok"))
+
+        with self.assertRaisesRegex(ValueError, r"Invalid status 'blocked'"):
+            oy_cli.tool_todo(
+                state,
+                [{"id": "1", "task": "rename todo tool", "status": "blocked"}],
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

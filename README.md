@@ -44,89 +44,21 @@ oy --help                 # Show all commands
 OpenAI-completions-focused CLI loop, multiple backends behind shims,
 new session each run, and explicit checkpoints when needed.
 
-## System Prompts
+## Session Text and Prompts
 
-The system prompt is short. Tool semantics live with the tool definitions; the system prompt focuses on operating rules and judgment:
+All text that is sent as part of model sessions lives in [`oy_cli/session_text.toml`](oy_cli/session_text.toml).
 
-### Base Prompt
+That includes:
 
-```markdown
-You are oy, a coding cli with tools.
-Inspect before editing with `read` for file content, `search` for regex
-matches, and `list` for path discovery. For existing code changes, prefer
-syntax-aware edits via `ast-grep` run through `bash`. Keep edits small,
-auditable, and verified with `read`, `git diff`, and batch independent tool
-calls.
-Keep going until done or blocked; if blocked, say what you tried and next
-steps.
-Use grugbrain.dev approach for maintainability/simplicity, OWASP-minded
-judgment for security, and performance-aware programming (Computer, Enhance!).
-Use `webfetch` to pull in documentation or references when needed.
-Use `todowrite` at the start of multi-step work to plan, and update it as
-you go — it persists across context compaction so you won't lose your place.
-```
+- base system prompt text
+- interactive/non-interactive prompt suffixes
+- audit prompt text
+- research-only `/ask` suffix
+- transcript compaction text (`Current todo list`, omitted-history note, packed-history note)
+- built-in tool descriptions exposed to the model
 
-### Interactive Appendix
-
-```markdown
-Use ask only when clarification or direction is needed.
-```
-
-### Non-Interactive Appendix
-
-```markdown
-Non-interactive mode: do not pause for approval.
-```
-
-## Tools
-
-Each tool description is passed directly to the model:
-
-| Tool | Description |
-|------|-------------|
-| `list` | List paths by calling `Path.glob(path)`. Defaults to `path: "*"`. Use `src/*` or `src/**/*.py` exactly like pathlib glob patterns. Returns sorted entries, one per line, with / for directories. |
-| `read` | Read a file or directory. Files return line-numbered text. Directories return sorted entries, one per line, with / for directories. Use `offset` and `limit` for large files. |
-| `bash` | Shell commands are easy to run. For edits, prefer `ast-grep` for precise search/replace, `scc` for code-count analysis, and `xh` for web/API interaction (or use the `webfetch` tool directly for simple fetches); pipe to `rg` or `yq` for filtering when useful. These tools are effective for their niches, guaranteed to be available during an `oy` run, and their current usage docs can be checked with `--help`. For inspection, prefer the `search` tool. Returns structured results with `command`, `exit_code`, `ok`, `output_format`, `output`, and `truncated`. JSON output is parsed when possible. |
-| `search` | Search with ripgrep JSON output. Takes `pattern` and `path`, then passes any extra ripgrep flags from `args`, for example `pattern: 'needle', path: 'src', args: ['--glob', '*.py', '-i']`. `limit` only limits displayed results after ripgrep runs. |
-| `ask` | Ask the user a question in interactive runs. Use for ambiguity or decisions. Provide choices. |
-| `webfetch` | Fetch a URL over the web. Takes `url`, optional `method` (GET/HEAD/OPTIONS, default GET), and optional `headers` dict. Built on `xh`. Restricted to public addresses only (no localhost/private IPs) for safety. Returns response headers and body. Use for fetching documentation, APIs, or web content. |
-| `todowrite` | Update the in-memory todo list. Takes `todos`: a list of `{id, task, status}` objects (status: pending/in_progress/done). Replaces the full list each call. Use to plan multi-step work, track progress, and stay on course — the list persists in context even when earlier messages are compacted. Returns the current list. |
-
-**Output truncation:** tool output is clipped to preserve context window; `bash` summarizes output into a single `output` field and marks truncation with one `truncated` flag. When clipped, narrow the next query or use `search` with a tighter `path` instead of re-running broad inspection.
-
-**Conversation compaction:** interactive chat compresses prepared context with [Headroom](https://github.com/chopratejas/headroom) before each model request, then falls back to omitting the oldest messages if the transcript still does not fit.
-
-**Parallel tool calls:** `oy` can execute multiple tool calls returned in a single assistant turn. Explicit provider flags for parallel tool calls are only sent where the upstream API supports them directly today; other providers rely on their native tool-calling behavior.
-
-## Audit Command
-
-`oy audit` runs the agent with a dedicated system prompt:
-
-### Audit Prompt
-
-```markdown
-Audit the repo for security, unnecessary complexity, and major
-performance issues, preserving project and human context.
-Use `todowrite` to plan audit steps and track progress.
-First read key markdown docs, then refresh or generate an audit
-header at the top of ISSUES.md that includes the current date,
-the latest Git commit reference, and a codebase summary
-using tools like `scc`. Next, fetch the current OWASP
-ASVS (or MASVS if more relevant) and grugbrain.dev guidelines
-using `webfetch`, inspect the codebase against these, and write or
-merge prioritised findings (max 10-15) into the ISSUES.md file. Check
-each link or reference carefully to make sure ids and links are accurate.
-Ensure each finding is formatted to include its location, category
-(security, complexity, or performance), standard reference, a clear
-recommendation, and has a Status, if existing findings have been
-resolved, summarise and note them in a short log at the end.
-```
-
-```bash
-oy audit                    # Full audit
-oy audit "focus on auth"    # With focus area
-OY_ROOT=./src oy audit      # Audit specific directory
-```
+Code that reads this content lives in [`oy_cli/session_text.py`](oy_cli/session_text.py).
+Runtime composition lives mainly in [`oy_cli/modes.py`](oy_cli/modes.py), [`oy_cli/agent.py`](oy_cli/agent.py), and [`oy_cli/tooling/core.py`](oy_cli/tooling/core.py).
 
 ## Configuration
 
@@ -163,8 +95,6 @@ is a reference.
 
 - Python 3.13+
 - `bash`
-- `mise` installed and activated in the shell before launching `oy`
-- (Optional helper CLIs; `oy` auto-installs them on demand via `mise`): `rg` (ripgrep), `ast-grep`, `scc`, `xh`, `yq`
 - OpenAI API key or Codex local auth **OR**
   AWS CLI configured for Bedrock
 
@@ -174,6 +104,22 @@ is a reference.
 uv tool install oy-cli  # Preferred
 pip install oy-cli       # Alternative
 ```
+
+## Development
+
+For local development, linting, tests, and builds, use `uv`.
+Do not run bare `pytest`, `ruff`, or `pip install -e .` commands in this repo.
+
+```bash
+uv sync
+uv run ruff format .
+uv run ruff check .
+uv run python -m pytest tests/ -v
+uv run oy --help
+uv build
+```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contributor workflow.
 
 ## Authentication
 
@@ -206,10 +152,6 @@ ensure your profile has `bedrock:InvokeModel` permission.
 **"stdin is not a TTY"** -> Piping input disables `ask`. Set `OY_NON_INTERACTIVE=1` to make explicit.
 
 **"AWS SSO session is stale"** -> Run `aws sso login --use-device-code --no-browser`.
-
-**"Missing helper tool"** -> Install or activate `mise`, then rerun `oy`; `oy` assumes a working `mise` shell activation and auto-installs missing helper CLIs together through `mise`.
-
-**"`mise` is required; install and activate `mise` before running `oy`."** -> Install `mise`, activate it in your shell, then relaunch `oy`.
 
 ## Security
 
