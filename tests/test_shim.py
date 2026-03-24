@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import json
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+import oy_cli.aws_sigv4 as aws_sigv4
 from oy_cli import providers
 
 
@@ -49,30 +52,39 @@ class DecodeToolCallArgumentsTests(unittest.TestCase):
 
 
 class BedrockCredentialTests(unittest.TestCase):
-    def test_make_bedrock_token_uses_botocore_sigv4_query_auth(self):
-        session = Mock()
-        credentials = Mock()
-        frozen = Mock()
-        credentials.get_frozen_credentials.return_value = frozen
-        session.get_credentials.return_value = credentials
-        request = Mock(url="https://bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1")
-        signer = Mock()
+    def test_internal_bedrock_signer_matches_known_sigv4_token(self):
+        token = aws_sigv4.bedrock_bearer_token(
+            aws_sigv4.AwsCredentials(
+                access_key="AKIDEXAMPLE",
+                secret_key="wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                session_token="session-token",
+            ),
+            "us-east-1",
+            expires=600,
+            now=datetime(2026, 3, 25, 12, 34, 56, tzinfo=timezone.utc),
+        )
+
+        raw = base64.b64decode(token.removeprefix("bedrock-api-key-")).decode()
+        self.assertEqual(
+            raw,
+            "bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIDEXAMPLE%2F20260325%2Fus-east-1%2Fbedrock%2Faws4_request&X-Amz-Date=20260325T123456Z&X-Amz-Expires=600&X-Amz-SignedHeaders=host&X-Amz-Security-Token=session-token&X-Amz-Signature=702fccf760edb52d49251f73bafd6b263f155102fc6def0bc63d1615b45f5900",
+        )
+
+    def test_make_bedrock_token_loads_aws_credentials(self):
+        creds = {
+            "access_key": "AKIDEXAMPLE",
+            "secret_key": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "session_token": "session-token",
+        }
+        fixed_now = datetime(2026, 3, 25, 12, 34, 56, tzinfo=timezone.utc)
 
         with (
-            patch.object(providers, "_botocore_session", return_value=session),
-            patch.object(providers, "AWSRequest", return_value=request) as aws_request,
-            patch.object(providers, "SigV4QueryAuth", return_value=signer) as signer_cls,
+            patch.object(providers, "load_aws_credentials", return_value=creds) as load_creds,
+            patch("oy_cli.aws_sigv4._utc_now", return_value=fixed_now),
         ):
             token = providers.make_bedrock_token("us-east-1", expires=600)
 
-        aws_request.assert_called_once_with(
-            method="POST",
-            url="https://bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1",
-            data=b"",
-            headers={"Host": "bedrock.amazonaws.com"},
-        )
-        signer_cls.assert_called_once_with(frozen, "bedrock", "us-east-1", expires=600)
-        signer.add_auth.assert_called_once_with(request)
+        load_creds.assert_called_once_with(None)
         self.assertTrue(token.startswith("bedrock-api-key-"))
 
 

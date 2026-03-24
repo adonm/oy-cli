@@ -257,7 +257,7 @@ class _WaitIndicator:
 
     def start(self):
         self._active = True
-        rt.STDERR.print(rt._ansi("2", f"… {self._label}"))
+        rt._note(self._label, tag="wait")
 
     def stop(self):
         self._active = False
@@ -265,10 +265,10 @@ class _WaitIndicator:
     def update(self, label: str):
         self._label = label
         if self._active:
-            rt.STDERR.print(rt._ansi("2", f"… {self._label}"))
+            rt._note(self._label, tag="wait")
 
     def log(self, message: str):
-        rt.STDERR.print(rt._sanitize_terminal_text(message))
+        rt._note(message, tag="wait")
 
 
 async def run_turn(
@@ -298,7 +298,7 @@ async def run_turn(
             excerpt = ""
             if error_ctx:
                 excerpt = " | ".join(line.strip() for line in error_ctx.strip().splitlines()[:3] if line.strip())
-            spinner.log(rt._ansi("2", f"-> retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}"))
+            spinner.log(f"retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}")
             spinner.update(f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) | {size_str}")
 
         try:

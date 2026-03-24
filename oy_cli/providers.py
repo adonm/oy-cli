@@ -17,10 +17,6 @@ from typing import Any, Awaitable, Callable, TypeAlias
 import httpx
 import msgspec
 import toons
-from botocore.auth import SigV4QueryAuth
-from botocore.awsrequest import AWSRequest
-from botocore.exceptions import NoCredentialsError, PartialCredentialsError
-from botocore.session import Session as BotocoreSession
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -31,8 +27,9 @@ from openai import (
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 from tenacity.wait import wait_base
 
-JSONLike: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
+from .aws_sigv4 import AwsCredentials, bedrock_bearer_token
 
+JSONLike: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 def normalize_jsonlike(value: Any) -> JSONLike:
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -43,7 +40,6 @@ def normalize_jsonlike(value: Any) -> JSONLike:
         return [normalize_jsonlike(item) for item in value]
     return str(value)
 
-
 def serialize_json(value: Any) -> str:
     normalized = normalize_jsonlike(value)
     return (
@@ -52,36 +48,29 @@ def serialize_json(value: Any) -> str:
         else msgspec.json.encode(normalized).decode("utf-8")
     )
 
-
 def serialize_toon(value: Any) -> str:
     normalized = normalize_jsonlike(value)
     return normalized if isinstance(normalized, str) else toons.dumps(normalized)
-
 
 class ToolCall(msgspec.Struct, omit_defaults=True):
     id: str
     name: str
     arguments: dict[str, Any] = msgspec.field(default_factory=dict)
 
-
 class ToolResult(msgspec.Struct, omit_defaults=True):
     ok: bool = True
     content: JSONLike = None
-
 
 class ToolSpec(msgspec.Struct, omit_defaults=True):
     name: str
     description: str
     parameters: dict[str, Any]
 
-
 class SystemMessage(msgspec.Struct, tag="system", tag_field="role", omit_defaults=True):
     content: str
 
-
 class UserMessage(msgspec.Struct, tag="user", tag_field="role", omit_defaults=True):
     content: str
-
 
 class AssistantMessage(
     msgspec.Struct, tag="assistant", tag_field="role", omit_defaults=True
@@ -90,15 +79,12 @@ class AssistantMessage(
     tool_calls: list[ToolCall] = msgspec.field(default_factory=list)
     thought_signatures: dict[str, str] = msgspec.field(default_factory=dict)
 
-
 class ToolMessage(msgspec.Struct, tag="tool", tag_field="role", omit_defaults=True):
     tool_call_id: str
     name: str = ""
     content: ToolResult = msgspec.field(default_factory=ToolResult)
 
-
 ChatMessage: TypeAlias = SystemMessage | UserMessage | AssistantMessage | ToolMessage
-
 
 @dataclass(frozen=True, slots=True)
 class CompletionClient:
@@ -305,40 +291,14 @@ def async_http_client(**kw):
     httpx_kwargs.setdefault("follow_redirects", False)
     return httpx.AsyncClient(**httpx_kwargs)
 
-def _botocore_session() -> BotocoreSession:
-    session = BotocoreSession()
-    session.set_config_variable("profile", os.environ.get("AWS_PROFILE"))
-    return session
-
-
 def bedrock_base_url(region: str) -> str:
     return f"https://bedrock-mantle.{region}.api.aws/v1"
-
 
 def make_bedrock_token(
     region: str, cwd: Path | None = None, expires: int = 43200
 ) -> str:
-    _ = cwd
-    request = AWSRequest(
-        method="POST",
-        url="https://bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1",
-        data=b"",
-        headers={"Host": "bedrock.amazonaws.com"},
-    )
-    credentials = _botocore_session().get_credentials()
-    if credentials is None:
-        raise RuntimeError(
-            "No AWS credentials found. Configure via environment variables, "
-            "~/.aws/credentials, IAM role, or AWS SSO."
-        )
-    try:
-        SigV4QueryAuth(
-            credentials.get_frozen_credentials(), "bedrock", region, expires=expires
-        ).add_auth(request)
-    except (NoCredentialsError, PartialCredentialsError) as exc:
-        raise RuntimeError(f"AWS credentials incomplete: {exc}") from exc
-    raw = request.url.removeprefix("https://")
-    return f"bedrock-api-key-{base64.b64encode(raw.encode()).decode()}"
+    creds = AwsCredentials(**load_aws_credentials(cwd))
+    return bedrock_bearer_token(creds, region, expires=expires)
 
 def aws_cli(parts, cwd=None, timeout=10):
     env = command_env(cwd)
@@ -1212,8 +1172,6 @@ def _codex_chatgpt_client() -> CompletionClient:
         list_models=lambda: load_codex_model_list() or [CODEX_DEFAULT_MODEL],
     )
 
-
-
 KNOWN_SHIMS = set(SHIM_ORDER)
 _COPILOT_BASE_URL = os.environ.get(
     "COPILOT_BASE_URL", "https://api.githubcopilot.com"
@@ -1221,51 +1179,80 @@ _COPILOT_BASE_URL = os.environ.get(
 _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
 
+def _responses_client_from_key(
+    api_key: str,
+    *,
+    base_url: str | None = None,
+    max_retries: int = 3,
+    timeout: Any = None,
+    fallback_models: Callable[[], list[str]] | None = None,
+    default_models: list[str] | None = None,
+) -> CompletionClient:
+    return _openai_responses_client(
+        *_openai_pair(
+            api_key,
+            base_url=base_url,
+            max_retries=max_retries,
+            timeout=timeout,
+        ),
+        fallback_models=fallback_models,
+        default_models=default_models,
+    )
 
-def _list_models_from_client(build_client, cwd: Path | None = None) -> list[str]:
-    return build_client(cwd).list_models()
-
+def _chat_client_from_key(
+    api_key: str,
+    *,
+    base_url: str | None = None,
+    max_retries: int = 3,
+    timeout: Any = None,
+    tools_map: Callable[[list[ToolSpec]], list[dict[str, Any]]] | None = _tool_specs_to_openai,
+) -> CompletionClient:
+    return _openai_chat_completions_client(
+        *_openai_pair(
+            api_key,
+            base_url=base_url,
+            max_retries=max_retries,
+            timeout=timeout,
+        ),
+        tools_map=tools_map,
+    )
 
 def _require_openai_env(_cwd: Path | None = None) -> None:
     _require_string(get_openai_api_key(), "OPENAI_API_KEY is not set")
 
-
 def _openai_client(
-    _region: str | None = None,
-    _cwd: Path | None = None,
+    cwd: Path | None = None,
     *,
     max_retries: int = 3,
 ) -> CompletionClient:
-    return _openai_responses_client(
-        *_openai_pair(
-            _require_string(get_openai_api_key(), "No OpenAI credentials found"),
-            base_url=os.environ.get("OPENAI_BASE_URL"),
-            max_retries=max_retries,
-        )
+    _ = cwd
+    return _responses_client_from_key(
+        _require_string(get_openai_api_key(), "No OpenAI credentials found"),
+        base_url=os.environ.get("OPENAI_BASE_URL"),
+        max_retries=max_retries,
     )
-
 
 def _require_codex_env(_cwd: Path | None = None) -> None:
     load_codex_session()
 
-
-def _codex_client(_cwd: Path | None = None) -> CompletionClient:
+def _codex_client(cwd: Path | None = None) -> CompletionClient:
+    _ = cwd
     if api_key := get_codex_api_key():
-        return _openai_responses_client(
-            *_openai_pair(api_key),
+        return _responses_client_from_key(
+            api_key,
             fallback_models=load_codex_model_list,
             default_models=[CODEX_DEFAULT_MODEL],
         )
     return _codex_chatgpt_client()
 
-
 def _require_aws_env(cwd: Path | None = None) -> None:
     default_region(None)
     load_aws_credentials(cwd, allow_login=False)
 
-
 def _mantle_completion_client(
-    region: str | None = None, cwd: Path | None = None
+    cwd: Path | None = None,
+    *,
+    region: str | None = None,
 ) -> CompletionClient:
     current = default_region(region)
     timeout = httpx.Timeout(
@@ -1274,16 +1261,12 @@ def _mantle_completion_client(
         write=10.0,
         pool=10.0,
     )
-    return _openai_chat_completions_client(
-        *_openai_pair(
-            make_bedrock_token(current, cwd),
-            base_url=bedrock_base_url(current),
-            max_retries=0,
-            timeout=timeout.read,
-        ),
-        tools_map=_tool_specs_to_openai,
+    return _chat_client_from_key(
+        make_bedrock_token(current, cwd),
+        base_url=bedrock_base_url(current),
+        max_retries=0,
+        timeout=timeout.read,
     )
-
 
 def _get_github_token() -> str | None:
     for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
@@ -1305,13 +1288,11 @@ def _get_github_token() -> str | None:
     token = proc.stdout.strip()
     return token if proc.returncode == 0 and token else None
 
-
 def _copilot_default_headers() -> dict[str, str]:
     return {
         "Copilot-Integration-Id": _COPILOT_INTEGRATION_ID,
         "Editor-Version": _COPILOT_EDITOR_VERSION,
     }
-
 
 def _copilot_openai_pair(token: str):
     return _openai_client_pair(
@@ -1321,13 +1302,11 @@ def _copilot_openai_pair(token: str):
         default_headers=_copilot_default_headers(),
     )
 
-
 def _require_copilot_env(_cwd: Path | None = None) -> None:
     _require_string(
         _get_github_token(),
         "No GitHub token found (set GH_TOKEN, GITHUB_TOKEN, or run `gh auth login`)",
     )
-
 
 def _fetch_copilot_models_raw(token: str) -> list[dict[str, Any]]:
     response = httpx.get(
@@ -1341,7 +1320,6 @@ def _fetch_copilot_models_raw(token: str) -> list[dict[str, Any]]:
     response.raise_for_status()
     data = response.json()
     return data.get("data", []) if isinstance(data, dict) else []
-
 
 def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
     raw = _fetch_copilot_models_raw(token)
@@ -1357,8 +1335,8 @@ def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
             responses_ids.add(model_id)
     return sorted(chat_ids), responses_ids
 
-
-def _copilot_completion_client(_cwd: Path | None = None) -> CompletionClient:
+def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
+    _ = cwd
     token = _require_string(_get_github_token(), "No GitHub token found")
     async_client, sync_client = _copilot_openai_pair(token)
 
@@ -1408,21 +1386,17 @@ def _copilot_completion_client(_cwd: Path | None = None) -> CompletionClient:
 
     return CompletionClient(chat_completion=chat_completion, list_models=list_models)
 
-
 def _load_opencode_auth() -> dict[str, Any]:
     data = load_json(OPENCODE_AUTH_PATH, {})
     return data if isinstance(data, dict) else {}
-
 
 def get_opencode_zen_api_key() -> str | None:
     entry = _load_opencode_auth().get("opencode", {})
     return (entry.get("key") or None) if isinstance(entry, dict) else None
 
-
 def get_opencode_go_api_key() -> str | None:
     entry = _load_opencode_auth().get("opencode-go", {})
     return (entry.get("key") or None) if isinstance(entry, dict) else None
-
 
 def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
     _require_string(
@@ -1430,38 +1404,32 @@ def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
         f"No OpenCode Zen credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
     )
 
-
 def _require_opencode_go_env(_cwd: Path | None = None) -> None:
     _require_string(
         get_opencode_go_api_key(),
         f"No OpenCode Go credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
     )
 
+def _opencode_client(api_key: str, *, base_url: str) -> CompletionClient:
+    return _chat_client_from_key(api_key, base_url=base_url)
 
-def _opencode_zen_client(_cwd: Path | None = None) -> CompletionClient:
-    key = _require_string(
-        get_opencode_zen_api_key(), "No OpenCode Zen credentials found"
-    )
-    return _openai_chat_completions_client(
-        *_openai_pair(key, base_url=OPENCODE_ZEN_URL),
-        tools_map=_tool_specs_to_openai,
-    )
-
-
-def _opencode_go_client(_cwd: Path | None = None) -> CompletionClient:
-    key = _require_string(
-        get_opencode_go_api_key(), "No OpenCode Go credentials found"
-    )
-    return _openai_chat_completions_client(
-        *_openai_pair(key, base_url=OPENCODE_GO_URL),
-        tools_map=_tool_specs_to_openai,
+def _opencode_zen_client(cwd: Path | None = None) -> CompletionClient:
+    _ = cwd
+    return _opencode_client(
+        _require_string(get_opencode_zen_api_key(), "No OpenCode Zen credentials found"),
+        base_url=OPENCODE_ZEN_URL,
     )
 
+def _opencode_go_client(cwd: Path | None = None) -> CompletionClient:
+    _ = cwd
+    return _opencode_client(
+        _require_string(get_opencode_go_api_key(), "No OpenCode Go credentials found"),
+        base_url=OPENCODE_GO_URL,
+    )
 
 ShimEnvChecker: TypeAlias = Callable[[Path | None], None]
 ShimClientBuilder: TypeAlias = Callable[..., CompletionClient]
 ShimModelLister: TypeAlias = Callable[[Path | None], list[str]]
-
 
 @dataclass(frozen=True, slots=True)
 class ShimSpec:
@@ -1470,50 +1438,66 @@ class ShimSpec:
     build_client: ShimClientBuilder
     list_models: ShimModelLister
 
+def _client_model_lister(
+    build_client: ShimClientBuilder,
+    /,
+    **kwargs: Any,
+) -> ShimModelLister:
+    def list_models(cwd: Path | None = None) -> list[str]:
+        return build_client(cwd=cwd, **kwargs).list_models()
+
+    return list_models
+
+def _make_shim_spec(
+    name: str,
+    *,
+    ensure_env: ShimEnvChecker,
+    build_client: ShimClientBuilder,
+    list_models: ShimModelLister | None = None,
+) -> ShimSpec:
+    return ShimSpec(
+        name=name,
+        ensure_env=ensure_env,
+        build_client=build_client,
+        list_models=list_models or _client_model_lister(build_client),
+    )
 
 SHIM_SPECS: dict[str, ShimSpec] = {
-    SHIM_OPENAI: ShimSpec(
-        name=SHIM_OPENAI,
+    SHIM_OPENAI: _make_shim_spec(
+        SHIM_OPENAI,
         ensure_env=_require_openai_env,
         build_client=_openai_client,
-        list_models=lambda cwd: _openai_client(cwd, max_retries=0).list_models(),
+        list_models=_client_model_lister(_openai_client, max_retries=0),
     ),
-    SHIM_CODEX: ShimSpec(
-        name=SHIM_CODEX,
+    SHIM_CODEX: _make_shim_spec(
+        SHIM_CODEX,
         ensure_env=_require_codex_env,
         build_client=_codex_client,
-        list_models=lambda cwd: _list_models_from_client(_codex_client, cwd),
     ),
-    SHIM_MANTLE: ShimSpec(
-        name=SHIM_MANTLE,
+    SHIM_MANTLE: _make_shim_spec(
+        SHIM_MANTLE,
         ensure_env=_require_aws_env,
         build_client=_mantle_completion_client,
-        list_models=lambda cwd: _list_models_from_client(_mantle_completion_client, cwd),
     ),
-    SHIM_COPILOT: ShimSpec(
-        name=SHIM_COPILOT,
+    SHIM_COPILOT: _make_shim_spec(
+        SHIM_COPILOT,
         ensure_env=_require_copilot_env,
         build_client=_copilot_completion_client,
-        list_models=lambda cwd: _list_models_from_client(_copilot_completion_client, cwd),
     ),
-    SHIM_OPENCODE: ShimSpec(
-        name=SHIM_OPENCODE,
+    SHIM_OPENCODE: _make_shim_spec(
+        SHIM_OPENCODE,
         ensure_env=_require_opencode_zen_env,
         build_client=_opencode_zen_client,
-        list_models=lambda cwd: _list_models_from_client(_opencode_zen_client, cwd),
     ),
-    SHIM_OPENCODE_GO: ShimSpec(
-        name=SHIM_OPENCODE_GO,
+    SHIM_OPENCODE_GO: _make_shim_spec(
+        SHIM_OPENCODE_GO,
         ensure_env=_require_opencode_go_env,
         build_client=_opencode_go_client,
-        list_models=lambda cwd: _list_models_from_client(_opencode_go_client, cwd),
     ),
 }
 
-
 def _shim_spec(shim: str) -> ShimSpec:
     return SHIM_SPECS[validate_shim(shim)]
-
 
 def _shim_env_error(spec: ShimSpec, cwd: Path | None) -> str | None:
     try:
@@ -1522,14 +1506,11 @@ def _shim_env_error(spec: ShimSpec, cwd: Path | None) -> str | None:
         return str(exc)
     return None
 
-
 def _shim_available(shim: str) -> bool:
     return _shim_env_error(_shim_spec(shim), None) is None
 
-
 def detect_available_shims() -> list[str]:
     return [shim for shim in SHIM_ORDER if _shim_available(shim)]
-
 
 def resolve_shim(
     model_spec: str | None = None, configured_shim: str | None = None
@@ -1545,14 +1526,12 @@ def resolve_shim(
     shims = detect_available_shims()
     return shims[0] if shims else SHIM_OPENAI
 
-
 def validate_shim(shim: str) -> str:
     if shim not in KNOWN_SHIMS:
         raise RuntimeError(
             f"Unknown shim value: `{shim}`. Use one of: {', '.join(SHIM_ORDER)}"
         )
     return shim
-
 
 def ensure_api_env(
     model_spec: str | None = None,
@@ -1562,7 +1541,6 @@ def ensure_api_env(
     spec = _shim_spec(resolve_shim(model_spec, configured_shim))
     error = _shim_env_error(spec, cwd)
     return error is None, error
-
 
 _MISSING_API_CREDENTIALS_MESSAGE = (
     "Missing API credentials.\n\n"
@@ -1580,7 +1558,6 @@ def _missing_api_credentials_message(error: str | None) -> str:
         else f"{_MISSING_API_CREDENTIALS_MESSAGE}\n- error: {error}"
     )
 
-
 def require_api_env(
     model_spec: str | None = None,
     configured_shim: str | None = None,
@@ -1591,10 +1568,8 @@ def require_api_env(
         raise RuntimeError(_missing_api_credentials_message(error))
     return shim
 
-
 def get_client(shim: str, cwd: Path | None = None) -> CompletionClient:
     return _shim_spec(shim).build_client(cwd)
-
 
 def list_models_for_shim(shim: str, cwd: Path | None = None) -> list[str]:
     try:

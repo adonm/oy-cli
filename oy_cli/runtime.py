@@ -59,7 +59,6 @@ _FENCE_RE = re.compile(r"^```([a-zA-Z0-9_+.-]*)\s*$")
 _INLINE_TOKEN_RE = re.compile(r"`[^`\n]+`|\*\*[^*\n]+?\*\*|\*[^*\n]+?\*")
 _CONTROL_TEXT_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
-
 def _ansi(style: str, text: str) -> str:
     return f"\x1b[{style}m{text}\x1b[0m" if text else ""
 
@@ -197,7 +196,17 @@ def _render_text_line(line: str) -> str:
         return _ansi("1;31" if heading.lower() == "error" else "1;36", heading)
     if line.startswith("# "):
         return _ansi("1;34", _sanitize_terminal_text(line[2:].strip()))
-    if line.startswith("[!] "):
+    if line.startswith("[warning] "):
+        return _ansi("1;33", "[warning]") + " " + _apply_inline_styles(line[10:])
+    if line.startswith("[status] "):
+        return _ansi("2", "[status]") + " " + _apply_inline_styles(line[9:])
+    if line.startswith("[note] "):
+        return _ansi("2", "[note]") + " " + _apply_inline_styles(line[7:])
+    if line.startswith("[tool] "):
+        return _ansi("2", "[tool]") + " " + _apply_inline_styles(line[7:])
+    if line.startswith("[wait] "):
+        return _ansi("2", "[wait]") + " " + _apply_inline_styles(line[7:])
+    if line.startswith("[!] "): 
         return _ansi("1;33", "[!]") + " " + _apply_inline_styles(line[4:])
     if line.startswith("... ["):
         return _ansi("2", _sanitize_terminal_text(line))
@@ -390,8 +399,8 @@ def _fmt(kind, value="", extra=None):
         "md": text,
         "block": f"```{extra or 'text'}\n{text.rstrip()}\n```",
         "inline": f"`{text.replace('`', '\\`')}`",
-        "status": f"- {text}",
-        "warning": f"- **Warning:** {text}",
+        "status": f"[status] {text}",
+        "warning": f"[warning] {text}",
         "prompt": f"### {text}",
         "error": f"## Error\n\n{text if chr(10) in text else f'- {text}'}",
     }[kind]
@@ -399,6 +408,12 @@ def _fmt(kind, value="", extra=None):
 def _print(kind="md", value="", *, err=False, extra=None):
     console = STDERR if err else STDOUT
     console.print(_render_markdownish(_fmt(kind, value, extra))) if value else console.print()
+
+
+def _note(label: str, *, tag: str | None = None) -> None:
+    body = _sanitize_terminal_text(label)
+    tag_text = _sanitize_terminal_text(tag) if tag else "note"
+    STDERR.print(_ansi("2", f"[{tag_text}] {body}".rstrip()))
 
 def fail(message, code=1):
     _print("error", str(message).strip(), err=True)
@@ -639,13 +654,12 @@ def note_tool(state, name, *, _defaults=None, _suffix="", **details):
         for key, value in details.items()
         if value not in (None, "", False) and value != defaults.get(key)
     ]
-    prefix = f"{'─' * 2} {'▶ ' if name == 'bash' else ''}"
-    label = prefix + _sanitize_terminal_text(name)
+    label = _sanitize_terminal_text(name)
     if parts:
         label += f" {', '.join(parts)}"
     if _suffix:
         label += f"  {_sanitize_terminal_text(_suffix)}"
-    STDERR.print(_ansi("2", label))
+    _note(label, tag="tool")
 
 def get_tokenizer() -> tiktoken.Encoding:
     global _tokenizer
@@ -728,6 +742,7 @@ __all__ = [
     "_load_cfg",
     "_model",
     "_msg_to_dict",
+    "_note",
     "_pick_model",
     "_print",
     "_rel",

@@ -248,13 +248,13 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
         return ("load", arg)
     if name == "/undo":
         if transcript.undo_last_turn():
-            rt._print(value="Undid last turn.", err=True)
+            rt._note("undid last turn", tag="note")
         else:
             rt._print("warning", "Nothing to undo.", err=True)
         return True
     if name == "/clear":
         transcript.clear(system_prompt)
-        rt._print(value="Conversation cleared.", err=True)
+        rt._note("cleared conversation", tag="note")
         return True
     if name in ("/quit", "/exit"):
         return None
@@ -267,11 +267,8 @@ def render_model_list(items, *, title, query=None, current=None, err=False, limi
 
 def _handle_model_switch(arg, current_model):
     if not arg:
-        rt._print(value=f"Current model: {rt._fmt('inline', current_model)}", err=True)
-        rt._print(
-            value="Usage: `/model <name>` to switch, or `/model list` to browse.",
-            err=True,
-        )
+        rt._print(value=_current_model_text(current_model), err=True)
+        rt._note("use /model <name> to switch, or /model list to browse", tag="note")
         return current_model
     if arg.lower() == "list":
         try:
@@ -285,11 +282,11 @@ def _handle_model_switch(arg, current_model):
         rt._print("warning", "Could not load model list.", err=True)
         return current_model
     if arg in all_models:
-        rt._print(value=f"Switched to {rt._fmt('inline', arg)}", err=True)
+        rt._note(f"switched model: {arg}", tag="note")
         return arg
     matches = [model for model in all_models if arg.lower() in model.lower()]
     if len(matches) == 1:
-        rt._print(value=f"Switched to {rt._fmt('inline', matches[0])}", err=True)
+        rt._note(f"switched model: {matches[0]}", tag="note")
         return matches[0]
     if matches:
         render_model_list(
@@ -314,14 +311,11 @@ def _handle_debug_toggle():
             rt._debug_logger.removeHandler(handler)
         rt._debug_logger = None
         rt._debug_log_path = None
-        rt._print(value="Debug logging **disabled**.", err=True)
+        rt._note("debug logging disabled", tag="note")
     else:
         os.environ["OY_DEBUG"] = "1"
         rt._debug_logger, rt._debug_log_path = rt._init_debug_log()
-        rt._print(
-            value=f"Debug logging **enabled** → {rt._fmt('inline', rt._debug_log_path)}",
-            err=True,
-        )
+        rt._note(f"debug logging enabled: {rt._debug_log_path}", tag="note")
 
 def _handle_ask(question, current_model, session, transcript):
     if not question:
@@ -336,7 +330,7 @@ def _handle_ask(question, current_model, session, transcript):
         if not isinstance(msg, SystemMessage):
             ask_transcript.messages.append(msg)
 
-    rt._print(value="*Researching (read-only)…*", err=True)
+    rt._note("research mode (read-only)", tag="note")
     state = AgentState.new(
         root=session.workspace,
         tool_specs=read_only_registry,
@@ -357,7 +351,7 @@ def _handle_ask(question, current_model, session, transcript):
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
-        rt._print(value="\nResearch cancelled.", err=True)
+        rt._note("research cancelled", tag="note")
     except Exception as exc:
         rt._print("error", f"Research error: {exc}", err=True)
 
@@ -366,7 +360,7 @@ def _handle_audit(focus, current_model, session):
     if focus:
         audit_prompt += session_text("audit", "focus_suffix", focus=focus)
 
-    rt._print(value="*Running audit…*", err=True)
+    rt._note("audit mode", tag="note")
     audit_transcript = Transcript.with_system_prompt(AUDIT_SYSTEM_PROMPT)
 
     try:
@@ -382,7 +376,7 @@ def _handle_audit(focus, current_model, session):
             )
         )
     except KeyboardInterrupt:
-        rt._print(value="\nAudit cancelled.", err=True)
+        rt._note("audit cancelled", tag="note")
     except Exception as exc:
         rt._print("error", f"Audit error: {exc}", err=True)
 
@@ -399,7 +393,7 @@ def _handle_save(name, transcript, current_model):
         "transcript": msgspec.to_builtins(transcript),
     }
     save_json(path, data)
-    rt._print(value=f"Session saved to {rt._fmt('inline', path.name)}", err=True)
+    rt._note(f"saved session: {path.name}", tag="note")
 
 def _handle_load(name, transcript, current_model, system_prompt):
     sessions_dir = _sessions_dir()
@@ -458,10 +452,9 @@ def _handle_load(name, transcript, current_model, system_prompt):
         loaded = msgspec.convert(data["transcript"], Transcript)
         loaded_model = data.get("model", current_model)
         loaded.set_system_prompt(system_prompt)
-        rt._print(
-            value=f"Loaded session {rt._fmt('inline', target.stem)} — "
-            f"{len(loaded.messages)} messages, model: {rt._fmt('inline', loaded_model)}",
-            err=True,
+        rt._note(
+            f"loaded session: {target.stem} ({len(loaded.messages)} messages, model: {loaded_model})",
+            tag="note",
         )
         return loaded, loaded_model
     except Exception as exc:
@@ -472,7 +465,7 @@ def chat():
     prompt_session = _create_prompt_session()
     session = _resolve_session(interactive=True)
     _print_session_intro("Chat", session)
-    rt._print(value="Type `/help` for commands.", err=True)
+    rt._note("chat mode; /help for commands", tag="note")
 
     transcript = Transcript.with_system_prompt(session.system_prompt)
     current_model = session.model
@@ -486,7 +479,7 @@ def chat():
             rt.STDERR.print()
             continue
         except EOFError:
-            rt._print(value="\n## Session Ended", err=True)
+            rt._note("session ended", tag="note")
             break
 
         if not prompt.strip():
@@ -537,23 +530,21 @@ def chat():
             )
         except KeyboardInterrupt:
             transcript.rollback(checkpoint)
-            rt._print(
-                value="\nCancelled — your message is in history (press ↑).",
-                err=True,
-            )
+            rt._note("cancelled; prompt still in history (press ↑)", tag="note")
             continue
         except Exception as exc:
             transcript.rollback(checkpoint)
             rt._print("error", f"Agent error: {exc}", err=True)
-            rt._print(value="Your message is in history (press ↑).", err=True)
+            rt._note("prompt still in history (press ↑)", tag="note")
             continue
 
         _ = code
         _, model = rt.split_model_spec(current_model)
         prepped = transcript.prepared_tokens(model=model)
         remaining = max(transcript.max_context_tokens - prepped, 0)
-        rt.STDERR.print(
-            rt._ansi("2", f"| {rt.format_tokens(prepped)} used, ~{rt.format_tokens(remaining)} remaining")
+        rt._note(
+            f"context: {rt.format_tokens(prepped)} used, ~{rt.format_tokens(remaining)} remaining",
+            tag="note",
         )
 
     _set_terminal_title("")

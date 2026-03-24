@@ -75,6 +75,7 @@ from .runtime import (
     _load_cfg,
     _model,
     _msg_to_dict,
+    _note,
     _pick_model,
     _print,
     _rel,

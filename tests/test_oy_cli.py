@@ -293,7 +293,7 @@ class BashToolTests(unittest.TestCase):
                 patch.object(oy_cli.runtime, "which", return_value="/bin/bash"),
                 patch.object(oy_cli.runtime, "run_cmd", return_value=result) as run_cmd,
                 patch.object(oy_cli.runtime, "show"),
-                patch.object(oy_cli.runtime, "_print"),
+                patch.object(oy_cli.runtime, "_note"),
             ):
                 payload = oy_cli.tool_bash(
                     self._state(root), "printf out; printf err >&2", timeout_seconds=30
@@ -330,7 +330,7 @@ class BashToolTests(unittest.TestCase):
                 patch.object(oy_cli.runtime, "which", return_value="/bin/bash"),
                 patch.object(oy_cli.runtime, "run_cmd", return_value=result),
                 patch.object(oy_cli.runtime, "show"),
-                patch.object(oy_cli.runtime, "_print"),
+                patch.object(oy_cli.runtime, "_note"),
             ):
                 payload = oy_cli.tool_bash(self._state(root), "echo json")
 
@@ -357,7 +357,7 @@ class BashToolTests(unittest.TestCase):
         self.assertIn("count", rendered)
         self.assertIn("items", rendered)
         self.assertNotIn("```json", rendered)
-        self.assertIn("- exit 1", rendered)
+        self.assertIn("[status] exit 1", rendered)
         self.assertIn("**stderr**", rendered)
 
     def test_bash_preview_prefers_existing_toon_output(self):
@@ -636,13 +636,13 @@ class ChatCommandTests(unittest.TestCase):
 
         with (
             patch.object(oy_cli.runtime, "split_model_spec", return_value=("openai", "gpt-test")),
-            patch.object(oy_cli.runtime, "_print") as print_mock,
+            patch.object(oy_cli.runtime, "_note") as note_mock,
         ):
             result = oy_cli._chat_command("/undo", transcript, "sys", "openai:gpt-test")
 
         self.assertTrue(result)
         self.assertEqual(transcript.messages, [SystemMessage("sys")])
-        print_mock.assert_called_once_with(value="Undid last turn.", err=True)
+        note_mock.assert_called_once_with("undid last turn", tag="note")
 
     def test_chat_command_undo_reports_when_empty(self):
         transcript = oy_cli.Transcript.with_system_prompt("sys")
@@ -747,7 +747,7 @@ class PrivatePathPermissionTests(unittest.TestCase):
 
             with (
                 patch.object(oy_cli.cli, "_SESSIONS_DIR", sessions_dir),
-                patch.object(oy_cli.runtime, "_print"),
+                patch.object(oy_cli.runtime, "_note"),
             ):
                 oy_cli._handle_save("demo", transcript, "openai:gpt-test")
 
