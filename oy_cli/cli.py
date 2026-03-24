@@ -12,14 +12,14 @@ import msgspec
 
 from . import runtime as rt
 from .agent import AgentState, Transcript, run_agent, run_turn
-from .modes import (
+from .providers import SystemMessage
+from .runtime import (
     AUDIT_SYSTEM_PROMPT,
     active_system_prompt,
     ask_system_prompt,
     read_only_tool_specs,
+    session_text,
 )
-from .protocol import SystemMessage
-from .session_text import session_text
 run_cmd = rt.run_cmd
 save_json = rt.save_json
 
@@ -142,6 +142,7 @@ def _create_prompt_session():
         "/audit",
         "/save",
         "/load",
+        "/undo",
         "/clear",
         "/quit",
         "/exit",
@@ -202,6 +203,7 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
                     "- `/audit [focus]` -- run a security/complexity audit",
                     "- `/save [name]` -- save session transcript",
                     "- `/load [name]` -- load a saved session",
+                    "- `/undo` -- remove the last prompt and its follow-up messages",
                     "- `/clear` -- reset conversation (keeps system prompt)",
                     "- `/quit` or `/exit` -- end session",
                     "",
@@ -244,6 +246,12 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
         return ("save", arg)
     if name == "/load":
         return ("load", arg)
+    if name == "/undo":
+        if transcript.undo_last_turn():
+            rt._print(value="Undid last turn.", err=True)
+        else:
+            rt._print("warning", "Nothing to undo.", err=True)
+        return True
     if name == "/clear":
         transcript.clear(system_prompt)
         rt._print(value="Conversation cleared.", err=True)
@@ -545,7 +553,7 @@ def chat():
         prepped = transcript.prepared_tokens(model=model)
         remaining = max(transcript.max_context_tokens - prepped, 0)
         rt.STDERR.print(
-            f"[dim]| {rt.format_tokens(prepped)} used, ~{rt.format_tokens(remaining)} remaining[/dim]"
+            rt._ansi("2", f"| {rt.format_tokens(prepped)} used, ~{rt.format_tokens(remaining)} remaining")
         )
 
     _set_terminal_title("")

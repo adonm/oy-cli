@@ -57,8 +57,7 @@ That includes:
 - transcript compaction text (`Current todo list`, omitted-history note, packed-history note)
 - built-in tool descriptions exposed to the model
 
-Code that reads this content lives in [`oy_cli/session_text.py`](oy_cli/session_text.py).
-Runtime composition lives mainly in [`oy_cli/modes.py`](oy_cli/modes.py), [`oy_cli/agent.py`](oy_cli/agent.py), and [`oy_cli/tooling/core.py`](oy_cli/tooling/core.py).
+Code that reads and composes this content now lives mainly in [`oy_cli/runtime.py`](oy_cli/runtime.py), with transcript/agent flow in [`oy_cli/agent.py`](oy_cli/agent.py) and CLI entrypoints in [`oy_cli/cli.py`](oy_cli/cli.py).
 
 ## Configuration
 
@@ -67,7 +66,7 @@ Runtime composition lives mainly in [`oy_cli/modes.py`](oy_cli/modes.py), [`oy_c
 | Variable | Purpose |
 |----------|---------|
 | `OY_MODEL` | Override model for this session (bare name or `shim:model`) |
-| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `copilot`, `bedrock`, or `bedrock-mantle` |
+| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `copilot`, `opencode`, `opencode-go`, or `bedrock-mantle` |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable checkpoints |
 | `OY_ROOT` | Run against different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
@@ -95,8 +94,7 @@ is a reference.
 
 - Python 3.13+
 - `bash`
-- OpenAI API key or Codex local auth **OR**
-  AWS CLI configured for Bedrock
+- OpenAI API key or compatible endpoint credentials, Codex local auth, Copilot auth, OpenCode auth, or AWS CLI configured for Bedrock Mantle
 
 ## Installation
 
@@ -137,7 +135,7 @@ export OPENAI_API_KEY=...
 Copilot and Codex (OpenAI) creds are introspected
 and used, if creds are available `oy model` will show them in the model list.
 
-**AWS Bedrock:** Uses your default AWS profile/region. Supports auto-refresh of stale SSO sessions.
+**AWS Bedrock Mantle:** Uses your default AWS profile/region. Supports auto-refresh of stale SSO sessions.
 ```bash
 export AWS_PROFILE=my-profile
 export AWS_REGION=us-west-2
@@ -145,9 +143,7 @@ export AWS_REGION=us-west-2
 
 ## Troubleshooting
 
-**"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`,
-or configure AWS CLI (`aws configure`). For Bedrock:
-ensure your profile has `bedrock:InvokeModel` permission.
+**"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or configure AWS CLI (`aws configure`) for Bedrock Mantle.
 
 **"stdin is not a TTY"** -> Piping input disables `ask`. Set `OY_NON_INTERACTIVE=1` to make explicit.
 
@@ -163,7 +159,7 @@ Recommended:
 - avoid exposing long-lived secrets in the environment
 - review generated changes before shipping
 
-**Protections:** workspace-bound file access for built-in file tools and native boto3 credential resolution for Bedrock.
+**Protections:** workspace-bound file access for built-in file tools and default SDK credential flows for supported providers.
 
 ## Links
 

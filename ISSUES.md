@@ -13,8 +13,8 @@
 > | `shim.py` | 223 code lines (thin facade) |
 > | Tests | 1,086 lines across 3 files |
 > | Agent tools | 7 (`list`, `read`, `bash`, `search`, `ask`, `webfetch`, `todo`) |
-> | Provider shims | 7 (`openai`, `codex`, `bedrock`, `bedrock-mantle`, `copilot`, `opencode`, `opencode-go`) |
-> | Runtime dependencies | 10 (`boto3`, `defopt`, `httpx`, `openai`, `rich`, `tiktoken`, `tenacity`, `msgspec`, `headroom-ai`, `prompt-toolkit`) |
+> | Provider shims | 6 (`openai`, `codex`, `bedrock-mantle`, `copilot`, `opencode`, `opencode-go`) |
+> | Runtime dependencies | 10 (`botocore`, `defopt`, `httpx`, `openai`, `rich`, `tiktoken`, `tenacity`, `msgspec`, `toons`, `prompt-toolkit`) |
 >
 > **Audit lens**: CLI agent that reads/writes workspace files via `bash`, executes shell commands, makes outbound API calls, and fetches arbitrary URLs via `webfetch`. Priority: workspace-boundary safety, secret handling, SSRF prevention, provider complexity, and keeping a deliberately small codebase from accreting unnecessary weight.
 

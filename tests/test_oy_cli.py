@@ -10,7 +10,7 @@ from unittest.mock import patch
 import msgspec
 
 import oy_cli
-from oy_cli.shim import AssistantMessage, SystemMessage, ToolCall, ToolMessage, ToolResult, ToolSpec, UserMessage
+from oy_cli import AssistantMessage, SystemMessage, ToolCall, ToolMessage, ToolResult, ToolSpec, UserMessage
 
 
 def make_state(root: Path, tool_specs=None, *, unattended_deadline: float = float("inf")):
@@ -36,7 +36,6 @@ class ShimDirectTests(unittest.TestCase):
         with (
             patch.object(oy_cli.runtime, "require_api_env") as require_api_env,
             patch.object(oy_cli.runtime, "resolve_active_shim", return_value="openai") as resolve,
-            patch.object(oy_cli.runtime, "default_region", return_value="ap-southeast-2") as default_region,
             patch.object(oy_cli.runtime.Path, "cwd", return_value=Path("/workspace")),
             patch.object(oy_cli.runtime, "_shim_get_client", return_value=sentinel),
         ):
@@ -44,7 +43,6 @@ class ShimDirectTests(unittest.TestCase):
 
         require_api_env.assert_called_once_with(Path("/workspace"))
         resolve.assert_called_once_with("openai:gpt-test")
-        default_region.assert_called_once_with()
         self.assertIs(client, sentinel)
 
     def test_ensure_api_env_calls_shim_directly(self):
@@ -107,6 +105,36 @@ class TranscriptLifecycleTests(unittest.TestCase):
         transcript.clear("next")
 
         self.assertEqual(transcript.messages, [SystemMessage("next")])
+
+    def test_undo_last_turn_removes_last_user_message_and_followups(self):
+        transcript = oy_cli.Transcript(
+            messages=[
+                SystemMessage("sys"),
+                UserMessage("first"),
+                UserMessage("second"),
+                AssistantMessage("working", tool_calls=[ToolCall(id="call_1", name="bash", arguments={})]),
+                ToolMessage("call_1", "bash", ToolResult(ok=True, content="done")),
+            ]
+        )
+
+        undone = transcript.undo_last_turn()
+
+        self.assertTrue(undone)
+        self.assertEqual(
+            transcript.messages,
+            [
+                SystemMessage("sys"),
+                UserMessage("first"),
+            ],
+        )
+
+    def test_undo_last_turn_returns_false_without_user_messages(self):
+        transcript = oy_cli.Transcript.with_system_prompt("sys")
+
+        undone = transcript.undo_last_turn()
+
+        self.assertFalse(undone)
+        self.assertEqual(transcript.messages, [SystemMessage("sys")])
 
 
 class TranscriptTests(unittest.TestCase):
@@ -602,6 +630,34 @@ class SlocToolTests(unittest.TestCase):
         self.assertEqual(payload["languages"][0]["file_count"], 1)
 
 
+class ChatCommandTests(unittest.TestCase):
+    def test_chat_command_undo_reports_success(self):
+        transcript = oy_cli.Transcript(messages=[SystemMessage("sys"), UserMessage("hello")])
+
+        with (
+            patch.object(oy_cli.runtime, "split_model_spec", return_value=("openai", "gpt-test")),
+            patch.object(oy_cli.runtime, "_print") as print_mock,
+        ):
+            result = oy_cli._chat_command("/undo", transcript, "sys", "openai:gpt-test")
+
+        self.assertTrue(result)
+        self.assertEqual(transcript.messages, [SystemMessage("sys")])
+        print_mock.assert_called_once_with(value="Undid last turn.", err=True)
+
+    def test_chat_command_undo_reports_when_empty(self):
+        transcript = oy_cli.Transcript.with_system_prompt("sys")
+
+        with (
+            patch.object(oy_cli.runtime, "split_model_spec", return_value=("openai", "gpt-test")),
+            patch.object(oy_cli.runtime, "_print") as print_mock,
+        ):
+            result = oy_cli._chat_command("/undo", transcript, "sys", "openai:gpt-test")
+
+        self.assertTrue(result)
+        self.assertEqual(transcript.messages, [SystemMessage("sys")])
+        print_mock.assert_called_once_with("warning", "Nothing to undo.", err=True)
+
+
 class PrivatePathPermissionTests(unittest.TestCase):
     def test_save_cfg_hardens_config_directory_permissions(self):
         import tempfile
@@ -812,28 +868,28 @@ class TestWebfetch(unittest.TestCase):
         self.assertIn("webfetch", names)
 
     def test_webfetch_in_read_only_tools(self):
-        from oy_cli.modes import _READ_ONLY_TOOLS
+        from oy_cli import _READ_ONLY_TOOLS
 
         self.assertIn("webfetch", _READ_ONLY_TOOLS)
 
     def test_sloc_in_read_only_tools(self):
-        from oy_cli.modes import _READ_ONLY_TOOLS
+        from oy_cli import _READ_ONLY_TOOLS
 
         self.assertIn("sloc", _READ_ONLY_TOOLS)
 
     def test_noninteractive_tool_registry_excludes_ask(self):
-        from oy_cli.modes import active_tool_specs
+        from oy_cli import active_tool_specs
 
         names = [spec.name for spec in active_tool_specs(False).specs()]
         self.assertNotIn("ask", names)
 
     def test_read_only_tool_registry_matches_declared_names(self):
-        from oy_cli.modes import _READ_ONLY_TOOLS, read_only_tool_specs
+        from oy_cli import _READ_ONLY_TOOLS, read_only_tool_specs
 
         self.assertEqual({spec.name for spec in read_only_tool_specs().specs()}, _READ_ONLY_TOOLS)
 
     def test_webfetch_args_schema_has_url_and_options(self):
-        from oy_cli.tools import WebfetchArgs
+        from oy_cli import WebfetchArgs
         import msgspec
 
         schema = msgspec.json.schema(WebfetchArgs)
@@ -1071,7 +1127,7 @@ class TestTodo(unittest.TestCase):
         self.assertIn("todo", names)
 
     def test_todo_args_schema_has_todos(self):
-        from oy_cli.tools import TodoArgs
+        from oy_cli import TodoArgs
 
         schema = msgspec.json.schema(TodoArgs)
         defs = schema.get("$defs", {})

@@ -4,7 +4,7 @@ import unittest
 
 from unittest.mock import patch
 
-from oy_cli import providers, shim
+from oy_cli import providers
 
 
 class OpenAIPairTests(unittest.TestCase):
@@ -60,12 +60,12 @@ class OpenAIPairTests(unittest.TestCase):
             patch("oy_cli.providers.AsyncOpenAI") as async_openai,
             patch("oy_cli.providers.OpenAI") as openai,
         ):
-            shim._copilot_openai_pair("test-token")
+            providers._copilot_openai_pair("test-token")
 
         expected = {
             "api_key": "test-token",
-            "base_url": shim._COPILOT_BASE_URL,
-            "default_headers": shim._copilot_default_headers(),
+            "base_url": providers._COPILOT_BASE_URL,
+            "default_headers": providers._copilot_default_headers(),
         }
         make_async_http.assert_called_once_with(**expected)
         make_sync_http.assert_called_once_with(**expected)

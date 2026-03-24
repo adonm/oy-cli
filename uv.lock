@@ -37,20 +37,6 @@ wheels = [
 ]
 
 [[package]]
-name = "boto3"
-version = "1.42.68"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "botocore" },
-    { name = "jmespath" },
-    { name = "s3transfer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/06/ae/60c642aa5413e560b671da825329f510b29a77274ed0f580bde77562294d/boto3-1.42.68.tar.gz", hash = "sha256:3f349f967ab38c23425626d130962bcb363e75f042734fe856ea8c5a00eef03c", size = 112761, upload-time = "2026-03-13T19:32:17.137Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/f6/dc6e993479dbb597d68223fbf61cb026511737696b15bd7d2a33e9b2c24f/boto3-1.42.68-py3-none-any.whl", hash = "sha256:dbff353eb7dc93cbddd7926ed24793e0174c04adbe88860dfa639568442e4962", size = 140556, upload-time = "2026-03-13T19:32:14.951Z" },
-]
-
-[[package]]
 name = "botocore"
 version = "1.42.68"
 source = { registry = "https://pypi.org/simple" }
@@ -393,7 +379,7 @@ name = "oy-cli"
 version = "0.4.2"
 source = { editable = "." }
 dependencies = [
-    { name = "boto3" },
+    { name = "botocore" },
     { name = "defopt" },
     { name = "httpx" },
     { name = "markdownify" },
@@ -401,9 +387,9 @@ dependencies = [
     { name = "openai" },
     { name = "pathspec" },
     { name = "prompt-toolkit" },
+    { name = "pygments" },
     { name = "pygount" },
     { name = "regex" },
-    { name = "rich" },
     { name = "tenacity" },
     { name = "tiktoken" },
     { name = "toons" },
@@ -418,7 +404,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.35.0" },
+    { name = "botocore", specifier = ">=1.35.0" },
     { name = "defopt", specifier = ">=7.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "markdownify", specifier = ">=1.2.0" },
@@ -426,9 +412,9 @@ requires-dist = [
     { name = "openai", specifier = ">=1.68.0" },
     { name = "pathspec", specifier = ">=0.12.1" },
     { name = "prompt-toolkit", specifier = ">=3.0.50" },
+    { name = "pygments", specifier = ">=2.19.0" },
     { name = "pygount", specifier = ">=3.0.0" },
     { name = "regex", specifier = ">=2026.0.0" },
-    { name = "rich", specifier = ">=14.3.0" },
     { name = "tenacity", specifier = ">=9.0.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "toons", specifier = ">=0.5.3" },
@@ -735,18 +721,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/6c/25/3fc9114abf979a41673ce877c08016f8e660ad6cf508c3957f537d2e9fa9/ruff-0.15.6-py3-none-win32.whl", hash = "sha256:bbf67d39832404812a2d23020dda68fee7f18ce15654e96fb1d3ad21a5fe436c", size = 10616872, upload-time = "2026-03-12T23:05:42.451Z" },
     { url = "https://files.pythonhosted.org/packages/89/7a/09ece68445ceac348df06e08bf75db72d0e8427765b96c9c0ffabc1be1d9/ruff-0.15.6-py3-none-win_amd64.whl", hash = "sha256:aee25bc84c2f1007ecb5037dff75cef00414fdf17c23f07dc13e577883dca406", size = 11787271, upload-time = "2026-03-12T23:05:20.168Z" },
     { url = "https://files.pythonhosted.org/packages/7f/d0/578c47dd68152ddddddf31cd7fc67dc30b7cdf639a86275fda821b0d9d98/ruff-0.15.6-py3-none-win_arm64.whl", hash = "sha256:c34de3dd0b0ba203be50ae70f5910b17188556630e2178fd7d79fc030eb0d837", size = 11060497, upload-time = "2026-03-12T23:05:25.968Z" },
-]
-
-[[package]]
-name = "s3transfer"
-version = "0.16.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "botocore" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/05/04/74127fc843314818edfa81b5540e26dd537353b123a4edc563109d8f17dd/s3transfer-0.16.0.tar.gz", hash = "sha256:8e990f13268025792229cd52fa10cb7163744bf56e719e0b9cb925ab79abf920", size = 153827, upload-time = "2025-12-01T02:30:59.114Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/51/727abb13f44c1fcf6d145979e1535a35794db0f6e450a0cb46aa24732fe2/s3transfer-0.16.0-py3-none-any.whl", hash = "sha256:18e25d66fed509e3868dc1572b3f427ff947dd2c56f844a5bf09481ad3f3b2fe", size = 86830, upload-time = "2025-12-01T02:30:57.729Z" },
 ]
 
 [[package]]

@@ -8,15 +8,11 @@ import msgspec
 import tiktoken
 import toons
 from openai import AuthenticationError, BadRequestError, PermissionDeniedError, RateLimitError
-from rich.status import Status
-
 from . import runtime as rt
-from .modes import active_tool_specs
-from .protocol import AssistantMessage, ChatMessage, CompletionClient, SystemMessage, ToolMessage, UserMessage
+from .providers import AssistantMessage, ChatMessage, CompletionClient, SystemMessage, ToolMessage, UserMessage
 from .providers import _tool_output_text
-from .tooling.core import TodoItem, ToolRegistry, _positive_int
-from .session_text import session_text
-from .tooling.interaction import _format_todos
+from .runtime import active_tool_specs, session_text
+from .tools import TodoItem, ToolRegistry, _format_todos, _positive_int
 
 
 class AgentState(msgspec.Struct, omit_defaults=True):
@@ -195,6 +191,13 @@ class Transcript(msgspec.Struct, omit_defaults=True):
     def rollback(self, checkpoint: int) -> None:
         del self.messages[checkpoint:]
 
+    def undo_last_turn(self) -> bool:
+        for index in range(len(self.messages) - 1, 0, -1):
+            if isinstance(self.messages[index], UserMessage):
+                del self.messages[index:]
+                return True
+        return False
+
     def add_user(self, prompt: str) -> None:
         self.messages.append(UserMessage(prompt))
 
@@ -250,27 +253,22 @@ _tokenizer: tiktoken.Encoding | None = None
 class _WaitIndicator:
     def __init__(self, label: str):
         self._label = label
-        self._spinner: Status | None = None
+        self._active = False
 
     def start(self):
-        self._spinner = Status(self._label, console=rt.STDERR, spinner="dots")
-        self._spinner.start()
+        self._active = True
+        rt.STDERR.print(rt._ansi("2", f"… {self._label}"))
 
     def stop(self):
-        if self._spinner is not None:
-            self._spinner.stop()
-            self._spinner = None
+        self._active = False
 
     def update(self, label: str):
         self._label = label
-        if self._spinner is not None:
-            self._spinner.update(label)
+        if self._active:
+            rt.STDERR.print(rt._ansi("2", f"… {self._label}"))
 
     def log(self, message: str):
-        if self._spinner is not None:
-            self._spinner.console.log(message)
-        else:
-            rt.STDERR.print(message)
+        rt.STDERR.print(rt._sanitize_terminal_text(message))
 
 
 async def run_turn(
@@ -300,7 +298,7 @@ async def run_turn(
             excerpt = ""
             if error_ctx:
                 excerpt = " | ".join(line.strip() for line in error_ctx.strip().splitlines()[:3] if line.strip())
-            spinner.log(f"[dim]\\-> retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}[/dim]")
+            spinner.log(rt._ansi("2", f"-> retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}"))
             spinner.update(f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) | {size_str}")
 
         try:

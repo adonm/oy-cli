@@ -1,27 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 from importlib.metadata import version as _meta_version
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
+import tomllib
 
 import msgspec
 import tiktoken
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.markup import escape
-from rich.prompt import Prompt
-from rich.theme import Theme
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.output.defaults import create_output
+from prompt_toolkit.shortcuts import print_formatted_text, prompt as prompt_input
+from pygments import highlight
+from pygments.formatters import Terminal256Formatter
+from pygments.lexers import TextLexer, get_lexer_by_name
+from pygments.util import ClassNotFound
 
 from .providers import (
     command_env,
-    default_region,
     http_client,
     join_model_spec,
     load_json,
@@ -30,7 +35,7 @@ from .providers import (
     split_model_spec,
     which,
 )
-from .shim import (
+from .providers import (
     detect_available_shims,
     ensure_api_env as _shim_ensure_api_env,
     get_client as _shim_get_client,
@@ -50,13 +55,180 @@ _BASH_IMPORTANT_LINE_RE = re.compile(
     r"(?i)(error|warn(?:ing)?|fail(?:ed|ure)?|exception|traceback|fatal|denied|not found|timed out)"
 )
 
-_THEME = Theme(
-    {
-        "markdown.code": "bold cyan",
-        "markdown.code_block": "cyan",
+_FENCE_RE = re.compile(r"^```([a-zA-Z0-9_+.-]*)\s*$")
+_INLINE_TOKEN_RE = re.compile(r"`[^`\n]+`|\*\*[^*\n]+?\*\*|\*[^*\n]+?\*")
+_CONTROL_TEXT_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _ansi(style: str, text: str) -> str:
+    return f"\x1b[{style}m{text}\x1b[0m" if text else ""
+
+
+def _sanitize_terminal_text(text: str) -> str:
+    return _CONTROL_TEXT_RE.sub("?", str(text).replace("\x1b", r"\x1b"))
+
+
+class Console:
+    def __init__(self, *, stderr: bool = False):
+        self._stderr = stderr
+
+    @property
+    def stream(self):
+        return sys.stderr if self._stderr else sys.stdout
+
+    @property
+    def output(self):
+        return create_output(stdout=self.stream)
+
+    def print(self, *values: Any, sep: str = " ", end: str = "\n", highlight: bool | None = None):
+        _ = highlight
+        if not values:
+            self.stream.write(end)
+            self.stream.flush()
+            return
+        print_formatted_text(
+            ANSI(sep.join(map(str, values))),
+            output=self.output,
+            end=end,
+            flush=True,
+            include_default_pygments_style=False,
+        )
+
+    def rule(self, style: str | None = None):
+        width = max(shutil.get_terminal_size((80, 20)).columns - 1, 20)
+        line = "─" * width
+        self.print(_ansi("2", line) if style == "dim" else line)
+
+
+class Prompt:
+    @staticmethod
+    def ask(
+        message: str,
+        *,
+        console: Console | None = None,
+        default: str | None = None,
+        choices: list[str] | None = None,
+    ) -> str:
+        prompt_text = _ansi("1;36", _sanitize_terminal_text(str(message)))
+        if choices:
+            prompt_text += _ansi("2", f" ({'/'.join(map(str, choices))})")
+        if default not in (None, ""):
+            prompt_text += _ansi("2", f" [{default}]")
+        prompt_text += ": "
+        while True:
+            response = prompt_input(
+                ANSI(prompt_text),
+                default="" if default is None else str(default),
+                output=(console.output if isinstance(console, Console) else create_output(stdout=sys.stderr)),
+                include_default_pygments_style=False,
+            ).strip()
+            if not choices or response in choices:
+                return response
+            _print(
+                "warning",
+                f"Enter one of: {', '.join(_fmt('inline', choice) for choice in choices)}.",
+                err=True,
+            )
+
+
+STDOUT, STDERR = Console(), Console(stderr=True)
+
+
+@lru_cache(maxsize=1)
+def _terminal_formatter() -> Terminal256Formatter:
+    return Terminal256Formatter(style="native")
+
+
+@lru_cache(maxsize=None)
+def _code_lexer(language: str):
+    aliases = {
+        "plain": "text",
+        "plaintext": "text",
+        "console": "bash",
+        "shell": "bash",
+        "sh": "bash",
     }
-)
-STDOUT, STDERR = Console(theme=_THEME), Console(stderr=True, theme=_THEME)
+    name = aliases.get(
+        (language or "text").strip().lower(),
+        (language or "text").strip().lower() or "text",
+    )
+    try:
+        return get_lexer_by_name(name)
+    except ClassNotFound:
+        return TextLexer()
+
+
+def _highlight_code(text: str, language: str = "text") -> str:
+    return highlight(
+        _sanitize_terminal_text(text).rstrip("\n"),
+        _code_lexer(language),
+        _terminal_formatter(),
+    ).rstrip("\n")
+
+
+def _apply_inline_styles(text: str) -> str:
+    text = _sanitize_terminal_text(text)
+    parts: list[str] = []
+    last = 0
+    for match in _INLINE_TOKEN_RE.finditer(text):
+        start, end = match.span()
+        parts.append(text[last:start])
+        token = match.group(0)
+        if token.startswith("`"):
+            parts.append(_ansi("38;5;81", token[1:-1].replace(r"\`", "`")))
+        elif token.startswith("**"):
+            inner = token[2:-2]
+            style = "1;33" if inner.rstrip(":").lower() == "warning" else "1"
+            parts.append(_ansi(style, inner))
+        else:
+            parts.append(_ansi("2", token[1:-1]))
+        last = end
+    parts.append(text[last:])
+    return "".join(parts)
+
+
+def _render_text_line(line: str) -> str:
+    if not line:
+        return ""
+    if line.startswith("### "):
+        return _ansi("1;35", _sanitize_terminal_text(line[4:].strip()))
+    if line.startswith("## "):
+        heading = _sanitize_terminal_text(line[3:].strip())
+        return _ansi("1;31" if heading.lower() == "error" else "1;36", heading)
+    if line.startswith("# "):
+        return _ansi("1;34", _sanitize_terminal_text(line[2:].strip()))
+    if line.startswith("[!] "):
+        return _ansi("1;33", "[!]") + " " + _apply_inline_styles(line[4:])
+    if line.startswith("... ["):
+        return _ansi("2", _sanitize_terminal_text(line))
+    return _apply_inline_styles(line)
+
+
+def _render_markdownish(text: str) -> str:
+    rendered: list[str] = []
+    code_lines: list[str] = []
+    code_language = "text"
+    in_code_block = False
+    for line in str(text).splitlines():
+        fence = _FENCE_RE.match(line)
+        if in_code_block:
+            if fence:
+                rendered.append(_highlight_code("\n".join(code_lines), code_language))
+                code_lines.clear()
+                code_language = "text"
+                in_code_block = False
+            else:
+                code_lines.append(line)
+            continue
+        if fence:
+            code_language = fence.group(1) or "text"
+            in_code_block = True
+            code_lines.clear()
+            continue
+        rendered.append(_render_text_line(line))
+    if in_code_block:
+        rendered.append(_highlight_code("\n".join(code_lines), code_language))
+    return "\n".join(rendered)
 
 def _env(name, default, t=None):
     value = os.environ.get(f"OY_{name}")
@@ -95,6 +267,76 @@ def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
     )
 
 BUDGETS = _derive_runtime_budgets(MAX_CONTEXT_TOKENS)
+
+@lru_cache(maxsize=1)
+def load_session_text() -> dict[str, Any]:
+    raw = files("oy_cli").joinpath("session_text.toml").read_text(encoding="utf-8")
+    data = tomllib.loads(raw)
+    if not isinstance(data, dict):
+        raise RuntimeError("session_text.toml must decode to a table")
+    return data
+
+
+def session_text(*keys: str, **values: Any) -> str:
+    node: Any = load_session_text()
+    for key in keys:
+        if not isinstance(node, dict) or key not in node:
+            joined = ".".join((*keys,))
+            raise KeyError(f"Missing session text key: {joined}")
+        node = node[key]
+    if not isinstance(node, str):
+        joined = ".".join(keys)
+        raise TypeError(f"Session text key must point to a string: {joined}")
+    return node.format(**values) if values else node
+
+
+def tool_description(name: str) -> str:
+    return session_text("tools", name, "description")
+
+
+def base_system_prompt() -> str:
+    return session_text("system", "base").strip()
+
+
+def interactive_system_prompt() -> str:
+    return session_text("system", "interactive_suffix").strip()
+
+
+def noninteractive_system_prompt() -> str:
+    return session_text("system", "noninteractive_suffix").strip()
+
+
+def audit_system_prompt() -> str:
+    return session_text("system", "audit").strip()
+
+
+BASE_SYSTEM_PROMPT = base_system_prompt()
+INTERACTIVE_SYSTEM_PROMPT = interactive_system_prompt()
+NONINTERACTIVE_SYSTEM_PROMPT = noninteractive_system_prompt()
+AUDIT_SYSTEM_PROMPT = audit_system_prompt()
+_ASK_SYSTEM_SUFFIX = "\n" + session_text("system", "ask_suffix").strip() + "\n"
+_READ_ONLY_TOOLS = {"list", "read", "search", "sloc", "webfetch"}
+
+
+def active_system_prompt(interactive: bool) -> str:
+    suffix = INTERACTIVE_SYSTEM_PROMPT if interactive else NONINTERACTIVE_SYSTEM_PROMPT
+    return BASE_SYSTEM_PROMPT + "\n" + suffix + "\n"
+
+
+def active_tool_specs(interactive: bool):
+    from .tools import TOOL_REGISTRY, ToolRegistry
+
+    return TOOL_REGISTRY if interactive else ToolRegistry.select(exclude={"ask"})
+
+
+def ask_system_prompt(system_prompt: str) -> str:
+    return system_prompt + _ASK_SYSTEM_SUFFIX
+
+
+def read_only_tool_specs():
+    from .tools import ToolRegistry
+
+    return ToolRegistry.select(include=_READ_ONLY_TOOLS)
 
 def _ensure_private_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -156,7 +398,7 @@ def _fmt(kind, value="", extra=None):
 
 def _print(kind="md", value="", *, err=False, extra=None):
     console = STDERR if err else STDOUT
-    console.print(Markdown(_fmt(kind, value, extra), code_theme="ansi_dark")) if value else console.print()
+    console.print(_render_markdownish(_fmt(kind, value, extra))) if value else console.print()
 
 def fail(message, code=1):
     _print("error", str(message).strip(), err=True)
@@ -216,13 +458,14 @@ def _wrap_code_block(text: str) -> str:
         return text
     return f"```text\n{text.rstrip()}\n```"
 
+
 def show(text):
     if not text:
         return
     text = _truncate_long_lines(text)
     lines = text.splitlines()
     if len(lines) <= _MAX_SHOW_LINES:
-        STDERR.print(Markdown(_wrap_code_block(text), code_theme="ansi_dark"), overflow="fold")
+        STDERR.print(_render_markdownish(_wrap_code_block(text)))
         return
     head_count = max(_MAX_SHOW_LINES // 2, 2)
     tail_count = max(_MAX_SHOW_LINES - head_count, 2)
@@ -249,7 +492,7 @@ def show(text):
         last = index
     wrapped = _wrap_code_block("\n".join(selected))
     wrapped += f"\n\n*[{len(lines)} lines total]*"
-    STDERR.print(Markdown(wrapped, code_theme="ansi_dark"), overflow="fold")
+    STDERR.print(_render_markdownish(wrapped))
 
 def _rel(root, path):
     try:
@@ -378,7 +621,7 @@ def require_command_env(cwd=None):
 def get_client(spec=None):
     require_api_env(Path.cwd())
     model_spec = spec or _model()
-    return _shim_get_client(resolve_active_shim(model_spec), region=default_region(), cwd=Path.cwd())
+    return _shim_get_client(resolve_active_shim(model_spec), cwd=Path.cwd())
 
 def resolve_path(root, path):
     resolved = (root / path).resolve()
@@ -390,19 +633,19 @@ def note_tool(state, name, *, _defaults=None, _suffix="", **details):
     state.note_progress()
     defaults = _defaults or {}
     parts = [
-        key.replace("_", "-") if value is True else f"{key.replace('_', '-')}: {value if isinstance(value, str) else preview(value)}"
+        key.replace("_", "-")
+        if value is True
+        else f"{key.replace('_', '-')}: {_sanitize_terminal_text(value if isinstance(value, str) else preview(value))}"
         for key, value in details.items()
         if value not in (None, "", False) and value != defaults.get(key)
     ]
-    label = f"[bold]{name}[/bold]"
+    prefix = f"{'─' * 2} {'▶ ' if name == 'bash' else ''}"
+    label = prefix + _sanitize_terminal_text(name)
     if parts:
-        label += f" {escape(', '.join(parts))}"
+        label += f" {', '.join(parts)}"
     if _suffix:
-        label += f"  {escape(_suffix)}"
-    if name == "bash":
-        STDERR.print(f"[dim]{'─' * 2} ▶ {label}[/dim]", highlight=False)
-    else:
-        STDERR.print(f"[dim]{'─' * 2} {label}[/dim]", highlight=False)
+        label += f"  {_sanitize_terminal_text(_suffix)}"
+    STDERR.print(_ansi("2", label))
 
 def get_tokenizer() -> tiktoken.Encoding:
     global _tokenizer
@@ -442,18 +685,22 @@ def list_all_model_ids() -> list[str]:
     shims = detect_available_shims()
     if not shims:
         abort(
-            "No shims are configured. Set OPENAI_API_KEY, sign in with Codex CLI, or configure AWS CLI."
+            "No shims are configured. Set OPENAI_API_KEY, sign in with Codex CLI, authenticate GitHub CLI, run `opencode auth`, or configure AWS CLI for Bedrock Mantle."
         )
     all_models: list[str] = []
     for shim in shims:
         _print("status", f"Loading models from {_fmt('inline', shim)}.", err=True)
-        all_models.extend(list_models_for_shim(shim, region=default_region(), cwd=Path.cwd()))
+        all_models.extend(list_models_for_shim(shim, cwd=Path.cwd()))
     return all_models
 
 _tokenizer: tiktoken.Encoding | None = None
 
 __all__ = [
+    "AUDIT_SYSTEM_PROMPT",
+    "BASE_SYSTEM_PROMPT",
     "BUDGETS",
+    "INTERACTIVE_SYSTEM_PROMPT",
+    "NONINTERACTIVE_SYSTEM_PROMPT",
     "CONFIG_PATH",
     "DEFAULT_UNATTENDED_TIMEOUT_SECONDS",
     "MAX_BASH_CMD_BYTES",
@@ -463,7 +710,9 @@ __all__ = [
     "RuntimeBudgets",
     "SessionContext",
     "__version__",
+    "_ASK_SYSTEM_SUFFIX",
     "_BASH_IMPORTANT_LINE_RE",
+    "_READ_ONLY_TOOLS",
     "_TRUTHY_VALUES",
     "_FALSY_VALUES",
     "_cfg_path",
@@ -488,29 +737,38 @@ __all__ = [
     "_sys_file",
     "_truncate_long_lines",
     "_wrap_code_block",
+    "active_system_prompt",
+    "base_system_prompt",
+    "active_tool_specs",
+    "ask_system_prompt",
+    "audit_system_prompt",
     "abort",
     "clip_tokens",
     "command_env",
     "count_tokens",
     "decode_tokens",
-    "default_region",
     "encode_tokens",
     "ensure_api_env",
     "fail",
     "format_tokens",
     "get_client",
     "get_tokenizer",
+    "interactive_system_prompt",
     "http_client",
     "join_model_spec",
     "list_all_model_ids",
     "load_json",
     "logging",
+    "load_session_text",
+    "noninteractive_system_prompt",
     "note_tool",
     "os",
     "preview",
     "Prompt",
     "re",
+    "read_only_tool_specs",
     "render_model_list",
+    "session_text",
     "require_api_env",
     "require_command_env",
     "resolve_active_shim",
@@ -525,6 +783,7 @@ __all__ = [
     "split_model_spec",
     "sys",
     "time",
+    "tool_description",
     "truncate_str_to_tokens",
     "which",
     "Path",

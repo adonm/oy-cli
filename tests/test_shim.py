@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from oy_cli import providers
-from oy_cli import shim
 
 
 async def _unused_chat_completion(
@@ -16,8 +15,8 @@ async def _unused_chat_completion(
     raise AssertionError("chat_completion should not be called in this test")
 
 
-def _dummy_client(models: list[str] | None = None) -> shim.CompletionClient:
-    return shim.CompletionClient(
+def _dummy_client(models: list[str] | None = None) -> providers.CompletionClient:
+    return providers.CompletionClient(
         chat_completion=_unused_chat_completion,
         list_models=lambda: list(models or []),
     )
@@ -28,12 +27,12 @@ def _dummy_spec(
     *,
     ensure_env=None,
     list_models=None,
-) -> shim.ShimSpec:
-    return shim.ShimSpec(
+) -> providers.ShimSpec:
+    return providers.ShimSpec(
         name=name,
         ensure_env=ensure_env or (lambda cwd: None),
-        build_client=lambda region, cwd: _dummy_client(),
-        list_models=list_models or (lambda region, cwd: []),
+        build_client=lambda cwd: _dummy_client(),
+        list_models=list_models or (lambda cwd: []),
     )
 
 
@@ -49,10 +48,38 @@ class DecodeToolCallArgumentsTests(unittest.TestCase):
         )
 
 
+class BedrockCredentialTests(unittest.TestCase):
+    def test_make_bedrock_token_uses_botocore_sigv4_query_auth(self):
+        session = Mock()
+        credentials = Mock()
+        frozen = Mock()
+        credentials.get_frozen_credentials.return_value = frozen
+        session.get_credentials.return_value = credentials
+        request = Mock(url="https://bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1")
+        signer = Mock()
+
+        with (
+            patch.object(providers, "_botocore_session", return_value=session),
+            patch.object(providers, "AWSRequest", return_value=request) as aws_request,
+            patch.object(providers, "SigV4QueryAuth", return_value=signer) as signer_cls,
+        ):
+            token = providers.make_bedrock_token("us-east-1", expires=600)
+
+        aws_request.assert_called_once_with(
+            method="POST",
+            url="https://bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1",
+            data=b"",
+            headers={"Host": "bedrock.amazonaws.com"},
+        )
+        signer_cls.assert_called_once_with(frozen, "bedrock", "us-east-1", expires=600)
+        signer.add_auth.assert_called_once_with(request)
+        self.assertTrue(token.startswith("bedrock-api-key-"))
+
+
 class TranslationTests(unittest.TestCase):
     def test_tool_output_text_uses_toon_for_structured_values(self):
         rendered = providers._tool_output_text(
-            shim.ToolResult(content={"count": 2, "items": [1, 2]})
+            providers.ToolResult(content={"count": 2, "items": [1, 2]})
         )
 
         self.assertIsInstance(rendered, str)
@@ -62,10 +89,10 @@ class TranslationTests(unittest.TestCase):
 
     def test_openai_chat_message_uses_toon_for_tool_output(self):
         message = providers._openai_chat_message(
-            shim.ToolMessage(
+            providers.ToolMessage(
                 tool_call_id="call_1",
                 name="echo",
-                content=shim.ToolResult(content={"count": 2}),
+                content=providers.ToolResult(content={"count": 2}),
             )
         )
 
@@ -77,10 +104,10 @@ class TranslationTests(unittest.TestCase):
     def test_responses_input_uses_toon_for_tool_outputs(self):
         items = providers._responses_input_from_messages(
             [
-                shim.ToolMessage(
+                providers.ToolMessage(
                     tool_call_id="call_1",
                     name="echo",
-                    content=shim.ToolResult(content={"count": 2}),
+                    content=providers.ToolResult(content={"count": 2}),
                 )
             ]
         )
@@ -91,7 +118,7 @@ class TranslationTests(unittest.TestCase):
 
     def test_openai_tool_call_keeps_json_arguments(self):
         tool_call = providers._openai_tool_call(
-            shim.ToolCall(id="call_1", name="echo", arguments={"count": 2})
+            providers.ToolCall(id="call_1", name="echo", arguments={"count": 2})
         )
 
         self.assertEqual(tool_call["function"]["arguments"], '{"count":2}')
@@ -117,7 +144,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(message.content, "hello\n\nnope")
         self.assertEqual(
             message.tool_calls,
-            [shim.ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
+            [providers.ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
         )
 
     def test_decodes_responses_output_ignores_blank_text_parts(self):
@@ -139,52 +166,6 @@ class TranslationTests(unittest.TestCase):
         )
         self.assertEqual(message.content, "hello\n\nnope")
 
-    def test_assistant_from_blocks_ignores_blank_text_blocks(self):
-        message = providers._assistant_from_blocks(
-            [
-                providers.TextBlock("\n\n"),
-                providers.TextBlock("hello"),
-                providers.ToolUseBlock(id="call_1", name="echo", arguments={"x": 1}),
-            ]
-        )
-        self.assertEqual(message.content, "hello")
-        self.assertEqual(
-            message.tool_calls,
-            [shim.ToolCall(id="call_1", name="echo", arguments={"x": 1})],
-        )
-
-    def test_extract_blocks_ignores_blank_text(self):
-        blocks = providers._extract_blocks(
-            [{"text": "\n\n"}, {"text": "hello"}],
-            text_of=lambda item: item.get("text"),
-            tool_of=lambda item, index: None,
-        )
-        self.assertEqual(blocks, [providers.TextBlock("hello")])
-
-    def test_bedrock_encoding_merges_adjacent_tool_results(self):
-        messages: list[shim.ChatMessage] = [
-            shim.AssistantMessage(
-                tool_calls=[shim.ToolCall(id="call_1", name="echo", arguments={"x": 1})]
-            ),
-            shim.ToolMessage(
-                tool_call_id="call_1",
-                name="echo",
-                content=shim.ToolResult(content="first"),
-            ),
-            shim.ToolMessage(
-                tool_call_id="call_2",
-                name="echo",
-                content=shim.ToolResult(ok=False, content={"error": "second"}),
-            ),
-        ]
-        encoded, system = providers._encode_provider_messages(messages, providers.BEDROCK_CODEC)
-        self.assertIsNone(system)
-        self.assertEqual([item["role"] for item in encoded], ["assistant", "user"])
-        self.assertEqual(encoded[1]["content"][1]["toolResult"]["status"], "error")
-        tool_text = encoded[1]["content"][0]["toolResult"]["content"][0]["text"]
-        self.assertIn("first", tool_text)
-        self.assertNotIn('{"error":"second"', encoded[1]["content"][1]["toolResult"]["content"][0]["text"])
-        self.assertIn("error", encoded[1]["content"][1]["toolResult"]["content"][0]["text"])
 
 
 class ReasoningTests(unittest.IsolatedAsyncioTestCase):
@@ -218,7 +199,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         await client.chat_completion(
             "gpt-test",
             [],
-            [shim.ToolSpec("echo", "echo text", {"type": "object"})],
+            [providers.ToolSpec("echo", "echo text", {"type": "object"})],
         )
 
         self.assertNotIn("parallel_tool_calls", create.call_args.kwargs)
@@ -284,7 +265,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.content, "Let me inspect the repo.")
         self.assertEqual(
             message.tool_calls,
-            [shim.ToolCall(id="call_1", name="list", arguments={"path": "*"})],
+            [providers.ToolCall(id="call_1", name="list", arguments={"path": "*"})],
         )
 
     def test_chat_completion_merge_returns_prefix_before_conflicting_duplicate_key(self):
@@ -352,9 +333,11 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
 class ShimApiSurfaceTests(unittest.TestCase):
     def test_module_all_exports_public_boundary(self):
         expected = {
+            "APIStatusError",
             "AssistantMessage",
             "ChatMessage",
             "CompletionClient",
+            "JSONLike",
             "SystemMessage",
             "ToolCall",
             "ToolMessage",
@@ -362,30 +345,33 @@ class ShimApiSurfaceTests(unittest.TestCase):
             "ToolSpec",
             "UserMessage",
             "command_env",
-            "default_region",
             "detect_available_shims",
             "ensure_api_env",
             "get_client",
             "join_model_spec",
             "list_models_for_shim",
             "load_json",
+            "normalize_jsonlike",
             "require_api_env",
+            "resolve_shim",
             "run_cmd",
             "save_json",
+            "serialize_json",
+            "serialize_toon",
             "split_model_spec",
             "validate_shim",
             "which",
         }
 
-        self.assertEqual(set(shim.__all__), expected | {"ShimSpec", "resolve_shim"})
+        self.assertEqual(set(providers.__all__), expected | {"ShimSpec"})
 
     def test_ensure_api_env_uses_resolved_shim_spec(self):
         spec = _dummy_spec("alpha", ensure_env=lambda cwd: None)
         with (
-            patch.object(shim, "resolve_shim", return_value="alpha") as resolve_shim,
-            patch.object(shim, "_shim_spec", return_value=spec) as shim_spec,
+            patch.object(providers, "resolve_shim", return_value="alpha") as resolve_shim,
+            patch.object(providers, "_shim_spec", return_value=spec) as shim_spec,
         ):
-            ok, error = shim.ensure_api_env("alpha:model", None, Path("/workspace"))
+            ok, error = providers.ensure_api_env("alpha:model", None, Path("/workspace"))
 
         resolve_shim.assert_called_once_with("alpha:model", None)
         shim_spec.assert_called_once_with("alpha")
@@ -393,14 +379,14 @@ class ShimApiSurfaceTests(unittest.TestCase):
 
     def test_get_client_uses_shim_registry_builder(self):
         sentinel = _dummy_client(["demo"])
-        spec = shim.ShimSpec(
+        spec = providers.ShimSpec(
             name="alpha",
             ensure_env=lambda cwd: None,
-            build_client=lambda region, cwd: sentinel,
-            list_models=lambda region, cwd: ["demo"],
+            build_client=lambda cwd: sentinel,
+            list_models=lambda cwd: ["demo"],
         )
-        with patch.object(shim, "_shim_spec", return_value=spec) as shim_spec:
-            client = shim.get_client("alpha", region="us-east-1")
+        with patch.object(providers, "_shim_spec", return_value=spec) as shim_spec:
+            client = providers.get_client("alpha")
 
         shim_spec.assert_called_once_with("alpha")
         self.assertIs(client, sentinel)
@@ -431,11 +417,11 @@ class ShimRegistryTests(unittest.TestCase):
             "gamma": _dummy_spec("gamma", ensure_env=ok("gamma")),
         }
         with (
-            patch.object(shim, "SHIM_ORDER", ("alpha", "beta", "gamma")),
-            patch.object(shim, "KNOWN_SHIMS", set(specs)),
-            patch.dict(shim.SHIM_SPECS, specs, clear=True),
+            patch.object(providers, "SHIM_ORDER", ("alpha", "beta", "gamma")),
+            patch.object(providers, "KNOWN_SHIMS", set(specs)),
+            patch.dict(providers.SHIM_SPECS, specs, clear=True),
         ):
-            self.assertEqual(shim.detect_available_shims(), ["alpha", "gamma"])
+            self.assertEqual(providers.detect_available_shims(), ["alpha", "gamma"])
         self.assertEqual(calls, ["alpha", "beta", "gamma"])
 
 
@@ -444,7 +430,7 @@ class RunCmdTests(unittest.TestCase):
         with self.assertRaisesRegex(
             FileNotFoundError, r"\[Errno 2\] No such file or directory: 'missing-tool'"
         ):
-            shim.run_cmd(["missing-tool"], env={"PATH": ""})
+            providers.run_cmd(["missing-tool"], env={"PATH": ""})
 
     def test_run_cmd_allows_explicit_relative_paths(self):
         import tempfile
@@ -456,7 +442,7 @@ class RunCmdTests(unittest.TestCase):
             script.write_text("#!/bin/sh\nprintf hi\n", encoding="utf-8")
             script.chmod(0o755)
 
-            result = shim.run_cmd(["./hello.sh"], cwd=root, env={"PATH": ""})
+            result = providers.run_cmd(["./hello.sh"], cwd=root, env={"PATH": ""})
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "hi")
@@ -464,13 +450,13 @@ class RunCmdTests(unittest.TestCase):
 
 class CommandEnvTests(unittest.TestCase):
     def tearDown(self):
-        shim.command_env.cache_clear()
+        providers.command_env.cache_clear()
 
     def test_command_env_returns_launch_environment(self):
         with patch.dict(
             providers.os.environ, {"PATH": "/test/bin", "HOME": "/tmp/home"}, clear=True
         ):
-            env = shim.command_env()
+            env = providers.command_env()
 
         self.assertEqual(env["PATH"], "/test/bin")
         self.assertEqual(env["HOME"], "/tmp/home")
