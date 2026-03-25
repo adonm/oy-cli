@@ -246,7 +246,7 @@ def _tool_approval_prompt(name: str, args: dict[str, Any]) -> str:
         [
             "",
             "Choose `once` to approve this call only, `all` to approve all mutating tools for the rest of the session, or `deny` to block it.",
-            "Press Enter to take the safe default: `deny`.",
+            "Press Enter to take the default: `once`.",
         ]
     )
     return "\n".join(lines)
@@ -260,7 +260,7 @@ def _approve_mutating_tool(state: Any, name: str, args: dict[str, Any]) -> bool:
         "Approve mutating tool?",
         _MUTATING_TOOL_APPROVAL_CHOICES,
         console=rt.STDERR,
-        default="deny",
+        default="once",
         prompt_label="Approval",
         option_text=lambda option, index: {
             "once": f"{index}. once — approve this call only",

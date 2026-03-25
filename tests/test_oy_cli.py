@@ -128,7 +128,7 @@ class ToolDispatchTests(unittest.TestCase):
             "Approve mutating tool?",
             ["once", "all", "deny"],
             console=oy_cli.runtime.STDERR,
-            default="deny",
+            default="once",
             prompt_label="Approval",
             option_text=unittest.mock.ANY,
         )
