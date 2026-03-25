@@ -8,8 +8,8 @@ Use `todo` for multi-step work and keep it current. Use `webfetch` only when ext
 Manage context aggressively: do not restate large tool outputs, keep only key facts with paths, and prefer narrow reads/searches with `path`, `limit`, and `offset` over broad dumps.
 When context gets long, compress state to the current plan, key evidence, and next action. Keep going until done or blocked; if blocked, say what you tried and the next step.
 """
-interactive_suffix = "Use `ask` only for genuine ambiguity or irreversible user-facing choices."
-noninteractive_suffix = "Non-interactive mode: do not pause for approval or clarification; choose the safest reasonable path and state assumptions briefly."
+interactive_suffix = "Use `ask` only for genuine ambiguity or irreversible user-facing choices. Batch changes to minimise prompts."
+noninteractive_suffix = "Non-interactive mode: do not pause for questions; choose the safest reasonable path and state assumptions briefly."
 audit = """
 Audit the repo for security, unnecessary complexity, and material performance issues. Be terse and evidence-first.
 Use `todo` to plan and track audit steps. Read key markdown docs first.
@@ -58,7 +58,7 @@ description = "Replace text with Python `regex`. Respects `.gitignore` via `path
 description = "Count source lines with `pygount`. Respects `.gitignore` and returns totals, per-language counts, and non-countable files/errors."
 
 [tools.ask]
-description = "Ask the user in interactive runs with Rich prompts. Use for ambiguity or decisions; provide choices."
+description = "Ask the user in interactive runs. Use only for genuine ambiguity or irreversible user-facing choices; provide choices when useful."
 
 [tools.webfetch]
 description = "Fetch a public URL with `httpx`. Methods: GET/HEAD/OPTIONS. Returns `status_code`, `headers`, `content`, and `content_format`; may convert large HTML to markdown. Blocks localhost/private IPs."

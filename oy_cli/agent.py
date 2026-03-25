@@ -20,6 +20,8 @@ class AgentState(msgspec.Struct, omit_defaults=True):
     tool_specs: ToolRegistry
     unattended_timeout_seconds: int
     unattended_deadline: float
+    interactive: bool = False
+    approve_all_mutating_tools: bool = False
     todos: list[TodoItem] = msgspec.field(default_factory=list)
 
     @classmethod
@@ -29,12 +31,14 @@ class AgentState(msgspec.Struct, omit_defaults=True):
         root: rt.Path,
         tool_specs: ToolRegistry,
         unattended_timeout_seconds: int,
+        interactive: bool = False,
     ) -> "AgentState":
         return cls(
             root=root,
             tool_specs=tool_specs,
             unattended_timeout_seconds=unattended_timeout_seconds,
             unattended_deadline=time.monotonic() + unattended_timeout_seconds,
+            interactive=interactive,
         )
 
     def remaining_unattended_seconds(self) -> float:
@@ -360,6 +364,7 @@ async def run_agent(
         root=root,
         tool_specs=tool_specs,
         unattended_timeout_seconds=unattended_timeout_seconds,
+        interactive=interactive,
     )
     if transcript is None:
         transcript = Transcript.with_system_prompt(system_prompt)

@@ -83,11 +83,7 @@ def _resolve_session(
     system_prompt: str | None = None,
     include_system_file: bool = True,
 ):
-    resolved_interactive = (
-        sys.stdin.isatty() and not rt._flag("OY_NON_INTERACTIVE", False)
-        if interactive is None
-        else interactive
-    )
+    resolved_interactive = rt.can_prompt() if interactive is None else interactive
     system_file = rt._sys_file() if include_system_file else None
     return rt.SessionContext(
         workspace=_workspace(),
@@ -124,15 +120,7 @@ def audit(prompt: str = ""):
     return code
 
 def _create_prompt_session():
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import WordCompleter
-    from prompt_toolkit.history import FileHistory
-
-    history_path = rt.CONFIG_PATH.parent / "history"
-    rt._ensure_private_dir(history_path.parent)
-    history_path.touch(mode=0o600, exist_ok=True)
-    history_path.chmod(0o600)
-
+    history_path = rt._history_path()
     commands = [
         "/help",
         "/tokens",
@@ -147,12 +135,14 @@ def _create_prompt_session():
         "/quit",
         "/exit",
     ]
-    return PromptSession(
-        history=FileHistory(str(history_path)),
-        completer=WordCompleter(commands, sentence=True),
+    return rt.Prompt.session(
+        console=rt.STDERR,
+        history=rt.FileHistory(str(history_path)),
+        choices=commands,
         multiline=False,
         enable_open_in_editor=True,
     )
+
 
 def _git_diff_shortstat(workspace: Path) -> str | None:
     try:
@@ -177,12 +167,10 @@ def _git_diff_shortstat(workspace: Path) -> str | None:
     return summary or "git diff: clean"
 
 def _read_input(prompt_session, workspace: Path):
-    from prompt_toolkit.formatted_text import ANSI
-
     prompt = "\x1b[1;32moy ❯\x1b[0m "
     if summary := _git_diff_shortstat(workspace):
-        return prompt_session.prompt(ANSI(f"\x1b[2m{summary}\x1b[0m\n{prompt}"))
-    return prompt_session.prompt(ANSI(prompt))
+        return prompt_session.prompt(rt.ANSI(f"\x1b[2m{summary}\x1b[0m\n{prompt}"))
+    return prompt_session.prompt(rt.ANSI(prompt))
 
 def _chat_command(cmd, transcript, system_prompt, model_spec):
     parts = cmd.strip().split(None, 1)
@@ -335,6 +323,7 @@ def _handle_ask(question, current_model, session, transcript):
         root=session.workspace,
         tool_specs=read_only_registry,
         unattended_timeout_seconds=rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+        interactive=session.interactive,
     )
     ask_transcript.add_user(question)
 
@@ -554,12 +543,12 @@ def run(*prompt: str):
     task = (
         " ".join(prompt)
         if prompt
-        else (sys.stdin.read().strip() if not sys.stdin.isatty() else "")
+        else (sys.stdin.read().strip() if not rt.has_tty_stdin() else "")
     )
     if not task:
         return chat()
 
-    session = _resolve_session()
+    session = _resolve_session(interactive=False)
     _print_session_intro("Run", session, prompt=rt.preview(task, 100))
     return asyncio.run(
         run_agent(
@@ -584,7 +573,7 @@ def resolve_model_choice(model_id=None):
     available, current = rt.list_all_model_ids(), rt._model(None)
     if model_id in available:
         return model_id
-    if not sys.stdin.isatty():
+    if not rt.can_prompt():
         if model_id:
             matches = [model for model in available if model_id.strip().lower() in model.lower()]
             if matches:
@@ -624,17 +613,12 @@ def resolve_model_choice(model_id=None):
 
 def model(query: str | None = None):
     current = rt._model(None)
-    if query is None and not sys.stdin.isatty():
+    if query is None and not rt.can_prompt():
         rt._print(value=_current_model_text(current))
         return 0
     if current:
         rt._print(value=_current_model_text(current), err=True)
-        if (
-            rt.Prompt.ask(
-                "\nPick a new model?", console=rt.STDERR, choices=["y", "n"], default="n"
-            )
-            != "y"
-        ):
+        if not rt.Prompt.yes_no("Pick a new model?", console=rt.STDERR, default=False):
             return 0
     chosen = resolve_model_choice(query)
     if chosen is None:
@@ -653,7 +637,7 @@ def main(argv: list[str] | None = None):
     args = list(sys.argv[1:] if argv is None else argv)
     commands = {"run", "chat", "model", "audit", "-h", "--help"}
     if not args:
-        args = ["run"] if not sys.stdin.isatty() else ["--help"]
+        args = ["run"] if not rt.stdin_is_interactive() else ["--help"]
     elif args[0] in {"-v", "--version"}:
         rt._print(value=f"oy {rt.__version__}")
         return 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 import unittest
@@ -13,12 +14,19 @@ import oy_cli
 from oy_cli import AssistantMessage, SystemMessage, ToolCall, ToolMessage, ToolResult, ToolSpec, UserMessage
 
 
-def make_state(root: Path, tool_specs=None, *, unattended_deadline: float = float("inf")):
+def make_state(
+    root: Path,
+    tool_specs=None,
+    *,
+    unattended_deadline: float = float("inf"),
+    interactive: bool = False,
+):
     return oy_cli.AgentState(
         root=root,
         tool_specs=oy_cli.TOOL_REGISTRY if tool_specs is None else tool_specs,
         unattended_timeout_seconds=3600,
         unattended_deadline=unattended_deadline,
+        interactive=interactive,
     )
 
 
@@ -90,6 +98,225 @@ class ToolDispatchTests(unittest.TestCase):
                 TimeoutError, r"reached unattended timeout \(1h\)"
             ):
                 state.note_progress()
+
+    def test_mutating_tools_prompt_for_approval_in_interactive_mode(self):
+        calls: list[str] = []
+
+        def mutating(state, text):
+            calls.append(text)
+            return f"done:{text}"
+
+        registry = oy_cli.ToolRegistry(
+            {
+                "mutating": oy_cli.ToolHandler(
+                    name="mutating",
+                    fn=mutating,
+                    spec=ToolSpec("mutating", "mutates state", {"type": "object"}),
+                    args_type=EchoArgs,
+                    mutating=True,
+                )
+            }
+        )
+        state = make_state(Path("/tmp/ok"), registry, interactive=True)
+        with (
+            patch.object(oy_cli.runtime, "_print") as print_mock,
+            patch.object(oy_cli.runtime.Prompt, "select", return_value="once") as ask_mock,
+        ):
+            result = registry.invoke(state, "mutating", {"text": "hi"})
+
+        ask_mock.assert_called_once_with(
+            "Approve mutating tool?",
+            ["once", "all", "deny"],
+            console=oy_cli.runtime.STDERR,
+            default="deny",
+            prompt_label="Approval",
+            option_text=unittest.mock.ANY,
+        )
+        print_mock.assert_called_once()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.content, "done:hi")
+        self.assertEqual(calls, ["hi"])
+
+    def test_mutating_tools_can_be_approved_for_rest_of_session(self):
+        calls: list[str] = []
+
+        def mutating(state, text):
+            calls.append(text)
+            return f"done:{text}"
+
+        registry = oy_cli.ToolRegistry(
+            {
+                "mutating": oy_cli.ToolHandler(
+                    name="mutating",
+                    fn=mutating,
+                    spec=ToolSpec("mutating", "mutates state", {"type": "object"}),
+                    args_type=EchoArgs,
+                    mutating=True,
+                )
+            }
+        )
+        state = make_state(Path("/tmp/ok"), registry, interactive=True)
+        with (
+            patch.object(oy_cli.runtime, "_print"),
+            patch.object(oy_cli.runtime, "_note"),
+            patch.object(oy_cli.runtime.Prompt, "select", return_value="all") as ask_mock,
+        ):
+            first = registry.invoke(state, "mutating", {"text": "first"})
+            second = registry.invoke(state, "mutating", {"text": "second"})
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        self.assertTrue(state.approve_all_mutating_tools)
+        self.assertEqual(calls, ["first", "second"])
+        ask_mock.assert_called_once()
+
+    def test_mutating_tools_can_be_denied_in_interactive_mode(self):
+        invoked = False
+
+        def mutating(state, text):
+            nonlocal invoked
+            invoked = True
+            return f"done:{text}"
+
+        registry = oy_cli.ToolRegistry(
+            {
+                "mutating": oy_cli.ToolHandler(
+                    name="mutating",
+                    fn=mutating,
+                    spec=ToolSpec("mutating", "mutates state", {"type": "object"}),
+                    args_type=EchoArgs,
+                    mutating=True,
+                )
+            }
+        )
+        state = make_state(Path("/tmp/ok"), registry, interactive=True)
+        with (
+            patch.object(oy_cli.runtime, "_print"),
+            patch.object(oy_cli.runtime, "_note"),
+            patch.object(oy_cli.runtime.Prompt, "select", return_value="deny") as ask_mock,
+        ):
+            result = registry.invoke(state, "mutating", {"text": "nope"})
+
+        ask_mock.assert_called_once()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.content["tool"], "mutating")
+        self.assertEqual(result.content["error_type"], "PermissionError")
+        self.assertIn("denied approval", result.content["message"])
+        self.assertFalse(invoked)
+
+    def test_mutating_tools_do_not_prompt_in_noninteractive_mode(self):
+        calls: list[str] = []
+
+        def mutating(state, text):
+            calls.append(text)
+            return f"done:{text}"
+
+        registry = oy_cli.ToolRegistry(
+            {
+                "mutating": oy_cli.ToolHandler(
+                    name="mutating",
+                    fn=mutating,
+                    spec=ToolSpec("mutating", "mutates state", {"type": "object"}),
+                    args_type=EchoArgs,
+                    mutating=True,
+                )
+            }
+        )
+        state = make_state(Path("/tmp/ok"), registry, interactive=False)
+        with patch.object(oy_cli.runtime.Prompt, "select") as ask_mock:
+            result = registry.invoke(state, "mutating", {"text": "ci"})
+
+        ask_mock.assert_not_called()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.content, "done:ci")
+        self.assertEqual(calls, ["ci"])
+
+
+class PromptRuntimeTests(unittest.TestCase):
+    def test_prompt_needs_thread_false_without_running_loop(self):
+        self.assertFalse(oy_cli.runtime._prompt_needs_thread())
+
+    def test_prompt_ask_uses_in_thread_when_loop_running(self):
+        sessions: list[object] = []
+
+        class SessionStub:
+            def prompt(self, *args, **kwargs):
+                sessions.append(kwargs)
+                return "ok"
+
+        async def run_test():
+            with patch.object(oy_cli.runtime, "_prompt_session", return_value=SessionStub()):
+                return oy_cli.runtime.Prompt.ask("Q", console=oy_cli.runtime.STDERR)
+
+        result = asyncio.run(run_test())
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(sessions), 1)
+        self.assertTrue(sessions[0]["in_thread"])
+
+    def test_prompt_select_uses_in_thread_when_loop_running(self):
+        sessions: list[object] = []
+
+        class SessionStub:
+            def prompt(self, *args, **kwargs):
+                sessions.append(kwargs)
+                return "1"
+
+        async def run_test():
+            with patch.object(oy_cli.runtime, "_prompt_session", return_value=SessionStub()):
+                return oy_cli.runtime.Prompt.select("Pick", ["one", "two"], console=oy_cli.runtime.STDERR)
+
+        result = asyncio.run(run_test())
+        self.assertEqual(result, "one")
+        self.assertEqual(len(sessions), 1)
+        self.assertTrue(sessions[0]["in_thread"])
+
+
+class PromptGuardTests(unittest.TestCase):
+    def test_require_prompt_reports_noninteractive_env(self):
+        with patch.dict(oy_cli.runtime.os.environ, {"OY_NON_INTERACTIVE": "1"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "OY_NON_INTERACTIVE=1"):
+                oy_cli.runtime.require_prompt("ask question")
+
+
+class AskToolTests(unittest.TestCase):
+    def test_ask_tool_uses_prompt_text_for_freeform_answers(self):
+        state = make_state(Path("/tmp/ok"))
+        with (
+            patch.object(oy_cli.runtime, "require_prompt"),
+            patch.object(oy_cli.runtime, "note_tool"),
+            patch.object(oy_cli.runtime.Prompt, "ask", return_value="typed answer") as ask_mock,
+        ):
+            result = oy_cli.tool_ask(state, question="What now?")
+
+        self.assertEqual(result, "typed answer")
+        ask_mock.assert_called_once_with("What now?", console=oy_cli.runtime.STDERR, default="")
+
+    def test_ask_tool_uses_select_for_choices(self):
+        state = make_state(Path("/tmp/ok"))
+        with (
+            patch.object(oy_cli.runtime, "require_prompt"),
+            patch.object(oy_cli.runtime, "note_tool"),
+            patch.object(oy_cli.runtime.Prompt, "select", return_value="beta") as select_mock,
+        ):
+            result = oy_cli.tool_ask(state, question="Pick one", choices=["alpha", "beta"])
+
+        self.assertEqual(result, "beta")
+        select_mock.assert_called_once_with(
+            "Pick one",
+            ["alpha", "beta"],
+            console=oy_cli.runtime.STDERR,
+            prompt_label="Selection",
+            option_text=unittest.mock.ANY,
+        )
+
+    def test_ask_tool_requires_tty(self):
+        state = make_state(Path("/tmp/ok"))
+        with (
+            patch.object(oy_cli.runtime, "require_prompt", side_effect=ValueError("Cannot ask question: stdin is not a TTY")),
+            patch.object(oy_cli.runtime, "note_tool"),
+        ):
+            with self.assertRaisesRegex(ValueError, "Cannot ask question: stdin is not a TTY"):
+                oy_cli.tool_ask(state, question="blocked")
 
 
 class TranscriptLifecycleTests(unittest.TestCase):
@@ -262,6 +489,18 @@ class ReadToolTests(unittest.TestCase):
 
 
 class ListToolTests(unittest.TestCase):
+    def test_list_path_dot_lists_workspace_root(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "src").mkdir()
+            (root / "README.md").write_text("hi\n", encoding="utf-8")
+            state = make_state(root)
+            with patch.object(oy_cli.runtime, "show"):
+                result = oy_cli.tool_list(state, path=".")
+        self.assertEqual(result, "README.md\nsrc/")
+
     def test_list_path_accepts_pathlib_glob(self):
         import tempfile
 
@@ -630,6 +869,56 @@ class SlocToolTests(unittest.TestCase):
         self.assertEqual(payload["languages"][0]["file_count"], 1)
 
 
+class SessionTextPromptTests(unittest.TestCase):
+    def test_interactive_suffix_stays_simple(self):
+        text = oy_cli.interactive_system_prompt()
+        self.assertIn("Use `ask` only for genuine ambiguity or irreversible user-facing choices.", text)
+        self.assertIn("Batch changes to minimise prompts.", text)
+        self.assertNotIn("approval layer", text)
+        self.assertNotIn("need approval", text)
+        self.assertNotIn("reply approve", text)
+
+    def test_noninteractive_suffix_stays_generic(self):
+        text = oy_cli.noninteractive_system_prompt()
+        self.assertIn("Non-interactive mode: do not pause for questions;", text)
+        self.assertNotIn("approval", text)
+        self.assertNotIn("approve", text)
+        self.assertNotIn("clarification", text)
+
+    def test_ask_tool_description_stays_generic(self):
+        text = oy_cli.tool_description("ask")
+        self.assertIn("Ask the user in interactive runs.", text)
+        self.assertNotIn("prompt_toolkit", text)
+
+
+
+
+class RunModeTests(unittest.TestCase):
+    def test_run_forces_noninteractive_even_with_tty_stdin(self):
+        session = oy_cli.runtime.SessionContext(
+            workspace=Path("/workspace"),
+            model="openai:gpt-test",
+            interactive=False,
+            system_prompt="sys",
+            system_file=None,
+        )
+
+        async def fake_run_agent(*args, **kwargs):
+            self.assertFalse(args[5])
+            return 0, "ok"
+
+        with (
+            patch.object(oy_cli.cli, "_resolve_session", return_value=session) as resolve_mock,
+            patch.object(oy_cli.cli, "_print_session_intro"),
+            patch.object(oy_cli.cli, "run_agent", side_effect=fake_run_agent),
+        ):
+            code = oy_cli.run("do", "thing")
+
+        self.assertEqual(code, 0)
+        resolve_mock.assert_called_once_with(interactive=False)
+
+
+
 class ChatCommandTests(unittest.TestCase):
     def test_chat_command_undo_reports_success(self):
         transcript = oy_cli.Transcript(messages=[SystemMessage("sys"), UserMessage("hello")])
@@ -673,6 +962,57 @@ class PrivatePathPermissionTests(unittest.TestCase):
 
             self.assertEqual(config_dir.stat().st_mode & 0o777, 0o700)
             self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+
+    def test_history_path_hardens_history_file_permissions(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            config_path = Path(d) / "config" / "oy" / "config.json"
+            history_dir = config_path.parent
+            history_dir.mkdir(parents=True, mode=0o755, exist_ok=True)
+            history_dir.chmod(0o755)
+            history_path = history_dir / "history"
+            history_path.write_text("hello\n", encoding="utf-8")
+            history_path.chmod(0o644)
+
+            with patch.object(oy_cli.runtime, "CONFIG_PATH", config_path):
+                resolved = oy_cli.runtime._history_path()
+
+            self.assertEqual(resolved, history_path)
+            self.assertEqual(history_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(history_path.stat().st_mode & 0o777, 0o600)
+
+    def test_create_prompt_session_uses_prompt_factory(self):
+        sentinel = object()
+        with (
+            patch.object(oy_cli.runtime, "_history_path", return_value=Path("/tmp/history")),
+            patch.object(oy_cli.runtime, "FileHistory", side_effect=lambda p: ("history", p)) as history_mock,
+            patch.object(oy_cli.runtime.Prompt, "session", return_value=sentinel) as session_mock,
+        ):
+            result = oy_cli._create_prompt_session()
+
+        self.assertIs(result, sentinel)
+        history_mock.assert_called_once_with("/tmp/history")
+        session_mock.assert_called_once_with(
+            console=oy_cli.runtime.STDERR,
+            history=("history", "/tmp/history"),
+            choices=[
+                "/help",
+                "/tokens",
+                "/model",
+                "/debug",
+                "/ask",
+                "/audit",
+                "/save",
+                "/load",
+                "/undo",
+                "/clear",
+                "/quit",
+                "/exit",
+            ],
+            multiline=False,
+            enable_open_in_editor=True,
+        )
 
     def test_create_prompt_session_hardens_history_path_permissions(self):
         import tempfile
@@ -721,20 +1061,16 @@ class PrivatePathPermissionTests(unittest.TestCase):
                 prompts.append(value)
                 return "hello"
 
-        with (
-            patch.object(oy_cli.cli, "_git_diff_shortstat", return_value="1 file changed, 2 insertions(+)"),
-            patch("prompt_toolkit.formatted_text.ANSI", side_effect=lambda text: text),
-        ):
+        with patch.object(oy_cli.cli, "_git_diff_shortstat", return_value="1 file changed, 2 insertions(+)"):
             result = oy_cli._read_input(PromptSessionStub(), Path("/workspace"))
 
         self.assertEqual(result, "hello")
+        self.assertEqual(len(prompts), 1)
         self.assertEqual(
-            prompts,
-            [
-                "\x1b[2m1 file changed, 2 insertions(+)\x1b[0m\n"
-                "\x1b[1;32moy ❯\x1b[0m "
-            ],
+            prompts[0].value,
+            "\x1b[2m1 file changed, 2 insertions(+)\x1b[0m\n\x1b[1;32moy ❯\x1b[0m ",
         )
+
 
     def test_handle_save_hardens_sessions_directory_permissions(self):
         import tempfile

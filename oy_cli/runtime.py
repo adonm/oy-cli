@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from functools import lru_cache
 import json
@@ -12,14 +13,19 @@ import time
 from importlib.metadata import version as _meta_version
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import tomllib
 
 import msgspec
 import tiktoken
+from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import FuzzyCompleter, WordCompleter
 from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.output.defaults import create_output
-from prompt_toolkit.shortcuts import print_formatted_text, prompt as prompt_input
+from prompt_toolkit.shortcuts import print_formatted_text
+from prompt_toolkit.validation import ValidationError, Validator
 from pygments import highlight
 from pygments.formatters import Terminal256Formatter
 from pygments.lexers import TextLexer, get_lexer_by_name
@@ -67,6 +73,51 @@ def _sanitize_terminal_text(text: str) -> str:
     return _CONTROL_TEXT_RE.sub("?", str(text).replace("\x1b", r"\x1b"))
 
 
+def has_tty_stdin() -> bool:
+    return sys.stdin.isatty()
+
+
+def stdin_is_interactive() -> bool:
+    return has_tty_stdin() and not _flag("OY_NON_INTERACTIVE", False)
+
+
+def stdout_is_interactive() -> bool:
+    return sys.stdout.isatty()
+
+
+def prompt_unavailable_reason() -> str | None:
+    if _flag("OY_NON_INTERACTIVE", False):
+        return "interactive prompting disabled by OY_NON_INTERACTIVE=1"
+    if not has_tty_stdin():
+        return "stdin is not a TTY"
+    return None
+
+
+def can_prompt() -> bool:
+    return prompt_unavailable_reason() is None
+
+
+def require_prompt(action: str = "prompt") -> None:
+    if reason := prompt_unavailable_reason():
+        raise ValueError(f"Cannot {action}: {reason}")
+
+
+def _history_path(name: str = "history") -> Path:
+    path = CONFIG_PATH.parent / name
+    _ensure_private_dir(path.parent)
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
+    return path
+
+
+def _prompt_needs_thread() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 class Console:
     def __init__(self, *, stderr: bool = False):
         self._stderr = stderr
@@ -99,6 +150,61 @@ class Console:
         self.print(_ansi("2", line) if style == "dim" else line)
 
 
+def _prompt_session(
+    *,
+    console: Console | None = None,
+    history=None,
+    completer=None,
+    validator=None,
+    auto_suggest=None,
+    multiline: bool = False,
+    enable_open_in_editor: bool = False,
+) -> PromptSession:
+    return PromptSession(
+        history=history or InMemoryHistory(),
+        completer=completer,
+        validator=validator,
+        auto_suggest=auto_suggest,
+        multiline=multiline,
+        enable_open_in_editor=enable_open_in_editor,
+        output=(console.output if isinstance(console, Console) else create_output(stdout=sys.stderr)),
+        include_default_pygments_style=False,
+        complete_while_typing=bool(completer),
+        validate_while_typing=bool(validator),
+        reserve_space_for_menu=8 if completer else 0,
+        mouse_support=False,
+    )
+
+
+def _choice_completer(choices: list[str] | None):
+    if not choices:
+        return None
+    return FuzzyCompleter(WordCompleter(choices, sentence=True, match_middle=True))
+
+
+def _prompt_text(label: str, *, default: str | None = None, choices: list[str] | None = None) -> str:
+    prompt_text = _ansi("1;36", _sanitize_terminal_text(str(label)))
+    if choices:
+        prompt_text += _ansi("2", f" ({'/'.join(map(str, choices))})")
+    if default not in (None, ""):
+        prompt_text += _ansi("2", f" [{default}]")
+    return prompt_text + ": "
+
+
+class _ChoiceValidator(Validator):
+    def __init__(self, choices: list[str]):
+        self.choices = choices
+
+    def validate(self, document) -> None:
+        value = document.text.strip()
+        if value in self.choices:
+            return
+        raise ValidationError(
+            message=f"Enter one of: {', '.join(self.choices)}.",
+            cursor_position=len(document.text),
+        )
+
+
 class Prompt:
     @staticmethod
     def ask(
@@ -107,27 +213,113 @@ class Prompt:
         console: Console | None = None,
         default: str | None = None,
         choices: list[str] | None = None,
+        history=None,
+        prompt_label: str | None = None,
     ) -> str:
-        prompt_text = _ansi("1;36", _sanitize_terminal_text(str(message)))
-        if choices:
-            prompt_text += _ansi("2", f" ({'/'.join(map(str, choices))})")
-        if default not in (None, ""):
-            prompt_text += _ansi("2", f" [{default}]")
-        prompt_text += ": "
-        while True:
-            response = prompt_input(
-                ANSI(prompt_text),
-                default="" if default is None else str(default),
-                output=(console.output if isinstance(console, Console) else create_output(stdout=sys.stderr)),
-                include_default_pygments_style=False,
-            ).strip()
-            if not choices or response in choices:
-                return response
-            _print(
-                "warning",
-                f"Enter one of: {', '.join(_fmt('inline', choice) for choice in choices)}.",
-                err=True,
+        response = _prompt_session(
+            console=console,
+            history=history,
+            completer=_choice_completer(choices),
+            validator=(_ChoiceValidator(choices) if choices else None),
+        ).prompt(
+            ANSI(_prompt_text(prompt_label or message, default=default, choices=choices)),
+            default="" if default is None else str(default),
+            in_thread=_prompt_needs_thread(),
+        ).strip()
+        return response if response or default is None else str(default)
+
+    @staticmethod
+    def select(
+        message: str,
+        options: list[str],
+        *,
+        console: Console | None = None,
+        default: str | None = None,
+        allow_custom: bool = False,
+        option_text: Callable[[str, int], str] | None = None,
+        prompt_label: str = "Selection",
+        history=None,
+    ) -> str:
+        if not options:
+            raise ValueError("select requires at least one option")
+        render = option_text or (lambda option, index: f"{index}. {option}")
+        _print("prompt", message, err=True)
+        _print(
+            value="## Options\n\n"
+            + "\n".join(render(option, index) for index, option in enumerate(options, 1)),
+            err=True,
+        )
+        aliases = {str(index): option for index, option in enumerate(options, 1)}
+        allowed = list(aliases) + options
+
+        class _SelectValidator(Validator):
+            def validate(self, document) -> None:
+                value = document.text.strip()
+                if not value and default not in (None, ""):
+                    return
+                if value in aliases or value in options or (allow_custom and value):
+                    return
+                hint = f"Enter 1-{len(options)}, type an option exactly" + (
+                    ", or enter custom text." if allow_custom else "."
+                )
+                raise ValidationError(message=hint, cursor_position=len(document.text))
+
+        response = _prompt_session(
+            console=console,
+            history=history,
+            completer=_choice_completer(allowed),
+            validator=_SelectValidator(),
+        ).prompt(
+            ANSI(_prompt_text(prompt_label, default=default)),
+            default="" if default is None else str(default),
+            in_thread=_prompt_needs_thread(),
+        ).strip()
+        value = response if response or default is None else str(default)
+        if value in aliases:
+            return aliases[value]
+        if value in options or (allow_custom and value):
+            return value
+        raise ValueError(f"Invalid selection: {value}")
+
+    @staticmethod
+    def session(
+        *,
+        console: Console | None = None,
+        history=None,
+        choices: list[str] | None = None,
+        validator=None,
+        multiline: bool = False,
+        enable_open_in_editor: bool = False,
+    ) -> PromptSession:
+        return _prompt_session(
+            console=console,
+            history=history,
+            completer=_choice_completer(choices),
+            validator=validator,
+            auto_suggest=AutoSuggestFromHistory(),
+            multiline=multiline,
+            enable_open_in_editor=enable_open_in_editor,
+        )
+
+    @staticmethod
+    def yes_no(
+        message: str,
+        *,
+        console: Console | None = None,
+        default: bool = False,
+        history=None,
+    ) -> bool:
+        default_choice = "y" if default else "n"
+        return (
+            Prompt.ask(
+                message,
+                console=console,
+                default=default_choice,
+                choices=["y", "n"],
+                history=history,
             )
+            == "y"
+        )
 
 
 STDOUT, STDERR = Console(), Console(stderr=True)
@@ -538,7 +730,7 @@ def render_model_list(items, *, title, query=None, current=None, err=False, limi
     _print(value="\n".join(lines), err=err)
 
 def _pick_model():
-    if not sys.stdin.isatty() or _flag("OY_NON_INTERACTIVE", False):
+    if not can_prompt():
         abort(
             "No model configured.\n\n"
             "Pick one interactively:\n"

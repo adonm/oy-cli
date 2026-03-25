@@ -9,7 +9,6 @@ import json
 import lzma
 import os
 import socket
-import sys
 import tarfile
 import zipfile
 from dataclasses import dataclass
@@ -101,11 +100,22 @@ class ToolHandler:
     fn: Callable[..., Any]
     spec: ToolSpec
     args_type: Any
+    mutating: bool = False
 
     def invoke(self, state: Any, args: dict[str, Any] | None = None) -> ToolResult:
         try:
             parsed = msgspec.convert(args or {}, type=self.args_type)
-            payload = self.fn(state, **msgspec.to_builtins(parsed))
+            builtins = msgspec.to_builtins(parsed)
+            if self.mutating and not _approve_mutating_tool(state, self.name, builtins):
+                return ToolResult(
+                    ok=False,
+                    content={
+                        "tool": self.name,
+                        "error_type": "PermissionError",
+                        "message": f"User denied approval for mutating tool '{self.name}'",
+                    },
+                )
+            payload = self.fn(state, **builtins)
             return ToolResult(content=payload)
         except Exception as exc:
             return ToolResult(
@@ -168,7 +178,7 @@ def _tool_schema(args_type: Any):
     return resolve(schema, schema.get("$defs", {}))
 
 
-def tool(args_type: Any):
+def tool(args_type: Any, *, mutating: bool = False):
     def deco(fn: Callable[..., Any]):
         name = _tool_name(fn.__name__)
         _TOOLS[name] = ToolHandler(
@@ -176,6 +186,7 @@ def tool(args_type: Any):
             fn=fn,
             spec=ToolSpec(name, rt.tool_description(name), _tool_schema(args_type)),
             args_type=args_type,
+            mutating=mutating,
         )
         return fn
 
@@ -215,6 +226,56 @@ class ToolRegistry:
 
 
 TOOL_REGISTRY = ToolRegistry.select()
+
+
+_MUTATING_TOOL_APPROVAL_CHOICES = ["once", "all", "deny"]
+
+
+def _tool_approval_prompt(name: str, args: dict[str, Any]) -> str:
+    lines = [
+        "## Approve Mutating Tool",
+        "",
+        f"- tool: {rt._fmt('inline', name)}",
+    ]
+    lines.extend(
+        f"- {key.replace('_', '-')}: {rt._fmt('inline', rt.preview(value, 120))}"
+        for key, value in args.items()
+        if value not in (None, "", False)
+    )
+    lines.extend(
+        [
+            "",
+            "Choose `once` to approve this call only, `all` to approve all mutating tools for the rest of the session, or `deny` to block it.",
+            "Press Enter to take the safe default: `deny`.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _approve_mutating_tool(state: Any, name: str, args: dict[str, Any]) -> bool:
+    if not getattr(state, "interactive", False) or getattr(state, "approve_all_mutating_tools", False):
+        return True
+    rt._print(value=_tool_approval_prompt(name, args), err=True)
+    choice = rt.Prompt.select(
+        "Approve mutating tool?",
+        _MUTATING_TOOL_APPROVAL_CHOICES,
+        console=rt.STDERR,
+        default="deny",
+        prompt_label="Approval",
+        option_text=lambda option, index: {
+            "once": f"{index}. once — approve this call only",
+            "all": f"{index}. all — approve all mutating tools for this session",
+            "deny": f"{index}. deny — block this call",
+        }[option],
+    ).strip()
+    if choice == "all":
+        state.approve_all_mutating_tools = True
+        rt._note("approved all mutating tools for this session", tag="note")
+        return True
+    if choice == "once":
+        return True
+    rt._note(f"denied mutating tool {rt._fmt('inline', name)}", tag="note")
+    return False
 
 
 def _positive_int(value: int, name: str) -> int:
@@ -360,29 +421,16 @@ def _summarize_text_output(text: str) -> tuple[str, bool]:
 @tool(AskArgs)
 def tool_ask(state: Any, question: str, choices: list[str] | None = None):
     rt.note_tool(state, "ask", question=question, choices=choices)
-    if not sys.stdin.isatty():
-        raise ValueError("Cannot ask question: stdin is not a TTY")
-    rt._print("prompt", question, err=True)
+    rt.require_prompt("ask question")
     if not choices:
-        return rt.Prompt.ask("Answer", console=rt.STDERR).strip()
-    rt._print(
-        value="## Options\n\n"
-        + "\n".join(
-            f"{i}. {rt._fmt('inline', choice)}" for i, choice in enumerate(choices, 1)
-        ),
-        err=True,
-    )
-    while True:
-        response = rt.Prompt.ask("Selection", console=rt.STDERR).strip()
-        if response.isdigit() and 0 < int(response) <= len(choices):
-            return choices[int(response) - 1]
-        if response in choices:
-            return response
-        rt._print(
-            "warning",
-            f"Enter a number 1-{len(choices)} or type the choice exactly.",
-            err=True,
-        )
+        return rt.Prompt.ask(question, console=rt.STDERR, default="").strip()
+    return rt.Prompt.select(
+        question,
+        choices,
+        console=rt.STDERR,
+        prompt_label="Selection",
+        option_text=lambda option, index: f"{index}. {rt._fmt('inline', option)}",
+    ).strip()
 
 
 def _format_todos(todos: list[TodoItem]) -> str:
@@ -462,7 +510,7 @@ def _render_bash_preview(command: str, result, payload: dict[str, Any]) -> str:
     return "\n\n".join(blocks)
 
 
-@tool(BashArgs)
+@tool(BashArgs, mutating=True)
 def tool_bash(state: Any, command: str, timeout_seconds: int = 120):
     if len(command.encode("utf-8", errors="replace")) > rt.MAX_BASH_CMD_BYTES:
         raise ValueError(
@@ -1021,6 +1069,8 @@ def _path_listing(
     return _join_paths(paths[: _shown_line_limit(limit)], root, empty)
 
 def _glob_paths(root: Path, pattern: str) -> list[Path]:
+    if pattern in {".", "./"}:
+        return sorted(root.iterdir(), key=lambda item: item.as_posix())
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
         raise ValueError(f"Path traversal denied: '{pattern}'")
     matches: list[Path] = []
@@ -1280,7 +1330,7 @@ def _replace_contents(
     results = replace(target, pattern, replacement, ignore_root=root)
     return _replace_payload(root, pattern, replacement, path, results, limit=limit)
 
-@tool(ReplaceArgs)
+@tool(ReplaceArgs, mutating=True)
 def tool_replace(
     state: Any,
     pattern: str,
