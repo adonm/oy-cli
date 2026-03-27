@@ -168,6 +168,29 @@ def test_reasoning_fallback_drops_unsupported_reasoning_after_first_rejection():
     assert "reasoning_effort" not in chat_cached.call_args.args[0]
 
 
+def test_sigv4_headers_sign_bedrock_mantle_requests():
+    headers = providers._bedrock_request_headers(
+        {
+            "access_key": "AKIDEXAMPLE",
+            "secret_key": "wJalrXUtnFEMI/I/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "session_token": "TOKEN",
+        },
+        "us-east-1",
+        "POST",
+        "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions",
+        body=b'{"model":"zai.glm-4.6"}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Host"] == "bedrock-mantle.us-east-1.api.aws"
+    assert headers["X-Amz-Security-Token"] == "TOKEN"
+    assert "Credential=AKIDEXAMPLE/" in headers["Authorization"]
+    assert "/us-east-1/bedrock-mantle/aws4_request" in headers["Authorization"]
+    assert "SignedHeaders=content-type;host;x-amz-date;x-amz-security-token" in headers["Authorization"]
+
+
+
 def test_provider_decoding_helpers_cover_json_and_message_shapes():
     assert providers._decode_tool_call_arguments(json.dumps('{"count":2}')) == {"count": 2}
     assert providers._decode_tool_call_arguments('{"ok":true}{"ok":true}') == {"ok": True}
@@ -216,6 +239,81 @@ def test_provider_decoding_helpers_cover_json_and_message_shapes():
         "hello",
         tool_calls=[ToolCall(id="call_2", name="echo", arguments={"count": 2})],
     )
+
+    reasoning_only = providers._chat_completion_to_assistant_message(
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="", reasoning="thoughts", tool_calls=None)
+                )
+            ]
+        )
+    )
+    assert reasoning_only == AssistantMessage("thoughts")
+
+
+def test_mantle_completion_client_uses_sigv4_client_in_aws_credentials_mode(monkeypatch, tmp_path):
+    sentinel = {"chat_completion": lambda *a, **k: None, "list_models": lambda: ["alpha", "beta"]}
+    monkeypatch.setattr(providers, "default_region", lambda choice=None: "us-east-1")
+    monkeypatch.setattr(
+        providers,
+        "load_aws_credentials",
+        lambda cwd=None, allow_login=True: {"access_key": "AKIA", "secret_key": "SECRET"},
+    )
+    monkeypatch.setattr(
+        providers,
+        "_bedrock_mantle_client",
+        lambda credentials, region, timeout=providers.DEFAULT_HTTP_TIMEOUT: dict(sentinel),
+    )
+
+    client = providers._mantle_completion_client(tmp_path)
+    assert client["list_models"]() == ["alpha", "beta"]
+    assert client["chat_completion"] is sentinel["chat_completion"]
+
+
+def test_load_bedrock_model_list_uses_mantle_models_endpoint(monkeypatch, tmp_path):
+    requested = {}
+
+    monkeypatch.setattr(providers, "default_region", lambda choice=None: "us-east-1")
+    monkeypatch.setattr(
+        providers,
+        "load_aws_credentials",
+        lambda cwd=None, allow_login=True: {
+            "access_key": "AKIDEXAMPLE",
+            "secret_key": "wJalrXUtnFEMI/I/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "session_token": "TOKEN",
+        },
+    )
+    monkeypatch.setattr(
+        providers,
+        "_bedrock_request_headers",
+        lambda credentials, region, method, url, body=b"", headers=None: {
+            "Authorization": "AWS4-HMAC-SHA256 test",
+            "X-Amz-Date": "20260327T062009Z",
+            "X-Amz-Security-Token": "TOKEN",
+            **(headers or {}),
+        },
+    )
+    monkeypatch.setattr(
+        providers,
+        "http_client",
+        lambda **kwargs: SimpleNamespace(
+            request=lambda method, url, **req: requested.update({"method": method, "url": url, **req}) or providers.response_adapter(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                text='{"data":[{"id":"zai.glm-4.6"},{"id":"moonshotai.kimi-k2-thinking"}]}',
+                content=b'{"data":[{"id":"zai.glm-4.6"},{"id":"moonshotai.kimi-k2-thinking"}]}',
+                url=url,
+                reason_phrase="OK",
+            )
+        ),
+    )
+
+    assert providers.load_bedrock_model_list(tmp_path) == ["zai.glm-4.6", "moonshotai.kimi-k2-thinking"]
+    assert requested["method"] == "GET"
+    assert requested["url"] == "https://bedrock-mantle.us-east-1.api.aws/v1/models"
+    assert requested["headers"]["Authorization"] == "AWS4-HMAC-SHA256 test"
+    assert requested["headers"]["X-Amz-Security-Token"] == "TOKEN"
 
 
 def test_shim_registry_helpers_follow_registry_order_and_build_clients(monkeypatch, tmp_path):
@@ -266,6 +364,13 @@ def test_shim_registry_helpers_follow_registry_order_and_build_clients(monkeypat
     assert calls == ["alpha", "beta", "gamma"]
     assert providers.ensure_api_env("alpha:model", None, tmp_path) == (True, None)
     assert providers.get_client("alpha", cwd=tmp_path) is sentinel
+    assert providers.list_models_for_shim("alpha", cwd=tmp_path) == ["alpha:demo"]
+    assert providers.list_models_for_shim("gamma", cwd=tmp_path) == []
+
+    specs["gamma"]["list_models"] = lambda cwd: (_ for _ in ()).throw(RuntimeError("boom"))
+    assert providers.list_models_for_shim("gamma", cwd=tmp_path) == []
+    with pytest.raises(RuntimeError, match="boom"):
+        providers.list_models_for_shim("gamma", cwd=tmp_path, ignore_errors=False)
 
 
 def test_transcript_lifecycle_and_prepared_messages_pack_and_truncate(monkeypatch):
@@ -329,6 +434,32 @@ def test_transcript_lifecycle_and_prepared_messages_pack_and_truncate(monkeypatc
         UserMessage("... [3 earlier messages omitted to fit context limit]"),
         UserMessage("tail"),
     ]
+
+
+def test_list_all_model_ids_warns_and_keeps_other_shims(monkeypatch, tmp_path):
+    printed: list[tuple[str, str, bool]] = []
+    warned: list[str] = []
+
+    monkeypatch.setattr(rt, "detect_available_shims", lambda: ["alpha", "beta"])
+
+    def fake_list_models_for_shim(shim, cwd=None, *, ignore_errors=True):
+        assert cwd == tmp_path
+        if shim == "alpha":
+            return ["alpha:demo"]
+        raise RuntimeError("boom\nsecond line")
+
+    monkeypatch.setattr(rt, "list_models_for_shim", fake_list_models_for_shim)
+    monkeypatch.setattr(rt, "_print", lambda kind="md", value="", err=False, extra=None: printed.append((kind, value, err)))
+    monkeypatch.setattr(rt, "_warn", warned.append)
+    monkeypatch.setattr(rt, "Path", SimpleNamespace(cwd=lambda: tmp_path))
+
+    assert rt.list_all_model_ids() == ["alpha:demo"]
+    assert printed == [
+        ("status", "Loading models from `alpha`.", True),
+        ("status", "Loading models from `beta`.", True),
+    ]
+    assert warned == ["Could not load models from `beta`: boom"]
+
 
 
 def test_runtime_model_config_and_tool_registries_round_trip(tmp_path, monkeypatch):

@@ -23,7 +23,7 @@ import toons
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 from tenacity.wait import wait_base
 
-from .aws_sigv4 import bedrock_bearer_token
+from .aws_sigv4 import sigv4_headers
 
 JSONLike: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
@@ -556,6 +556,7 @@ class HTTPClient:
 OpenAI: TypeAlias = dict[str, Any]
 
 
+
 def _openai(
     api_key: str,
     *,
@@ -583,6 +584,26 @@ def _headers(api: OpenAI, headers: dict[str, str] | None = None) -> dict[str, st
     if headers:
         merged.update(headers)
     return merged
+
+
+def _bedrock_request_headers(
+    credentials: dict[str, str],
+    region: str,
+    method: str,
+    url: str,
+    *,
+    body: bytes = b"",
+    headers: dict[str, str] | None = None,
+) -> dict[str, str]:
+    return sigv4_headers(
+        credentials,
+        region,
+        "bedrock-mantle",
+        method,
+        url,
+        body=body,
+        headers=headers,
+    )
 
 
 def _req(
@@ -700,11 +721,19 @@ def http_client(**kw):
 def bedrock_base_url(region: str) -> str:
     return f"https://bedrock-mantle.{region}.api.aws/v1"
 
-def make_bedrock_token(
-    region: str, cwd: Path | None = None, expires: int = 43200
-) -> str:
-    creds = load_aws_credentials(cwd)
-    return bedrock_bearer_token(creds, region, expires=expires)
+
+def load_bedrock_model_list(cwd: Path | None = None, region: str | None = None) -> list[str]:
+    current = default_region(region)
+    url = f"{bedrock_base_url(current).rstrip('/')}/models"
+    response = adapt_response(
+        http_client(timeout=SHORT_HTTP_TIMEOUT, follow_redirects=False).request(
+            "GET",
+            url,
+            headers=_bedrock_request_headers(load_aws_credentials(cwd), current, "GET", url),
+        )
+    )
+    response_raise_for_status(response)
+    return _extract_model_ids(response_json(response).get("data"), "id")
 
 def aws_cli(parts, cwd=None, timeout=10):
     env = command_env(cwd)
@@ -782,6 +811,7 @@ def load_codex_auth() -> dict[str, Any]:
 
 def get_openai_api_key() -> str | None:
     return os.environ.get("OPENAI_API_KEY")
+
 
 def load_codex_session() -> dict[str, Any]:
     auth = load_codex_auth()
@@ -1344,6 +1374,7 @@ def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
         "content",
         "tool_calls",
         "refusal",
+        "reasoning",
         "reasoning_text",
         "reasoning_opaque",
     ):
@@ -1403,16 +1434,22 @@ def _merged_chat_completion_message(choices: list[Any]) -> dict[str, Any]:
     return merged
 
 def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
-    choices = getattr(response, "choices", None)
+    data = _message_like_dict(response)
+    choices = data.get("choices") if data else getattr(response, "choices", None)
     message = (
         _merged_chat_completion_message(choices)
         if isinstance(choices, list) and len(choices) > 1
-        else _chat_completion_message_dict(getattr(choices[0], "message", None))
+        else _chat_completion_message_dict(
+            (choices[0] or {}).get("message") if isinstance(choices[0], dict) else getattr(choices[0], "message", None)
+        )
         if isinstance(choices, list) and choices
         else {}
     )
+    content = message.get("content") if isinstance(message.get("content"), str) else ""
+    if not content and isinstance(message.get("reasoning"), str):
+        content = message["reasoning"]
     return AssistantMessage(
-        content=message.get("content") if isinstance(message.get("content"), str) else "",
+        content=content,
         tool_calls=[
             call
             for tool_call in message.get("tool_calls") or []
@@ -1607,8 +1644,51 @@ def _codex_client(cwd: Path | None = None) -> CompletionClient:
     return _codex_chatgpt_client()
 
 def _require_aws_env(cwd: Path | None = None) -> None:
-    default_region(None)
     load_aws_credentials(cwd, allow_login=False)
+
+def _bedrock_mantle_client(
+    credentials: dict[str, str],
+    region: str,
+    *,
+    timeout: float = DEFAULT_HTTP_TIMEOUT,
+) -> CompletionClient:
+    api = {
+        "credentials": credentials,
+        "region": region,
+        "base_url": bedrock_base_url(region),
+        "timeout": timeout,
+        "session": http_client(timeout=timeout, follow_redirects=False),
+    }
+
+    def create(payload: dict[str, Any]) -> dict[str, Any]:
+        body = _encode_json_body(payload)
+        url = f"{api['base_url'].rstrip('/')}/chat/completions"
+        response = adapt_response(
+            api["session"].request(
+                "POST",
+                url,
+                data=body,
+                headers=_bedrock_request_headers(
+                    api["credentials"],
+                    api["region"],
+                    "POST",
+                    url,
+                    body=body,
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=api["timeout"],
+            )
+        )
+        response_raise_for_status(response)
+        return _json_dict(response, "Chat Completions API")
+
+    return _chat_client(
+        create,
+        lambda: load_bedrock_model_list(None, region),
+        tools_map=_tool_specs_to_openai,
+    )
+
+
 
 def _mantle_completion_client(
     cwd: Path | None = None,
@@ -1616,12 +1696,7 @@ def _mantle_completion_client(
     region: str | None = None,
 ) -> CompletionClient:
     current = default_region(region)
-    return _chat_from_key(
-        make_bedrock_token(current, cwd),
-        base_url=bedrock_base_url(current),
-        max_retries=0,
-        timeout=DEFAULT_HTTP_TIMEOUT,
-    )
+    return _bedrock_mantle_client(load_aws_credentials(cwd), current)
 
 def _get_github_token() -> str | None:
     for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
@@ -1832,6 +1907,7 @@ SHIM_SPECS: dict[str, ShimSpec] = {
         SHIM_MANTLE,
         ensure_env=_require_aws_env,
         build_client=_mantle_completion_client,
+        list_models=load_bedrock_model_list,
     ),
     SHIM_COPILOT: _make_shim_spec(
         SHIM_COPILOT,
@@ -1902,7 +1978,7 @@ _MISSING_API_CREDENTIALS_MESSAGE = (
     "- sign in with Codex CLI (`codex login`), or\n"
     "- authenticate GitHub CLI for Copilot (`gh auth login`), or\n"
     "- authenticate with OpenCode (`opencode auth`), or\n"
-    "- configure AWS CLI for Bedrock Mantle"
+    "- for Bedrock Mantle: configure AWS CLI credentials / SSO and set `AWS_REGION` (or `AWS_DEFAULT_REGION`) for the target region"
 )
 
 def _missing_api_credentials_message(error: str | None) -> str:
@@ -1925,12 +2001,19 @@ def require_api_env(
 def get_client(shim: str, cwd: Path | None = None) -> CompletionClient:
     return _shim_spec(shim)["build_client"](cwd)
 
-def list_models_for_shim(shim: str, cwd: Path | None = None) -> list[str]:
+def list_models_for_shim(
+    shim: str,
+    cwd: Path | None = None,
+    *,
+    ignore_errors: bool = True,
+) -> list[str]:
     try:
         raw = _shim_spec(shim)["list_models"](cwd)
         return [join_model_spec(shim, model) for model in raw]
     except Exception:
-        return []
+        if ignore_errors:
+            return []
+        raise
 
 __all__ = [
     "APIStatusError",

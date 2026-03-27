@@ -973,12 +973,18 @@ def list_all_model_ids() -> list[str]:
     shims = detect_available_shims()
     if not shims:
         abort(
-            "No shims are configured. Set OPENAI_API_KEY, sign in with Codex CLI, authenticate GitHub CLI, run `opencode auth`, or configure AWS CLI for Bedrock Mantle."
+            "No shims are configured. Set OPENAI_API_KEY, sign in with Codex CLI, authenticate GitHub CLI, run `opencode auth`, or configure Bedrock Mantle via AWS CLI credentials / SSO and `AWS_REGION`."
         )
     all_models: list[str] = []
     for shim in shims:
         _print("status", f"Loading models from {_fmt('inline', shim)}.", err=True)
-        all_models.extend(list_models_for_shim(shim, cwd=Path.cwd()))
+        try:
+            all_models.extend(
+                list_models_for_shim(shim, cwd=Path.cwd(), ignore_errors=False)
+            )
+        except Exception as exc:
+            message = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+            _warn(f"Could not load models from {_fmt('inline', shim)}: {message}")
     return all_models
 
 _tokenizer: tiktoken.Encoding | None = None

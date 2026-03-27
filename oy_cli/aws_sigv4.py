@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 from datetime import datetime, timezone
-from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
-
-_BEDROCK_BEARER_TOKEN_URL = (
-    "https://bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1"
-)
-_EMPTY_SHA256_HASH = hashlib.sha256(b"").hexdigest()
+from urllib.parse import quote, urlsplit
 
 
 type AwsCredentials = dict[str, str | None]
-
 
 
 def _utc_now() -> datetime:
@@ -27,11 +20,6 @@ def _uri_encode(value: str) -> str:
 def _normalize_path(path: str) -> str:
     return quote(path or "/", safe="/~")
 
-
-def _encode_query_pairs(pairs: list[tuple[str, str]]) -> str:
-    return "&".join(
-        f"{_uri_encode(key)}={_uri_encode(value)}" for key, value in pairs
-    )
 
 
 def _canonical_query_string(query: str) -> str:
@@ -51,7 +39,13 @@ def _sign(key: bytes, message: str) -> bytes:
     return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
 
 
-def _signature(secret_key: str, datestamp: str, region: str, service: str, string_to_sign: str) -> str:
+def _signature(
+    secret_key: str,
+    datestamp: str,
+    region: str,
+    service: str,
+    string_to_sign: str,
+) -> str:
     k_date = _sign(f"AWS4{secret_key}".encode("utf-8"), datestamp)
     k_region = _sign(k_date, region)
     k_service = _sign(k_region, service)
@@ -61,42 +55,38 @@ def _signature(secret_key: str, datestamp: str, region: str, service: str, strin
     ).hexdigest()
 
 
-def bedrock_bearer_token(
+def sigv4_headers(
     credentials: AwsCredentials,
     region: str,
+    service: str,
+    method: str,
+    url: str,
     *,
-    expires: int = 43200,
+    body: bytes = b"",
+    headers: dict[str, str] | None = None,
     now: datetime | None = None,
-) -> str:
+) -> dict[str, str]:
     now = (now or _utc_now()).astimezone(timezone.utc)
     timestamp = now.strftime("%Y%m%dT%H%M%SZ")
     datestamp = timestamp[:8]
-    service = "bedrock"
-    url = urlsplit(_BEDROCK_BEARER_TOKEN_URL)
-    operation_params = parse_qsl(url.query, keep_blank_values=True)
-    auth_params = [
-        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
-        (
-            "X-Amz-Credential",
-            f"{credentials['access_key']}/{_credential_scope(datestamp, region, service)}",
-        ),
-        ("X-Amz-Date", timestamp),
-        ("X-Amz-Expires", str(expires)),
-        ("X-Amz-SignedHeaders", "host"),
-    ]
+    parsed = urlsplit(url)
+    canonical_headers = {
+        "host": parsed.netloc,
+        "x-amz-date": timestamp,
+    }
+    for key, value in (headers or {}).items():
+        canonical_headers[str(key).lower()] = str(value).strip()
     if credentials["session_token"]:
-        auth_params.append(("X-Amz-Security-Token", credentials["session_token"]))
-    query = "&".join(
-        part for part in (_encode_query_pairs(operation_params), _encode_query_pairs(auth_params)) if part
-    )
+        canonical_headers["x-amz-security-token"] = str(credentials["session_token"])
+    signed_headers = ";".join(sorted(canonical_headers))
     canonical_request = "\n".join(
         [
-            "POST",
-            _normalize_path(url.path),
-            _canonical_query_string(query),
-            f"host:{url.netloc}\n",
-            "host",
-            _EMPTY_SHA256_HASH,
+            method.upper(),
+            _normalize_path(parsed.path),
+            _canonical_query_string(parsed.query),
+            "".join(f"{key}:{canonical_headers[key]}\n" for key in sorted(canonical_headers)),
+            signed_headers,
+            hashlib.sha256(body).hexdigest(),
         ]
     )
     string_to_sign = "\n".join(
@@ -107,17 +97,21 @@ def bedrock_bearer_token(
             hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
         ]
     )
-    signature = _signature(
-        str(credentials["secret_key"]), datestamp, region, service, string_to_sign
+    auth = (
+        "AWS4-HMAC-SHA256 "
+        f"Credential={credentials['access_key']}/{_credential_scope(datestamp, region, service)}, "
+        f"SignedHeaders={signed_headers}, "
+        f"Signature={_signature(str(credentials['secret_key']), datestamp, region, service, string_to_sign)}"
     )
-    signed_url = urlunsplit(
-        (
-            url.scheme,
-            url.netloc,
-            url.path,
-            f"{query}&X-Amz-Signature={signature}",
-            url.fragment,
-        )
-    )
-    raw = signed_url.removeprefix("https://")
-    return f"bedrock-api-key-{base64.b64encode(raw.encode()).decode()}"
+    return {
+        **(headers or {}),
+        "Host": parsed.netloc,
+        "X-Amz-Date": timestamp,
+        **(
+            {"X-Amz-Security-Token": str(credentials["session_token"])}
+            if credentials["session_token"]
+            else {}
+        ),
+        "Authorization": auth,
+    }
+

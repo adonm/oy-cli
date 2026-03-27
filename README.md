@@ -135,15 +135,19 @@ export OPENAI_API_KEY=...
 Copilot and Codex (OpenAI) creds are introspected
 and used, if creds are available `oy model` will show them in the model list.
 
-**AWS Bedrock Mantle:** Uses your default AWS profile/region. Supports auto-refresh of stale SSO sessions.
+**AWS Bedrock Mantle:** `oy` uses the Bedrock Mantle OpenAI-compatible endpoint (`https://bedrock-mantle.<region>.api.aws/v1`) and signs requests directly with SigV4 service `bedrock-mantle`.
+
 ```bash
+export OY_SHIM=bedrock-mantle
 export AWS_PROFILE=my-profile
-export AWS_REGION=us-west-2
+export AWS_REGION=us-east-1
 ```
+
+`oy` loads models from `GET /models` on the Mantle endpoint and sends chat requests to `POST /chat/completions` on the same endpoint.
 
 ## Troubleshooting
 
-**"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or configure AWS CLI (`aws configure`) for Bedrock Mantle.
+**"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or for Bedrock Mantle configure AWS credentials / SSO and set `AWS_REGION`.
 
 **"stdin is not a TTY"** -> Piping input disables `ask`. Set `OY_NON_INTERACTIVE=1` to make explicit.
 
