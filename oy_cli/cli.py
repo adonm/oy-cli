@@ -1,40 +1,82 @@
 from __future__ import annotations
 
-import asyncio
+import argparse
 import os
-import re
 import sys
 import time
 from pathlib import Path
 
 import defopt
-import msgspec
+from prompt_toolkit.history import FileHistory
 
 from . import runtime as rt
-from .agent import AgentState, Transcript, run_agent, run_turn
-from .providers import SystemMessage
+from .agent import (
+    Transcript,
+    add_user,
+    checkpoint,
+    clear_transcript,
+    new_agent_state,
+    prepared_tokens,
+    rollback,
+    run_agent,
+    run_turn,
+    set_system_prompt,
+    session_tokens,
+    transcript,
+    transcript_with_system_prompt,
+    undo_last_turn,
+)
 from .runtime import (
     AUDIT_SYSTEM_PROMPT,
     active_system_prompt,
     ask_system_prompt,
-    read_only_tool_specs,
+    read_only_tool_registry,
     session_text,
 )
-run_cmd = rt.run_cmd
-save_json = rt.save_json
+from .tools import tool_specs
+
 
 _SESSIONS_DIR: Path | None = None
 
 def _sessions_dir() -> Path:
     return _SESSIONS_DIR or (rt.CONFIG_PATH.parent / "sessions")
 
-def _pick_model():
-    return rt._pick_model()
 
-def _save_cfg(data):
-    return rt._save_cfg(data)
+def _session_name(name: str) -> str:
+    return "".join(
+        char if char.isascii() and (char.isalnum() or char in "_-") else "_"
+        for char in name
+    )
 
-def read_system_prompt(system_file, interactive):
+
+def _session_file(name: str) -> Path:
+    return _sessions_dir() / f"{_session_name(name)}.json"
+
+def _transcript_data(transcript: Transcript) -> dict[str, object]:
+    return {
+        "messages": list(transcript["messages"]),
+        "max_context_tokens": transcript["max_context_tokens"],
+        "max_message_tokens": transcript["max_message_tokens"],
+    }
+
+
+def _load_transcript(data: object) -> Transcript:
+    if not isinstance(data, dict):
+        raise ValueError("Invalid transcript payload")
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        raise ValueError("Invalid transcript messages")
+    max_context_tokens = data.get("max_context_tokens", rt.MAX_CONTEXT_TOKENS)
+    max_message_tokens = data.get("max_message_tokens", rt.BUDGETS["message_tokens"])
+    if not isinstance(max_context_tokens, int) or not isinstance(max_message_tokens, int):
+        raise ValueError("Invalid transcript token limits")
+    return transcript(
+        messages=list(messages),
+        max_context_tokens=max_context_tokens,
+        max_message_tokens=max_message_tokens,
+    )
+
+def load_system_prompt(system_file, interactive):
     base = active_system_prompt(interactive)
     if system_file is None:
         return base
@@ -56,28 +98,28 @@ def _print_session_intro(heading: str, session, **extras) -> None:
     lines = [
         f"## {heading}",
         "",
-        f"- workspace: {rt._fmt('inline', session.workspace)}",
-        f"- model: {rt._fmt('inline', session.model)}",
-        f"- mode: {rt._fmt('inline', 'interactive' if session.interactive else 'non-interactive')}",
+        f"- workspace: {rt._fmt('inline', session['workspace'])}",
+        f"- model: {rt._fmt('inline', session['model'])}",
+        f"- mode: {rt._fmt('inline', 'interactive' if session['interactive'] else 'non-interactive')}",
     ]
-    if session.system_file is not None:
-        extras["system file"] = session.system_file.resolve()
+    if session['system_file'] is not None:
+        extras["system file"] = session['system_file'].resolve()
     for key, value in extras.items():
         if value is not None:
             lines.append(f"- {key}: {rt._fmt('inline', value)}")
     if rt._debug_log_path:
         lines.append(f"- debug log: {rt._fmt('inline', rt._debug_log_path)}")
     rt._print(value="\n".join(lines), err=True)
-    _, model = rt.split_model_spec(session.model)
-    _set_terminal_title(f"oy · {model} · {session.workspace.name}")
+    _, model = rt.split_model_spec(session['model'])
+    _set_terminal_title(f"oy · {model} · {session['workspace'].name}")
 
-def _workspace():
+def workspace_root():
     workspace = Path(os.environ.get("OY_ROOT", ".")).expanduser().resolve()
     if not workspace.is_dir():
         rt.abort(f"Workspace root is not a directory: {rt._fmt('inline', workspace)}")
     return workspace
 
-def _resolve_session(
+def resolve_session(
     *,
     interactive: bool | None = None,
     system_prompt: str | None = None,
@@ -85,37 +127,40 @@ def _resolve_session(
 ):
     resolved_interactive = rt.can_prompt() if interactive is None else interactive
     system_file = rt._sys_file() if include_system_file else None
-    return rt.SessionContext(
-        workspace=_workspace(),
+    return rt.session_context(
+        workspace=workspace_root(),
         model=rt._model(None),
         interactive=resolved_interactive,
         system_prompt=(
-            read_system_prompt(system_file, resolved_interactive)
+            load_system_prompt(system_file, resolved_interactive)
             if system_prompt is None
             else system_prompt
         ),
         system_file=system_file,
+        yolo=rt.yolo_enabled(),
     )
 
-def audit(prompt: str = ""):
-    session = _resolve_session(
+def audit(focus: str = ""):
+    """Run a one-shot security and complexity audit.
+
+    :param focus: Optional area to focus on, such as auth, tests, or a file path.
+    """
+    session = resolve_session(
         interactive=False,
         system_prompt=AUDIT_SYSTEM_PROMPT,
         include_system_file=False,
     )
     audit_prompt = session_text("audit", "default_user_prompt")
-    if prompt:
-        audit_prompt += session_text("audit", "focus_suffix", focus=prompt)
-    _print_session_intro("Audit", session, focus=rt.preview(prompt, 100) if prompt else None)
-    code, _ = asyncio.run(
-        run_agent(
+    if focus:
+        audit_prompt += session_text("audit", "focus_suffix", focus=focus)
+    _print_session_intro("Audit", session, focus=rt.preview(focus, 100) if focus else None)
+    code, _ = run_agent(
             audit_prompt,
-            session.model,
-            session.workspace,
-            session.system_prompt,
+            session['model'],
+            session['workspace'],
+            session['system_prompt'],
             rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
             interactive=False,
-        )
     )
     return code
 
@@ -126,6 +171,7 @@ def _create_prompt_session():
         "/tokens",
         "/model",
         "/debug",
+        "/yolo",
         "/ask",
         "/audit",
         "/save",
@@ -135,9 +181,9 @@ def _create_prompt_session():
         "/quit",
         "/exit",
     ]
-    return rt.Prompt.session(
+    return rt.prompt_session(
         console=rt.STDERR,
-        history=rt.FileHistory(str(history_path)),
+        history=FileHistory(str(history_path)),
         choices=commands,
         multiline=False,
         enable_open_in_editor=True,
@@ -146,7 +192,7 @@ def _create_prompt_session():
 
 def _git_diff_shortstat(workspace: Path) -> str | None:
     try:
-        result = run_cmd(
+        result = rt.run_cmd(
             [
                 "git",
                 "-C",
@@ -185,8 +231,9 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
                     "",
                     "- `/help` -- show this help",
                     "- `/tokens` -- show context usage",
-                    "- `/model [query]` -- show or switch model",
+                    "- `/model [filter]` -- show or switch model",
                     "- `/debug` -- toggle debug logging",
+                    "- `/yolo` -- allow all tools for the rest of this session",
                     "- `/ask <question>` -- research-only query (read-only, no changes)",
                     "- `/audit [focus]` -- run a security/complexity audit",
                     "- `/save [name]` -- save session transcript",
@@ -195,7 +242,7 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
                     "- `/clear` -- reset conversation (keeps system prompt)",
                     "- `/quit` or `/exit` -- end session",
                     "",
-                    "Context is compressed with Headroom before model requests.",
+                    "Older conversation history may be packed into TOON before model requests.",
                     "Paste multiline text directly — bracketed paste keeps it intact.",
                     "Press Meta+E to open your $EDITOR for longer prompts.",
                 ]
@@ -204,15 +251,15 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
         )
         return True
     if name == "/tokens":
-        total = transcript.session_tokens()
-        prepped = transcript.prepared_tokens(model=model)
-        budget = transcript.max_context_tokens
+        total = session_tokens(transcript)
+        prepped = prepared_tokens(transcript, model=model)
+        budget = transcript["max_context_tokens"]
         rt._print(
             value="\n".join(
                 [
                     "## Context",
                     "",
-                    f"- messages: {len(transcript.messages)}",
+                    f"- messages: {len(transcript["messages"])}",
                     f"- session tokens: {rt.format_tokens(total)}",
                     f"- prepared tokens: {rt.format_tokens(prepped)}",
                     f"- context budget: {rt.format_tokens(budget)}",
@@ -226,6 +273,8 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
         return ("model", arg)
     if name == "/debug":
         return ("debug",)
+    if name == "/yolo":
+        return ("yolo",)
     if name == "/ask":
         return ("ask", arg)
     if name == "/audit":
@@ -235,23 +284,18 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
     if name == "/load":
         return ("load", arg)
     if name == "/undo":
-        if transcript.undo_last_turn():
+        if undo_last_turn(transcript):
             rt._note("undid last turn", tag="note")
         else:
-            rt._print("warning", "Nothing to undo.", err=True)
+            rt._warn("Nothing to undo.")
         return True
     if name == "/clear":
-        transcript.clear(system_prompt)
+        clear_transcript(transcript, system_prompt)
         rt._note("cleared conversation", tag="note")
         return True
     if name in ("/quit", "/exit"):
         return None
     return False
-
-def render_model_list(items, *, title, query=None, current=None, err=False, limit=None):
-    return rt.render_model_list(
-        items, title=title, query=query, current=current, err=err, limit=limit
-    )
 
 def _handle_model_switch(arg, current_model):
     if not arg:
@@ -267,7 +311,7 @@ def _handle_model_switch(arg, current_model):
     try:
         all_models = rt.list_all_model_ids()
     except SystemExit:
-        rt._print("warning", "Could not load model list.", err=True)
+        rt._warn("Could not load model list.")
         return current_model
     if arg in all_models:
         rt._note(f"switched model: {arg}", tag="note")
@@ -277,7 +321,7 @@ def _handle_model_switch(arg, current_model):
         rt._note(f"switched model: {matches[0]}", tag="note")
         return matches[0]
     if matches:
-        render_model_list(
+        rt.render_model_list(
             matches,
             title="## Matching Models",
             query=arg,
@@ -289,7 +333,7 @@ def _handle_model_switch(arg, current_model):
             err=True,
         )
     else:
-        rt._print("warning", f"No models matching {rt._fmt('inline', arg)}.", err=True)
+        rt._warn(f"No models matching {rt._fmt('inline', arg)}.")
     return current_model
 
 def _handle_debug_toggle():
@@ -305,6 +349,14 @@ def _handle_debug_toggle():
         rt._debug_logger, rt._debug_log_path = rt._init_debug_log()
         rt._note(f"debug logging enabled: {rt._debug_log_path}", tag="note")
 
+
+def _handle_yolo_toggle(session):
+    if session['yolo']:
+        rt._note("yolo already enabled for this session", tag="note")
+        return session
+    session['yolo'] = True
+    return session
+
 def _handle_ask(question, current_model, session, transcript):
     if not question:
         rt._print(
@@ -312,37 +364,34 @@ def _handle_ask(question, current_model, session, transcript):
             err=True,
         )
         return
-    read_only_registry = read_only_tool_specs()
-    ask_transcript = Transcript.with_system_prompt(ask_system_prompt(session.system_prompt))
-    for msg in transcript.messages[-6:]:
-        if not isinstance(msg, SystemMessage):
-            ask_transcript.messages.append(msg)
+    read_only_registry = read_only_tool_registry()
+    ask_transcript = transcript_with_system_prompt(ask_system_prompt(session['system_prompt']))
+    for msg in transcript["messages"][-6:]:
+        if msg.get("role") != "system":
+            ask_transcript["messages"].append(msg)
 
     rt._note("research mode (read-only)", tag="note")
-    state = AgentState.new(
-        root=session.workspace,
-        tool_specs=read_only_registry,
+    state = new_agent_state(
+        root=session['workspace'],
+        tool_registry=read_only_registry,
         unattended_timeout_seconds=rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
-        interactive=session.interactive,
+        interactive=session['interactive'],
     )
-    ask_transcript.add_user(question)
+    add_user(ask_transcript, question)
 
-    async def _run():
+    try:
         client = rt.get_client(current_model)
-        return await run_turn(
+        run_turn(
             client,
             ask_transcript,
             state,
             current_model,
-            read_only_registry.specs(),
+            tool_specs(read_only_registry),
         )
-
-    try:
-        asyncio.run(_run())
     except KeyboardInterrupt:
         rt._note("research cancelled", tag="note")
     except Exception as exc:
-        rt._print("error", f"Research error: {exc}", err=True)
+        rt._error(f"Research error: {exc}")
 
 def _handle_audit(focus, current_model, session):
     audit_prompt = session_text("audit", "repo_user_prompt")
@@ -350,48 +399,43 @@ def _handle_audit(focus, current_model, session):
         audit_prompt += session_text("audit", "focus_suffix", focus=focus)
 
     rt._note("audit mode", tag="note")
-    audit_transcript = Transcript.with_system_prompt(AUDIT_SYSTEM_PROMPT)
+    audit_transcript = transcript_with_system_prompt(AUDIT_SYSTEM_PROMPT)
 
     try:
-        asyncio.run(
-            run_agent(
+        run_agent(
                 audit_prompt,
                 current_model,
-                session.workspace,
+                session['workspace'],
                 AUDIT_SYSTEM_PROMPT,
                 rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
                 interactive=False,
                 transcript=audit_transcript,
-            )
         )
     except KeyboardInterrupt:
         rt._note("audit cancelled", tag="note")
     except Exception as exc:
-        rt._print("error", f"Audit error: {exc}", err=True)
+        rt._error(f"Audit error: {exc}")
 
 def _handle_save(name, transcript, current_model):
-    sessions_dir = _sessions_dir()
-    rt._ensure_private_dir(sessions_dir)
+    rt._ensure_private_dir(_sessions_dir())
     if not name:
         name = time.strftime("%Y%m%d-%H%M%S")
-    safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
-    path = sessions_dir / f"{safe_name}.json"
+    path = _session_file(name)
     data = {
         "model": current_model,
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "transcript": msgspec.to_builtins(transcript),
+        "transcript": _transcript_data(transcript),
     }
-    save_json(path, data)
+    rt.save_json(path, data)
     rt._note(f"saved session: {path.name}", tag="note")
 
 def _handle_load(name, transcript, current_model, system_prompt):
-    sessions_dir = _sessions_dir()
-    rt._ensure_private_dir(sessions_dir)
+    sessions_dir = rt._ensure_private_dir(_sessions_dir())
     sessions = sorted(
         sessions_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True
     )
     if not sessions:
-        rt._print("warning", "No saved sessions found.", err=True)
+        rt._warn("No saved sessions found.")
         return transcript, current_model
     if not name:
         lines = ["## Saved Sessions", ""]
@@ -415,7 +459,7 @@ def _handle_load(name, transcript, current_model, system_prompt):
         if 0 <= index < len(sessions):
             target = sessions[index]
     if target is None:
-        candidate = sessions_dir / f"{re.sub(r'[^a-zA-Z0-9_\-]', '_', name)}.json"
+        candidate = _session_file(name)
         if candidate.exists():
             target = candidate
     if target is None:
@@ -423,49 +467,53 @@ def _handle_load(name, transcript, current_model, system_prompt):
         if len(matches) == 1:
             target = matches[0]
         elif matches:
-            rt._print(
-                "warning",
-                f"Ambiguous — {len(matches)} sessions match. Be more specific.",
-                err=True,
-            )
+            rt._warn(f"Ambiguous — {len(matches)} sessions match. Be more specific.")
             return transcript, current_model
     if target is None:
-        rt._print(
-            "warning", f"No session found matching {rt._fmt('inline', name)}.", err=True
-        )
+        rt._warn(f"No session found matching {rt._fmt('inline', name)}.")
         return transcript, current_model
     try:
         data = rt.load_json(target, None)
         if data is None:
             raise ValueError("Empty or invalid session file")
-        loaded = msgspec.convert(data["transcript"], Transcript)
+        loaded = _load_transcript(data["transcript"])
         loaded_model = data.get("model", current_model)
-        loaded.set_system_prompt(system_prompt)
+        set_system_prompt(loaded, system_prompt)
         rt._note(
-            f"loaded session: {target.stem} ({len(loaded.messages)} messages, model: {loaded_model})",
+            f"loaded session: {target.stem} ({len(loaded['messages'])} messages, model: {loaded_model})",
             tag="note",
         )
         return loaded, loaded_model
     except Exception as exc:
-        rt._print("error", f"Failed to load session: {exc}", err=True)
+        rt._error(f"Failed to load session: {exc}")
         return transcript, current_model
 
-def chat():
-    prompt_session = _create_prompt_session()
-    session = _resolve_session(interactive=True)
-    _print_session_intro("Chat", session)
-    rt._note("chat mode; /help for commands", tag="note")
+def chat(*, yolo: bool = False):
+    """Start an interactive multi-turn chat session.
 
-    transcript = Transcript.with_system_prompt(session.system_prompt)
-    current_model = session.model
+    :param yolo: Allow all tools without per-action approval prompts.
+    """
+    if yolo:
+        os.environ["OY_YOLO"] = "1"
+    prompt_session = _create_prompt_session()
+    session = resolve_session(interactive=True)
+    _print_session_intro("Chat", session)
+    rt._note(
+        "chat mode; /help for commands"
+        + ("; yolo on" if session['yolo'] else ""),
+        tag="note",
+    )
+
+    transcript = transcript_with_system_prompt(session['system_prompt'])
+    current_model = session['model']
 
     while True:
         try:
-            rt.STDERR.print()
-            rt.STDERR.rule(style="dim")
-            prompt = _read_input(prompt_session, session.workspace)
+            rt.print_console(rt.STDERR)
+            rt.rule_console(rt.STDERR, style="dim")
+            prompt = _read_input(prompt_session, session['workspace'])
         except KeyboardInterrupt:
-            rt.STDERR.print()
+            rt.print_console(rt.STDERR)
             continue
         except EOFError:
             rt._note("session ended", tag="note")
@@ -474,16 +522,21 @@ def chat():
         if not prompt.strip():
             continue
         if prompt.strip().startswith("/"):
-            result = _chat_command(prompt.strip(), transcript, session.system_prompt, current_model)
+            result = _chat_command(prompt.strip(), transcript, session['system_prompt'], current_model)
             if result is None:
                 break
             if isinstance(result, tuple):
                 if result[0] == "model":
                     current_model = _handle_model_switch(result[1], current_model)
                     _, model = rt.split_model_spec(current_model)
-                    _set_terminal_title(f"oy · {model} · {session.workspace.name}")
+                    _set_terminal_title(f"oy · {model} · {session['workspace'].name}")
                 elif result[0] == "debug":
                     _handle_debug_toggle()
+                elif result[0] == "yolo":
+                    next_session = _handle_yolo_toggle(session)
+                    if next_session is not session:
+                        session = next_session
+                        rt._note("yolo enabled; all tools allowed for this session", tag="note")
                 elif result[0] == "ask":
                     _handle_ask(result[1], current_model, session, transcript)
                 elif result[0] == "audit":
@@ -492,45 +545,43 @@ def chat():
                     _handle_save(result[1], transcript, current_model)
                 elif result[0] == "load":
                     transcript, current_model = _handle_load(
-                        result[1], transcript, current_model, session.system_prompt
+                        result[1], transcript, current_model, session['system_prompt']
                     )
                     _, model = rt.split_model_spec(current_model)
-                    _set_terminal_title(f"oy · {model} · {session.workspace.name}")
+                    _set_terminal_title(f"oy · {model} · {session['workspace'].name}")
                 continue
             if result:
                 continue
-            rt._print("warning", f"Unknown command: {prompt.strip().split()[0]}", err=True)
+            rt._warn(f"Unknown command: {prompt.strip().split()[0]}")
             continue
         if prompt.strip().lower() in ("exit", "quit"):
             break
-
-        checkpoint = transcript.checkpoint()
+        checkpoint_point = checkpoint(transcript)
         try:
-            code, _ = asyncio.run(
-                run_agent(
+            code, _ = run_agent(
                     prompt,
                     current_model,
-                    session.workspace,
-                    session.system_prompt,
+                    session['workspace'],
+                    session['system_prompt'],
                     rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
-                    session.interactive,
+                    session['interactive'],
+                    yolo=session['yolo'],
                     transcript=transcript,
-                )
             )
         except KeyboardInterrupt:
-            transcript.rollback(checkpoint)
+            rollback(transcript, checkpoint_point)
             rt._note("cancelled; prompt still in history (press ↑)", tag="note")
             continue
         except Exception as exc:
-            transcript.rollback(checkpoint)
-            rt._print("error", f"Agent error: {exc}", err=True)
+            rollback(transcript, checkpoint_point)
+            rt._error(f"Agent error: {exc}")
             rt._note("prompt still in history (press ↑)", tag="note")
             continue
 
         _ = code
         _, model = rt.split_model_spec(current_model)
-        prepped = transcript.prepared_tokens(model=model)
-        remaining = max(transcript.max_context_tokens - prepped, 0)
+        prepped = prepared_tokens(transcript, model=model)
+        remaining = max(transcript["max_context_tokens"] - prepped, 0)
         rt._note(
             f"context: {rt.format_tokens(prepped)} used, ~{rt.format_tokens(remaining)} remaining",
             tag="note",
@@ -539,26 +590,28 @@ def chat():
     _set_terminal_title("")
     return 0
 
-def run(*prompt: str):
-    task = (
-        " ".join(prompt)
-        if prompt
+def run(*task: str):
+    """Run a one-shot task.
+
+    :param task: Task text. If omitted, read from stdin or start chat in a TTY.
+    """
+    task_text = (
+        " ".join(task)
+        if task
         else (sys.stdin.read().strip() if not rt.has_tty_stdin() else "")
     )
-    if not task:
+    if not task_text:
         return chat()
 
-    session = _resolve_session(interactive=False)
-    _print_session_intro("Run", session, prompt=rt.preview(task, 100))
-    return asyncio.run(
-        run_agent(
-            task,
-            session.model,
-            session.workspace,
-            session.system_prompt,
+    session = resolve_session(interactive=False)
+    _print_session_intro("Run", session, prompt=rt.preview(task_text, 100))
+    return run_agent(
+            task_text,
+            session['model'],
+            session['workspace'],
+            session['system_prompt'],
             rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
-            session.interactive,
-        )
+            session['interactive'],
     )[0]
 
 def _current_model_text(model_spec: str) -> str:
@@ -577,7 +630,7 @@ def resolve_model_choice(model_id=None):
         if model_id:
             matches = [model for model in available if model_id.strip().lower() in model.lower()]
             if matches:
-                render_model_list(
+                rt.render_model_list(
                     matches,
                     title="## Matching Models",
                     query=model_id,
@@ -598,9 +651,9 @@ def resolve_model_choice(model_id=None):
         err=True,
     )
     if model_id is None:
-        render_model_list(available, title="## Available Models", current=current, err=True)
+        rt.render_model_list(available, title="## Available Models", current=current, err=True)
     shown = available
-    query = model_id or rt.Prompt.ask("Model or filter", console=rt.STDERR, default=current).strip()
+    query = model_id or rt.ask("Model or filter", console=rt.STDERR, default=current).strip()
     while True:
         query = query.strip() or current
         if query in available:
@@ -608,42 +661,72 @@ def resolve_model_choice(model_id=None):
         if query.isdigit() and 1 <= (index := int(query)) <= len(shown):
             return shown[index - 1]
         shown = [model for model in available if query.lower() in model.lower()]
-        render_model_list(shown, title="## Matching Models", query=query, current=current, err=True)
-        query = rt.Prompt.ask("Model or filter", console=rt.STDERR).strip()
+        rt.render_model_list(shown, title="## Matching Models", query=query, current=current, err=True)
+        query = rt.ask("Model or filter", console=rt.STDERR).strip()
 
-def model(query: str | None = None):
+def model(model: str | None = None):
+    """Show or change the default model.
+
+    :param model: Exact model id or filter text to select from available models.
+    """
     current = rt._model(None)
-    if query is None and not rt.can_prompt():
+    if model is None and not rt.can_prompt():
         rt._print(value=_current_model_text(current))
         return 0
     if current:
         rt._print(value=_current_model_text(current), err=True)
-        if not rt.Prompt.yes_no("Pick a new model?", console=rt.STDERR, default=False):
+        if model is None and not rt.yes_no(
+            "Pick a new model?", console=rt.STDERR, default=False
+        ):
             return 0
-    chosen = resolve_model_choice(query)
+    chosen = resolve_model_choice(model)
     if chosen is None:
         return 1
-    shim, bare_model = rt.split_model_spec(chosen)
-    cfg = {**rt._load_cfg(), "model": bare_model}
-    (cfg.__setitem__("shim", shim) if shim else cfg.pop("shim", None))
-    _save_cfg(cfg)
+    config = rt.save_model_config(chosen)
     rt._print(
-        value=f"## Default Model Updated\n\n- selected: {rt._fmt('inline', chosen)}"
-        + (f"\n- shim: {rt._fmt('inline', shim)}" if shim else "")
+        value=(
+            f"## Default Model Updated\n\n- selected: {rt._fmt('inline', chosen)}"
+            + (f"\n- shim: {rt._fmt('inline', config['shim'])}" if config['shim'] else "")
+        )
     )
     return 0
 
 def main(argv: list[str] | None = None):
+    """Run the top-level `oy` CLI.
+
+    Global behavior:
+    - bare text defaults to `run`
+    - `--version` works at the top level
+    - other flags must follow an explicit subcommand
+    """
     args = list(sys.argv[1:] if argv is None else argv)
+
     commands = {"run", "chat", "model", "audit", "-h", "--help"}
     if not args:
         args = ["run"] if not rt.stdin_is_interactive() else ["--help"]
     elif args[0] in {"-v", "--version"}:
         rt._print(value=f"oy {rt.__version__}")
         return 0
-    elif args[0] not in commands:
+    elif not args[0].startswith("-") and args[0] not in commands:
         args = ["run", *args]
-    result = defopt.run([run, chat, model, audit], argv=args, version=False, short={})
+    result = defopt.run(
+        [run, chat, model, audit],
+        argv=args,
+        version=rt.__version__,
+        short={},
+        show_defaults=False,
+        no_negated_flags=True,
+        argparse_kwargs={
+            "description": "AI coding assistant for your shell.",
+            "epilog": """Examples:
+  oy "fix the failing tests"
+  oy chat
+  oy chat --yolo
+  oy audit auth
+  oy model gpt-5""",
+            "formatter_class": argparse.RawDescriptionHelpFormatter,
+        },
+    )
     return 0 if result is None else result
 
 __all__ = [
@@ -658,18 +741,16 @@ __all__ = [
     "_handle_load",
     "_handle_model_switch",
     "_handle_save",
-    "_pick_model",
     "_print_session_intro",
     "_read_input",
-    "_resolve_session",
+    "resolve_session",
     "_set_terminal_title",
-    "_workspace",
+    "workspace_root",
     "audit",
     "chat",
     "main",
     "model",
-    "read_system_prompt",
-    "render_model_list",
+    "load_system_prompt",
     "resolve_model_choice",
     "run",
 ]

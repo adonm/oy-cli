@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass
 from functools import lru_cache
 import json
 import logging
@@ -16,13 +14,12 @@ from pathlib import Path
 from typing import Any, Callable
 import tomllib
 
-import msgspec
 import tiktoken
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import FuzzyCompleter, WordCompleter
 from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.history import FileHistory, InMemoryHistory
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.validation import ValidationError, Validator
@@ -32,6 +29,7 @@ from pygments.lexers import TextLexer, get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from .providers import (
+    _ensure_private_dir,
     command_env,
     http_client,
     join_model_spec,
@@ -81,9 +79,6 @@ def stdin_is_interactive() -> bool:
     return has_tty_stdin() and not _flag("OY_NON_INTERACTIVE", False)
 
 
-def stdout_is_interactive() -> bool:
-    return sys.stdout.isatty()
-
 
 def prompt_unavailable_reason() -> str | None:
     if _flag("OY_NON_INTERACTIVE", False):
@@ -110,44 +105,44 @@ def _history_path(name: str = "history") -> Path:
     return path
 
 
-def _prompt_needs_thread() -> bool:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return False
-    return True
+type Console = dict[str, bool]
 
 
-class Console:
-    def __init__(self, *, stderr: bool = False):
-        self._stderr = stderr
 
-    @property
-    def stream(self):
-        return sys.stderr if self._stderr else sys.stdout
+def console_stream(console: Console):
+    return sys.stderr if console.get("stderr", False) else sys.stdout
 
-    @property
-    def output(self):
-        return create_output(stdout=self.stream)
 
-    def print(self, *values: Any, sep: str = " ", end: str = "\n", highlight: bool | None = None):
-        _ = highlight
-        if not values:
-            self.stream.write(end)
-            self.stream.flush()
-            return
-        print_formatted_text(
-            ANSI(sep.join(map(str, values))),
-            output=self.output,
-            end=end,
-            flush=True,
-            include_default_pygments_style=False,
-        )
+def console_output(console: Console):
+    return create_output(stdout=console_stream(console))
 
-    def rule(self, style: str | None = None):
-        width = max(shutil.get_terminal_size((80, 20)).columns - 1, 20)
-        line = "─" * width
-        self.print(_ansi("2", line) if style == "dim" else line)
+
+def print_console(
+    console: Console,
+    *values: Any,
+    sep: str = " ",
+    end: str = "\n",
+    highlight: bool | None = None,
+):
+    _ = highlight
+    stream = console_stream(console)
+    if not values:
+        stream.write(end)
+        stream.flush()
+        return
+    print_formatted_text(
+        ANSI(sep.join(map(str, values))),
+        output=console_output(console),
+        end=end,
+        flush=True,
+        include_default_pygments_style=False,
+    )
+
+
+def rule_console(console: Console, style: str | None = None):
+    width = max(shutil.get_terminal_size((80, 20)).columns - 1, 20)
+    line = "─" * width
+    print_console(console, _ansi("2", line) if style == "dim" else line)
 
 
 def _prompt_session(
@@ -167,7 +162,7 @@ def _prompt_session(
         auto_suggest=auto_suggest,
         multiline=multiline,
         enable_open_in_editor=enable_open_in_editor,
-        output=(console.output if isinstance(console, Console) else create_output(stdout=sys.stderr)),
+        output=(console_output(console) if console is not None else create_output(stdout=sys.stderr)),
         include_default_pygments_style=False,
         complete_while_typing=bool(completer),
         validate_while_typing=bool(validator),
@@ -205,124 +200,116 @@ class _ChoiceValidator(Validator):
         )
 
 
-class Prompt:
-    @staticmethod
-    def ask(
-        message: str,
-        *,
-        console: Console | None = None,
-        default: str | None = None,
-        choices: list[str] | None = None,
-        history=None,
-        prompt_label: str | None = None,
-    ) -> str:
-        response = _prompt_session(
-            console=console,
-            history=history,
-            completer=_choice_completer(choices),
-            validator=(_ChoiceValidator(choices) if choices else None),
-        ).prompt(
-            ANSI(_prompt_text(prompt_label or message, default=default, choices=choices)),
-            default="" if default is None else str(default),
-            in_thread=_prompt_needs_thread(),
-        ).strip()
-        return response if response or default is None else str(default)
+def ask(
+    message: str,
+    *,
+    console: Console | None = None,
+    default: str | None = None,
+    choices: list[str] | None = None,
+    history=None,
+    prompt_label: str | None = None,
+) -> str:
+    response = _prompt_session(
+        console=console,
+        history=history,
+        completer=_choice_completer(choices),
+        validator=(_ChoiceValidator(choices) if choices else None),
+    ).prompt(
+        ANSI(_prompt_text(prompt_label or message, default=default, choices=choices)),
+        default="" if default is None else str(default),
+    ).strip()
+    return response if response or default is None else str(default)
 
-    @staticmethod
-    def select(
-        message: str,
-        options: list[str],
-        *,
-        console: Console | None = None,
-        default: str | None = None,
-        allow_custom: bool = False,
-        option_text: Callable[[str, int], str] | None = None,
-        prompt_label: str = "Selection",
-        history=None,
-    ) -> str:
-        if not options:
-            raise ValueError("select requires at least one option")
-        render = option_text or (lambda option, index: f"{index}. {option}")
-        _print("prompt", message, err=True)
-        _print(
-            value="## Options\n\n"
-            + "\n".join(render(option, index) for index, option in enumerate(options, 1)),
-            err=True,
-        )
-        aliases = {str(index): option for index, option in enumerate(options, 1)}
-        allowed = list(aliases) + options
 
-        class _SelectValidator(Validator):
-            def validate(self, document) -> None:
-                value = document.text.strip()
-                if not value and default not in (None, ""):
-                    return
-                if value in aliases or value in options or (allow_custom and value):
-                    return
-                hint = f"Enter 1-{len(options)}, type an option exactly" + (
-                    ", or enter custom text." if allow_custom else "."
-                )
-                raise ValidationError(message=hint, cursor_position=len(document.text))
+def select(
+    message: str,
+    options: list[str],
+    *,
+    console: Console | None = None,
+    default: str | None = None,
+    allow_custom: bool = False,
+    option_text: Callable[[str, int], str] | None = None,
+    prompt_label: str = "Selection",
+    history=None,
+) -> str:
+    if not options:
+        raise ValueError("select requires at least one option")
+    render = option_text or (lambda option, index: f"{index}. {option}")
+    _print("prompt", message, err=True)
+    _print(
+        value="## Options\n\n" + "\n".join(render(option, index) for index, option in enumerate(options, 1)),
+        err=True,
+    )
+    aliases = {str(index): option for index, option in enumerate(options, 1)}
+    allowed = list(aliases) + options
 
-        response = _prompt_session(
-            console=console,
-            history=history,
-            completer=_choice_completer(allowed),
-            validator=_SelectValidator(),
-        ).prompt(
-            ANSI(_prompt_text(prompt_label, default=default)),
-            default="" if default is None else str(default),
-            in_thread=_prompt_needs_thread(),
-        ).strip()
-        value = response if response or default is None else str(default)
-        if value in aliases:
-            return aliases[value]
-        if value in options or (allow_custom and value):
-            return value
-        raise ValueError(f"Invalid selection: {value}")
-
-    @staticmethod
-    def session(
-        *,
-        console: Console | None = None,
-        history=None,
-        choices: list[str] | None = None,
-        validator=None,
-        multiline: bool = False,
-        enable_open_in_editor: bool = False,
-    ) -> PromptSession:
-        return _prompt_session(
-            console=console,
-            history=history,
-            completer=_choice_completer(choices),
-            validator=validator,
-            auto_suggest=AutoSuggestFromHistory(),
-            multiline=multiline,
-            enable_open_in_editor=enable_open_in_editor,
-        )
-
-    @staticmethod
-    def yes_no(
-        message: str,
-        *,
-        console: Console | None = None,
-        default: bool = False,
-        history=None,
-    ) -> bool:
-        default_choice = "y" if default else "n"
-        return (
-            Prompt.ask(
-                message,
-                console=console,
-                default=default_choice,
-                choices=["y", "n"],
-                history=history,
+    class _SelectValidator(Validator):
+        def validate(self, document) -> None:
+            value = document.text.strip()
+            if not value and default not in (None, ""):
+                return
+            if value in aliases or value in options or (allow_custom and value):
+                return
+            hint = f"Enter 1-{len(options)}, type an option exactly" + (
+                ", or enter custom text." if allow_custom else "."
             )
-            == "y"
-        )
+            raise ValidationError(message=hint, cursor_position=len(document.text))
+
+    response = _prompt_session(
+        console=console,
+        history=history,
+        completer=_choice_completer(allowed),
+        validator=_SelectValidator(),
+    ).prompt(
+        ANSI(_prompt_text(prompt_label, default=default)),
+        default="" if default is None else str(default),
+    ).strip()
+    value = response if response or default is None else str(default)
+    if value in aliases:
+        return aliases[value]
+    if value in options or (allow_custom and value):
+        return value
+    raise ValueError(f"Invalid selection: {value}")
 
 
-STDOUT, STDERR = Console(), Console(stderr=True)
+def prompt_session(
+    *,
+    console: Console | None = None,
+    history=None,
+    choices: list[str] | None = None,
+    validator=None,
+    multiline: bool = False,
+    enable_open_in_editor: bool = False,
+) -> PromptSession:
+    return _prompt_session(
+        console=console,
+        history=history,
+        completer=_choice_completer(choices),
+        validator=validator,
+        auto_suggest=AutoSuggestFromHistory(),
+        multiline=multiline,
+        enable_open_in_editor=enable_open_in_editor,
+    )
+
+
+def yes_no(
+    message: str,
+    *,
+    console: Console | None = None,
+    default: bool = False,
+    history=None,
+) -> bool:
+    default_choice = "y" if default else "n"
+    return ask(
+        message,
+        console=console,
+        default=default_choice,
+        choices=["y", "n"],
+        history=history,
+    ) == "y"
+
+
+STDOUT, STDERR = {"stderr": False}, {"stderr": True}
 
 
 @lru_cache(maxsize=1)
@@ -440,27 +427,84 @@ MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
 DEFAULT_UNATTENDED_TIMEOUT_SECONDS = _env("UNATTENDED_TIMEOUT_SECONDS", 3600)
 CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
 
-@dataclass(frozen=True, slots=True)
-class RuntimeBudgets:
-    message_tokens: int
-    tool_output_tokens: int
-    tool_tail_tokens: int
-    default_line_limit: int
+type RuntimeBudgets = dict[str, int]
+type SessionContext = dict[str, Any]
+type SavedModelConfig = dict[str, str | None]
 
-@dataclass(frozen=True, slots=True)
-class SessionContext:
-    workspace: Path
-    model: str
-    interactive: bool
-    system_prompt: str
-    system_file: Path | None = None
+
+def runtime_budgets(
+    *,
+    message_tokens: int,
+    tool_output_tokens: int,
+    tool_tail_tokens: int,
+    default_line_limit: int,
+) -> RuntimeBudgets:
+    return {
+        "message_tokens": message_tokens,
+        "tool_output_tokens": tool_output_tokens,
+        "tool_tail_tokens": tool_tail_tokens,
+        "default_line_limit": default_line_limit,
+    }
+
+
+def session_context(
+    *,
+    workspace: Path,
+    model: str,
+    interactive: bool,
+    system_prompt: str,
+    system_file: Path | None = None,
+    yolo: bool = False,
+) -> SessionContext:
+    return {
+        "workspace": workspace,
+        "model": model,
+        "interactive": interactive,
+        "system_prompt": system_prompt,
+        "system_file": system_file,
+        "yolo": yolo,
+    }
+
+
+def model_config(model: str | None = None, shim: str | None = None) -> SavedModelConfig:
+    return {"model": model, "shim": shim}
+
+
+def model_config_from_model_spec(model_spec: str) -> SavedModelConfig:
+    shim, model = split_model_spec(model_spec)
+    return model_config(model=model, shim=shim)
+
+
+def resolved_model(config: SavedModelConfig) -> str | None:
+    model = config["model"]
+    shim = config["shim"]
+    if not model:
+        return None
+    if ":" in model or not shim:
+        return model
+    return join_model_spec(shim, model)
+
+
+def merge_model_config(
+    config: SavedModelConfig, base: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    data = dict(base or {})
+    if config["model"]:
+        data["model"] = config["model"]
+    else:
+        data.pop("model", None)
+    if config["shim"]:
+        data["shim"] = config["shim"]
+    else:
+        data.pop("shim", None)
+    return data
 
 def _clamp_int(value: int, lower: int, upper: int) -> int:
     return max(lower, min(value, upper))
 
 def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
     tool_output_tokens = _clamp_int(context_tokens // 24, 2048, 8192)
-    return RuntimeBudgets(
+    return runtime_budgets(
         message_tokens=_clamp_int(context_tokens // 16, tool_output_tokens, 12288),
         tool_output_tokens=tool_output_tokens,
         tool_tail_tokens=_clamp_int(tool_output_tokens // 5, 512, 2048),
@@ -524,25 +568,29 @@ def active_system_prompt(interactive: bool) -> str:
     return BASE_SYSTEM_PROMPT + "\n" + suffix + "\n"
 
 
-def active_tool_specs(interactive: bool):
-    from .tools import TOOL_REGISTRY, ToolRegistry
+def active_tool_registry(interactive: bool):
+    from .tools import TOOL_REGISTRY, select_tools
 
-    return TOOL_REGISTRY if interactive else ToolRegistry.select(exclude={"ask"})
+    return TOOL_REGISTRY if interactive else select_tools(exclude={"ask"})
 
 
 def ask_system_prompt(system_prompt: str) -> str:
     return system_prompt + _ASK_SYSTEM_SUFFIX
 
 
-def read_only_tool_specs():
-    from .tools import ToolRegistry
+def read_only_tool_registry():
+    from .tools import select_tools
 
-    return ToolRegistry.select(include=_READ_ONLY_TOOLS)
+    return select_tools(include=_READ_ONLY_TOOLS)
 
-def _ensure_private_dir(path: Path) -> Path:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
-    return path
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
 
 def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
     if os.environ.get("OY_DEBUG", "").strip().lower() not in _TRUTHY_VALUES:
@@ -564,7 +612,7 @@ def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
 _debug_logger, _debug_log_path = _init_debug_log()
 
 def _msg_to_dict(msg) -> dict[str, Any]:
-    return msgspec.to_builtins(msg)
+    return _jsonable(msg)
 
 def _debug_log(event: str, **data: Any) -> None:
     if _debug_logger is None:
@@ -599,13 +647,22 @@ def _fmt(kind, value="", extra=None):
 
 def _print(kind="md", value="", *, err=False, extra=None):
     console = STDERR if err else STDOUT
-    console.print(_render_markdownish(_fmt(kind, value, extra))) if value else console.print()
+    print_console(console, _render_markdownish(_fmt(kind, value, extra))) if value else print_console(console)
 
 
 def _note(label: str, *, tag: str | None = None) -> None:
     body = _sanitize_terminal_text(label)
     tag_text = _sanitize_terminal_text(tag) if tag else "note"
-    STDERR.print(_ansi("2", f"[{tag_text}] {body}".rstrip()))
+    print_console(STDERR, _ansi("2", f"[{tag_text}] {body}".rstrip()))
+
+
+def _warn(message: str) -> None:
+    _print("warning", message, err=True)
+
+
+def _error(message: str) -> None:
+    _print("error", message, err=True)
+
 
 def fail(message, code=1):
     _print("error", str(message).strip(), err=True)
@@ -615,7 +672,7 @@ def abort(message, code=1):
     raise SystemExit(fail(message, code))
 
 def clip_tokens(text, limit=None, tail=0):
-    limit = BUDGETS.tool_output_tokens if limit is None else limit
+    limit = BUDGETS["tool_output_tokens"] if limit is None else limit
     token_ids = encode_tokens(text)
     count = len(token_ids)
     if count <= limit:
@@ -644,7 +701,7 @@ def _format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 def _show_and_clip(text, limit=None, tail=0):
-    limit = BUDGETS.tool_output_tokens if limit is None else limit
+    limit = BUDGETS["tool_output_tokens"] if limit is None else limit
     show(text)
     return clip_tokens(text, limit=limit, tail=tail)
 
@@ -672,7 +729,7 @@ def show(text):
     text = _truncate_long_lines(text)
     lines = text.splitlines()
     if len(lines) <= _MAX_SHOW_LINES:
-        STDERR.print(_render_markdownish(_wrap_code_block(text)))
+        print_console(STDERR, _render_markdownish(_wrap_code_block(text)))
         return
     head_count = max(_MAX_SHOW_LINES // 2, 2)
     tail_count = max(_MAX_SHOW_LINES - head_count, 2)
@@ -699,7 +756,7 @@ def show(text):
         last = index
     wrapped = _wrap_code_block("\n".join(selected))
     wrapped += f"\n\n*[{len(lines)} lines total]*"
-    STDERR.print(_render_markdownish(wrapped))
+    print_console(STDERR, _render_markdownish(wrapped))
 
 def _rel(root, path):
     try:
@@ -716,6 +773,25 @@ def _load_cfg():
 
 def _save_cfg(data):
     save_json(_cfg_path(), data)
+
+
+def load_model_config() -> SavedModelConfig:
+    data = _load_cfg()
+    if not isinstance(data, dict):
+        return model_config()
+    model = data.get("model")
+    shim = data.get("shim")
+    return model_config(
+        model=model if isinstance(model, str) else None,
+        shim=shim if isinstance(shim, str) else None,
+    )
+
+
+def save_model_config(model_spec: str) -> SavedModelConfig:
+    config = model_config_from_model_spec(model_spec)
+    _save_cfg(merge_model_config(config, _load_cfg()))
+    return config
+
 
 def render_model_list(items, *, title, query=None, current=None, err=False, limit=None):
     shown = list(items if limit is None else items[:limit])
@@ -757,7 +833,7 @@ def _pick_model():
     )
     render_model_list(available, title="## Available Models", err=True)
     while True:
-        response = Prompt.ask("Model number or ID", console=STDERR).strip()
+        response = ask("Model number or ID", console=STDERR).strip()
         if response.isdigit() and 1 <= int(response) <= len(available):
             chosen = available[int(response) - 1]
             break
@@ -771,27 +847,31 @@ def _pick_model():
         if matches:
             render_model_list(matches, title="## Matching Models", query=response, err=True)
             continue
-        _print("warning", f"No match for {_fmt('inline', response)}. Try again.", err=True)
-    shim_name, bare_model = split_model_spec(chosen)
-    cfg = {**_load_cfg(), "model": bare_model}
-    if shim_name:
-        cfg["shim"] = shim_name
-    else:
-        cfg.pop("shim", None)
-    _save_cfg(cfg)
+        _warn(f"No match for {_fmt('inline', response)}. Try again.")
+    save_model_config(chosen)
     _print(value=f"## Default Model Saved\n\n- selected: {_fmt('inline', chosen)}", err=True)
     return chosen
 
-def _env_or_cfg(configured, env_name, key, default=None):
-    return configured or os.environ.get(env_name) or _load_cfg().get(key, default)
-
 def _shim_name(configured=None):
-    return _env_or_cfg(configured, "OY_SHIM", "shim")
+    if configured:
+        return configured
+    if value := os.environ.get("OY_SHIM"):
+        return value
+    return load_model_config()["shim"]
+
 
 def _model(configured=None):
-    if value := _env_or_cfg(configured, "OY_MODEL", "model"):
-        return join_model_spec(shim_name, value) if isinstance(value, str) and ":" not in value and (shim_name := _shim_name()) else value
+    if configured:
+        return configured
+    if value := os.environ.get("OY_MODEL"):
+        return join_model_spec(shim_name, value) if ":" not in value and (shim_name := _shim_name()) else value
+    if value := resolved_model(load_model_config()):
+        return value
     return _pick_model()
+
+def yolo_enabled(default: bool = False) -> bool:
+    return _flag("OY_YOLO", default)
+
 
 def _flag(name, default=False):
     value = os.environ.get(name)
@@ -837,7 +917,9 @@ def resolve_path(root, path):
     raise ValueError(f"Path traversal denied: '{path}'")
 
 def note_tool(state, name, *, _defaults=None, _suffix="", **details):
-    state.note_progress()
+    from . import agent as ag
+
+    ag.note_progress(state)
     defaults = _defaults or {}
     parts = [
         key.replace("_", "-")
@@ -868,7 +950,7 @@ def decode_tokens(token_ids: list[int]) -> str:
 def count_tokens(text: str) -> int:
     return len(encode_tokens(text))
 
-def truncate_str_to_tokens(text: str, max_tokens: int = BUDGETS.message_tokens) -> str:
+def truncate_str_to_tokens(text: str, max_tokens: int = BUDGETS["message_tokens"]) -> str:
     token_ids = encode_tokens(text)
     if len(token_ids) <= max_tokens:
         return text
@@ -914,6 +996,7 @@ __all__ = [
     "STDERR",
     "STDOUT",
     "RuntimeBudgets",
+    "SavedModelConfig",
     "SessionContext",
     "__version__",
     "_ASK_SYSTEM_SUFFIX",
@@ -945,8 +1028,9 @@ __all__ = [
     "_truncate_long_lines",
     "_wrap_code_block",
     "active_system_prompt",
+    "ask",
     "base_system_prompt",
-    "active_tool_specs",
+    "active_tool_registry",
     "ask_system_prompt",
     "audit_system_prompt",
     "abort",
@@ -965,17 +1049,19 @@ __all__ = [
     "join_model_spec",
     "list_all_model_ids",
     "load_json",
+    "load_model_config",
     "logging",
     "load_session_text",
     "noninteractive_system_prompt",
     "note_tool",
     "os",
     "preview",
-    "Prompt",
+    "prompt_session",
     "re",
-    "read_only_tool_specs",
+    "read_only_tool_registry",
     "render_model_list",
     "session_text",
+    "select",
     "require_api_env",
     "require_command_env",
     "resolve_active_shim",
@@ -986,6 +1072,7 @@ __all__ = [
     "_shim_require_api_env",
     "_shim_resolve_shim",
     "save_json",
+    "save_model_config",
     "show",
     "split_model_spec",
     "sys",
@@ -993,5 +1080,7 @@ __all__ = [
     "tool_description",
     "truncate_str_to_tokens",
     "which",
+    "yes_no",
+    "yolo_enabled",
     "Path",
 ]

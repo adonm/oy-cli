@@ -3,31 +3,27 @@ import base64
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading as _threading
-from dataclasses import dataclass
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
+from http import HTTPStatus
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Awaitable, Callable, TypeAlias
+from typing import Any, Callable, TypeAlias
 
-import httpx
-import msgspec
+import http.cookiejar
 import toons
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    AsyncOpenAI,
-    OpenAI,
-)
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 from tenacity.wait import wait_base
 
-from .aws_sigv4 import AwsCredentials, bedrock_bearer_token
+from .aws_sigv4 import bedrock_bearer_token
 
 JSONLike: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
@@ -45,54 +41,60 @@ def serialize_json(value: Any) -> str:
     return (
         normalized
         if isinstance(normalized, str)
-        else msgspec.json.encode(normalized).decode("utf-8")
+        else json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
     )
 
 def serialize_toon(value: Any) -> str:
     normalized = normalize_jsonlike(value)
     return normalized if isinstance(normalized, str) else toons.dumps(normalized)
 
-class ToolCall(msgspec.Struct, omit_defaults=True):
-    id: str
-    name: str
-    arguments: dict[str, Any] = msgspec.field(default_factory=dict)
+def ToolCall(id: str, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"id": id, "name": name, "arguments": dict(arguments or {})}
 
-class ToolResult(msgspec.Struct, omit_defaults=True):
-    ok: bool = True
-    content: JSONLike = None
 
-class ToolSpec(msgspec.Struct, omit_defaults=True):
-    name: str
-    description: str
-    parameters: dict[str, Any]
+def ToolResult(*, ok: bool = True, content: JSONLike = None) -> dict[str, Any]:
+    return {"ok": ok, "content": content}
 
-class SystemMessage(msgspec.Struct, tag="system", tag_field="role", omit_defaults=True):
-    content: str
 
-class UserMessage(msgspec.Struct, tag="user", tag_field="role", omit_defaults=True):
-    content: str
+def SystemMessage(content: str) -> dict[str, Any]:
+    return {"role": "system", "content": content}
 
-class AssistantMessage(
-    msgspec.Struct, tag="assistant", tag_field="role", omit_defaults=True
-):
-    content: str = ""
-    tool_calls: list[ToolCall] = msgspec.field(default_factory=list)
-    thought_signatures: dict[str, str] = msgspec.field(default_factory=dict)
 
-class ToolMessage(msgspec.Struct, tag="tool", tag_field="role", omit_defaults=True):
-    tool_call_id: str
-    name: str = ""
-    content: ToolResult = msgspec.field(default_factory=ToolResult)
+def UserMessage(content: str) -> dict[str, Any]:
+    return {"role": "user", "content": content}
 
-ChatMessage: TypeAlias = SystemMessage | UserMessage | AssistantMessage | ToolMessage
 
-@dataclass(frozen=True, slots=True)
-class CompletionClient:
-    chat_completion: Callable[
-        [str, list[ChatMessage], list[ToolSpec] | None, str, Any],
-        Awaitable[AssistantMessage],
-    ]
-    list_models: Callable[[], list[str]]
+def AssistantMessage(
+    content: str = "",
+    tool_calls: list[dict[str, Any]] | None = None,
+    thought_signatures: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": list(tool_calls or []),
+        "thought_signatures": dict(thought_signatures or {}),
+    }
+
+
+def ToolMessage(
+    tool_call_id: str,
+    name: str = "",
+    content: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "name": name,
+        "content": content or ToolResult(),
+    }
+
+
+ChatMessage: TypeAlias = dict[str, Any]
+
+
+CompletionClient: TypeAlias = dict[str, Any]
+
 
 SHIM_OPENAI = "openai"
 SHIM_CODEX = "codex"
@@ -135,71 +137,72 @@ DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 5.0
 DEFAULT_RETRY_MAX_DELAY_SECONDS = 30.0
 TRANSPORT_ERROR_RETRY_DELAY = 3.0
 
-def _tool_output_value(result: ToolResult) -> JSONLike:
-    return normalize_jsonlike(result.content)
+def _tool_output_value(result: dict[str, Any]) -> JSONLike:
+    return normalize_jsonlike(result.get("content"))
 
-def _tool_output_text(result: ToolResult) -> str:
+def _tool_output_text(result: dict[str, Any]) -> str:
     return serialize_toon(_tool_output_value(result))
 
-def _openai_tool_call(tool_call: ToolCall) -> dict[str, Any]:
+def _openai_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": tool_call.id,
+        "id": tool_call["id"],
         "type": "function",
         "function": {
-            "name": tool_call.name,
-            "arguments": serialize_json(tool_call.arguments),
+            "name": tool_call["name"],
+            "arguments": serialize_json(tool_call["arguments"]),
         },
     }
 
 def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
-    match message:
-        case SystemMessage():
-            return {"role": "system", "content": message.content}
-        case UserMessage():
-            return {"role": "user", "content": message.content}
-        case AssistantMessage():
-            payload = {"role": "assistant", "content": message.content}
-            if message.tool_calls:
-                payload["tool_calls"] = [
-                    _openai_tool_call(tool_call) for tool_call in message.tool_calls
-                ]
-            if message.thought_signatures:
-                payload["thought_signatures"] = message.thought_signatures
-            return payload
-        case ToolMessage():
-            return {
-                "role": "tool",
-                "tool_call_id": message.tool_call_id,
-                "name": message.name,
-                "content": _tool_output_text(message.content),
-            }
-    raise TypeError(f"Unsupported message type: {type(message).__name__}")
+    role = message.get("role")
+    if role == "system":
+        return {"role": "system", "content": message["content"]}
+    if role == "user":
+        return {"role": "user", "content": message["content"]}
+    if role == "assistant":
+        payload = {"role": "assistant", "content": message["content"]}
+        if message["tool_calls"]:
+            payload["tool_calls"] = [
+                _openai_tool_call(tool_call) for tool_call in message["tool_calls"]
+            ]
+        if message["thought_signatures"]:
+            payload["thought_signatures"] = message["thought_signatures"]
+        return payload
+    if role == "tool":
+        return {
+            "role": "tool",
+            "tool_call_id": message["tool_call_id"],
+            "name": message["name"],
+            "content": _tool_output_text(message["content"]),
+        }
+    raise TypeError(f"Unsupported message role: {role!r}")
 
 # ---------------------------------------------------------------------------
 # Local persistence and shell/runtime helpers
 # ---------------------------------------------------------------------------
 
-def load_json(p, d):
+def load_json(path, default):
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return d
+        return default
 
-def _ensure_private_dir(path: Path) -> None:
+def _ensure_private_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
+    return path
 
-def save_json(p, d):
+def save_json(path, data):
     try:
-        _ensure_private_dir(p.parent)
-        p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        p.chmod(0o600)
+        _ensure_private_dir(path.parent)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.chmod(0o600)
         return True
     except OSError:
         return False
 
-def unique_strings(v):
-    return list(dict.fromkeys(x for x in v if x))
+def unique_strings(values):
+    return list(dict.fromkeys(value for value in values if value))
 
 def _first_nonempty_string(data: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
@@ -217,15 +220,18 @@ def _post_form_json(
     url: str, data: dict[str, str], *, error_prefix: str
 ) -> dict[str, Any]:
     try:
-        with http_client(timeout=15) as client:
-            resp = client.post(
-                url,
-                data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+        with http_client(timeout=SHORT_HTTP_TIMEOUT) as client:
+            response = adapt_response(
+                client.request(
+                    "POST",
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
             )
-            resp.raise_for_status()
-            payload = resp.json()
-    except httpx.HTTPError as exc:
+        response_raise_for_status(response)
+        payload = response_json(response)
+    except HTTPError as exc:
         raise RuntimeError(f"{error_prefix}: {exc}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError(f"{error_prefix}: invalid JSON response")
@@ -238,8 +244,8 @@ def _extract_model_ids(items: Any, *keys: str) -> list[str]:
         _first_nonempty_string(item, *keys) for item in items if isinstance(item, dict)
     )
 
-def which(t, p=None):
-    return shutil.which(t, path=p)
+def which(command, path=None):
+    return shutil.which(command, path=path)
 
 def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
     if not cmd:
@@ -264,32 +270,432 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
 def command_env(_cwd=None):
     return MappingProxyType(os.environ.copy())
 
-_OPENAI_HTTPX_ONLY_KWARGS = (
-    "api_key",
-    "max_retries",
-    "default_headers",
-    "default_query",
-    "organization",
-    "project",
-    "webhook_secret",
-    "_strict_response_validation",
-)
+DEFAULT_HTTP_TIMEOUT = 300.0
+SHORT_HTTP_TIMEOUT = 30.0
+DEFAULT_WEBFETCH_TIMEOUT_SECONDS = 60
 
-def _httpx_client_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    httpx_kwargs = dict(kwargs)
-    for key in _OPENAI_HTTPX_ONLY_KWARGS:
-        httpx_kwargs.pop(key, None)
-    return httpx_kwargs
+
+class HTTPError(RuntimeError):
+    def __init__(self, message: str, *, response: "ResponseAdapter | None" = None):
+        self.response = response
+        super().__init__(message)
+
+
+class TransportError(RuntimeError):
+    pass
+
+
+class TimeoutException(TransportError):
+    pass
+
+
+class APIConnectionError(TransportError):
+    pass
+
+
+class APITimeoutError(TimeoutException):
+    pass
+
+
+class APIStatusError(HTTPError):
+    def __init__(self, message: str, *, response: "ResponseAdapter", body: Any = None):
+        self.body = body
+        super().__init__(message, response=response)
+
+
+class AuthenticationError(APIStatusError):
+    pass
+
+
+class PermissionDeniedError(APIStatusError):
+    pass
+
+
+class RateLimitError(APIStatusError):
+    pass
+
+
+class BadRequestError(APIStatusError):
+    pass
+
+
+ResponseAdapter: TypeAlias = dict[str, Any]
+
+
+def _normalize_headers(headers: Any) -> dict[str, str]:
+    if headers is None:
+        return {}
+    if hasattr(headers, "items"):
+        items = headers.items()
+    else:
+        items = dict(headers).items()
+    return {str(key).lower(): str(value) for key, value in items}
+
+
+def adapt_response(response: Any) -> ResponseAdapter:
+    is_mapping = isinstance(response, dict)
+    status_code = int((response.get("status_code") if is_mapping else getattr(response, "status_code", 0)) or 0)
+    reason_phrase = str(
+        (
+            response.get("reason_phrase", "")
+            if is_mapping
+            else getattr(response, "reason", "") or _status_reason(status_code)
+        )
+        or ""
+    )
+    return response_adapter(
+        status_code=status_code,
+        headers=response.get("headers") if is_mapping else getattr(response, "headers", None),
+        text=str((response.get("text", "") if is_mapping else getattr(response, "text", "")) or ""),
+        content=bytes((response.get("content", b"") if is_mapping else getattr(response, "content", b"")) or b""),
+        url=str((response.get("url", "") if is_mapping else getattr(response, "url", "")) or ""),
+        reason_phrase=reason_phrase,
+        http_version=_http_version_name(
+            response.get("http_version") if is_mapping else getattr(response, "http_version", None)
+        ),
+    )
+
+
+def response_adapter(
+    *,
+    status_code: int,
+    headers: Any,
+    text: str,
+    content: bytes,
+    url: str,
+    reason_phrase: str = "",
+    http_version: str = "HTTP/1.1",
+) -> ResponseAdapter:
+    return {
+        "status_code": status_code,
+        "headers": _normalize_headers(headers),
+        "text": text,
+        "content": content,
+        "url": url,
+        "reason_phrase": reason_phrase,
+        "http_version": http_version,
+    }
+
+
+def response_is_success(response: ResponseAdapter) -> bool:
+    return 200 <= response["status_code"] < 300
+
+
+def response_json(response: ResponseAdapter) -> Any:
+    return json.loads(response["text"])
+
+
+def response_raise_for_status(response: ResponseAdapter) -> None:
+    if response["status_code"] < 400:
+        return
+    raise _status_error_from_response(response)
+
+
+def _encode_json_body(value: Any) -> bytes:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _encode_request_data(value: Any) -> bytes | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, dict):
+        return urllib.parse.urlencode({str(key): str(item) for key, item in value.items()}).encode("utf-8")
+    raise TypeError(f"Unsupported request body type: {type(value).__name__}")
+
+
+def _decode_response_text(content: bytes, headers: Any) -> str:
+    charset = None
+    if hasattr(headers, "get_content_charset"):
+        charset = headers.get_content_charset()
+    if not charset and hasattr(headers, "get"):
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        if isinstance(content_type, str):
+            parts = [part.strip() for part in content_type.split(";")]
+            for part in parts[1:]:
+                if part.lower().startswith("charset="):
+                    charset = part.split("=", 1)[1].strip().strip('"') or None
+                    break
+    for encoding in [charset, "utf-8", "latin-1"]:
+        if not encoding:
+            continue
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def _no_redirect(self, req, fp, code, msg, headers):
+        fp.status = code
+        fp.code = code
+        fp.msg = msg
+        fp.headers = headers
+        return fp
+
+    http_error_301 = _no_redirect
+    http_error_302 = _no_redirect
+    http_error_303 = _no_redirect
+    http_error_307 = _no_redirect
+    http_error_308 = _no_redirect
+
+
+class HTTPClientResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        headers: Any,
+        content: bytes,
+        url: str,
+        reason: str = "",
+        http_version: str = "HTTP/1.1",
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+        self.url = url
+        self.reason = reason
+        self.http_version = http_version
+        self.text = _decode_response_text(content, headers)
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
+    def raise_for_status(self) -> None:
+        response_raise_for_status(adapt_response(self))
+
+
+class HTTPClient:
+    def __init__(
+        self,
+        *,
+        timeout: float = DEFAULT_HTTP_TIMEOUT,
+        follow_redirects: bool = False,
+        cookie_jar: http.cookiejar.CookieJar | None = None,
+    ) -> None:
+        self.timeout = float(timeout)
+        self.follow_redirects = bool(follow_redirects)
+        self.cookie_jar = cookie_jar or http.cookiejar.CookieJar()
+        handlers: list[Any] = [urllib.request.HTTPCookieProcessor(self.cookie_jar)]
+        if not self.follow_redirects:
+            handlers.append(_NoRedirectHandler())
+        self._opener = urllib.request.build_opener(*handlers)
+
+    def __enter__(self) -> "HTTPClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def close(self) -> None:
+        return None
+
+    def get(self, url: str, **kwargs: Any) -> HTTPClientResponse:
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> HTTPClientResponse:
+        return self.request("POST", url, **kwargs)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: Any = None,
+        data: Any = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> HTTPClientResponse:
+        if json is not None and data is not None:
+            raise TypeError("request accepts either json or data, not both")
+        request_headers = {str(key): str(value) for key, value in (headers or {}).items()}
+        body = None
+        if json is not None:
+            body = _encode_json_body(json)
+            request_headers.setdefault("Content-Type", "application/json")
+        elif data is not None:
+            body = _encode_request_data(data)
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers=request_headers,
+            method=method.upper(),
+        )
+        request_timeout = self.timeout if timeout is None else float(timeout)
+        try:
+            raw = self._opener.open(request, timeout=request_timeout)
+        except urllib.error.HTTPError as exc:
+            raw = exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                raise APITimeoutError(str(reason)) from exc
+            raise APIConnectionError(str(reason)) from exc
+        content = raw.read()
+        status_code = int(getattr(raw, "status", None) or getattr(raw, "code", 0) or 0)
+        response_headers = getattr(raw, "headers", None)
+        response_url = raw.geturl() if hasattr(raw, "geturl") else url
+        reason = str(getattr(raw, "reason", None) or getattr(raw, "msg", "") or _status_reason(status_code))
+        return HTTPClientResponse(
+            status_code=status_code,
+            headers=response_headers,
+            content=content,
+            url=str(response_url),
+            reason=reason,
+            http_version=_http_version_name(getattr(raw, "version", None)),
+        )
+
+
+OpenAI: TypeAlias = dict[str, Any]
+
+
+def _openai(
+    api_key: str,
+    *,
+    base_url: str = "https://api.openai.com/v1",
+    timeout: float = DEFAULT_HTTP_TIMEOUT,
+    headers: dict[str, str] | None = None,
+    follow_redirects: bool = False,
+) -> OpenAI:
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "timeout": timeout,
+        "headers": dict(headers or {}),
+        "follow_redirects": follow_redirects,
+        "session": http_client(timeout=timeout, follow_redirects=follow_redirects),
+    }
+
+
+def _headers(api: OpenAI, headers: dict[str, str] | None = None) -> dict[str, str]:
+    merged = {
+        "Authorization": f"Bearer {api['api_key']}",
+        "Content-Type": "application/json",
+        **api["headers"],
+    }
+    if headers:
+        merged.update(headers)
+    return merged
+
+
+def _req(
+    api: OpenAI,
+    method: str,
+    path: str,
+    *,
+    json_body: dict[str, Any] | None = None,
+    data: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> ResponseAdapter:
+    url = (
+        path
+        if path.startswith(("http://", "https://"))
+        else f"{api['base_url'].rstrip('/')}/{path.lstrip('/')}"
+    )
+    response = api["session"].request(
+        method,
+        url,
+        json=json_body,
+        data=data,
+        headers=_headers(api, headers),
+        timeout=api["timeout"],
+    )
+    adapted = adapt_response(response)
+    response_raise_for_status(adapted)
+    return adapted
+
+
+def _req_json(
+    api: OpenAI,
+    method: str,
+    path: str,
+    *,
+    source: str,
+    json_body: dict[str, Any] | None = None,
+    data: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return _json_dict(
+        _req(api, method, path, json_body=json_body, data=data, headers=headers),
+        source,
+    )
+
+
+def _model_ids(api: OpenAI) -> list[str]:
+    data = _req_json(api, "GET", "/models", source="Models API")
+    return sorted(
+        model_id
+        for model_id in _extract_model_ids(data.get("data"), "id")
+        if not model_id.startswith("text-embedding")
+    )
+
+
+
+def _status_reason(status_code: int) -> str:
+    try:
+        return HTTPStatus(status_code).phrase
+    except ValueError:
+        return ""
+
+
+def _http_version_name(value: Any) -> str:
+    if value in (None, ""):
+        return "HTTP/1.1"
+    if isinstance(value, str):
+        upper = value.upper()
+        return upper if upper.startswith("HTTP/") else f"HTTP/{value}"
+    if value == 3:
+        return "HTTP/3"
+    if value == 2:
+        return "HTTP/2"
+    if value in (11, 1.1, 1):
+        return "HTTP/1.1"
+    if value == 10:
+        return "HTTP/1.0"
+    return f"HTTP/{value}"
+
+
+
+def _json_dict(response: ResponseAdapter, source: str) -> dict[str, Any]:
+    try:
+        payload = response_json(response)
+    except Exception as exc:
+        raise RuntimeError(f"{source}: invalid JSON response") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{source}: invalid JSON response")
+    return payload
+
+
+def _status_error_from_response(response: ResponseAdapter) -> APIStatusError:
+    message = _response_error_message(response) or response["reason_phrase"] or f"HTTP {response['status_code']}"
+    cls: type[APIStatusError]
+    if response["status_code"] == 400:
+        cls = BadRequestError
+    elif response["status_code"] == 401:
+        cls = AuthenticationError
+    elif response["status_code"] == 403:
+        cls = PermissionDeniedError
+    elif response["status_code"] == 429:
+        cls = RateLimitError
+    else:
+        cls = APIStatusError
+    return cls(message, response=response)
+
 
 def http_client(**kw):
-    httpx_kwargs = _httpx_client_kwargs(kw)
-    httpx_kwargs.setdefault("follow_redirects", False)
-    return httpx.Client(**httpx_kwargs)
+    timeout = float(kw.pop("timeout", DEFAULT_HTTP_TIMEOUT))
+    follow_redirects = bool(kw.pop("follow_redirects", kw.pop("allow_redirects", False)))
+    if kw:
+        raise TypeError(f"Unsupported http_client kwargs: {', '.join(sorted(kw))}")
+    return HTTPClient(timeout=timeout, follow_redirects=follow_redirects)
 
-def async_http_client(**kw):
-    httpx_kwargs = _httpx_client_kwargs(kw)
-    httpx_kwargs.setdefault("follow_redirects", False)
-    return httpx.AsyncClient(**httpx_kwargs)
 
 def bedrock_base_url(region: str) -> str:
     return f"https://bedrock-mantle.{region}.api.aws/v1"
@@ -297,7 +703,7 @@ def bedrock_base_url(region: str) -> str:
 def make_bedrock_token(
     region: str, cwd: Path | None = None, expires: int = 43200
 ) -> str:
-    creds = AwsCredentials(**load_aws_credentials(cwd))
+    creds = load_aws_credentials(cwd)
     return bedrock_bearer_token(creds, region, expires=expires)
 
 def aws_cli(parts, cwd=None, timeout=10):
@@ -496,29 +902,22 @@ def load_codex_model_list() -> list[str]:
 # Provider client factories and protocol adapters
 # ---------------------------------------------------------------------------
 
-def _openai_client_pair(**kwargs: Any) -> tuple[AsyncOpenAI, OpenAI]:
-    http_client_kwargs = dict(kwargs)
-    http_client_kwargs.pop("max_retries", None)
-    async_http = async_http_client(**http_client_kwargs)
-    sync_http = http_client(**http_client_kwargs)
-    return (
-        AsyncOpenAI(http_client=async_http, **kwargs),
-        OpenAI(http_client=sync_http, **kwargs),
-    )
-
 def _openai_pair(
     api_key: str,
     *,
     base_url: str | None = None,
     max_retries: int = 3,
     timeout: Any = None,
-) -> tuple[AsyncOpenAI, OpenAI]:
-    kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": max_retries}
-    if base_url:
-        kwargs["base_url"] = base_url
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    return _openai_client_pair(**kwargs)
+    headers: dict[str, str] | None = None,
+) -> tuple[OpenAI, OpenAI]:
+    _ = max_retries
+    api = _openai(
+        api_key,
+        base_url=base_url or "https://api.openai.com/v1",
+        timeout=float(timeout or DEFAULT_HTTP_TIMEOUT),
+        headers=headers,
+    )
+    return api, api
 
 def split_model_spec(spec: str) -> tuple[str | None, str]:
     if ":" in spec:
@@ -538,9 +937,9 @@ def _is_retryable_status(status_code: int) -> bool:
     return status_code in {429, 499} or 500 <= status_code < 600
 
 class RetryableHttpError(RuntimeError):
-    def __init__(self, response: httpx.Response):
+    def __init__(self, response: ResponseAdapter):
         self.response = response
-        super().__init__(f"retryable HTTP {response.status_code}")
+        super().__init__(f"retryable HTTP {response['status_code']}")
 
 def _parse_retry_after_seconds(value: str | None) -> float | None:
     if not value:
@@ -557,9 +956,9 @@ def _parse_retry_after_seconds(value: str | None) -> float | None:
         seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
     return max(0.0, seconds)
 
-def _response_json(response: httpx.Response) -> dict[str, Any] | None:
+def _response_json(response: ResponseAdapter) -> dict[str, Any] | None:
     try:
-        payload = response.json()
+        payload = response_json(response)
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
@@ -580,42 +979,42 @@ class WaitForRetryableResponse(wait_base):
         exc = retry_state.outcome.exception() if retry_state.outcome else None
         if isinstance(exc, RetryableHttpError):
             retry_after_seconds = _parse_retry_after_seconds(
-                exc.response.headers.get("retry-after")
+                exc.response["headers"].get("retry-after")
             )
             return min(self.maximum, max(base, retry_after_seconds or 0.0))
         # Transport errors (including timeouts): use a short fixed floor so we
         # don't hammer the endpoint, but also don't wait as long as rate-limit
         # back-off since the server may just have been slow.
-        if isinstance(exc, (httpx.TransportError, APIConnectionError, APITimeoutError)):
+        if isinstance(exc, (TransportError, APIConnectionError, APITimeoutError)):
             return max(TRANSPORT_ERROR_RETRY_DELAY, min(base, self.maximum))
         return base
 
 def _retry_error_context(exc: BaseException | None) -> str | None:
     if isinstance(exc, RetryableHttpError):
         msg = _response_error_message(exc.response)
-        return msg or f"HTTP {exc.response.status_code}"
+        return msg or f"HTTP {exc.response['status_code']}"
     if isinstance(exc, APIStatusError):
         msg = _response_error_message(exc.response)
-        return msg or f"HTTP {exc.response.status_code}"
+        return msg or f"HTTP {exc.response['status_code']}"
     if isinstance(exc, APITimeoutError):
         return f"timeout ({type(exc).__name__})"
     if isinstance(exc, APIConnectionError):
         return f"transport error ({type(exc).__name__}): {exc}"
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, TimeoutException):
         return f"timeout ({type(exc).__name__})"
-    if isinstance(exc, httpx.TransportError):
+    if isinstance(exc, TransportError):
         return f"transport error ({type(exc).__name__}): {exc}"
     if exc is not None:
         return str(exc)
     return None
 
-async def _call_with_retry(
+def _call_with_retry(
     call,
     *,
     max_attempts: int = DEFAULT_RETRY_MAX_ATTEMPTS,
     on_retry=None,
 ):
-    async for attempt in AsyncRetrying(
+    for attempt in Retrying(
         stop=stop_after_attempt(max_attempts),
         wait=WaitForRetryableResponse(maximum=DEFAULT_RETRY_MAX_DELAY_SECONDS),
         retry=retry_if_exception_type(
@@ -635,14 +1034,14 @@ async def _call_with_retry(
                     ),
                 )
             try:
-                return await call()
+                return call()
             except APIStatusError as exc:
-                if _is_retryable_status(exc.response.status_code):
+                if _is_retryable_status(exc.response["status_code"]):
                     raise RetryableHttpError(exc.response) from exc
                 raise
     raise RuntimeError("SDK retry loop exited unexpectedly")
 
-def _response_error_message(response: httpx.Response) -> str:
+def _response_error_message(response: ResponseAdapter) -> str:
     payload = _response_json(response)
     if isinstance(payload, dict):
         error = payload.get("error")
@@ -652,59 +1051,53 @@ def _response_error_message(response: httpx.Response) -> str:
         if isinstance(top_msg, str) and top_msg:
             error_type = payload.get("__type") or payload.get("code") or ""
             return f"{error_type}: {top_msg}" if error_type else top_msg
-    return response.text
+    return response["text"]
 
 def _responses_instructions(messages: list[ChatMessage]) -> str | None:
-    parts = [msg.content for msg in messages if isinstance(msg, SystemMessage)]
+    parts = [msg["content"] for msg in messages if msg.get("role") == "system"]
     joined = "\n\n".join(part for part in parts if part)
     return joined or None
 
 def _responses_input_from_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for msg in messages:
-        match msg:
-            case SystemMessage():
-                continue
-            case UserMessage():
-                items.append(
-                    {"type": "message", "role": "user", "content": msg.content}
-                )
-            case AssistantMessage():
-                if msg.content:
-                    items.append(
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": msg.content,
-                        }
-                    )
-                items.extend(
-                    {
-                        "type": "function_call",
-                        "call_id": call.id,
-                        "name": call.name,
-                        "arguments": serialize_json(call.arguments),
-                        "status": "completed",
-                    }
-                    for call in msg.tool_calls
-                )
-            case ToolMessage():
-                items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": msg.tool_call_id,
-                        "output": _tool_output_text(msg.content),
-                    }
-                )
+        role = msg.get("role")
+        if role == "system":
+            continue
+        if role == "user":
+            items.append({"type": "message", "role": "user", "content": msg["content"]})
+            continue
+        if role == "assistant":
+            if msg["content"]:
+                items.append({"type": "message", "role": "assistant", "content": msg["content"]})
+            items.extend(
+                {
+                    "type": "function_call",
+                    "call_id": call["id"],
+                    "name": call["name"],
+                    "arguments": serialize_json(call["arguments"]),
+                    "status": "completed",
+                }
+                for call in msg["tool_calls"]
+            )
+            continue
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": msg["tool_call_id"],
+                    "output": _tool_output_text(msg["content"]),
+                }
+            )
     return items
 
-def _responses_tools(tools: list[ToolSpec] | None) -> list[dict[str, Any]] | None:
+def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     result = [
         {
             "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters or {"type": "object"},
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool.get("parameters") or {"type": "object"},
             "strict": False,
         }
         for tool in tools or []
@@ -723,15 +1116,15 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
         raise RuntimeError("Tool arguments must be a JSON object or JSON string")
 
     def decode(candidate: str) -> dict[str, Any]:
-        parsed = msgspec.json.decode(candidate)
-        parsed = msgspec.json.decode(parsed) if isinstance(parsed, str) else parsed
+        parsed = json.loads(candidate)
+        parsed = json.loads(parsed) if isinstance(parsed, str) else parsed
         if not isinstance(parsed, dict):
             raise RuntimeError("Tool arguments must decode to a JSON object")
         return parsed
 
     try:
         return decode(arguments)
-    except (msgspec.DecodeError, RuntimeError) as exc:
+    except (json.JSONDecodeError, RuntimeError) as exc:
         # Some providers duplicate a JSON blob — the first copy is often
         # truncated (missing close brace) and the second is the valid one.
         # Scan near the midpoint for `{` and try decoding from there.
@@ -740,7 +1133,7 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
             if arguments[i] == "{":
                 try:
                     return decode(arguments[i:])
-                except (msgspec.DecodeError, RuntimeError):
+                except (json.JSONDecodeError, RuntimeError):
                     pass
         raise RuntimeError(f"Could not parse tool arguments JSON: {exc}") from exc
 
@@ -764,7 +1157,7 @@ def _mark_reasoning_unsupported(api_kind: str, model: str) -> None:
         _REASONING_SUPPORT_CACHE[(api_kind, model)] = False
 
 def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
-    if exc.response.status_code != 400:
+    if exc.response["status_code"] != 400:
         return False
     message = (_response_error_message(exc.response) or "").lower()
     return "reasoning" in message and any(
@@ -779,7 +1172,7 @@ def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
         )
     )
 
-async def _call_with_reasoning_fallback(
+def _call_with_reasoning_fallback(
     api_kind: str,
     model: str,
     payload: dict[str, Any],
@@ -790,22 +1183,21 @@ async def _call_with_reasoning_fallback(
     if not _should_send_reasoning(api_kind, model):
         payload = _drop_reasoning_arg(payload)
     try:
-        return await _call_with_retry(
-            lambda: create(payload), on_retry=on_retry
-        )
+        return _call_with_retry(lambda: create(payload), on_retry=on_retry)
     except APIStatusError as exc:
         if not _is_reasoning_unsupported_error(exc):
             raise
         _mark_reasoning_unsupported(api_kind, model)
-        return await _call_with_retry(
+        return _call_with_retry(
             lambda: create(_drop_reasoning_arg(payload)),
             on_retry=on_retry,
         )
 
+
 def _responses_payload(
     model: str,
     messages: list[ChatMessage],
-    tools: list[ToolSpec] | None,
+    tools: list[dict[str, Any]] | None,
     tool_choice: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -833,7 +1225,7 @@ def _decode_responses_output(response: Any) -> AssistantMessage:
     if not isinstance(data, dict):
         raise RuntimeError("Responses API returned an unexpected payload")
     content_parts: list[str] = []
-    tool_calls: list[ToolCall] = []
+    tool_calls: list[dict[str, Any]] = []
     for item in data.get("output") or []:
         if not isinstance(item, dict):
             continue
@@ -871,14 +1263,14 @@ def _decode_responses_output(response: Any) -> AssistantMessage:
         tool_calls=tool_calls,
     )
 
-def _http_error_message(prefix: str, response: httpx.Response) -> str:
+def _http_error_message(prefix: str, response: ResponseAdapter) -> str:
     try:
-        data = response.json()
+        data = response_json(response)
     except ValueError:
-        body = response.text.strip()
+        body = response["text"].strip()
         body = body[:200] if body else ""
         return (
-            f"{prefix} error {response.status_code}: {body or response.reason_phrase}"
+            f"{prefix} error {response['status_code']}: {body or response['reason_phrase']}"
         )
     detail = data.get("error") or data.get("detail") if isinstance(data, dict) else data
     if isinstance(detail, dict):
@@ -887,56 +1279,16 @@ def _http_error_message(prefix: str, response: httpx.Response) -> str:
         message = detail
     else:
         message = json.dumps(detail, ensure_ascii=True)
-    return f"{prefix} error {response.status_code}: {message}"
+    return f"{prefix} error {response['status_code']}: {message}"
 
-async def _read_sse_completed_response(response: httpx.Response) -> dict[str, Any]:
-    event_name = ""
-    data_lines: list[str] = []
-
-    async def flush_event() -> dict[str, Any] | None:
-        nonlocal event_name, data_lines
-        if not data_lines:
-            event_name = ""
-            return None
-        raw = "\n".join(data_lines)
-        data_lines = []
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            event_name = ""
-            return None
-        current_event = event_name
-        event_name = ""
-        if current_event == "response.completed":
-            completed = payload.get("response")
-            if isinstance(completed, dict):
-                return completed
-        return None
-
-    async for line in response.aiter_lines():
-        if not line:
-            completed = await flush_event()
-            if completed is not None:
-                return completed
-            continue
-        if line.startswith("event:"):
-            event_name = line[6:].strip()
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line[5:].strip())
-    completed = await flush_event()
-    if completed is not None:
-        return completed
-    raise RuntimeError("Codex ChatGPT stream ended before response.completed")
-
-def _sync_model_ids(
-    sync_client: OpenAI,
+def _list_models(
+    list_models: Callable[[], list[str]],
     *,
     fallback: Callable[[], list[str]] | None = None,
     default: list[str] | None = None,
 ) -> list[str]:
     try:
-        return sorted(model.id for model in list(sync_client.models.list()))
+        return list_models()
     except Exception:
         if fallback:
             cached = fallback()
@@ -946,37 +1298,33 @@ def _sync_model_ids(
             return default
         raise
 
-def _openai_responses_client(
-    async_client: AsyncOpenAI,
-    sync_client: OpenAI,
+
+def _responses_client(
+    create: Callable[[dict[str, Any]], dict[str, Any]],
+    list_models: Callable[[], list[str]],
     *,
-    fallback_models: Callable[[], list[str]] | None = load_codex_model_list,
-    default_models: list[str] | None = None,
+    fallback: Callable[[], list[str]] | None = load_codex_model_list,
+    default: list[str] | None = None,
 ) -> CompletionClient:
-    async def chat_completion(
+    def chat_completion(
         model: str,
         messages: list[ChatMessage],
-        tools: list[ToolSpec] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         on_retry=None,
     ) -> AssistantMessage:
-        client = async_client.with_options(max_retries=0)
-
-        async def create_response(payload: dict[str, Any]):
-            return await client.responses.create(**payload)
-
         payload = _responses_payload(model, messages, tools, tool_choice)
-        response = await _call_with_reasoning_fallback(
-            "responses", model, payload, create_response, on_retry=on_retry
+        response = _call_with_reasoning_fallback(
+            "responses", model, payload, create, on_retry=on_retry
         )
         return _decode_responses_output(response)
 
-    return CompletionClient(
-        chat_completion=chat_completion,
-        list_models=lambda: _sync_model_ids(
-            sync_client, fallback=fallback_models, default=default_models
+    return {
+        "chat_completion": chat_completion,
+        "list_models": lambda: _list_models(
+            list_models, fallback=fallback, default=default
         ),
-    )
+    }
 
 def _message_like_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
@@ -1007,7 +1355,7 @@ def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
             result[key] = value
     return result
 
-def _chat_completion_tool_call(tool_call: Any) -> ToolCall | None:
+def _chat_completion_tool_call(tool_call: Any) -> dict[str, Any] | None:
     data = _message_like_dict(tool_call)
     if data:
         call_id = data.get("id")
@@ -1072,105 +1420,101 @@ def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
         ],
     )
 
-def _openai_chat_completions_client(
-    async_client: AsyncOpenAI,
-    sync_client: OpenAI,
+def _chat_client(
+    create: Callable[[dict[str, Any]], dict[str, Any]],
+    list_models: Callable[[], list[str]],
     *,
-    tools_map: Callable[[list[ToolSpec]], list[dict[str, Any]]],
+    tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
 ) -> CompletionClient:
-    async def chat_completion(
+    def chat_completion(
         model: str,
         messages: list[ChatMessage],
-        tools: list[ToolSpec] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         on_retry=None,
     ) -> AssistantMessage:
-        client = async_client.with_options(max_retries=0)
-        kwargs: dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": [_openai_chat_message(message) for message in messages],
             "reasoning_effort": "high",
         }
         if tools:
-            kwargs["tools"] = tools_map(tools)
-            kwargs["tool_choice"] = tool_choice
-
-        async def create_response(payload: dict[str, Any]):
-            return await client.chat.completions.create(**payload)
-
-        response = await _call_with_reasoning_fallback(
-            "chat_completions", model, kwargs, create_response, on_retry=on_retry
+            payload["tools"] = tools_map(tools)
+            payload["tool_choice"] = tool_choice
+        response = _call_with_reasoning_fallback(
+            "chat_completions", model, payload, create, on_retry=on_retry
         )
         return _chat_completion_to_assistant_message(response)
 
-    return CompletionClient(
-        chat_completion=chat_completion,
-        list_models=lambda: _sync_model_ids(sync_client, fallback=None),
-    )
+    return {
+        "chat_completion": chat_completion,
+        "list_models": lambda: _list_models(list_models),
+    }
 
-def _tool_specs_to_openai(tools: list[ToolSpec]) -> list[dict[str, Any]]:
+def _tool_specs_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
             "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
             },
         }
         for tool in tools
     ]
 
 def _codex_chatgpt_client() -> CompletionClient:
-    async def chat_completion(
+    api = _openai(
+        "",
+        base_url="https://chatgpt.com/backend-api/codex",
+        timeout=DEFAULT_HTTP_TIMEOUT,
+    )
+
+    def chat_completion(
         model: str,
         messages: list[ChatMessage],
-        tools: list[ToolSpec] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         on_retry=None,
     ) -> AssistantMessage:
         _ = on_retry
         payload = _responses_payload(model, messages, tools, tool_choice)
-        payload["stream"] = True
         session = get_codex_chatgpt_session()
+        headers = {
+            "Authorization": f"Bearer {session['access_token']}",
+            "ChatGPT-Account-Id": session["account_id"],
+        }
         for attempt in range(2):
             try:
-                async with async_http_client(timeout=60) as client:
-                    async with client.stream(
-                        "POST",
-                        CODEX_CHATGPT_RESPONSES_URL,
-                        json=payload,
-                        headers={
-                            "Authorization": f"Bearer {session['access_token']}",
-                            "ChatGPT-Account-Id": session["account_id"],
-                            "Content-Type": "application/json",
-                            "Accept": "text/event-stream",
-                        },
-                    ) as response:
-                        if response.status_code == 401 and attempt == 0:
-                            session = get_codex_chatgpt_session(force_refresh=True)
-                            continue
-                        if response.status_code >= 400:
-                            body = await response.aread()
-                            buffered = httpx.Response(
-                                response.status_code,
-                                headers=response.headers,
-                                content=body,
-                                request=response.request,
-                            )
-                            raise RuntimeError(
-                                _http_error_message("Codex ChatGPT", buffered)
-                            )
-                        data = await _read_sse_completed_response(response)
-            except httpx.HTTPError as exc:
+                data = _req_json(
+                    api,
+                    "POST",
+                    CODEX_CHATGPT_RESPONSES_URL,
+                    source="Codex ChatGPT",
+                    json_body=payload,
+                    headers=headers,
+                )
+            except AuthenticationError:
+                if attempt == 0:
+                    session = get_codex_chatgpt_session(force_refresh=True)
+                    headers = {
+                        "Authorization": f"Bearer {session['access_token']}",
+                        "ChatGPT-Account-Id": session["account_id"],
+                    }
+                    continue
+                raise RuntimeError("Codex ChatGPT authentication failed after token refresh")
+            except APIStatusError as exc:
+                raise RuntimeError(_http_error_message("Codex ChatGPT", exc.response)) from exc
+            except HTTPError as exc:
                 raise RuntimeError(f"Codex ChatGPT request failed: {exc}") from exc
             return _decode_responses_output(data)
         raise RuntimeError("Codex ChatGPT authentication failed after token refresh")
 
-    return CompletionClient(
-        chat_completion=chat_completion,
-        list_models=lambda: load_codex_model_list() or [CODEX_DEFAULT_MODEL],
-    )
+    return {
+        "chat_completion": chat_completion,
+        "list_models": lambda: load_codex_model_list() or [CODEX_DEFAULT_MODEL],
+    }
 
 KNOWN_SHIMS = set(SHIM_ORDER)
 _COPILOT_BASE_URL = os.environ.get(
@@ -1179,41 +1523,58 @@ _COPILOT_BASE_URL = os.environ.get(
 _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
 
-def _responses_client_from_key(
+def _responses_from_key(
     api_key: str,
     *,
     base_url: str | None = None,
     max_retries: int = 3,
     timeout: Any = None,
-    fallback_models: Callable[[], list[str]] | None = None,
-    default_models: list[str] | None = None,
+    fallback: Callable[[], list[str]] | None = None,
+    default: list[str] | None = None,
 ) -> CompletionClient:
-    return _openai_responses_client(
-        *_openai_pair(
-            api_key,
-            base_url=base_url,
-            max_retries=max_retries,
-            timeout=timeout,
+    api, models = _openai_pair(
+        api_key,
+        base_url=base_url,
+        max_retries=max_retries,
+        timeout=timeout,
+    )
+    return _responses_client(
+        lambda payload: _req_json(
+            api,
+            "POST",
+            "/responses",
+            source="Responses API",
+            json_body=payload,
         ),
-        fallback_models=fallback_models,
-        default_models=default_models,
+        lambda: _model_ids(models),
+        fallback=fallback,
+        default=default,
     )
 
-def _chat_client_from_key(
+
+def _chat_from_key(
     api_key: str,
     *,
     base_url: str | None = None,
     max_retries: int = 3,
     timeout: Any = None,
-    tools_map: Callable[[list[ToolSpec]], list[dict[str, Any]]] | None = _tool_specs_to_openai,
+    tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = _tool_specs_to_openai,
 ) -> CompletionClient:
-    return _openai_chat_completions_client(
-        *_openai_pair(
-            api_key,
-            base_url=base_url,
-            max_retries=max_retries,
-            timeout=timeout,
+    api, models = _openai_pair(
+        api_key,
+        base_url=base_url,
+        max_retries=max_retries,
+        timeout=timeout,
+    )
+    return _chat_client(
+        lambda payload: _req_json(
+            api,
+            "POST",
+            "/chat/completions",
+            source="Chat Completions API",
+            json_body=payload,
         ),
+        lambda: _model_ids(models),
         tools_map=tools_map,
     )
 
@@ -1226,7 +1587,7 @@ def _openai_client(
     max_retries: int = 3,
 ) -> CompletionClient:
     _ = cwd
-    return _responses_client_from_key(
+    return _responses_from_key(
         _require_string(get_openai_api_key(), "No OpenAI credentials found"),
         base_url=os.environ.get("OPENAI_BASE_URL"),
         max_retries=max_retries,
@@ -1238,10 +1599,10 @@ def _require_codex_env(_cwd: Path | None = None) -> None:
 def _codex_client(cwd: Path | None = None) -> CompletionClient:
     _ = cwd
     if api_key := get_codex_api_key():
-        return _responses_client_from_key(
+        return _responses_from_key(
             api_key,
-            fallback_models=load_codex_model_list,
-            default_models=[CODEX_DEFAULT_MODEL],
+            fallback=load_codex_model_list,
+            default=[CODEX_DEFAULT_MODEL],
         )
     return _codex_chatgpt_client()
 
@@ -1255,17 +1616,11 @@ def _mantle_completion_client(
     region: str | None = None,
 ) -> CompletionClient:
     current = default_region(region)
-    timeout = httpx.Timeout(
-        connect=10.0,
-        read=float(os.environ.get("OY_BEDROCK_READ_TIMEOUT", "120")),
-        write=10.0,
-        pool=10.0,
-    )
-    return _chat_client_from_key(
+    return _chat_from_key(
         make_bedrock_token(current, cwd),
         base_url=bedrock_base_url(current),
         max_retries=0,
-        timeout=timeout.read,
+        timeout=DEFAULT_HTTP_TIMEOUT,
     )
 
 def _get_github_token() -> str | None:
@@ -1294,14 +1649,6 @@ def _copilot_default_headers() -> dict[str, str]:
         "Editor-Version": _COPILOT_EDITOR_VERSION,
     }
 
-def _copilot_openai_pair(token: str):
-    return _openai_client_pair(
-        api_key=token,
-        base_url=_COPILOT_BASE_URL,
-        max_retries=0,
-        default_headers=_copilot_default_headers(),
-    )
-
 def _require_copilot_env(_cwd: Path | None = None) -> None:
     _require_string(
         _get_github_token(),
@@ -1309,16 +1656,13 @@ def _require_copilot_env(_cwd: Path | None = None) -> None:
     )
 
 def _fetch_copilot_models_raw(token: str) -> list[dict[str, Any]]:
-    response = httpx.get(
-        f"{_COPILOT_BASE_URL}/models",
-        headers={
-            "Authorization": f"Bearer {token}",
-            **_copilot_default_headers(),
-        },
-        timeout=15,
+    api = _openai(
+        token,
+        base_url=_COPILOT_BASE_URL,
+        timeout=SHORT_HTTP_TIMEOUT,
+        headers=_copilot_default_headers(),
     )
-    response.raise_for_status()
-    data = response.json()
+    data = _req_json(api, "GET", "/models", source="Copilot models")
     return data.get("data", []) if isinstance(data, dict) else []
 
 def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
@@ -1338,34 +1682,51 @@ def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
 def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
     _ = cwd
     token = _require_string(_get_github_token(), "No GitHub token found")
-    async_client, sync_client = _copilot_openai_pair(token)
+    client, model_client = _openai_pair(
+        token,
+        base_url=_COPILOT_BASE_URL,
+        max_retries=0,
+        headers=_copilot_default_headers(),
+    )
 
     try:
         _, responses_models = _classify_copilot_models(token)
     except Exception:
         responses_models = set()
 
-    responses_inner = _openai_responses_client(
-        async_client,
-        sync_client,
-        fallback_models=None,
-        default_models=None,
+    responses_inner = _responses_client(
+        lambda payload: _req_json(
+            client,
+            "POST",
+            "/responses",
+            source="Responses API",
+            json_body=payload,
+        ),
+        lambda: _model_ids(model_client),
+        fallback=None,
+        default=None,
     )
-    chat_inner = _openai_chat_completions_client(
-        async_client,
-        sync_client,
+    chat_inner = _chat_client(
+        lambda payload: _req_json(
+            client,
+            "POST",
+            "/chat/completions",
+            source="Chat Completions API",
+            json_body=payload,
+        ),
+        lambda: _model_ids(model_client),
         tools_map=_tool_specs_to_openai,
     )
 
-    async def chat_completion(
+    def chat_completion(
         model: str,
         messages: list[ChatMessage],
-        tools: list[ToolSpec] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         on_retry=None,
     ) -> AssistantMessage:
         inner = responses_inner if model in responses_models else chat_inner
-        return await inner.chat_completion(
+        return inner["chat_completion"](
             model,
             messages,
             tools,
@@ -1378,13 +1739,10 @@ def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
             chat_ids, _ = _classify_copilot_models(token)
             return chat_ids
         except Exception:
-            return sorted(
-                model.id
-                for model in sync_client.models.list()
-                if not model.id.startswith("text-embedding")
-            )
+            return _list_models(lambda: _model_ids(model_client), fallback=None, default=[])
 
-    return CompletionClient(chat_completion=chat_completion, list_models=list_models)
+
+    return {"chat_completion": chat_completion, "list_models": list_models}
 
 def _load_opencode_auth() -> dict[str, Any]:
     data = load_json(OPENCODE_AUTH_PATH, {})
@@ -1411,7 +1769,7 @@ def _require_opencode_go_env(_cwd: Path | None = None) -> None:
     )
 
 def _opencode_client(api_key: str, *, base_url: str) -> CompletionClient:
-    return _chat_client_from_key(api_key, base_url=base_url)
+    return _chat_from_key(api_key, base_url=base_url)
 
 def _opencode_zen_client(cwd: Path | None = None) -> CompletionClient:
     _ = cwd
@@ -1431,12 +1789,8 @@ ShimEnvChecker: TypeAlias = Callable[[Path | None], None]
 ShimClientBuilder: TypeAlias = Callable[..., CompletionClient]
 ShimModelLister: TypeAlias = Callable[[Path | None], list[str]]
 
-@dataclass(frozen=True, slots=True)
-class ShimSpec:
-    name: str
-    ensure_env: ShimEnvChecker
-    build_client: ShimClientBuilder
-    list_models: ShimModelLister
+ShimSpec: TypeAlias = dict[str, Any]
+
 
 def _client_model_lister(
     build_client: ShimClientBuilder,
@@ -1444,7 +1798,7 @@ def _client_model_lister(
     **kwargs: Any,
 ) -> ShimModelLister:
     def list_models(cwd: Path | None = None) -> list[str]:
-        return build_client(cwd=cwd, **kwargs).list_models()
+        return build_client(cwd=cwd, **kwargs)["list_models"]()
 
     return list_models
 
@@ -1455,12 +1809,12 @@ def _make_shim_spec(
     build_client: ShimClientBuilder,
     list_models: ShimModelLister | None = None,
 ) -> ShimSpec:
-    return ShimSpec(
-        name=name,
-        ensure_env=ensure_env,
-        build_client=build_client,
-        list_models=list_models or _client_model_lister(build_client),
-    )
+    return {
+        "name": name,
+        "ensure_env": ensure_env,
+        "build_client": build_client,
+        "list_models": list_models or _client_model_lister(build_client),
+    }
 
 SHIM_SPECS: dict[str, ShimSpec] = {
     SHIM_OPENAI: _make_shim_spec(
@@ -1501,7 +1855,7 @@ def _shim_spec(shim: str) -> ShimSpec:
 
 def _shim_env_error(spec: ShimSpec, cwd: Path | None) -> str | None:
     try:
-        spec.ensure_env(cwd)
+        spec["ensure_env"](cwd)
     except Exception as exc:
         return str(exc)
     return None
@@ -1569,17 +1923,19 @@ def require_api_env(
     return shim
 
 def get_client(shim: str, cwd: Path | None = None) -> CompletionClient:
-    return _shim_spec(shim).build_client(cwd)
+    return _shim_spec(shim)["build_client"](cwd)
 
 def list_models_for_shim(shim: str, cwd: Path | None = None) -> list[str]:
     try:
-        raw = _shim_spec(shim).list_models(cwd)
+        raw = _shim_spec(shim)["list_models"](cwd)
         return [join_model_spec(shim, model) for model in raw]
     except Exception:
         return []
 
 __all__ = [
     "APIStatusError",
+    "AuthenticationError",
+    "BadRequestError",
     "AssistantMessage",
     "ChatMessage",
     "CompletionClient",
@@ -1589,7 +1945,6 @@ __all__ = [
     "ToolCall",
     "ToolMessage",
     "ToolResult",
-    "ToolSpec",
     "UserMessage",
     "command_env",
     "detect_available_shims",
@@ -1599,6 +1954,8 @@ __all__ = [
     "list_models_for_shim",
     "load_json",
     "normalize_jsonlike",
+    "PermissionDeniedError",
+    "RateLimitError",
     "require_api_env",
     "resolve_shim",
     "run_cmd",

@@ -11,265 +11,444 @@ import os
 import socket
 import tarfile
 import zipfile
-from dataclasses import dataclass
 from functools import partial
+import inspect
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterable
+import types
+from typing import Any, BinaryIO, Callable, Iterable, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
 from urllib.parse import urlparse
 
-import httpx
 import pathspec
 from pygount import DuplicatePool, ProjectSummary, SourceAnalysis
 import regex
 import zstandard
 
-import msgspec
 from markdownify import markdownify
 
 from . import runtime as rt
-from .providers import ToolResult, ToolSpec, serialize_toon
+from .providers import (
+    DEFAULT_WEBFETCH_TIMEOUT_SECONDS,
+    HTTPError,
+    ResponseAdapter,
+    ToolResult,
+    TransportError,
+    adapt_response,
+    response_is_success,
+    serialize_toon,
+)
 
 
-class ListArgs(msgspec.Struct, omit_defaults=True):
-    path: str = "*"
-    limit: int = rt.BUDGETS.default_line_limit
+from dataclasses import MISSING, fields, is_dataclass
+
+class ValidationError(ValueError):
+    pass
 
 
-class ReadArgs(msgspec.Struct, omit_defaults=True):
-    path: str
-    offset: int = 1
-    limit: int = rt.BUDGETS.default_line_limit
+_NONE_TYPE = type(None)
+_PRIMITIVE_SCHEMAS = {
+    str: {"type": "string"},
+    int: {"type": "integer"},
+    float: {"type": "number"},
+    bool: {"type": "boolean"},
+}
+_SUPPORTED_PARAM_KINDS = {
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    inspect.Parameter.KEYWORD_ONLY,
+}
 
 
-class BashArgs(msgspec.Struct, omit_defaults=True):
-    command: str
-    timeout_seconds: int = 120
+def _is_dataclass_type(type_: Any) -> bool:
+    return isinstance(type_, type) and is_dataclass(type_)
 
 
-class SearchArgs(msgspec.Struct, omit_defaults=True):
-    pattern: str
-    path: str = "."
-    limit: int = rt.BUDGETS.default_line_limit
+def _field_types(type_: type, *, include_extras: bool = False) -> dict[str, Any]:
+    return get_type_hints(type_, include_extras=include_extras)
 
 
-class ReplaceArgs(msgspec.Struct, omit_defaults=True):
-    pattern: str
-    replacement: str
-    path: str = "."
-    limit: int = rt.BUDGETS.default_line_limit
+def _unwrap_required(type_: Any) -> Any:
+    origin = get_origin(type_)
+    if origin in (Required, NotRequired):
+        return get_args(type_)[0]
+    return type_
+
+def _jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+def coerce(value: Any, type_: Any) -> Any:
+    type_ = _unwrap_required(type_)
+    if type_ is Any:
+        return value
+
+    origin = get_origin(type_)
+    args = get_args(type_)
+
+    if origin in (types.UnionType, Union):
+        if value is None and _NONE_TYPE in args:
+            return None
+        last_error: ValidationError | None = None
+        for candidate in args:
+            if candidate is _NONE_TYPE:
+                continue
+            try:
+                return coerce(value, candidate)
+            except ValidationError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise ValidationError(f"Unsupported union type: {type_}")
+
+    if origin is Literal:
+        if value not in args:
+            raise ValidationError(f"Invalid enum value {value!r}")
+        return value
+
+    if origin is list:
+        if not isinstance(value, list):
+            raise ValidationError("Expected array")
+        item_type = args[0] if args else Any
+        return [coerce(item, item_type) for item in value]
+
+    if origin is dict:
+        if not isinstance(value, dict):
+            raise ValidationError("Expected object")
+        key_type, value_type = args if len(args) == 2 else (Any, Any)
+        items: dict[Any, Any] = {}
+        for key, item in value.items():
+            if key_type is str:
+                key = str(key)
+            elif key_type is not Any:
+                key = coerce(key, key_type)
+            items[key] = coerce(item, value_type)
+        return items
+
+    if is_typeddict(type_):
+        if not isinstance(value, dict):
+            raise ValidationError(f"Expected object for {type_.__name__}")
+        type_hints = _field_types(type_, include_extras=True)
+        fields_by_name = {name: _unwrap_required(annotation) for name, annotation in type_hints.items()}
+        extra = set(value) - set(fields_by_name)
+        if extra:
+            names = ", ".join(sorted(map(str, extra)))
+            raise ValidationError(f"Unexpected fields: {names}")
+        required = getattr(type_, "__required_keys__", frozenset(fields_by_name))
+        items: dict[str, Any] = {}
+        for name, annotation in fields_by_name.items():
+            if name not in value:
+                if name in required:
+                    raise ValidationError(f"Missing required field '{name}'")
+                continue
+            try:
+                items[name] = coerce(value[name], annotation)
+            except ValidationError as exc:
+                raise ValidationError(f"Invalid field '{name}': {exc}") from exc
+        return items
+
+    if _is_dataclass_type(type_):
+        if isinstance(value, type_):
+            return value
+        if not isinstance(value, dict):
+            raise ValidationError(f"Expected object for {type_.__name__}")
+        type_hints = _field_types(type_)
+        dataclass_fields = {field.name: field for field in fields(type_)}
+        extra = set(value) - set(dataclass_fields)
+        if extra:
+            names = ", ".join(sorted(map(str, extra)))
+            raise ValidationError(f"Unexpected fields: {names}")
+        kwargs: dict[str, Any] = {}
+        for field in dataclass_fields.values():
+            if not field.init:
+                if field.name in value and field.default is not MISSING and value[field.name] != field.default:
+                    raise ValidationError(
+                        f"Invalid field '{field.name}': expected {field.default!r}"
+                    )
+                continue
+            if field.name not in value:
+                if field.default is not MISSING or field.default_factory is not MISSING:
+                    continue
+                raise ValidationError(f"Missing required field '{field.name}'")
+            try:
+                kwargs[field.name] = coerce(value[field.name], type_hints[field.name])
+            except ValidationError as exc:
+                raise ValidationError(f"Invalid field '{field.name}': {exc}") from exc
+        return type_(**kwargs)
+
+    if type_ is str:
+        if not isinstance(value, str):
+            raise ValidationError("Expected string")
+        return value
+    if type_ is int:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValidationError("Expected integer")
+        return value
+    if type_ is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValidationError("Expected number")
+        return float(value)
+    if type_ is bool:
+        if not isinstance(value, bool):
+            raise ValidationError("Expected boolean")
+        return value
+
+    return value
 
 
-class SlocArgs(msgspec.Struct, omit_defaults=True):
-    path: str = "."
-    limit: int = rt.BUDGETS.default_line_limit
+
+def json_schema(type_: Any) -> dict[str, Any]:
+    type_ = _unwrap_required(type_)
+    if type_ is Any:
+        return {}
+
+    origin = get_origin(type_)
+    args = get_args(type_)
+
+    if origin in (types.UnionType, Union):
+        non_none = [arg for arg in args if arg is not _NONE_TYPE]
+        if len(non_none) == 1 and len(non_none) != len(args):
+            return json_schema(non_none[0])
+        return {"anyOf": [json_schema(arg) for arg in args]}
+
+    if origin is Literal:
+        enum = list(args)
+        schema: dict[str, Any] = {"enum": enum}
+        if enum:
+            sample = enum[0]
+            if isinstance(sample, str):
+                schema["type"] = "string"
+            elif isinstance(sample, bool):
+                schema["type"] = "boolean"
+            elif isinstance(sample, int):
+                schema["type"] = "integer"
+        return schema
+
+    if origin is list:
+        return {"type": "array", "items": json_schema(args[0] if args else Any)}
+
+    if origin is dict:
+        value_type = args[1] if len(args) == 2 else Any
+        schema = {"type": "object"}
+        value_schema = json_schema(value_type)
+        if value_schema:
+            schema["additionalProperties"] = value_schema
+        return schema
+
+    if is_typeddict(type_):
+        type_hints = _field_types(type_, include_extras=True)
+        properties = {
+            name: json_schema(_unwrap_required(annotation))
+            for name, annotation in type_hints.items()
+        }
+        required_keys = getattr(type_, "__required_keys__", frozenset(type_hints))
+        required = [name for name in type_hints if name in required_keys]
+        schema = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema
+
+    if _is_dataclass_type(type_):
+        type_hints = _field_types(type_)
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for field in fields(type_):
+            if not field.init:
+                continue
+            properties[field.name] = json_schema(type_hints[field.name])
+            if field.default is MISSING and field.default_factory is MISSING:
+                required.append(field.name)
+        schema = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema
+
+    if type_ in _PRIMITIVE_SCHEMAS:
+        return dict(_PRIMITIVE_SCHEMAS[type_])
+
+    if type_ is _NONE_TYPE:
+        return {"type": "null"}
+
+    return {}
 
 
-class AskArgs(msgspec.Struct, omit_defaults=True):
-    question: str
-    choices: list[str] | None = None
+
+def coerce_arguments(
+    fn: Callable[..., Any], args: dict[str, Any] | None, *, skip: set[str] | frozenset[str]
+) -> dict[str, Any]:
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        raise ValidationError("Expected object")
+    signature = inspect.signature(fn)
+    type_hints = get_type_hints(fn, include_extras=True)
+    parameters = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.name not in skip and parameter.kind in _SUPPORTED_PARAM_KINDS
+    ]
+    allowed = {parameter.name for parameter in parameters}
+    extra = set(args) - allowed
+    if extra:
+        names = ", ".join(sorted(map(str, extra)))
+        raise ValidationError(f"Unexpected fields: {names}")
+    kwargs: dict[str, Any] = {}
+    for parameter in parameters:
+        annotation = type_hints.get(parameter.name, Any)
+        if parameter.name in args:
+            try:
+                kwargs[parameter.name] = coerce(args[parameter.name], annotation)
+            except ValidationError as exc:
+                raise ValidationError(f"Invalid field '{parameter.name}': {exc}") from exc
+            continue
+        if parameter.default is inspect.Signature.empty:
+            raise ValidationError(f"Missing required field '{parameter.name}'")
+        kwargs[parameter.name] = parameter.default
+    return kwargs
 
 
-class WebfetchOptions(msgspec.Struct, omit_defaults=True):
-    follow_redirects: bool = False
-    timeout_seconds: int = 30
+
+def signature_schema(
+    fn: Callable[..., Any], *, skip: set[str] | frozenset[str]
+) -> dict[str, Any]:
+    signature = inspect.signature(fn)
+    type_hints = get_type_hints(fn, include_extras=True)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for parameter in signature.parameters.values():
+        if parameter.name in skip or parameter.kind not in _SUPPORTED_PARAM_KINDS:
+            continue
+        schema = json_schema(type_hints.get(parameter.name, Any))
+        if parameter.default is inspect.Signature.empty:
+            required.append(parameter.name)
+        else:
+            schema = {**schema, "default": _jsonable(parameter.default)}
+        properties[parameter.name] = schema
+    result = {"type": "object", "properties": properties}
+    if required:
+        result["required"] = required
+    return result
 
 
-class WebfetchArgs(msgspec.Struct, omit_defaults=True):
-    url: str
-    method: str = "GET"
-    headers: dict[str, str] = msgspec.field(default_factory=dict)
-    options: WebfetchOptions = msgspec.field(default_factory=WebfetchOptions)
-
-
-_TODO_STATUSES = {"pending", "in_progress", "done"}
-
-
-class TodoItem(msgspec.Struct, frozen=True):
-    id: str
-    task: str
-    status: str = "pending"
-
-
-class TodoArgs(msgspec.Struct, omit_defaults=True):
-    todos: list[TodoItem]
-
-
-@dataclass(frozen=True, slots=True)
-class ToolHandler:
-    name: str
-    fn: Callable[..., Any]
-    spec: ToolSpec
-    args_type: Any
-    mutating: bool = False
-
-    def invoke(self, state: Any, args: dict[str, Any] | None = None) -> ToolResult:
-        try:
-            parsed = msgspec.convert(args or {}, type=self.args_type)
-            builtins = msgspec.to_builtins(parsed)
-            if self.mutating and not _approve_mutating_tool(state, self.name, builtins):
-                return ToolResult(
-                    ok=False,
-                    content={
-                        "tool": self.name,
-                        "error_type": "PermissionError",
-                        "message": f"User denied approval for mutating tool '{self.name}'",
-                    },
-                )
-            payload = self.fn(state, **builtins)
-            return ToolResult(content=payload)
-        except Exception as exc:
-            return ToolResult(
-                ok=False,
-                content={
-                    "tool": self.name,
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                },
-            )
-
-
-_TOOLS: dict[str, ToolHandler] = {}
+_TODO_STATUSES = ("pending", "in_progress", "done")
+_TODO_ITEM_KEYS = frozenset({"id", "task", "status"})
 
 
 def _tool_name(name: str) -> str:
     return name[5:] if name.startswith("tool_") else name
 
 
-def _tool_schema(args_type: Any):
-    schema = msgspec.json.schema(args_type)
-
-    def resolve(node: Any, defs: dict[str, Any]):
-        if isinstance(node, list):
-            return [resolve(item, defs) for item in node]
-        if not isinstance(node, dict):
-            return node
-        if "$ref" in node and isinstance(node["$ref"], str):
-            name = node["$ref"].removeprefix("#/$defs/")
-            resolved = resolve(defs.get(name, {}), defs)
-            extras = {
-                key: resolve(value, defs)
-                for key, value in node.items()
-                if key not in {"$defs", "$ref"}
-            }
-            if isinstance(resolved, dict):
-                resolved = {**resolved, **extras}
-                resolved.pop("title", None)
-            else:
-                return resolved
-        else:
-            resolved = {
-                key: resolve(value, defs)
-                for key, value in node.items()
-                if key != "$defs"
-            }
-            resolved.pop("title", None)
-
-        if isinstance(resolved, dict):
-            if "enum" in resolved and "type" not in resolved:
-                if all(isinstance(value, str) for value in resolved["enum"]):
-                    resolved["type"] = "string"
-                elif all(isinstance(value, int) for value in resolved["enum"]):
-                    resolved["type"] = "integer"
-            if "properties" in resolved and "type" not in resolved:
-                resolved["type"] = "object"
-
-        return resolved
-
-    return resolve(schema, schema.get("$defs", {}))
+def _tool_schema(fn: Callable[..., Any]):
+    return signature_schema(fn, skip={"state"})
 
 
-def tool(args_type: Any, *, mutating: bool = False):
+def _invoke_tool(handler: dict[str, Any], state: Any, args: dict[str, Any] | None = None):
+    name = handler["name"]
+    try:
+        builtins = coerce_arguments(handler["fn"], args or {}, skip={"state"})
+        if handler.get("mutating") and not _approve_mutating_tool(state, name, builtins):
+            return ToolResult(
+                ok=False,
+                content={
+                    "tool": name,
+                    "error_type": "PermissionError",
+                    "message": f"User denied approval for mutating tool '{name}'",
+                },
+            )
+        return ToolResult(content=handler["fn"](state, **builtins))
+    except Exception as exc:
+        return ToolResult(
+            ok=False,
+            content={"tool": name, "error_type": type(exc).__name__, "message": str(exc)},
+        )
+
+
+_TOOLS: dict[str, dict[str, Any]] = {}
+
+
+def tool(*, mutating: bool = False):
     def deco(fn: Callable[..., Any]):
         name = _tool_name(fn.__name__)
-        _TOOLS[name] = ToolHandler(
-            name=name,
-            fn=fn,
-            spec=ToolSpec(name, rt.tool_description(name), _tool_schema(args_type)),
-            args_type=args_type,
-            mutating=mutating,
-        )
+        _TOOLS[name] = {
+            "name": name,
+            "fn": fn,
+            "description": rt.tool_description(name),
+            "parameters": _tool_schema(fn),
+            "mutating": mutating,
+        }
         return fn
 
     return deco
 
 
-class ToolRegistry:
-    def __init__(self, tools: dict[str, ToolHandler] | None = None):
-        self._tools = _TOOLS if tools is None else tools
-
-    @classmethod
-    def select(
-        cls,
-        *,
-        include: set[str] | frozenset[str] | None = None,
-        exclude: set[str] | frozenset[str] = frozenset(),
-    ):
-        if include is None and not exclude:
-            return cls()
-        return cls(
-            {
-                name: tool
-                for name, tool in _TOOLS.items()
-                if (include is None or name in include) and name not in exclude
-            }
-        )
-
-    def specs(self):
-        return [tool.spec for tool in self._tools.values()]
-
-    def invoke(self, state: Any, name: str, args: dict[str, Any] | None = None):
-        return (
-            handler.invoke(state, args)
-            if (handler := self._tools.get(name))
-            else ToolResult(ok=False, content=f"Tool '{name}' unavailable")
-        )
+def tool_specs(tools: dict[str, dict[str, Any]] | None = None):
+    registry = _TOOLS if tools is None else tools
+    return [
+        {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+        }
+        for tool in registry.values()
+    ]
 
 
-TOOL_REGISTRY = ToolRegistry.select()
+def select_tools(*, include=None, exclude=frozenset()):
+    if include is None and not exclude:
+        return _TOOLS
+    return {
+        name: tool
+        for name, tool in _TOOLS.items()
+        if (include is None or name in include) and name not in exclude
+    }
+
+
+def invoke_tool(registry: dict[str, dict[str, Any]], state: Any, name: str, args: dict[str, Any] | None = None):
+    handler = registry.get(name)
+    return _invoke_tool(handler, state, args) if handler else {"ok": False, "content": f"Tool '{name}' unavailable"}
+
+
+TOOL_REGISTRY = _TOOLS
 
 
 _MUTATING_TOOL_APPROVAL_CHOICES = ["once", "all", "deny"]
 
 
 def _tool_approval_prompt(name: str, args: dict[str, Any]) -> str:
-    lines = [
-        "## Approve Mutating Tool",
-        "",
-        f"- tool: {rt._fmt('inline', name)}",
-    ]
-    lines.extend(
-        f"- {key.replace('_', '-')}: {rt._fmt('inline', rt.preview(value, 120))}"
+    details = ", ".join(
+        f"{key.replace('_', '-')}: {rt.preview(value, 80)}"
         for key, value in args.items()
         if value not in (None, "", False)
     )
-    lines.extend(
-        [
-            "",
-            "Choose `once` to approve this call only, `all` to approve all mutating tools for the rest of the session, or `deny` to block it.",
-            "Press Enter to take the default: `once`.",
-        ]
-    )
-    return "\n".join(lines)
+    suffix = f" — {details}" if details else ""
+    return f"Approve `{name}`{suffix}?"
 
 
 def _approve_mutating_tool(state: Any, name: str, args: dict[str, Any]) -> bool:
-    if not getattr(state, "interactive", False) or getattr(state, "approve_all_mutating_tools", False):
+    if (
+        state.get("yolo", False)
+        or not state.get("interactive", False)
+        or state.get("approve_all_mutating_tools", False)
+    ):
         return True
-    rt._print(value=_tool_approval_prompt(name, args), err=True)
-    choice = rt.Prompt.select(
-        "Approve mutating tool?",
+    choice = rt.select(
+        _tool_approval_prompt(name, args),
         _MUTATING_TOOL_APPROVAL_CHOICES,
         console=rt.STDERR,
         default="once",
         prompt_label="Approval",
         option_text=lambda option, index: {
-            "once": f"{index}. once — approve this call only",
-            "all": f"{index}. all — approve all mutating tools for this session",
-            "deny": f"{index}. deny — block this call",
+            "once": f"{index}. once",
+            "all": f"{index}. all session",
+            "deny": f"{index}. deny",
         }[option],
     ).strip()
     if choice == "all":
-        state.approve_all_mutating_tools = True
+        state["approve_all_mutating_tools"] = True
         rt._note("approved all mutating tools for this session", tag="note")
         return True
     if choice == "once":
@@ -386,12 +565,12 @@ def _summarize_json_output(value: Any) -> tuple[Any, bool, str]:
     for width in (32, 16, 8, 4):
         summarized, truncated = _summarize_json_value(value, width=width)
         rendered = serialize_toon(summarized)
-        if rt.count_tokens(rendered) <= rt.BUDGETS.tool_output_tokens:
+        if rt.count_tokens(rendered) <= rt.BUDGETS["tool_output_tokens"]:
             return rendered, truncated, "toon"
     rendered = rt.clip_tokens(
         serialize_toon(value),
-        limit=rt.BUDGETS.tool_output_tokens,
-        tail=rt.BUDGETS.tool_tail_tokens,
+        limit=rt.BUDGETS["tool_output_tokens"],
+        tail=rt.BUDGETS["tool_tail_tokens"],
     )
     return rendered, True, "toon"
 
@@ -402,7 +581,7 @@ def _summarize_text_output(text: str) -> tuple[str, bool]:
     text = rt._truncate_long_lines(text)
     lines, collapsed = _collapse_repeated_lines(text.splitlines())
     rendered = "\n".join(lines)
-    if len(lines) > 80 or rt.count_tokens(rendered) > rt.BUDGETS.tool_output_tokens:
+    if len(lines) > 80 or rt.count_tokens(rendered) > rt.BUDGETS["tool_output_tokens"]:
         keep = set(range(min(30, len(lines))))
         keep.update(range(max(len(lines) - 20, 0), len(lines)))
         for idx, line in enumerate(lines):
@@ -412,19 +591,19 @@ def _summarize_text_output(text: str) -> tuple[str, bool]:
         collapsed = True
     clipped = rt.clip_tokens(
         rendered,
-        limit=rt.BUDGETS.tool_output_tokens,
-        tail=rt.BUDGETS.tool_tail_tokens,
+        limit=rt.BUDGETS["tool_output_tokens"],
+        tail=rt.BUDGETS["tool_tail_tokens"],
     )
     return clipped, collapsed or clipped != rendered
 
 
-@tool(AskArgs)
+@tool()
 def tool_ask(state: Any, question: str, choices: list[str] | None = None):
     rt.note_tool(state, "ask", question=question, choices=choices)
     rt.require_prompt("ask question")
     if not choices:
-        return rt.Prompt.ask(question, console=rt.STDERR, default="").strip()
-    return rt.Prompt.select(
+        return rt.ask(question, console=rt.STDERR, default="").strip()
+    return rt.select(
         question,
         choices,
         console=rt.STDERR,
@@ -433,32 +612,37 @@ def tool_ask(state: Any, question: str, choices: list[str] | None = None):
     ).strip()
 
 
-def _format_todos(todos: list[TodoItem]) -> str:
+def _format_todos(todos: list[dict[str, str]]) -> str:
     if not todos:
         return "<empty todo list>"
     status_icons = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
     return "\n".join(
-        f"{status_icons.get(item.status, '[ ]')} {item.id}: {item.task}" for item in todos
+        f"{status_icons.get(item.get('status', 'pending'), '[ ]')} {item['id']}: {item['task']}" for item in todos
     )
 
 
-@tool(TodoArgs)
-def tool_todo(state: Any, todos: list[TodoItem] | list[dict[str, Any]] | None = None):
-    if todos is None:
-        todos = []
-    validated: list[TodoItem] = []
+@tool()
+def tool_todo(state: Any, todos: list[dict[str, Any]]):
+    state["todos"] = []
     for item in todos:
-        if isinstance(item, dict):
-            item = msgspec.convert(item, TodoItem)
-        if item.status not in _TODO_STATUSES:
-            raise ValueError(
-                f"Invalid status {item.status!r} for todo {item.id!r}. "
-                f"Use one of: {', '.join(sorted(_TODO_STATUSES))}"
-            )
-        validated.append(item)
-    state.todos = validated
-    result = _format_todos(state.todos)
-    rt.note_tool(state, "todo", _suffix=f"({len(state.todos)} items)")
+        if not isinstance(item, dict):
+            raise ValidationError("Expected object")
+        extra = set(item) - _TODO_ITEM_KEYS
+        if extra:
+            names = ", ".join(sorted(map(str, extra)))
+            raise ValidationError(f"Unexpected fields: {names}")
+        todo_id = item.get("id")
+        task = item.get("task")
+        status = item.get("status", "pending")
+        if not isinstance(todo_id, str):
+            raise ValidationError("Invalid field 'id': Expected string")
+        if not isinstance(task, str):
+            raise ValidationError("Invalid field 'task': Expected string")
+        if status not in _TODO_STATUSES:
+            raise ValidationError(f"Invalid enum value {status!r}")
+        state["todos"].append({"id": todo_id, "task": task, "status": status})
+    result = _format_todos(state["todos"])
+    rt.note_tool(state, 'todo', _suffix=f'({len(state["todos"])} items)')
     rt.show(result)
     return result
 
@@ -510,7 +694,7 @@ def _render_bash_preview(command: str, result, payload: dict[str, Any]) -> str:
     return "\n\n".join(blocks)
 
 
-@tool(BashArgs, mutating=True)
+@tool(mutating=True)
 def tool_bash(state: Any, command: str, timeout_seconds: int = 120):
     if len(command.encode("utf-8", errors="replace")) > rt.MAX_BASH_CMD_BYTES:
         raise ValueError(
@@ -523,13 +707,13 @@ def tool_bash(state: Any, command: str, timeout_seconds: int = 120):
         command=command,
         timeout=timeout_seconds,
     )
-    env = rt.require_command_env(state.root)
+    env = rt.require_command_env(state["root"])
     bash_path = rt.which("bash", env.get("PATH"))
     if not bash_path:
         raise ValueError("bash is not installed or not on PATH")
     result = rt.run_cmd(
         [bash_path, "-c", command],
-        cwd=state.root,
+        cwd=state["root"],
         env=env,
         timeout=timeout_seconds,
     )
@@ -602,9 +786,9 @@ def _sanitize_webfetch_headers(headers: dict[str, str] | None) -> dict[str, str]
     return clean
 
 
-def _webfetch_is_html_response(response: httpx.Response, text: str) -> bool:
+def _webfetch_is_html_response(response: ResponseAdapter, text: str) -> bool:
     content_type = (
-        response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        response["headers"].get("content-type", "").split(";", 1)[0].strip().lower()
     )
     if content_type in _WEBFETCH_HTML_CONTENT_TYPES:
         return True
@@ -616,13 +800,13 @@ def _html_to_markdown(text: str) -> str:
 
 
 def _webfetch_summarize_response_body(
-    response: httpx.Response,
+    response: ResponseAdapter,
 ) -> tuple[str, bool, str]:
-    text = response.text
+    text = response["text"]
     content_format = "text"
     if (
         _webfetch_is_html_response(response, text)
-        and rt.count_tokens(text) > rt.BUDGETS.tool_output_tokens
+        and rt.count_tokens(text) > rt.BUDGETS["tool_output_tokens"]
     ):
         markdown = _html_to_markdown(text)
         if markdown:
@@ -632,7 +816,7 @@ def _webfetch_summarize_response_body(
     return summarized, truncated, content_format
 
 
-def _webfetch_response_headers(response: httpx.Response) -> dict[str, str]:
+def _webfetch_response_headers(response: ResponseAdapter) -> dict[str, str]:
     def display_name(name: str) -> str:
         return "-".join(part.capitalize() for part in name.split("-"))
 
@@ -640,9 +824,9 @@ def _webfetch_response_headers(response: httpx.Response) -> dict[str, str]:
         display_name(key): (
             "<redacted>"
             if key.lower() in _WEBFETCH_REDACTED_RESPONSE_HEADERS
-            else response.headers[key]
+            else response["headers"][key]
         )
-        for key in response.headers.keys()
+        for key in response["headers"].keys()
     }
 
 
@@ -650,23 +834,10 @@ def _webfetch_structured_text(payload: dict[str, Any]) -> str:
     return serialize_toon(payload)
 
 
-def _webfetch_response_text(response: httpx.Response, text: str | None = None) -> str:
-    version = response.http_version or "HTTP/1.1"
-    header_lines = [
-        f"{key}: {value}" for key, value in _webfetch_response_headers(response).items()
-    ]
-    parts = [f"{version} {response.status_code} {response.reason_phrase}".rstrip()]
-    if header_lines:
-        parts.append("\n".join(header_lines))
-    if text is None:
-        text = response.text
-    if text:
-        parts.append(text)
-    return "\n\n".join(parts)
 
 
 def _webfetch_payload(
-    response: httpx.Response,
+    response: ResponseAdapter,
     *,
     method: str,
     text: str,
@@ -675,11 +846,11 @@ def _webfetch_payload(
 ) -> dict[str, Any]:
     return _tool_content_payload(
         method=method,
-        url=str(response.url),
-        ok=response.is_success,
-        status_code=response.status_code,
-        reason_phrase=response.reason_phrase,
-        http_version=response.http_version or "HTTP/1.1",
+        url=str(response["url"]),
+        ok=response_is_success(response),
+        status_code=response["status_code"],
+        reason_phrase=response["reason_phrase"],
+        http_version=response["http_version"] or "HTTP/1.1",
         headers=_webfetch_response_headers(response),
         content=text,
         content_format=content_format,
@@ -688,7 +859,7 @@ def _webfetch_payload(
 
 
 def _webfetch_error_payload(
-    url: str, *, method: str, exc: httpx.HTTPError
+    url: str, *, method: str, exc: HTTPError
 ) -> dict[str, Any]:
     return {
         "method": method,
@@ -699,13 +870,14 @@ def _webfetch_error_payload(
     }
 
 
-@tool(WebfetchArgs)
+@tool()
 def tool_webfetch(
     state: Any,
     url: str,
     method: str = "GET",
     headers: dict[str, str] | None = None,
-    options: dict[str, Any] | WebfetchOptions | None = None,
+    follow_redirects: bool = False,
+    timeout_seconds: int = DEFAULT_WEBFETCH_TIMEOUT_SECONDS,
 ):
     method = method.upper()
     if method not in _WEBFETCH_ALLOWED_METHODS:
@@ -714,7 +886,6 @@ def tool_webfetch(
         )
     _validate_url_safe(url)
     headers = _sanitize_webfetch_headers(headers)
-    options = msgspec.convert(options or {}, WebfetchOptions)
     rt.note_tool(
         state,
         "webfetch",
@@ -722,21 +893,21 @@ def tool_webfetch(
             "method": "GET",
             "headers": {},
             "follow_redirects": False,
-            "timeout_seconds": 30,
+            "timeout_seconds": DEFAULT_WEBFETCH_TIMEOUT_SECONDS,
         },
         url=url,
         method=method,
         headers=headers,
-        follow_redirects=options.follow_redirects,
-        timeout_seconds=options.timeout_seconds,
+        follow_redirects=follow_redirects,
+        timeout_seconds=timeout_seconds,
     )
     try:
         with rt.http_client(
-            timeout=options.timeout_seconds,
-            follow_redirects=options.follow_redirects,
+            timeout=timeout_seconds,
+            follow_redirects=follow_redirects,
         ) as client:
-            response = client.request(method, url, headers=headers)
-    except httpx.HTTPError as exc:
+            response = adapt_response(client.request(method, url, headers=headers))
+    except (HTTPError, TransportError) as exc:
         payload = _webfetch_error_payload(url, method=method, exc=exc)
         rt.show(f"[!] {type(exc).__name__}: {exc}")
         return payload
@@ -760,51 +931,6 @@ _STREAM_OPENERS = {
 _ARCHIVE_SUFFIXES = frozenset({".zip", ".tar"})
 _ARCHIVE_NAMES = (".tar", ".tgz", ".tar.gz")
 _DEFAULT_THREADS = min(32, (os.cpu_count() or 4))
-
-@dataclass(frozen=True, slots=True)
-class SearchMatch:
-    source: str
-    line_number: int | None = None
-    text: str = ""
-    error: str | None = None
-
-@dataclass(frozen=True, slots=True)
-class ReplaceResult:
-    source: str
-    replacements: int = 0
-    skipped: str | None = None
-    error: str | None = None
-
-@dataclass(frozen=True, slots=True)
-class SlocLanguage:
-    language: str
-    file_count: int
-    code_count: int
-    documentation_count: int
-    empty_count: int
-    string_count: int
-
-@dataclass(frozen=True, slots=True)
-class SlocStateCount:
-    state: str
-    file_count: int
-
-@dataclass(frozen=True, slots=True)
-class SlocError:
-    path: str
-    message: str
-
-@dataclass(frozen=True, slots=True)
-class SlocReport:
-    total_file_count: int
-    total_code_count: int
-    total_documentation_count: int
-    total_empty_count: int
-    total_string_count: int
-    total_line_count: int
-    languages: tuple[SlocLanguage, ...]
-    state_counts: tuple[SlocStateCount, ...]
-    errors: tuple[SlocError, ...]
 
 def _ignore_spec(root: Path) -> pathspec.PathSpec:
     patterns = [".git/"]
@@ -863,23 +989,17 @@ def _streams(path: Path) -> Iterable[tuple[str, BinaryIO]]:
     opener = _STREAM_OPENERS.get(path.suffix, open)
     yield str(path), opener(path, "rb")
 
-def _search_file(path: Path, compiled: regex.Pattern) -> list[SearchMatch]:
-    matches: list[SearchMatch] = []
+def _search_file(path: Path, compiled: regex.Pattern) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
     for source, stream in _streams(path):
         try:
             with stream as handle:
                 for line_number, raw_line in enumerate(handle, 1):
                     if compiled.search(raw_line):
                         text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                        matches.append(
-                            SearchMatch(
-                                source=source,
-                                line_number=line_number,
-                                text=text,
-                            )
-                        )
+                        matches.append({"source": source, "line_number": line_number, "text": text})
         except Exception as exc:
-            matches.append(SearchMatch(source=source, error=str(exc)))
+            matches.append({"source": source, "error": str(exc)})
     return matches
 
 def search(
@@ -888,7 +1008,7 @@ def search(
     *,
     threads: int | None = None,
     ignore_root: str | Path | None = None,
-) -> list[SearchMatch]:
+) -> list[dict[str, Any]]:
     path = Path(target).resolve()
     if not path.exists():
         raise ValueError(f"Path not found: {target}")
@@ -903,11 +1023,11 @@ def search(
         return []
     worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
     if worker_count == 1:
-        results: list[SearchMatch] = []
+        results: list[dict[str, Any]] = []
         for file_path in files:
             results.extend(_search_file(file_path, compiled))
         return results
-    results: list[SearchMatch] = []
+    results: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
         for batch in pool.map(partial(_search_file, compiled=compiled), files):
             results.extend(batch)
@@ -924,30 +1044,30 @@ def _replace_file(
     path: Path,
     compiled: regex.Pattern,
     replacement: str,
-) -> ReplaceResult:
+) -> dict[str, Any]:
     if path.is_symlink():
-        return ReplaceResult(source=str(path), skipped="symlink")
+        return {"source": str(path), "skipped": "symlink"}
     if _is_archive(path):
-        return ReplaceResult(source=str(path), skipped="archive")
+        return {"source": str(path), "skipped": "archive"}
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        return ReplaceResult(source=str(path), error=str(exc))
+        return {"source": str(path), "error": str(exc)}
     if b"\x00" in raw:
-        return ReplaceResult(source=str(path), skipped="binary file")
+        return {"source": str(path), "skipped": "binary file"}
     try:
         original_text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        return ReplaceResult(source=str(path), error=f"cannot decode utf-8: {exc}")
+        return {"source": str(path), "error": f"cannot decode utf-8: {exc}"}
     updated_text, replacements = compiled.subn(replacement, original_text)
     if replacements == 0:
-        return ReplaceResult(source=str(path))
+        return {"source": str(path), "replacements": 0}
     try:
         with path.open("w", encoding="utf-8", newline="") as handle:
             handle.write(updated_text)
     except OSError as exc:
-        return ReplaceResult(source=str(path), error=str(exc))
-    return ReplaceResult(source=str(path), replacements=replacements)
+        return {"source": str(path), "error": str(exc)}
+    return {"source": str(path), "replacements": replacements}
 
 def replace(
     target: str | Path,
@@ -956,7 +1076,7 @@ def replace(
     *,
     threads: int | None = None,
     ignore_root: str | Path | None = None,
-) -> list[ReplaceResult]:
+) -> list[dict[str, Any]]:
     path = Path(target).resolve()
     if not path.exists():
         raise ValueError(f"Path not found: {target}")
@@ -984,7 +1104,7 @@ def sloc(
     target: str | Path,
     *,
     ignore_root: str | Path | None = None,
-) -> SlocReport:
+) -> dict[str, Any]:
     path = Path(target).resolve()
     if not path.exists():
         raise ValueError(f"Path not found: {target}")
@@ -994,7 +1114,7 @@ def sloc(
     summary = ProjectSummary()
     duplicate_pool = DuplicatePool()
     state_counts: Counter[str] = Counter()
-    errors: list[SlocError] = []
+    errors: list[dict[str, str]] = []
     group = path.name if path.is_dir() else (path.parent.name or ".")
 
     for file_path in _iter_files(path, ignore_root=ignore_root):
@@ -1013,46 +1133,41 @@ def sloc(
             continue
         state_counts[analysis.state.name] += 1
         if analysis.state.name == "error":
-            errors.append(
-                SlocError(
-                    path=str(file_path),
-                    message=analysis.state_info or "unknown pygount error",
-                )
-            )
+            errors.append({"path": str(file_path), "message": analysis.state_info or "unknown pygount error"})
 
     languages = sorted(
         (
-            SlocLanguage(
-                language=language_summary.language,
-                file_count=language_summary.file_count,
-                code_count=language_summary.code_count,
-                documentation_count=language_summary.documentation_count,
-                empty_count=language_summary.empty_count,
-                string_count=language_summary.string_count,
-            )
+            {
+                "language": language_summary.language,
+                "file_count": language_summary.file_count,
+                "code_count": language_summary.code_count,
+                "documentation_count": language_summary.documentation_count,
+                "empty_count": language_summary.empty_count,
+                "string_count": language_summary.string_count,
+            }
             for language_summary in summary.language_to_language_summary_map.values()
             if not language_summary.is_pseudo_language
         ),
-        key=lambda item: (-item.code_count, -item.file_count, item.language.lower()),
+        key=lambda item: (-item["code_count"], -item["file_count"], item["language"].lower()),
     )
     ordered_states = tuple(
-        SlocStateCount(state=state, file_count=file_count)
+        {"state": state, "file_count": file_count}
         for state, file_count in sorted(
             state_counts.items(), key=lambda item: (-item[1], item[0])
         )
     )
 
-    return SlocReport(
-        total_file_count=summary.total_file_count,
-        total_code_count=summary.total_code_count,
-        total_documentation_count=summary.total_documentation_count,
-        total_empty_count=summary.total_empty_count,
-        total_string_count=summary.total_string_count,
-        total_line_count=summary.total_line_count,
-        languages=tuple(languages),
-        state_counts=ordered_states,
-        errors=tuple(errors),
-    )
+    return {
+        "total_file_count": summary.total_file_count,
+        "total_code_count": summary.total_code_count,
+        "total_documentation_count": summary.total_documentation_count,
+        "total_empty_count": summary.total_empty_count,
+        "total_string_count": summary.total_string_count,
+        "total_line_count": summary.total_line_count,
+        "languages": languages,
+        "state_counts": list(ordered_states),
+        "errors": errors,
+    }
 
 def _join_paths(paths: list[Path], root: Path, empty: str = "<no matches>") -> str:
     return (
@@ -1083,37 +1198,37 @@ def _glob_paths(root: Path, pattern: str) -> list[Path]:
             matches.append(resolved)
     return sorted(set(matches), key=lambda item: item.as_posix())
 
-@tool(ListArgs)
-def tool_list(state: Any, path: str = "*", limit: int = rt.BUDGETS.default_line_limit):
+@tool()
+def tool_list(state: Any, path: str = "*", limit: int = rt.BUDGETS["default_line_limit"]):
     rt.note_tool(
         state,
         "list",
-        _defaults={"path": "*", "limit": rt.BUDGETS.default_line_limit},
+        _defaults={"path": "*", "limit": rt.BUDGETS["default_line_limit"]},
         path=path,
         limit=limit,
     )
-    text = _path_listing(_glob_paths(state.root, path), state.root, limit=limit)
+    text = _path_listing(_glob_paths(state["root"], path), state["root"], limit=limit)
     return rt._show_and_clip(text)
 
-@tool(ReadArgs)
+@tool()
 def tool_read(
-    state: Any, path: str, offset: int = 1, limit: int = rt.BUDGETS.default_line_limit
+    state: Any, path: str, offset: int = 1, limit: int = rt.BUDGETS["default_line_limit"]
 ):
     rt.note_tool(
         state,
         "read",
-        _defaults={"offset": 1, "limit": rt.BUDGETS.default_line_limit},
+        _defaults={"offset": 1, "limit": rt.BUDGETS["default_line_limit"]},
         path=path,
         offset=offset,
         limit=limit,
     )
-    target = rt.resolve_path(state.root, path)
+    target = rt.resolve_path(state["root"], path)
     if not target.exists():
-        raise ValueError(f"read path does not exist: {rt._rel(state.root, target)}")
+        raise ValueError(f"read path does not exist: {rt._rel(state['root'], target)}")
     if target.is_dir():
         text = _path_listing(
             sorted(target.iterdir(), key=lambda item: item.as_posix()),
-            state.root,
+            state["root"],
             limit=limit,
             empty="<empty directory>",
         )
@@ -1145,12 +1260,12 @@ def _search_display_path(root: Path, source: str) -> str:
         return f"{rt._rel(root, Path(container))}::{member}"
     return rt._rel(root, Path(source))
 
-def _search_preview_line(root: Path, match: SearchMatch) -> str:
-    path_text = _search_display_path(root, match.source)
-    if match.error:
-        return f"[!] {path_text}: {match.error}"
-    text = rt._truncate_long_lines(match.text)
-    return f"{path_text}:{match.line_number}:1:{text}"
+def _search_preview_line(root: Path, match: dict[str, Any]) -> str:
+    path_text = _search_display_path(root, match["source"])
+    if match.get("error"):
+        return f"[!] {path_text}: {match['error']}"
+    text = rt._truncate_long_lines(match["text"])
+    return f"{path_text}:{match['line_number']}:1:{text}"
 
 def _optional_counts(**counts: int) -> dict[str, int]:
     return {
@@ -1163,12 +1278,12 @@ def _search_payload(
     root: Path,
     pattern: str,
     path: str,
-    results: list[SearchMatch],
+    results: list[dict[str, Any]],
     *,
     limit: int,
 ) -> tuple[dict[str, Any], str, int, int, int]:
-    matches = [match for match in results if not match.error]
-    errors = [match for match in results if match.error]
+    matches = [match for match in results if not match.get("error")]
+    errors = [match for match in results if match.get("error")]
     shown_limit = _shown_line_limit(limit)
     shown_matches = matches[:shown_limit]
     payload: dict[str, Any] = {
@@ -1177,10 +1292,10 @@ def _search_payload(
         "match_count": len(matches),
         "matches": [
             {
-                "path": _search_display_path(root, match.source),
-                "line_number": match.line_number,
+                "path": _search_display_path(root, match["source"]),
+                "line_number": match["line_number"],
                 "column": 1,
-                "text": rt._truncate_long_lines(match.text),
+                "text": rt._truncate_long_lines(match["text"]),
             }
             for match in shown_matches
         ],
@@ -1189,7 +1304,7 @@ def _search_payload(
     payload.update(_optional_counts(error=len(errors)))
     if errors:
         payload["errors"] = [
-            {"path": _search_display_path(root, match.source), "message": match.error}
+            {"path": _search_display_path(root, match["source"]), "message": match["error"]}
             for match in errors[:shown_limit]
         ]
     preview_lines = [_search_preview_line(root, match) for match in shown_matches]
@@ -1209,13 +1324,13 @@ def _search_contents(root: Path, pattern: str, path: str, *, limit: int):
     results = search(target, pattern, ignore_root=root)
     return _search_payload(root, pattern, path, results, limit=limit)
 
-@tool(SearchArgs)
+@tool()
 def tool_search(
-    state: Any, pattern: str, path: str = ".", limit: int = rt.BUDGETS.default_line_limit
+    state: Any, pattern: str, path: str = ".", limit: int = rt.BUDGETS["default_line_limit"]
 ):
-    defaults = {"path": ".", "limit": rt.BUDGETS.default_line_limit}
+    defaults = {"path": ".", "limit": rt.BUDGETS["default_line_limit"]}
     payload, preview, matches, shown, errors = _search_contents(
-        state.root, pattern, path, limit=limit
+        state["root"], pattern, path, limit=limit
     )
     rt.note_tool(
         state,
@@ -1249,29 +1364,29 @@ def _replace_summary(
         parts.append(f"{errors} error{plural}")
     return "(" + "; ".join(parts) + ")"
 
-def _replace_preview_line(root: Path, result: ReplaceResult) -> str:
-    path_text = rt._rel(root, Path(result.source))
-    if result.error:
-        return f"[!] {path_text}: {result.error}"
-    if result.skipped:
-        return f"[-] {path_text}: skipped ({result.skipped})"
-    return f"{path_text}: {result.replacements} replacement(s)"
+def _replace_preview_line(root: Path, result: dict[str, Any]) -> str:
+    path_text = rt._rel(root, Path(result["source"]))
+    if result.get("error"):
+        return f"[!] {path_text}: {result['error']}"
+    if result.get("skipped"):
+        return f"[-] {path_text}: skipped ({result['skipped']})"
+    return f"{path_text}: {result.get('replacements', 0)} replacement(s)"
 
 def _replace_payload(
     root: Path,
     pattern: str,
     replacement: str,
     path: str,
-    results: list[ReplaceResult],
+    results: list[dict[str, Any]],
     *,
     limit: int,
 ) -> tuple[dict[str, Any], str, int, int, int, int]:
-    changed = [result for result in results if result.replacements]
-    skipped = [result for result in results if result.skipped]
-    errors = [result for result in results if result.error]
+    changed = [result for result in results if result.get("replacements")]
+    skipped = [result for result in results if result.get("skipped")]
+    errors = [result for result in results if result.get("error")]
     shown_limit = _shown_line_limit(limit)
     shown_changed = changed[:shown_limit]
-    replacement_count = sum(result.replacements for result in changed)
+    replacement_count = sum(result.get("replacements", 0) for result in changed)
     payload: dict[str, Any] = {
         "pattern": pattern,
         "replacement": replacement,
@@ -1280,8 +1395,8 @@ def _replace_payload(
         "replacement_count": replacement_count,
         "changed_files": [
             {
-                "path": rt._rel(root, Path(result.source)),
-                "replacements": result.replacements,
+                "path": rt._rel(root, Path(result["source"])),
+                "replacements": result.get("replacements", 0),
             }
             for result in shown_changed
         ],
@@ -1290,12 +1405,12 @@ def _replace_payload(
     payload.update(_optional_counts(skipped=len(skipped), error=len(errors)))
     if skipped:
         payload["skipped"] = [
-            {"path": rt._rel(root, Path(result.source)), "reason": result.skipped}
+            {"path": rt._rel(root, Path(result["source"])), "reason": result["skipped"]}
             for result in skipped[:shown_limit]
         ]
     if errors:
         payload["errors"] = [
-            {"path": rt._rel(root, Path(result.source)), "message": result.error}
+            {"path": rt._rel(root, Path(result["source"])), "message": result["error"]}
             for result in errors[:shown_limit]
         ]
     preview_lines = [_replace_preview_line(root, result) for result in shown_changed]
@@ -1330,17 +1445,17 @@ def _replace_contents(
     results = replace(target, pattern, replacement, ignore_root=root)
     return _replace_payload(root, pattern, replacement, path, results, limit=limit)
 
-@tool(ReplaceArgs, mutating=True)
+@tool(mutating=True)
 def tool_replace(
     state: Any,
     pattern: str,
     replacement: str,
     path: str = ".",
-    limit: int = rt.BUDGETS.default_line_limit,
+    limit: int = rt.BUDGETS["default_line_limit"],
 ):
-    defaults = {"path": ".", "limit": rt.BUDGETS.default_line_limit}
+    defaults = {"path": ".", "limit": rt.BUDGETS["default_line_limit"]}
     payload, preview, changed, replacements, skipped, errors = _replace_contents(
-        state.root, pattern, replacement, path, limit=limit
+        state["root"], pattern, replacement, path, limit=limit
     )
     rt.note_tool(
         state,
@@ -1355,101 +1470,101 @@ def tool_replace(
     rt.show(preview)
     return payload
 
-def _sloc_summary(report: SlocReport) -> str:
+def _sloc_summary(report: dict[str, Any]) -> str:
     parts = []
-    if report.total_file_count:
-        plural = "s" if report.total_file_count != 1 else ""
-        parts.append(f"{report.total_file_count} file{plural}")
-    if report.total_code_count:
-        parts.append(f"{report.total_code_count} code lines")
-    non_countable = sum(item.file_count for item in report.state_counts)
+    if report["total_file_count"]:
+        plural = "s" if report["total_file_count"] != 1 else ""
+        parts.append(f"{report['total_file_count']} file{plural}")
+    if report["total_code_count"]:
+        parts.append(f"{report['total_code_count']} code lines")
+    non_countable = sum(item["file_count"] for item in report["state_counts"])
     if non_countable:
         parts.append(f"{non_countable} non-countable")
-    if report.errors:
-        plural = "s" if len(report.errors) != 1 else ""
-        parts.append(f"{len(report.errors)} error{plural}")
+    if report["errors"]:
+        plural = "s" if len(report["errors"]) != 1 else ""
+        parts.append(f"{len(report['errors'])} error{plural}")
     return "(" + "; ".join(parts) + ")" if parts else "(no source files)"
 
-def _sloc_totals_line(report: SlocReport) -> str:
+def _sloc_totals_line(report: dict[str, Any]) -> str:
     return (
         "totals: "
-        f"{report.total_file_count} files, "
-        f"{report.total_code_count} code, "
-        f"{report.total_documentation_count} comments, "
-        f"{report.total_empty_count} empty, "
-        f"{report.total_string_count} strings, "
-        f"{report.total_line_count} lines"
+        f"{report['total_file_count']} files, "
+        f"{report['total_code_count']} code, "
+        f"{report['total_documentation_count']} comments, "
+        f"{report['total_empty_count']} empty, "
+        f"{report['total_string_count']} strings, "
+        f"{report['total_line_count']} lines"
     )
 
 def _sloc_language_preview_line(language: Any) -> str:
-    file_plural = "s" if language.file_count != 1 else ""
+    file_plural = "s" if language["file_count"] != 1 else ""
     return (
-        f"{language.language}: "
-        f"{language.code_count} code, "
-        f"{language.documentation_count} comments, "
-        f"{language.empty_count} empty, "
-        f"{language.string_count} strings "
-        f"({language.file_count} file{file_plural})"
+        f"{language['language']}: "
+        f"{language['code_count']} code, "
+        f"{language['documentation_count']} comments, "
+        f"{language['empty_count']} empty, "
+        f"{language['string_count']} strings "
+        f"({language['file_count']} file{file_plural})"
     )
 
 def _sloc_state_preview_line(state_count: Any) -> str:
-    file_plural = "s" if state_count.file_count != 1 else ""
-    return f"other/{state_count.state}: {state_count.file_count} file{file_plural}"
+    file_plural = "s" if state_count["file_count"] != 1 else ""
+    return f"other/{state_count['state']}: {state_count['file_count']} file{file_plural}"
 
 def _sloc_payload(
-    root: Path, path: str, report: SlocReport, *, limit: int
+    root: Path, path: str, report: dict[str, Any], *, limit: int
 ) -> tuple[dict[str, Any], str]:
     shown_limit = _shown_line_limit(limit)
-    shown_languages = list(report.languages[:shown_limit])
+    shown_languages = list(report["languages"][:shown_limit])
     payload: dict[str, Any] = {
         "path": path,
-        "total_file_count": report.total_file_count,
-        "total_code_count": report.total_code_count,
-        "total_documentation_count": report.total_documentation_count,
-        "total_empty_count": report.total_empty_count,
-        "total_string_count": report.total_string_count,
-        "total_line_count": report.total_line_count,
-        "language_count": len(report.languages),
+        "total_file_count": report["total_file_count"],
+        "total_code_count": report["total_code_count"],
+        "total_documentation_count": report["total_documentation_count"],
+        "total_empty_count": report["total_empty_count"],
+        "total_string_count": report["total_string_count"],
+        "total_line_count": report["total_line_count"],
+        "language_count": len(report["languages"]),
         "languages": [
             {
-                "language": language.language,
-                "file_count": language.file_count,
-                "code_count": language.code_count,
-                "documentation_count": language.documentation_count,
-                "empty_count": language.empty_count,
-                "string_count": language.string_count,
+                "language": language["language"],
+                "file_count": language["file_count"],
+                "code_count": language["code_count"],
+                "documentation_count": language["documentation_count"],
+                "empty_count": language["empty_count"],
+                "string_count": language["string_count"],
             }
             for language in shown_languages
         ],
-        "truncated": len(report.languages) > len(shown_languages),
+        "truncated": len(report["languages"]) > len(shown_languages),
     }
-    if report.state_counts:
+    if report["state_counts"]:
         payload["state_counts"] = [
-            {"state": state_count.state, "file_count": state_count.file_count}
-            for state_count in report.state_counts
+            {"state": state_count["state"], "file_count": state_count["file_count"]}
+            for state_count in report["state_counts"]
         ]
-    payload.update(_optional_counts(error=len(report.errors)))
-    if report.errors:
+    payload.update(_optional_counts(error=len(report["errors"])))
+    if report["errors"]:
         payload["errors"] = [
-            {"path": rt._rel(root, Path(error.path)), "message": error.message}
-            for error in report.errors[:shown_limit]
+            {"path": rt._rel(root, Path(error["path"])), "message": error["message"]}
+            for error in report["errors"][:shown_limit]
         ]
-    if not report.total_file_count and not report.state_counts:
+    if not report["total_file_count"] and not report["state_counts"]:
         return payload, "<no source files>"
     preview_lines = [_sloc_totals_line(report)]
     preview_lines.extend(
         _sloc_language_preview_line(language) for language in shown_languages
     )
-    if len(report.languages) > len(shown_languages):
+    if len(report["languages"]) > len(shown_languages):
         preview_lines.append(
-            f"... [{len(report.languages) - len(shown_languages)} more languages omitted]"
+            f"... [{len(report['languages']) - len(shown_languages)} more languages omitted]"
         )
     preview_lines.extend(
-        _sloc_state_preview_line(state_count) for state_count in report.state_counts
+        _sloc_state_preview_line(state_count) for state_count in report["state_counts"]
     )
     preview_lines.extend(
-        f"[!] {rt._rel(root, Path(error.path))}: {error.message}"
-        for error in report.errors[:shown_limit]
+        f"[!] {rt._rel(root, Path(error['path']))}: {error['message']}"
+        for error in report["errors"][:shown_limit]
     )
     return payload, "\n".join(preview_lines)
 
@@ -1460,10 +1575,10 @@ def _sloc_contents(root: Path, path: str, *, limit: int):
     report = sloc(target, ignore_root=root)
     return _sloc_payload(root, path, report, limit=limit), report
 
-@tool(SlocArgs)
-def tool_sloc(state: Any, path: str = ".", limit: int = rt.BUDGETS.default_line_limit):
-    defaults = {"path": ".", "limit": rt.BUDGETS.default_line_limit}
-    (payload, preview), report = _sloc_contents(state.root, path, limit=limit)
+@tool()
+def tool_sloc(state: Any, path: str = ".", limit: int = rt.BUDGETS["default_line_limit"]):
+    defaults = {"path": ".", "limit": rt.BUDGETS["default_line_limit"]}
+    (payload, preview), report = _sloc_contents(state["root"], path, limit=limit)
     rt.note_tool(
         state,
         "sloc",
@@ -1477,23 +1592,7 @@ def tool_sloc(state: Any, path: str = ".", limit: int = rt.BUDGETS.default_line_
 
 
 __all__ = [
-    "AskArgs",
-    "BashArgs",
-    "ListArgs",
-    "ReadArgs",
-    "ReplaceArgs",
-    "ReplaceResult",
-    "SearchArgs",
-    "SearchMatch",
-    "SlocArgs",
-    "SlocReport",
-    "TodoArgs",
-    "TodoItem",
     "TOOL_REGISTRY",
-    "ToolHandler",
-    "ToolRegistry",
-    "WebfetchArgs",
-    "WebfetchOptions",
     "_TODO_STATUSES",
     "_WEBFETCH_ALLOWED_METHODS",
     "_bash_payload",
@@ -1512,7 +1611,6 @@ __all__ = [
     "_validate_url_safe",
     "_webfetch_payload",
     "_webfetch_response_headers",
-    "_webfetch_response_text",
     "_webfetch_structured_text",
     "replace",
     "search",

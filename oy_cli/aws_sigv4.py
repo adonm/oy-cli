@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
@@ -13,11 +12,8 @@ _BEDROCK_BEARER_TOKEN_URL = (
 _EMPTY_SHA256_HASH = hashlib.sha256(b"").hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
-class AwsCredentials:
-    access_key: str
-    secret_key: str
-    session_token: str | None = None
+type AwsCredentials = dict[str, str | None]
+
 
 
 def _utc_now() -> datetime:
@@ -82,14 +78,14 @@ def bedrock_bearer_token(
         ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
         (
             "X-Amz-Credential",
-            f"{credentials.access_key}/{_credential_scope(datestamp, region, service)}",
+            f"{credentials['access_key']}/{_credential_scope(datestamp, region, service)}",
         ),
         ("X-Amz-Date", timestamp),
         ("X-Amz-Expires", str(expires)),
         ("X-Amz-SignedHeaders", "host"),
     ]
-    if credentials.session_token:
-        auth_params.append(("X-Amz-Security-Token", credentials.session_token))
+    if credentials["session_token"]:
+        auth_params.append(("X-Amz-Security-Token", credentials["session_token"]))
     query = "&".join(
         part for part in (_encode_query_pairs(operation_params), _encode_query_pairs(auth_params)) if part
     )
@@ -112,7 +108,7 @@ def bedrock_bearer_token(
         ]
     )
     signature = _signature(
-        credentials.secret_key, datestamp, region, service, string_to_sign
+        str(credentials["secret_key"]), datestamp, region, service, string_to_sign
     )
     signed_url = urlunsplit(
         (

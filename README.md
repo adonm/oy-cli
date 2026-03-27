@@ -54,7 +54,7 @@ That includes:
 - interactive/non-interactive prompt suffixes
 - audit prompt text
 - research-only `/ask` suffix
-- transcript compaction text (`Current todo list`, omitted-history note, packed-history note)
+- transcript compaction text (`Current todo list`, omitted-history note, TOON packed-history note)
 - built-in tool descriptions exposed to the model
 
 Code that reads and composes this content now lives mainly in [`oy_cli/runtime.py`](oy_cli/runtime.py), with transcript/agent flow in [`oy_cli/agent.py`](oy_cli/agent.py) and CLI entrypoints in [`oy_cli/cli.py`](oy_cli/cli.py).

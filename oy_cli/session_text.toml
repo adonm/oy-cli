@@ -61,7 +61,7 @@ description = "Count source lines with `pygount`. Respects `.gitignore` and retu
 description = "Ask the user in interactive runs. Use only for genuine ambiguity or irreversible user-facing choices; provide choices when useful."
 
 [tools.webfetch]
-description = "Fetch a public URL with `httpx`. Methods: GET/HEAD/OPTIONS. Returns `status_code`, `headers`, `content`, and `content_format`; may convert large HTML to markdown. Blocks localhost/private IPs."
+description = "Fetch a public URL with `urllib.request`. Methods: GET/HEAD/OPTIONS. Returns `status_code`, `headers`, `content`, and `content_format`; may convert large HTML to markdown. Blocks localhost/private IPs. Params: `url`, optional `method`, `headers`, `follow_redirects`, `timeout_seconds`."
 
 [tools.todo]
 description = "Replace the in-memory todo list with `todos` (`{id, task, status}`; status: pending/in_progress/done). Use it to track multi-step work; the list persists across compaction."

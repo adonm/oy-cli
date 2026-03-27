@@ -43,6 +43,33 @@ uv build
 - security guidance should explicitly align with OWASP thinking
 - performance guidance should reflect performance-aware programming: measure first, avoid obvious waste
 
+## Code Style and Naming
+
+### Naming
+
+- optimize for readability at the call site
+- prefer the shortest name that is still obvious in local context
+- avoid bloated names when surrounding scope already gives the context; `model`, `shim`, `path`, `root`, `state`, `items`, `result`, and `registry` are usually better than names that repeat the whole story
+- keep the same concept named the same way across nearby modules; if something is a registry, call it `registry`, not `specs` in one place and `tools` in another
+- prefer nouns for data, verbs for functions, and predicate names for booleans (`is_...`, `has_...`, `can_...`, `should_...`)
+- use leading underscores sparingly; in this repo, “internal” mainly means “not exported from top-level modules or `__all__`”, not “hard to access”
+- do not add underscore prefixes just to simulate privacy if they make the code harder to read
+- internal helpers should still be resilient enough to call directly; do not rely on “private” status for correctness
+
+### Modern Python Style
+
+- target modern Python directly; use `Path`, union syntax (`A | B`), `match`/`case`, context managers, f-strings, comprehensions, plain dict/list structures, and the Python 3.12+ `type Name = ...` statement for shaped data
+- prefer typed structured data (`type` aliases, `TypedDict`, small dict/list payloads) plus procedural functions over classes, dataclasses, and method-heavy wrappers
+- only keep a class when it is clearly the simplest fit for a real protocol boundary or language requirement (for example, an exception type or required third-party subclass); otherwise collapse behavior into functions over typed data
+- when replacing classes, also remove compatibility shims and legacy wrappers instead of layering new procedural code on top of old object APIs
+- prefer early returns and flat control flow over deep nesting
+- keep functions small enough to scan in one pass, but do not split out one-line helpers with vague names just to make a function shorter
+- type hints should help the reader; annotate public and non-trivial internal functions, and prefer `type` aliases for reusable shaped data
+- prefer small shaped data structures over passing parallel tuples, loose dicts, or positional blobs around
+- make side effects explicit in names and signatures
+- avoid clever tricks, abstraction-heavy rewrites, hidden mutation, and framework-style indirection
+- prefer simple data flow, explicit error handling, and code that is easy to debug in a terminal
+
 ## Release Process
 
 1. **Pre-flight** — all checks must pass:
