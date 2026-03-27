@@ -3,13 +3,9 @@ import base64
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import threading as _threading
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
@@ -17,11 +13,13 @@ from http import HTTPStatus
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, TypeAlias
+from urllib.parse import urljoin
 
-import http.cookiejar
 import toons
+import urllib3
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 from tenacity.wait import wait_base
+from urllib3.util import Retry
 
 from .aws_sigv4 import sigv4_headers
 
@@ -220,14 +218,12 @@ def _post_form_json(
     url: str, data: dict[str, str], *, error_prefix: str
 ) -> dict[str, Any]:
     try:
-        with http_client(timeout=SHORT_HTTP_TIMEOUT) as client:
-            response = adapt_response(
-                client.request(
-                    "POST",
-                    url,
-                    data=data,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                )
+        with tool_session(timeout=SHORT_HTTP_TIMEOUT) as client:
+            response = client.request(
+                "POST",
+                url,
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         response_raise_for_status(response)
         payload = response_json(response)
@@ -395,6 +391,11 @@ def _encode_json_body(value: Any) -> bytes:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def _coerce_form_fields(value: dict[Any, Any]) -> dict[str, str]:
+    return {str(key): str(item) for key, item in value.items()}
+
+
+
 def _encode_request_data(value: Any) -> bytes | None:
     if value is None:
         return None
@@ -404,8 +405,6 @@ def _encode_request_data(value: Any) -> bytes | None:
         return bytes(value)
     if isinstance(value, str):
         return value.encode("utf-8")
-    if isinstance(value, dict):
-        return urllib.parse.urlencode({str(key): str(item) for key, item in value.items()}).encode("utf-8")
     raise TypeError(f"Unsupported request body type: {type(value).__name__}")
 
 
@@ -431,45 +430,49 @@ def _decode_response_text(content: bytes, headers: Any) -> str:
     return content.decode("utf-8", errors="replace")
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def _no_redirect(self, req, fp, code, msg, headers):
-        fp.status = code
-        fp.code = code
-        fp.msg = msg
-        fp.headers = headers
-        return fp
-
-    http_error_301 = _no_redirect
-    http_error_302 = _no_redirect
-    http_error_303 = _no_redirect
-    http_error_307 = _no_redirect
-    http_error_308 = _no_redirect
+def _http_request_timeout(value: float) -> urllib3.Timeout:
+    return urllib3.Timeout(total=float(value))
 
 
-class HTTPClientResponse:
-    def __init__(
-        self,
-        *,
-        status_code: int,
-        headers: Any,
-        content: bytes,
-        url: str,
-        reason: str = "",
-        http_version: str = "HTTP/1.1",
-    ) -> None:
-        self.status_code = status_code
-        self.headers = headers
-        self.content = content
-        self.url = url
-        self.reason = reason
-        self.http_version = http_version
-        self.text = _decode_response_text(content, headers)
 
-    def json(self) -> Any:
-        return json.loads(self.text)
+def _http_request_retries(follow_redirects: bool) -> Retry | bool:
+    if not follow_redirects:
+        return False
+    return Retry(
+        total=None,
+        connect=0,
+        read=0,
+        redirect=10,
+        status=0,
+        other=0,
+        raise_on_redirect=False,
+    )
 
-    def raise_for_status(self) -> None:
-        response_raise_for_status(adapt_response(self))
+
+
+def _transport_error_reason(exc: BaseException) -> str:
+    if isinstance(exc, urllib3.exceptions.MaxRetryError) and exc.reason is not None:
+        return _transport_error_reason(exc.reason)
+    return str(exc)
+
+
+
+def _transport_error_is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, urllib3.exceptions.MaxRetryError) and exc.reason is not None:
+        return _transport_error_is_timeout(exc.reason)
+    if isinstance(exc, urllib3.exceptions.ReadTimeoutError):
+        return True
+    return isinstance(exc, urllib3.exceptions.TimeoutError) and not isinstance(
+        exc, urllib3.exceptions.NewConnectionError
+    )
+
+
+
+def _response_url_from_raw(response: Any, request_url: str) -> str:
+    raw_url = getattr(response, "url", None)
+    if not raw_url and hasattr(response, "geturl"):
+        raw_url = response.geturl()
+    return urljoin(request_url, str(raw_url or "")) or request_url
 
 
 class HTTPClient:
@@ -478,29 +481,25 @@ class HTTPClient:
         *,
         timeout: float = DEFAULT_HTTP_TIMEOUT,
         follow_redirects: bool = False,
-        cookie_jar: http.cookiejar.CookieJar | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.follow_redirects = bool(follow_redirects)
-        self.cookie_jar = cookie_jar or http.cookiejar.CookieJar()
-        handlers: list[Any] = [urllib.request.HTTPCookieProcessor(self.cookie_jar)]
-        if not self.follow_redirects:
-            handlers.append(_NoRedirectHandler())
-        self._opener = urllib.request.build_opener(*handlers)
+        self._pool = urllib3.PoolManager()
 
     def __enter__(self) -> "HTTPClient":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
         return False
 
     def close(self) -> None:
-        return None
+        self._pool.clear()
 
-    def get(self, url: str, **kwargs: Any) -> HTTPClientResponse:
+    def get(self, url: str, **kwargs: Any) -> ResponseAdapter:
         return self.request("GET", url, **kwargs)
 
-    def post(self, url: str, **kwargs: Any) -> HTTPClientResponse:
+    def post(self, url: str, **kwargs: Any) -> ResponseAdapter:
         return self.request("POST", url, **kwargs)
 
     def request(
@@ -512,44 +511,45 @@ class HTTPClient:
         data: Any = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
-    ) -> HTTPClientResponse:
+    ) -> ResponseAdapter:
         if json is not None and data is not None:
             raise TypeError("request accepts either json or data, not both")
-        request_headers = {str(key): str(value) for key, value in (headers or {}).items()}
-        body = None
+        method = method.upper()
+        request_kwargs: dict[str, Any] = {
+            "headers": {str(key): str(value) for key, value in (headers or {}).items()},
+            "timeout": _http_request_timeout(self.timeout if timeout is None else float(timeout)),
+            "redirect": self.follow_redirects,
+            "retries": _http_request_retries(self.follow_redirects),
+            "preload_content": True,
+        }
         if json is not None:
-            body = _encode_json_body(json)
-            request_headers.setdefault("Content-Type", "application/json")
+            request_kwargs["json"] = json
+        elif isinstance(data, dict):
+            request_kwargs["fields"] = _coerce_form_fields(data)
+            if method not in {"DELETE", "GET", "HEAD", "OPTIONS"}:
+                request_kwargs["encode_multipart"] = False
         elif data is not None:
-            body = _encode_request_data(data)
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers=request_headers,
-            method=method.upper(),
-        )
-        request_timeout = self.timeout if timeout is None else float(timeout)
+            request_kwargs["body"] = _encode_request_data(data)
         try:
-            raw = self._opener.open(request, timeout=request_timeout)
-        except urllib.error.HTTPError as exc:
-            raw = exc
-        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-            if isinstance(reason, (TimeoutError, socket.timeout)):
-                raise APITimeoutError(str(reason)) from exc
-            raise APIConnectionError(str(reason)) from exc
-        content = raw.read()
-        status_code = int(getattr(raw, "status", None) or getattr(raw, "code", 0) or 0)
+            raw = self._pool.request(method, url, **request_kwargs)
+        except urllib3.exceptions.HTTPError as exc:
+            reason = _transport_error_reason(exc)
+            if _transport_error_is_timeout(exc):
+                raise APITimeoutError(reason) from exc
+            raise APIConnectionError(reason) from exc
+        content = bytes(getattr(raw, "data", b"") or b"")
+        status_code = int(getattr(raw, "status", 0) or 0)
         response_headers = getattr(raw, "headers", None)
-        response_url = raw.geturl() if hasattr(raw, "geturl") else url
-        reason = str(getattr(raw, "reason", None) or getattr(raw, "msg", "") or _status_reason(status_code))
-        return HTTPClientResponse(
+        return response_adapter(
             status_code=status_code,
             headers=response_headers,
+            text=_decode_response_text(content, response_headers),
             content=content,
-            url=str(response_url),
-            reason=reason,
-            http_version=_http_version_name(getattr(raw, "version", None)),
+            url=_response_url_from_raw(raw, url),
+            reason_phrase=str(getattr(raw, "reason", None) or _status_reason(status_code)),
+            http_version=_http_version_name(
+                getattr(raw, "version_string", None) or getattr(raw, "version", None)
+            ),
         )
 
 
@@ -557,21 +557,36 @@ OpenAI: TypeAlias = dict[str, Any]
 
 
 
+def llm_session(**kw):
+    kw.setdefault("timeout", DEFAULT_HTTP_TIMEOUT)
+    kw.setdefault("follow_redirects", False)
+    return http_client(**kw)
+
+
+
+def tool_session(**kw):
+    kw.setdefault("timeout", DEFAULT_WEBFETCH_TIMEOUT_SECONDS)
+    kw.setdefault("follow_redirects", False)
+    return http_client(**kw)
+
+
+
 def _openai(
     api_key: str,
     *,
     base_url: str = "https://api.openai.com/v1",
+    max_retries: int = 3,
     timeout: float = DEFAULT_HTTP_TIMEOUT,
     headers: dict[str, str] | None = None,
     follow_redirects: bool = False,
+    http: HTTPClient | None = None,
 ) -> OpenAI:
+    _ = max_retries
     return {
         "api_key": api_key,
         "base_url": base_url,
-        "timeout": timeout,
+        "http": http or llm_session(timeout=timeout, follow_redirects=follow_redirects),
         "headers": dict(headers or {}),
-        "follow_redirects": follow_redirects,
-        "session": http_client(timeout=timeout, follow_redirects=follow_redirects),
     }
 
 
@@ -620,17 +635,15 @@ def _req(
         if path.startswith(("http://", "https://"))
         else f"{api['base_url'].rstrip('/')}/{path.lstrip('/')}"
     )
-    response = api["session"].request(
+    response = api["http"].request(
         method,
         url,
         json=json_body,
         data=data,
         headers=_headers(api, headers),
-        timeout=api["timeout"],
     )
-    adapted = adapt_response(response)
-    response_raise_for_status(adapted)
-    return adapted
+    response_raise_for_status(response)
+    return response
 
 
 def _req_json(
@@ -725,12 +738,10 @@ def bedrock_base_url(region: str) -> str:
 def load_bedrock_model_list(cwd: Path | None = None, region: str | None = None) -> list[str]:
     current = default_region(region)
     url = f"{bedrock_base_url(current).rstrip('/')}/models"
-    response = adapt_response(
-        http_client(timeout=SHORT_HTTP_TIMEOUT, follow_redirects=False).request(
-            "GET",
-            url,
-            headers=_bedrock_request_headers(load_aws_credentials(cwd), current, "GET", url),
-        )
+    response = llm_session(timeout=SHORT_HTTP_TIMEOUT, follow_redirects=False).request(
+        "GET",
+        url,
+        headers=_bedrock_request_headers(load_aws_credentials(cwd), current, "GET", url),
     )
     response_raise_for_status(response)
     return _extract_model_ids(response_json(response).get("data"), "id")
@@ -798,7 +809,7 @@ def default_region(choice: str | None = None) -> str:
         choice
         or os.environ.get("AWS_REGION")
         or os.environ.get("AWS_DEFAULT_REGION")
-        or "us-east-1"
+        or "ap-southeast-2"
     )
 
 # ---------------------------------------------------------------------------
@@ -931,23 +942,6 @@ def load_codex_model_list() -> list[str]:
 # ---------------------------------------------------------------------------
 # Provider client factories and protocol adapters
 # ---------------------------------------------------------------------------
-
-def _openai_pair(
-    api_key: str,
-    *,
-    base_url: str | None = None,
-    max_retries: int = 3,
-    timeout: Any = None,
-    headers: dict[str, str] | None = None,
-) -> tuple[OpenAI, OpenAI]:
-    _ = max_retries
-    api = _openai(
-        api_key,
-        base_url=base_url or "https://api.openai.com/v1",
-        timeout=float(timeout or DEFAULT_HTTP_TIMEOUT),
-        headers=headers,
-    )
-    return api, api
 
 def split_model_spec(spec: str) -> tuple[str | None, str]:
     if ":" in spec:
@@ -1569,7 +1563,7 @@ def _responses_from_key(
     fallback: Callable[[], list[str]] | None = None,
     default: list[str] | None = None,
 ) -> CompletionClient:
-    api, models = _openai_pair(
+    api = _openai(
         api_key,
         base_url=base_url,
         max_retries=max_retries,
@@ -1583,7 +1577,7 @@ def _responses_from_key(
             source="Responses API",
             json_body=payload,
         ),
-        lambda: _model_ids(models),
+        lambda: _model_ids(api),
         fallback=fallback,
         default=default,
     )
@@ -1597,7 +1591,7 @@ def _chat_from_key(
     timeout: Any = None,
     tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = _tool_specs_to_openai,
 ) -> CompletionClient:
-    api, models = _openai_pair(
+    api = _openai(
         api_key,
         base_url=base_url,
         max_retries=max_retries,
@@ -1611,7 +1605,7 @@ def _chat_from_key(
             source="Chat Completions API",
             json_body=payload,
         ),
-        lambda: _model_ids(models),
+        lambda: _model_ids(api),
         tools_map=tools_map,
     )
 
@@ -1656,28 +1650,24 @@ def _bedrock_mantle_client(
         "credentials": credentials,
         "region": region,
         "base_url": bedrock_base_url(region),
-        "timeout": timeout,
-        "session": http_client(timeout=timeout, follow_redirects=False),
+        "http": llm_session(timeout=timeout, follow_redirects=False),
     }
 
     def create(payload: dict[str, Any]) -> dict[str, Any]:
         body = _encode_json_body(payload)
         url = f"{api['base_url'].rstrip('/')}/chat/completions"
-        response = adapt_response(
-            api["session"].request(
+        response = api["http"].request(
+            "POST",
+            url,
+            data=body,
+            headers=_bedrock_request_headers(
+                api["credentials"],
+                api["region"],
                 "POST",
                 url,
-                data=body,
-                headers=_bedrock_request_headers(
-                    api["credentials"],
-                    api["region"],
-                    "POST",
-                    url,
-                    body=body,
-                    headers={"Content-Type": "application/json"},
-                ),
-                timeout=api["timeout"],
-            )
+                body=body,
+                headers={"Content-Type": "application/json"},
+            ),
         )
         response_raise_for_status(response)
         return _json_dict(response, "Chat Completions API")
@@ -1757,7 +1747,7 @@ def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
 def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
     _ = cwd
     token = _require_string(_get_github_token(), "No GitHub token found")
-    client, model_client = _openai_pair(
+    client = _openai(
         token,
         base_url=_COPILOT_BASE_URL,
         max_retries=0,
@@ -1777,7 +1767,7 @@ def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
             source="Responses API",
             json_body=payload,
         ),
-        lambda: _model_ids(model_client),
+        lambda: _model_ids(client),
         fallback=None,
         default=None,
     )
@@ -1789,7 +1779,7 @@ def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
             source="Chat Completions API",
             json_body=payload,
         ),
-        lambda: _model_ids(model_client),
+        lambda: _model_ids(client),
         tools_map=_tool_specs_to_openai,
     )
 
@@ -1814,7 +1804,7 @@ def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
             chat_ids, _ = _classify_copilot_models(token)
             return chat_ids
         except Exception:
-            return _list_models(lambda: _model_ids(model_client), fallback=None, default=[])
+            return _list_models(lambda: _model_ids(client), fallback=None, default=[])
 
 
     return {"chat_completion": chat_completion, "list_models": list_models}
@@ -2034,6 +2024,7 @@ __all__ = [
     "ensure_api_env",
     "get_client",
     "join_model_spec",
+    "llm_session",
     "list_models_for_shim",
     "load_json",
     "normalize_jsonlike",
@@ -2046,6 +2037,7 @@ __all__ = [
     "serialize_json",
     "serialize_toon",
     "split_model_spec",
+    "tool_session",
     "validate_shim",
     "which",
 ]

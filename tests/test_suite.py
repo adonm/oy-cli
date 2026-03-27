@@ -122,7 +122,7 @@ def test_adapt_response_and_webfetch_accept_response_objects(monkeypatch, tmp_pa
 
     shown: list[str] = []
     monkeypatch.setattr(tools, "_validate_url_safe", lambda url: url)
-    monkeypatch.setattr(rt, "http_client", fake_http_client)
+    monkeypatch.setattr(rt, "tool_session", fake_http_client)
     monkeypatch.setattr(rt, "show", shown.append)
 
     payload = tools.tool_webfetch(
@@ -141,6 +141,19 @@ def test_adapt_response_and_webfetch_accept_response_objects(monkeypatch, tmp_pa
     assert payload["text"] == "hello world"
     assert payload["format"] == "text"
     assert any("hello world" in text for text in shown)
+
+
+def test_default_http_sessions_use_expected_defaults():
+    llm = providers.llm_session()
+    tool = providers.tool_session()
+    try:
+        assert llm.timeout == providers.DEFAULT_HTTP_TIMEOUT
+        assert llm.follow_redirects is False
+        assert tool.timeout == providers.DEFAULT_WEBFETCH_TIMEOUT_SECONDS
+        assert tool.follow_redirects is False
+    finally:
+        llm.close()
+        tool.close()
 
 
 def test_reasoning_fallback_drops_unsupported_reasoning_after_first_rejection():
@@ -302,7 +315,7 @@ def test_load_bedrock_model_list_uses_mantle_models_endpoint(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         providers,
-        "http_client",
+        "llm_session",
         lambda **kwargs: SimpleNamespace(
             request=lambda method, url, **req: requested.update({"method": method, "url": url, **req}) or providers.response_adapter(
                 status_code=200,
@@ -642,7 +655,7 @@ def test_webfetch_validation_markdown_redaction_and_error_payloads(monkeypatch, 
         default_line_limit=20,
     ))
     monkeypatch.setattr(rt, "show", shown.append)
-    monkeypatch.setattr(rt, "http_client", lambda **kw: DummyHttpClient(response=response, **kw))
+    monkeypatch.setattr(rt, "tool_session", lambda **kw: DummyHttpClient(response=response, **kw))
 
     payload = tools.tool_webfetch(state, url="https://example.com/page")
     assert payload["format"] == "markdown"
@@ -652,7 +665,7 @@ def test_webfetch_validation_markdown_redaction_and_error_payloads(monkeypatch, 
 
     monkeypatch.setattr(
         rt,
-        "http_client",
+        "tool_session",
         lambda **kw: DummyHttpClient(error=providers.TransportError("boom"), **kw),
     )
     error_payload = tools.tool_webfetch(state, url="https://example.com/page")

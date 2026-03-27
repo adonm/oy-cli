@@ -16,7 +16,7 @@ import inspect
 from pathlib import Path
 import types
 from typing import Any, BinaryIO, Callable, Iterable, Literal, NotRequired, Required, TypedDict, Union, get_args, get_origin, get_type_hints, is_typeddict
-from urllib.parse import urlparse
+from urllib3.util import parse_url
 
 import pathspec
 from pygount import DuplicatePool, ProjectSummary, SourceAnalysis
@@ -708,7 +708,7 @@ def tool_bash(state: Any, command: str, timeout_seconds: int = 120):
 
 
 def _validate_url_safe(url: str) -> str:
-    parsed = urlparse(url)
+    parsed = parse_url(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"Only http/https URLs are allowed, got: {parsed.scheme!r}")
     hostname = parsed.hostname
@@ -904,7 +904,7 @@ def tool_webfetch(
         timeout_seconds=timeout_seconds,
     )
     try:
-        with rt.http_client(
+        with rt.tool_session(
             timeout=timeout_seconds,
             follow_redirects=follow_redirects,
         ) as client:

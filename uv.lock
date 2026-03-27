@@ -197,6 +197,7 @@ dependencies = [
     { name = "tenacity" },
     { name = "tiktoken" },
     { name = "toons" },
+    { name = "urllib3" },
     { name = "zstandard" },
 ]
 
@@ -218,6 +219,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=9.0.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "toons", specifier = ">=0.5.3" },
+    { name = "urllib3", specifier = ">=2.5.0" },
     { name = "zstandard", specifier = ">=0.23.0" },
 ]
 
