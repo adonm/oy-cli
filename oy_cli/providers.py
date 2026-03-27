@@ -136,7 +136,12 @@ DEFAULT_RETRY_MAX_DELAY_SECONDS = 30.0
 TRANSPORT_ERROR_RETRY_DELAY = 3.0
 
 def _tool_output_value(result: dict[str, Any]) -> JSONLike:
-    return normalize_jsonlike(result.get("content"))
+    content = normalize_jsonlike(result.get("content"))
+    if result.get("ok", True):
+        return content
+    if isinstance(content, dict):
+        return {"ok": False, **content}
+    return {"ok": False, "message": content}
 
 def _tool_output_text(result: dict[str, Any]) -> str:
     return serialize_toon(_tool_output_value(result))

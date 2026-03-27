@@ -84,6 +84,22 @@ def test_tool_specs_use_closed_object_schemas():
     specs = {tool["name"]: tool for tool in tools.tool_specs()}
     assert specs["todo"]["parameters"]["additionalProperties"] is False
     assert specs["todo"]["parameters"]["properties"]["todos"]["items"]["additionalProperties"] is False
+    assert "exclude" in specs["list"]["parameters"]["properties"]
+    assert "exclude" in specs["search"]["parameters"]["properties"]
+    assert "exclude" in specs["replace"]["parameters"]["properties"]
+    assert "exclude" in specs["sloc"]["parameters"]["properties"]
+
+
+def test_session_text_open_model_guidance_mentions_exclude_and_todo_requirements():
+    rt.load_session_text.cache_clear()
+    assert "Never guess" in rt.base_system_prompt()
+    assert "`webfetch` freely" in rt.base_system_prompt()
+    assert "exclude" in rt.tool_description("list")
+    assert "exclude" in rt.tool_description("search")
+    assert "exclude" in rt.tool_description("replace")
+    assert "exclude" in rt.tool_description("sloc")
+    assert "broad browsing" in rt.tool_description("webfetch")
+    assert "Every item must include string `id` and string `task`" in rt.tool_description("todo")
 
 
 class DummyHttpClient:
@@ -638,8 +654,10 @@ def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monk
     nested = tmp_path / "dir"
     nested.mkdir()
     (nested / "b.py").write_text("print('hello')\n", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "banana.txt").write_text("banana hidden\n", encoding="utf-8")
     with zipfile.ZipFile(tmp_path / "archive.zip", "w") as archive:
-        archive.writestr("notes.txt", "no match here")
+        archive.writestr("notes.txt", "hello from archive")
 
     state = make_state(tmp_path)
     monkeypatch.setattr(rt, "show", lambda *a, **k: None)
@@ -649,6 +667,11 @@ def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monk
     assert "a.txt" in list_payload["items"]
     assert "dir/" in list_payload["items"]
     assert list_payload["count"] >= 2
+
+    list_excluded_payload = tools.tool_list(state, "*", exclude=["dir/**", "archive.zip"])
+    assert list_excluded_payload["exclude"] == ["dir/**", "archive.zip"]
+    assert "dir/" not in list_excluded_payload["items"]
+    assert "archive.zip" not in list_excluded_payload["items"]
     shown: list[str] = []
     monkeypatch.setattr(rt, "show", shown.append)
 
@@ -668,10 +691,34 @@ def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monk
     found = {match["path"]: match for match in search_payload["matches"]}
     assert {"a.txt", "dir/b.py"} <= set(found)
     assert "ignored.txt" not in found
+
+    excluded_payload = tools.tool_search(
+        state,
+        "alpha|hello",
+        ".",
+        exclude=["dir/**", "*.zip"],
+        limit=20,
+    )
+    excluded_found = {match["path"]: match for match in excluded_payload["matches"]}
+    assert excluded_payload["exclude"] == ["dir/**", "*.zip"]
+    assert "a.txt" in excluded_found
+    assert "dir/b.py" not in excluded_found
     assert found["a.txt"]["column"] == 1
     assert found["a.txt"]["text"] == "alpha"
     assert found["dir/b.py"]["column"] == 8
     assert found["dir/b.py"]["text"] == "print('hello')"
+
+    multiline_exclude_payload = tools.tool_search(
+        state,
+        "banana|hello",
+        ".",
+        exclude="docs/**\n*.zip",
+        limit=20,
+    )
+    assert multiline_exclude_payload["exclude"] == "docs/**\n*.zip"
+    multiline_found = {match["path"] for match in multiline_exclude_payload["matches"]}
+    assert "docs/banana.txt" not in multiline_found
+    assert "archive.zip::notes.txt" not in multiline_found
 
     fuzzy_payload = tools.tool_search(state, "hello", ".", fuzzy="s<=1", limit=20)
     assert fuzzy_payload["fuzzy"] == "s<=1"
@@ -698,19 +745,36 @@ def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monk
 
     replace_payload = tools.tool_replace(state, "alpha", "ALPHA", ".", limit=20)
     assert replace_payload["changed_file_count"] == 1
+
+    (tmp_path / "skip.txt").write_text("alpha skip\n", encoding="utf-8")
+    replace_excluded_payload = tools.tool_replace(
+        state,
+        "alpha",
+        "OMEGA",
+        ".",
+        exclude=["skip.txt"],
+        limit=20,
+    )
+    assert replace_excluded_payload["changed_file_count"] == 0
+    assert replace_excluded_payload["exclude"] == ["skip.txt"]
+    assert (tmp_path / "skip.txt").read_text(encoding="utf-8") == "alpha skip\n"
     assert replace_payload["replacement_count"] == 1
     assert any(item["reason"] == "archive" for item in replace_payload.get("skipped", []))
     assert (tmp_path / "a.txt").read_text(encoding="utf-8").startswith("ALPHA")
     assert "alpha" in (tmp_path / "ignored.txt").read_text(encoding="utf-8")
-    assert "replace: /alpha/ -> 'ALPHA'" in shown[-1]
-    assert "changed:\n  change: a.txt — 1 replacement" in shown[-1]
+    assert "replace: /alpha/ -> 'OMEGA'" in shown[-1]
     assert "skipped:\n  skip: archive.zip — archive" in shown[-1]
 
     sloc_payload = tools.tool_sloc(state, ".", limit=20)
     assert sloc_payload["total_code_count"] > 0
     assert any(language["language"] == "Python" for language in sloc_payload["languages"])
-    assert sloc_payload["top_file_count"] == 3
-    assert [item["path"] for item in sloc_payload["top_files"]] == ["dir/b.py", "a.txt", "fuzzy.txt"]
+    assert sloc_payload["top_file_count"] == 5
+    assert [item["path"] for item in sloc_payload["top_files"]] == ["dir/b.py", "a.txt", "fuzzy.txt", "docs/banana.txt", "skip.txt"]
+
+    sloc_excluded_payload = tools.tool_sloc(state, ".", exclude=["docs/**", "skip.txt"], limit=20)
+    assert sloc_excluded_payload["exclude"] == ["docs/**", "skip.txt"]
+    assert sloc_excluded_payload["total_file_count"] == 5
+    assert [item["path"] for item in sloc_excluded_payload["top_files"]] == ["dir/b.py", "a.txt", "fuzzy.txt"]
 
 
 def test_sloc_returns_top_20_filenames_by_default(tmp_path, monkeypatch):
@@ -922,3 +986,27 @@ def test_run_turn_executes_tool_calls_until_final_answer(monkeypatch, tmp_path):
         "echo",
         ToolResult(content=f"{tmp_path.name}:hi"),
     )
+
+
+def test_failed_tool_results_keep_failure_metadata_in_model_round_trip(tmp_path):
+    result = ToolResult(
+        ok=False,
+        content={"tool": "read", "error_type": "ValueError", "message": "read path does not exist: missing.txt"},
+    )
+
+    assert providers._tool_output_value(result) == {
+        "ok": False,
+        "tool": "read",
+        "error_type": "ValueError",
+        "message": "read path does not exist: missing.txt",
+    }
+
+    openai_tool = providers._openai_chat_message(ToolMessage("call_1", "read", result))
+    assert 'ok: false' in openai_tool["content"]
+    assert 'read path does not exist: missing.txt' in openai_tool["content"]
+
+    responses_input = providers._responses_input_from_messages([ToolMessage("call_1", "read", result)])
+    assert len(responses_input) == 1
+    assert responses_input[0]["type"] == "function_call_output"
+    assert 'ok: false' in responses_input[0]["output"]
+    assert 'read path does not exist: missing.txt' in responses_input[0]["output"]

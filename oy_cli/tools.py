@@ -916,11 +916,20 @@ _ARCHIVE_NAMES = (".tar", ".tgz", ".tar.gz")
 _DEFAULT_THREADS = min(32, (os.cpu_count() or 4))
 _DEFAULT_SLOC_TOP_FILES = 20
 
-def _ignore_spec(root: Path) -> pathspec.PathSpec:
+def _ignore_spec(
+    root: Path,
+    exclude: str | list[str] | None = None,
+    *,
+    include_gitignore: bool = True,
+) -> pathspec.PathSpec:
     patterns = [".git/"]
     gitignore = root / ".gitignore"
-    if gitignore.is_file():
+    if include_gitignore and gitignore.is_file():
         patterns.extend(gitignore.read_text(encoding="utf-8", errors="replace").splitlines())
+    if isinstance(exclude, str):
+        patterns.extend(line.strip() for line in exclude.splitlines() if line.strip())
+    elif exclude:
+        patterns.extend(str(item).strip() for item in exclude if str(item).strip())
     return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 def _resolve_ignore_root(target: Path, ignore_root: str | Path | None) -> Path:
@@ -941,9 +950,14 @@ def _is_ignored(path: Path, spec: pathspec.PathSpec, root: Path) -> bool:
         rel_path += "/"
     return spec.match_file(rel_path)
 
-def _iter_files(target: Path, *, ignore_root: str | Path | None = None) -> list[Path]:
+def _iter_files(
+    target: Path,
+    *,
+    ignore_root: str | Path | None = None,
+    exclude: str | list[str] | None = None,
+) -> list[Path]:
     root = _resolve_ignore_root(target, ignore_root)
-    spec = _ignore_spec(root)
+    spec = _ignore_spec(root, exclude=exclude)
     if target.is_file():
         return [] if _is_ignored(target, spec, root) else [target]
     files: list[Path] = []
@@ -1050,6 +1064,7 @@ def search(
     enhance_match: bool = False,
     threads: int | None = None,
     ignore_root: str | Path | None = None,
+    exclude: str | list[str] | None = None,
 ) -> list[dict[str, Any]]:
     path = Path(target).resolve()
     if not path.exists():
@@ -1063,7 +1078,7 @@ def search(
         compiled_text = regex.compile(search_pattern, flags)
     except regex.error as exc:
         raise ValueError(f"Invalid search pattern: {exc}") from exc
-    files = _iter_files(path, ignore_root=ignore_root)
+    files = _iter_files(path, ignore_root=ignore_root, exclude=exclude)
     if not files:
         return []
     worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
@@ -1126,6 +1141,7 @@ def replace(
     *,
     threads: int | None = None,
     ignore_root: str | Path | None = None,
+    exclude: str | list[str] | None = None,
 ) -> list[dict[str, Any]]:
     path = Path(target).resolve()
     if not path.exists():
@@ -1136,7 +1152,7 @@ def replace(
         compiled = regex.compile(pattern)
     except regex.error as exc:
         raise ValueError(f"Invalid replace pattern: {exc}") from exc
-    files = _iter_files(path, ignore_root=ignore_root)
+    files = _iter_files(path, ignore_root=ignore_root, exclude=exclude)
     if not files:
         return []
     worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
@@ -1157,6 +1173,7 @@ def sloc(
     target: str | Path,
     *,
     ignore_root: str | Path | None = None,
+    exclude: str | list[str] | None = None,
 ) -> dict[str, Any]:
     path = Path(target).resolve()
     if not path.exists():
@@ -1171,7 +1188,7 @@ def sloc(
     file_summaries: list[_SlocFileSummary] = []
     group = path.name if path.is_dir() else (path.parent.name or ".")
 
-    for file_path in _iter_files(path, ignore_root=ignore_root):
+    for file_path in _iter_files(path, ignore_root=ignore_root, exclude=exclude):
         if file_path.is_symlink():
             state_counts["symlink"] += 1
             continue
@@ -1256,31 +1273,48 @@ def _path_listing(
 ) -> str:
     return _join_paths(paths[: _shown_line_limit(limit)], root, empty)
 
-def _glob_paths(root: Path, pattern: str) -> list[Path]:
+def _glob_paths(
+    root: Path,
+    pattern: str,
+    *,
+    exclude: str | list[str] | None = None,
+) -> list[Path]:
     if pattern in {".", "./"}:
-        return sorted(root.iterdir(), key=lambda item: item.as_posix())
+        spec = _ignore_spec(root, exclude=exclude, include_gitignore=False)
+        return [
+            item
+            for item in sorted(root.iterdir(), key=lambda item: item.as_posix())
+            if not _is_ignored(item.resolve(), spec, root)
+        ]
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
         raise ValueError(f"Path traversal denied: '{pattern}'")
+    spec = _ignore_spec(root, exclude=exclude, include_gitignore=False)
     matches: list[Path] = []
     for candidate in root.glob(pattern):
         try:
             resolved = candidate.resolve()
         except OSError:
             continue
-        if resolved == root or root in resolved.parents:
+        if (resolved == root or root in resolved.parents) and not _is_ignored(resolved, spec, root):
             matches.append(resolved)
     return sorted(set(matches), key=lambda item: item.as_posix())
 
 @tool()
-def tool_list(state: Any, path: str = "*", limit: int = rt.BUDGETS["default_line_limit"]):
+def tool_list(
+    state: Any,
+    path: str = "*",
+    exclude: str | list[str] | None = None,
+    limit: int = rt.BUDGETS["default_line_limit"],
+):
     rt.note_tool(
         state,
         "list",
-        _defaults={"path": "*", "limit": rt.BUDGETS["default_line_limit"]},
+        _defaults={"path": "*", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]},
         path=path,
+        exclude=exclude,
         limit=limit,
     )
-    matches = _glob_paths(state["root"], path)
+    matches = _glob_paths(state["root"], path, exclude=exclude)
     payload = {
         "path": path,
         "items": [
@@ -1290,6 +1324,8 @@ def tool_list(state: Any, path: str = "*", limit: int = rt.BUDGETS["default_line
         "count": len(matches),
         "truncated": len(matches) > _shown_line_limit(limit),
     }
+    if exclude is not None:
+        payload["exclude"] = exclude
     rt.show(serialize_toon(payload))
     return payload
 
@@ -1377,6 +1413,7 @@ def _search_payload(
     fuzzy: str | None = None,
     best_match: bool = False,
     enhance_match: bool = False,
+    exclude: str | list[str] | None = None,
     limit: int,
 ) -> tuple[dict[str, Any], str, int, int, int]:
     matches = [match for match in results if not match.get("error")]
@@ -1405,6 +1442,7 @@ def _search_payload(
                 "fuzzy": fuzzy,
                 "best_match": best_match or None,
                 "enhance_match": enhance_match or None,
+                "exclude": exclude,
             }.items()
             if value is not None
         }
@@ -1433,6 +1471,7 @@ def _search_contents(
     fuzzy: str | None = None,
     best_match: bool = False,
     enhance_match: bool = False,
+    exclude: str | list[str] | None = None,
     limit: int,
 ):
     target = rt.resolve_path(root, path)
@@ -1445,6 +1484,7 @@ def _search_contents(
         best_match=best_match,
         enhance_match=enhance_match,
         ignore_root=root,
+        exclude=exclude,
     )
     return _search_payload(
         root,
@@ -1454,6 +1494,7 @@ def _search_contents(
         fuzzy=fuzzy,
         best_match=best_match,
         enhance_match=enhance_match,
+        exclude=exclude,
         limit=limit,
     )
 
@@ -1465,6 +1506,7 @@ def tool_search(
     fuzzy: str | None = None,
     best_match: bool = False,
     enhance_match: bool = False,
+    exclude: str | list[str] | None = None,
     limit: int = rt.BUDGETS["default_line_limit"],
 ):
     defaults = {
@@ -1472,6 +1514,7 @@ def tool_search(
         "fuzzy": None,
         "best_match": False,
         "enhance_match": False,
+        "exclude": None,
         "limit": rt.BUDGETS["default_line_limit"],
     }
     payload, preview, matches, shown, errors = _search_contents(
@@ -1481,6 +1524,7 @@ def tool_search(
         fuzzy=fuzzy,
         best_match=best_match,
         enhance_match=enhance_match,
+        exclude=exclude,
         limit=limit,
     )
     rt.note_tool(
@@ -1493,6 +1537,7 @@ def tool_search(
         fuzzy=fuzzy,
         best_match=best_match,
         enhance_match=enhance_match,
+        exclude=exclude,
         limit=limit,
     )
     rt.show(preview)
@@ -1535,6 +1580,7 @@ def _replace_payload(
     path: str,
     results: list[dict[str, Any]],
     *,
+    exclude: str | list[str] | None = None,
     limit: int,
 ) -> tuple[dict[str, Any], str, int, int, int, int]:
     changed = [result for result in results if result.get("replacements")]
@@ -1558,6 +1604,8 @@ def _replace_payload(
         ],
         "truncated": len(changed) > len(shown_changed),
     }
+    if exclude is not None:
+        payload["exclude"] = exclude
     payload.update(_optional_counts(skipped=len(skipped), error=len(errors)))
     if skipped:
         payload["skipped"] = [
@@ -1603,13 +1651,19 @@ def _replace_payload(
     )
 
 def _replace_contents(
-    root: Path, pattern: str, replacement: str, path: str, *, limit: int
+    root: Path,
+    pattern: str,
+    replacement: str,
+    path: str,
+    *,
+    exclude: str | list[str] | None = None,
+    limit: int,
 ):
     target = rt.resolve_path(root, path)
     if not target.exists():
         raise ValueError(f"replace path does not exist: {rt._rel(root, target)}")
-    results = replace(target, pattern, replacement, ignore_root=root)
-    return _replace_payload(root, pattern, replacement, path, results, limit=limit)
+    results = replace(target, pattern, replacement, ignore_root=root, exclude=exclude)
+    return _replace_payload(root, pattern, replacement, path, results, exclude=exclude, limit=limit)
 
 @tool(mutating=True)
 def tool_replace(
@@ -1617,11 +1671,12 @@ def tool_replace(
     pattern: str,
     replacement: str,
     path: str = ".",
+    exclude: str | list[str] | None = None,
     limit: int = rt.BUDGETS["default_line_limit"],
 ):
-    defaults = {"path": ".", "limit": rt.BUDGETS["default_line_limit"]}
+    defaults = {"path": ".", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]}
     payload, preview, changed, replacements, skipped, errors = _replace_contents(
-        state["root"], pattern, replacement, path, limit=limit
+        state["root"], pattern, replacement, path, exclude=exclude, limit=limit
     )
     rt.note_tool(
         state,
@@ -1631,6 +1686,7 @@ def tool_replace(
         pattern=pattern,
         replacement=replacement,
         path=path,
+        exclude=exclude,
         limit=limit,
     )
     rt.show(preview)
@@ -1689,7 +1745,12 @@ def _sloc_file_preview_line(file_summary: Any) -> str:
 
 
 def _sloc_payload(
-    root: Path, path: str, report: dict[str, Any], *, limit: int
+    root: Path,
+    path: str,
+    report: dict[str, Any],
+    *,
+    exclude: str | list[str] | None = None,
+    limit: int,
 ) -> tuple[dict[str, Any], str]:
     shown_limit = _shown_line_limit(limit)
     shown_languages = list(report["languages"][:shown_limit])
@@ -1732,6 +1793,8 @@ def _sloc_payload(
             or len(report["top_files"]) > len(shown_top_files)
         ),
     }
+    if exclude is not None:
+        payload["exclude"] = exclude
     if report["state_counts"]:
         payload["state_counts"] = [
             {"state": state_count["state"], "file_count": state_count["file_count"]}
@@ -1770,23 +1833,37 @@ def _sloc_payload(
     return payload, "\n".join(preview_lines)
 
 
-def _sloc_contents(root: Path, path: str, *, limit: int):
+def _sloc_contents(
+    root: Path,
+    path: str,
+    *,
+    exclude: str | list[str] | None = None,
+    limit: int,
+):
     target = rt.resolve_path(root, path)
     if not target.exists():
         raise ValueError(f"sloc path does not exist: {rt._rel(root, target)}")
-    report = sloc(target, ignore_root=root)
-    return _sloc_payload(root, path, report, limit=limit), report
+    report = sloc(target, ignore_root=root, exclude=exclude)
+    return _sloc_payload(root, path, report, exclude=exclude, limit=limit), report
 
 @tool()
-def tool_sloc(state: Any, path: str = ".", limit: int = rt.BUDGETS["default_line_limit"]):
-    defaults = {"path": ".", "limit": rt.BUDGETS["default_line_limit"]}
-    (payload, preview), report = _sloc_contents(state["root"], path, limit=limit)
+def tool_sloc(
+    state: Any,
+    path: str = ".",
+    exclude: str | list[str] | None = None,
+    limit: int = rt.BUDGETS["default_line_limit"],
+):
+    defaults = {"path": ".", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]}
+    (payload, preview), report = _sloc_contents(
+        state["root"], path, exclude=exclude, limit=limit
+    )
     rt.note_tool(
         state,
         "sloc",
         _defaults=defaults,
         _suffix=_sloc_summary(report),
         path=path,
+        exclude=exclude,
         limit=limit,
     )
     rt.show(preview)
