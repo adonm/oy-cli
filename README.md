@@ -140,7 +140,7 @@ and used, if creds are available `oy model` will show them in the model list.
 ```bash
 export OY_SHIM=bedrock-mantle
 export AWS_PROFILE=my-profile
-export AWS_REGION=us-east-1
+export AWS_REGION=ap-southeast-2
 ```
 
 `oy` loads models from `GET /models` on the Mantle endpoint and sends chat requests to `POST /chat/completions` on the same endpoint.

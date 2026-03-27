@@ -194,18 +194,18 @@ def test_sigv4_headers_sign_bedrock_mantle_requests():
             "secret_key": "wJalrXUtnFEMI/I/K7MDENG+bPxRfiCYEXAMPLEKEY",
             "session_token": "TOKEN",
         },
-        "us-east-1",
+        "ap-southeast-2",
         "POST",
-        "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions",
+        "https://bedrock-mantle.ap-southeast-2.api.aws/v1/chat/completions",
         body=b'{"model":"zai.glm-4.6"}',
         headers={"Content-Type": "application/json"},
     )
 
     assert headers["Content-Type"] == "application/json"
-    assert headers["Host"] == "bedrock-mantle.us-east-1.api.aws"
+    assert headers["Host"] == "bedrock-mantle.ap-southeast-2.api.aws"
     assert headers["X-Amz-Security-Token"] == "TOKEN"
     assert "Credential=AKIDEXAMPLE/" in headers["Authorization"]
-    assert "/us-east-1/bedrock-mantle/aws4_request" in headers["Authorization"]
+    assert "/ap-southeast-2/bedrock-mantle/aws4_request" in headers["Authorization"]
     assert "SignedHeaders=content-type;host;x-amz-date;x-amz-security-token" in headers["Authorization"]
 
 
@@ -273,7 +273,7 @@ def test_provider_decoding_helpers_cover_json_and_message_shapes():
 
 def test_mantle_completion_client_uses_sigv4_client_in_aws_credentials_mode(monkeypatch, tmp_path):
     sentinel = {"chat_completion": lambda *a, **k: None, "list_models": lambda: ["alpha", "beta"]}
-    monkeypatch.setattr(providers, "default_region", lambda choice=None: "us-east-1")
+    monkeypatch.setattr(providers, "default_region", lambda choice=None: "ap-southeast-2")
     monkeypatch.setattr(
         providers,
         "load_aws_credentials",
@@ -293,7 +293,7 @@ def test_mantle_completion_client_uses_sigv4_client_in_aws_credentials_mode(monk
 def test_load_bedrock_model_list_uses_mantle_models_endpoint(monkeypatch, tmp_path):
     requested = {}
 
-    monkeypatch.setattr(providers, "default_region", lambda choice=None: "us-east-1")
+    monkeypatch.setattr(providers, "default_region", lambda choice=None: "ap-southeast-2")
     monkeypatch.setattr(
         providers,
         "load_aws_credentials",
@@ -330,7 +330,7 @@ def test_load_bedrock_model_list_uses_mantle_models_endpoint(monkeypatch, tmp_pa
 
     assert providers.load_bedrock_model_list(tmp_path) == ["zai.glm-4.6", "moonshotai.kimi-k2-thinking"]
     assert requested["method"] == "GET"
-    assert requested["url"] == "https://bedrock-mantle.us-east-1.api.aws/v1/models"
+    assert requested["url"] == "https://bedrock-mantle.ap-southeast-2.api.aws/v1/models"
     assert requested["headers"]["Authorization"] == "AWS4-HMAC-SHA256 test"
     assert requested["headers"]["X-Amz-Security-Token"] == "TOKEN"
 
