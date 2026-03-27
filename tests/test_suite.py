@@ -546,7 +546,7 @@ def test_ask_and_todo_tools_update_state_and_use_prompt_helpers(monkeypatch, tmp
     )
     assert state["todos"] == [{"id": "t1", "task": "ship it", "status": "in_progress"}]
     assert rendered == {"items": [{"id": "t1", "task": "ship it", "status": "in_progress"}], "count": 1}
-    assert "count: 1" in shown[-1]
+    assert shown[-1] == "count: 1\ntodos:\n  [~] t1: ship it"
     with pytest.raises(tools.ValidationError):
         tools.tool_todo(state, [{"id": "t2", "task": "bad", "status": "wat"}])
 
@@ -575,7 +575,60 @@ def test_bash_tool_summarizes_json_and_text(monkeypatch, tmp_path):
     assert text_payload["returncode"] == 1
     assert text_payload["stdout"] == "line1\nline2"
     assert text_payload["stderr"] == "boom"
-    assert any("returncode: 0" in text or "returncode: 1" in text for text in shown)
+    assert any("$ echo json" in text and "exit: 0" in text for text in shown)
+    assert any("stdout:" in text and '"ok":true' in text for text in shown)
+    assert any("$ echo text" in text and "stderr:" in text and "boom" in text for text in shown)
+
+def test_render_search_preview_text_uses_text_color_not_background():
+    rendered = rt._render_search_preview_text("pre ⟦match⟧ post")
+
+    assert rendered.plain == "pre match post"
+    spans = [span for span in rendered.spans if rendered.plain[span.start:span.end] == "match"]
+    assert spans
+    assert all(span.style == "bold yellow" for span in spans)
+    assert all(" on " not in span.style for span in spans)
+
+
+def test_render_preview_text_highlights_structured_tool_output():
+    rendered = rt._render_preview_text(
+        "\n".join(
+            [
+                "path: src/demo.py",
+                'stdout: "line1\nline2"',
+                "text.python: print('ok')",
+                "items[2]{id,task,status}:",
+                '  "1",ship it,done',
+                "src/demo.py:12:7:print(⟦'ok'⟧)",
+                "skip: file.txt — archive",
+                "change: file.txt — 3 replacements",
+                "... [4 more matches omitted]",
+            ]
+        )
+    )
+
+    assert "path:" in rendered
+    assert "line1" in rendered and "line2" in rendered
+    assert "text.python:" in rendered and "print('ok')" in rendered
+    assert "items[2]{id,task,status}:" in rendered
+    assert '"1"' in rendered and "ship it" in rendered and "done" in rendered
+    assert "src/demo.py:12:7:print('ok')" in rendered
+    assert "skip" in rendered and "file.txt" in rendered and "archive" in rendered
+    assert "change" in rendered and "3" in rendered and "replacement" in rendered
+    assert "... [4 more matches omitted]" in rendered
+
+
+def test_show_truncates_preview_uses_consistent_24_line_limit(monkeypatch):
+    rendered: list[str] = []
+    monkeypatch.setattr(rt, "print_console", lambda console, *values, **kwargs: rendered.extend(map(str, values)))
+
+    rt.show("\n".join(f"line {i}" for i in range(40)))
+
+    assert rendered
+    assert "line 0" in rendered[-1]
+    assert "line 39" in rendered[-1]
+    assert "... [20 lines hidden]" in rendered[-1]
+    assert "... [40 lines total]" in rendered[-1]
+
 
 
 def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monkeypatch):
@@ -596,16 +649,52 @@ def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monk
     assert "a.txt" in list_payload["items"]
     assert "dir/" in list_payload["items"]
     assert list_payload["count"] >= 2
+    shown: list[str] = []
+    monkeypatch.setattr(rt, "show", shown.append)
+
     read_payload = tools.tool_read(state, "a.txt", offset=2, limit=1)
-    assert read_payload["text"] == "2: beta"
+    assert read_payload["text"] == "beta"
     assert read_payload["line_count"] == 2
+    assert shown[-1] == "path: a.txt\nlines: 2-2 of 2\ntext: beta"
+
+    shown.clear()
+    python_read_payload = tools.tool_read(state, "dir/b.py", offset=1, limit=1)
+    assert python_read_payload["text"] == "print('hello')"
+    assert shown[-1] == "path: dir/b.py\nlines: 1-1 of 1\ntext.python: print('hello')"
     with pytest.raises(ValueError):
         tools.tool_read(state, "dir")
 
-    search_payload = tools.tool_search(state, "alpha|print", ".", limit=20)
-    found = {match["path"] for match in search_payload["matches"]}
-    assert {"a.txt", "dir/b.py"} <= found
+    search_payload = tools.tool_search(state, "alpha|hello", ".", limit=20)
+    found = {match["path"]: match for match in search_payload["matches"]}
+    assert {"a.txt", "dir/b.py"} <= set(found)
     assert "ignored.txt" not in found
+    assert found["a.txt"]["column"] == 1
+    assert found["a.txt"]["text"] == "alpha"
+    assert found["dir/b.py"]["column"] == 8
+    assert found["dir/b.py"]["text"] == "print('hello')"
+
+    fuzzy_payload = tools.tool_search(state, "hello", ".", fuzzy="s<=1", limit=20)
+    assert fuzzy_payload["fuzzy"] == "s<=1"
+    fuzzy_found = {match["path"]: match for match in fuzzy_payload["matches"]}
+    assert fuzzy_found["dir/b.py"]["column"] == 8
+    assert fuzzy_found["dir/b.py"]["text"] == "print('hello')"
+
+    (tmp_path / "fuzzy.txt").write_text("hallo\ncat and dog\n", encoding="utf-8")
+    shown.clear()
+    fuzzy_sub_payload = tools.tool_search(state, "hello", ".", fuzzy="s<=1", limit=20)
+    fuzzy_sub_found = {match["path"]: match for match in fuzzy_sub_payload["matches"]}
+    assert fuzzy_sub_found["fuzzy.txt"]["column"] == 1
+    assert fuzzy_sub_found["fuzzy.txt"]["text"] == "hallo"
+    assert "fuzzy: s<=1" in shown[-1] or "⟦hallo⟧" in shown[-1]
+
+    shown.clear()
+    fuzzy_enhanced_payload = tools.tool_search(state, "dog", ".", fuzzy="e<=1", enhance_match=True, limit=20)
+    assert fuzzy_enhanced_payload["fuzzy"] == "e<=1"
+    assert fuzzy_enhanced_payload["enhance_match"] is True
+    fuzzy_enhanced_found = {match["path"]: match for match in fuzzy_enhanced_payload["matches"]}
+    assert fuzzy_enhanced_found["fuzzy.txt"]["column"] == 9
+    assert fuzzy_enhanced_found["fuzzy.txt"]["text"] == "cat and dog"
+    assert shown[-1].endswith("cat and ⟦dog⟧")
 
     replace_payload = tools.tool_replace(state, "alpha", "ALPHA", ".", limit=20)
     assert replace_payload["changed_file_count"] == 1
@@ -613,10 +702,33 @@ def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monk
     assert any(item["reason"] == "archive" for item in replace_payload.get("skipped", []))
     assert (tmp_path / "a.txt").read_text(encoding="utf-8").startswith("ALPHA")
     assert "alpha" in (tmp_path / "ignored.txt").read_text(encoding="utf-8")
+    assert "replace: /alpha/ -> 'ALPHA'" in shown[-1]
+    assert "changed:\n  change: a.txt — 1 replacement" in shown[-1]
+    assert "skipped:\n  skip: archive.zip — archive" in shown[-1]
 
     sloc_payload = tools.tool_sloc(state, ".", limit=20)
     assert sloc_payload["total_code_count"] > 0
     assert any(language["language"] == "Python" for language in sloc_payload["languages"])
+    assert sloc_payload["top_file_count"] == 3
+    assert [item["path"] for item in sloc_payload["top_files"]] == ["dir/b.py", "a.txt", "fuzzy.txt"]
+
+
+def test_sloc_returns_top_20_filenames_by_default(tmp_path, monkeypatch):
+    for index in range(25):
+        line_count = index + 1
+        source = "\n".join(f"value_{index}_{line} = {line}" for line in range(line_count)) + "\n"
+        (tmp_path / f"file_{index:02d}.py").write_text(source, encoding="utf-8")
+
+    state = make_state(tmp_path)
+    monkeypatch.setattr(rt, "show", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "note_tool", lambda *a, **k: None)
+
+    sloc_payload = tools.tool_sloc(state, ".", limit=3)
+    assert sloc_payload["top_file_count"] == 25
+    assert len(sloc_payload["top_files"]) == 20
+    assert sloc_payload["top_files"][0]["path"] == "file_24.py"
+    assert sloc_payload["top_files"][-1]["path"] == "file_05.py"
+    assert sloc_payload["truncated"] is True
 
 
 def test_webfetch_validation_markdown_redaction_and_error_payloads(monkeypatch, tmp_path):

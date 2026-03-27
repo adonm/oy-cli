@@ -184,7 +184,7 @@ wheels = [
 
 [[package]]
 name = "oy-cli"
-version = "0.4.3b2"
+version = "0.4.3b3"
 source = { editable = "." }
 dependencies = [
     { name = "defopt" },
@@ -194,6 +194,7 @@ dependencies = [
     { name = "pygments" },
     { name = "pygount" },
     { name = "regex" },
+    { name = "rich" },
     { name = "tenacity" },
     { name = "tiktoken" },
     { name = "toons" },
@@ -216,6 +217,7 @@ requires-dist = [
     { name = "pygments", specifier = ">=2.19.0" },
     { name = "pygount", specifier = ">=3.0.0" },
     { name = "regex", specifier = ">=2026.0.0" },
+    { name = "rich", specifier = ">=14.3.0" },
     { name = "tenacity", specifier = ">=9.0.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "toons", specifier = ">=0.5.3" },

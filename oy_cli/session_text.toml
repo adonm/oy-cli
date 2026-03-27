@@ -43,19 +43,19 @@ focus_suffix = " Additional focus: {focus}"
 description = "List paths with `pathlib.Path.glob()`. Defaults to `path: \"*\"`; use standard pathlib glob syntax. Returns `items`, `count`, and `truncated`; directories end with `/`."
 
 [tools.read]
-description = "Read a file with `pathlib`. Returns line-numbered `text` plus `path`, `offset`, `limit`, `line_count`, and `truncated`. Use `offset` and `limit` for large files."
+description = "Read a file with `pathlib`. Returns verbatim `text` plus `path`, `offset`, `limit`, `line_count`, and `truncated`. Use `offset` and `limit` for large files."
 
 [tools.bash]
 description = "Run a system subprocess with Python `subprocess`. Returns `returncode`, summarized `stdout`/`stderr`, and truncation flags."
 
 [tools.search]
-description = "Search text with Python `regex`. Respects `.gitignore` via `pathspec`, scans common archives/compressed files, and returns `match_count`, `matches`, and optional `errors`."
+description = "Search text with Python `regex`. Respects `.gitignore` via `pathspec`, scans common archives/compressed files, and returns `match_count`, `matches`, and optional `errors`. Supports regex fuzzy matching via `fuzzy` plus `best_match`/`enhance_match`."
 
 [tools.replace]
 description = "Replace text with Python `regex`. Respects `.gitignore` via `pathspec`, skips archives/binaries, and only rewrites changed files. Returns changed files, replacement counts, and skips/errors."
 
 [tools.sloc]
-description = "Count source lines with `pygount`. Respects `.gitignore` and returns totals, per-language counts, and non-countable files/errors."
+description = "Count source lines with `pygount`. Respects `.gitignore` and returns totals, per-language counts, top filenames, and non-countable files/errors."
 
 [tools.ask]
 description = "Ask the user in interactive runs. Use only for genuine ambiguity or irreversible user-facing choices; provide choices when useful."

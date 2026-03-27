@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import io
 import json
 import logging
 import os
@@ -25,8 +26,13 @@ from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.validation import ValidationError, Validator
 from pygments import highlight
 from pygments.formatters import Terminal256Formatter
-from pygments.lexers import TextLexer, get_lexer_by_name
+from pygments.lexers import TextLexer, get_lexer_by_name, get_lexer_for_filename
 from pygments.util import ClassNotFound
+from rich.console import Console as RichConsole, Group
+from rich.highlighter import ReprHighlighter
+from rich.padding import Padding
+from rich.syntax import Syntax
+from rich.text import Text
 
 from .providers import (
     _ensure_private_dir,
@@ -64,6 +70,14 @@ _BASH_IMPORTANT_LINE_RE = re.compile(
 _FENCE_RE = re.compile(r"^```([a-zA-Z0-9_+.-]*)\s*$")
 _INLINE_TOKEN_RE = re.compile(r"`[^`\n]+`|\*\*[^*\n]+?\*\*|\*[^*\n]+?\*")
 _CONTROL_TEXT_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_TOON_LINE_RE = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+(?:\[\d+\])?(?:\{[^}]+\})?)(?:: ?(?P<value>.*))?$")
+_SEARCH_PREVIEW_LINE_RE = re.compile(r"^(?P<path>.+):(?P<line>\d+):(?P<column>\d+):(?P<text>.*)$")
+_REPLACE_SKIPPED_PREVIEW_LINE_RE = re.compile(r"^(?P<path>.+): skipped \((?P<reason>.+)\)$")
+_REPLACE_CHANGED_PREVIEW_LINE_RE = re.compile(r"^(?P<path>.+): (?P<count>\d+) replacement\(s\)$")
+_SEARCH_HIGHLIGHT_OPEN = "⟦"
+_SEARCH_HIGHLIGHT_CLOSE = "⟧"
+_MULTILINE_PREVIEW_KEYS = frozenset({"stderr", "stdout", "text"})
+_RICH_REPR_HIGHLIGHTER = ReprHighlighter()
 
 def _ansi(style: str, text: str) -> str:
     return f"\x1b[{style}m{text}\x1b[0m" if text else ""
@@ -141,9 +155,12 @@ def print_console(
     )
 
 
+def _terminal_width(default: tuple[int, int] = (80, 20), minimum: int = 20) -> int:
+    return max(shutil.get_terminal_size(default).columns - 1, minimum)
+
+
 def rule_console(console: Console, style: str | None = None):
-    width = max(shutil.get_terminal_size((80, 20)).columns - 1, 20)
-    line = "─" * width
+    line = "─" * _terminal_width()
     print_console(console, _ansi("2", line) if style == "dim" else line)
 
 
@@ -419,6 +436,213 @@ def _render_markdownish(text: str) -> str:
     if in_code_block:
         rendered.append(_highlight_code("\n".join(code_lines), code_language))
     return "\n".join(rendered)
+
+
+def _rich_console_buffer(console: Console, *, width: int | None = None) -> tuple[RichConsole, io.StringIO]:
+    buffer = io.StringIO()
+    stream = console_stream(console)
+    return (
+        RichConsole(
+            file=buffer,
+            force_terminal=stream.isatty(),
+            color_system="auto",
+            width=width or _terminal_width(),
+            soft_wrap=True,
+            highlight=False,
+            legacy_windows=False,
+        ),
+        buffer,
+    )
+
+
+def _looks_like_markdown(text: str) -> bool:
+    stripped = text.lstrip()
+    return bool(
+        stripped.startswith(("#", "- ", "* ", "> ", "```"))
+        or "\n#" in text
+        or "\n- " in text
+        or "\n* " in text
+        or "\n```" in text
+        or "=====\n" in text
+    )
+
+
+def _preview_language(key: str, text: str) -> str:
+    base_key, _, explicit_language = key.partition(".")
+    if explicit_language:
+        return explicit_language
+    if base_key == "text" and _looks_like_markdown(text):
+        return "markdown"
+    if base_key in {"stdout", "stderr"} and "$ " in text:
+        return "bash"
+    return "text"
+
+
+def preview_language_for_path(path: str, text: str) -> str:
+    try:
+        lexer = get_lexer_for_filename(path, text)
+    except ClassNotFound:
+        return _preview_language("text", text)
+    aliases = getattr(lexer, "aliases", ())
+    return aliases[0] if aliases else _preview_language("text", text)
+
+
+def _preview_text(value: str, *, style: str | None = None) -> Text:
+    return Text(_sanitize_terminal_text(value), style=style)
+
+
+def _preview_repr(value: str, *, style: str | None = None) -> Text:
+    text = _preview_text(value, style=style)
+    _RICH_REPR_HIGHLIGHTER.highlight(text)
+    return text
+
+
+def _decode_preview_string(value: str) -> str | None:
+    if len(value) < 2 or not (value.startswith('"') and value.endswith('"')):
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, str) else None
+
+
+def _render_preview_multiline(key: str, decoded: str, *, indent: str = "") -> Padding:
+    return Padding(
+        Syntax(
+            _sanitize_terminal_text(decoded).rstrip("\n") or " ",
+            _preview_language(key, decoded),
+            theme="ansi_dark",
+            word_wrap=True,
+            background_color="default",
+        ),
+        pad=(0, 0, 0, len(indent) + 2),
+    )
+
+
+def _render_preview_csv(line: str) -> Text:
+    indent = line[: len(line) - len(line.lstrip(" "))]
+    values = line[len(indent) :].split(",")
+    text = Text(indent)
+    for index, value in enumerate(values):
+        if index:
+            text.append(",", style="dim")
+        text.append_text(_preview_repr(value))
+    return text
+
+
+def _render_search_preview_text(text: str) -> Text:
+    sanitized = _sanitize_terminal_text(text)
+    if _SEARCH_HIGHLIGHT_OPEN not in sanitized:
+        return Text(sanitized)
+    rendered = Text()
+    remaining = sanitized
+    while remaining:
+        start = remaining.find(_SEARCH_HIGHLIGHT_OPEN)
+        if start < 0:
+            rendered.append(remaining)
+            break
+        rendered.append(remaining[:start])
+        remaining = remaining[start + len(_SEARCH_HIGHLIGHT_OPEN) :]
+        end = remaining.find(_SEARCH_HIGHLIGHT_CLOSE)
+        if end < 0:
+            rendered.append(_SEARCH_HIGHLIGHT_OPEN + remaining)
+            break
+        highlighted = remaining[:end]
+        if highlighted:
+            rendered.append(highlighted, style="bold yellow")
+        remaining = remaining[end + len(_SEARCH_HIGHLIGHT_CLOSE) :]
+    return rendered
+
+
+def _render_preview_line(line: str) -> list[Any]:
+    if not line:
+        return [Text("")]
+    if line.startswith("... ["):
+        return [_preview_text(line, style="dim italic")]
+    if line.startswith("[!] "):
+        text = Text("[!]", style="bold yellow")
+        if body := line[4:]:
+            text.append(" ")
+            text.append_text(_preview_text(body))
+        return [text]
+    if line.startswith("skip: ") and " — " in line:
+        path, reason = line[6:].rsplit(" — ", 1)
+        text = Text()
+        text.append("skip", style="yellow")
+        text.append(":", style="dim")
+        text.append(" ")
+        text.append(_sanitize_terminal_text(path), style="cyan")
+        text.append(" — ", style="dim")
+        text.append_text(_preview_text(reason, style="dim"))
+        return [text]
+    if line.startswith("change: ") and " — " in line:
+        path, detail = line[8:].rsplit(" — ", 1)
+        if count_match := re.match(r"^(?P<count>\d+) replacements?$", detail):
+            text = Text()
+            text.append("change", style="magenta")
+            text.append(":", style="dim")
+            text.append(" ")
+            text.append(_sanitize_terminal_text(path), style="cyan")
+            text.append(" — ", style="dim")
+            text.append_text(_preview_repr(count_match.group("count"), style="bold magenta"))
+            plural = "s" if count_match.group("count") != "1" else ""
+            text.append(f" replacement{plural}", style="dim")
+            return [text]
+    if match := _REPLACE_SKIPPED_PREVIEW_LINE_RE.match(line):
+        text = Text()
+        text.append(_sanitize_terminal_text(match.group("path")), style="cyan")
+        text.append(": ", style="dim")
+        text.append("skipped", style="yellow")
+        text.append(" (", style="dim")
+        text.append_text(_preview_text(match.group("reason"), style="dim"))
+        text.append(")", style="dim")
+        return [text]
+    if match := _REPLACE_CHANGED_PREVIEW_LINE_RE.match(line):
+        text = Text()
+        text.append(_sanitize_terminal_text(match.group("path")), style="cyan")
+        text.append(": ", style="dim")
+        text.append_text(_preview_repr(match.group("count"), style="bold magenta"))
+        text.append(" replacement(s)", style="dim")
+        return [text]
+    if match := _SEARCH_PREVIEW_LINE_RE.match(line):
+        text = Text()
+        text.append(_sanitize_terminal_text(match.group("path")), style="cyan")
+        text.append(":", style="dim")
+        text.append(match.group("line"), style="magenta")
+        text.append(":", style="dim")
+        text.append(match.group("column"), style="dim")
+        text.append(":", style="dim")
+        text.append_text(_render_search_preview_text(match.group("text")))
+        return [text]
+    if match := _TOON_LINE_RE.match(line):
+        indent, key, value = match.group("indent", "key", "value")
+        header = Text(indent)
+        header.append(key, style="bold cyan" if not indent else "cyan")
+        header.append(":", style="dim")
+        if value:
+            base_key, _, explicit_language = key.partition(".")
+            decoded = _decode_preview_string(value) if base_key in _MULTILINE_PREVIEW_KEYS else None
+            if explicit_language:
+                return [header, _render_preview_multiline(key, decoded if decoded is not None else value, indent=indent)]
+            if decoded and "\n" in decoded:
+                return [header, _render_preview_multiline(key, decoded, indent=indent)]
+            header.append(" ")
+            header.append_text(_preview_repr(value))
+        return [header]
+    if line.startswith("  ") and "," in line:
+        return [_render_preview_csv(line)]
+    if line.startswith("  "):
+        text = Text(line[: len(line) - len(line.lstrip(" "))])
+        text.append(_sanitize_terminal_text(line.lstrip()), style="cyan")
+        return [text]
+    return [_preview_text(line)]
+
+
+def _render_preview_text(text: str, *, console: Console = STDERR) -> str:
+    rich_console, buffer = _rich_console_buffer(console)
+    rich_console.print(Group(*[renderable for line in str(text).splitlines() for renderable in _render_preview_line(line)]))
+    return buffer.getvalue().rstrip("\n")
 
 def _env(name, default, t=None):
     value = os.environ.get(f"OY_{name}")
@@ -702,12 +926,7 @@ def _format_duration(seconds: int) -> str:
         return f"{seconds // 60}m"
     return f"{seconds}s"
 
-def _show_and_clip(text, limit=None, tail=0):
-    limit = BUDGETS["tool_output_tokens"] if limit is None else limit
-    show(text)
-    return clip_tokens(text, limit=limit, tail=tail)
-
-_MAX_SHOW_LINES = 10
+_MAX_PREVIEW_LINES = 20
 _MAX_LINE_WIDTH = 512
 
 def _truncate_long_lines(text: str, limit: int = _MAX_LINE_WIDTH) -> str:
@@ -719,22 +938,14 @@ def _truncate_long_lines(text: str, limit: int = _MAX_LINE_WIDTH) -> str:
             changed = True
     return "\n".join(lines) if changed else text
 
-def _wrap_code_block(text: str) -> str:
-    if "```" in text:
-        return text
-    return f"```text\n{text.rstrip()}\n```"
 
-
-def show(text):
-    if not text:
-        return
+def _summarize_preview_lines(text: str, *, max_lines: int = _MAX_PREVIEW_LINES) -> str:
     text = _truncate_long_lines(text)
     lines = text.splitlines()
-    if len(lines) <= _MAX_SHOW_LINES:
-        print_console(STDERR, _render_markdownish(_wrap_code_block(text)))
-        return
-    head_count = max(_MAX_SHOW_LINES // 2, 2)
-    tail_count = max(_MAX_SHOW_LINES - head_count, 2)
+    if len(lines) <= max_lines:
+        return text
+    head_count = max(max_lines // 2, 2)
+    tail_count = max(max_lines - head_count, 2)
     keep: list[int] = []
     keep.extend(range(head_count))
     for index in range(head_count, len(lines) - tail_count):
@@ -742,9 +953,9 @@ def show(text):
             keep.append(index)
     keep.extend(range(len(lines) - tail_count, len(lines)))
     keep = sorted(set(keep))
-    if len(keep) > _MAX_SHOW_LINES:
+    if len(keep) > max_lines:
         important_mid = [index for index in keep if head_count <= index < len(lines) - tail_count]
-        budget = _MAX_SHOW_LINES - head_count - tail_count
+        budget = max_lines - head_count - tail_count
         important_mid = important_mid[:budget]
         keep = sorted(
             set(list(range(head_count)) + important_mid + list(range(len(lines) - tail_count, len(lines))))
@@ -756,9 +967,13 @@ def show(text):
             selected.append(f"... [{index - last - 1} lines hidden]")
         selected.append(lines[index])
         last = index
-    wrapped = _wrap_code_block("\n".join(selected))
-    wrapped += f"\n\n*[{len(lines)} lines total]*"
-    print_console(STDERR, _render_markdownish(wrapped))
+    return "\n".join(selected + [f"... [{len(lines)} lines total]"])
+
+
+def show(text):
+    if not text:
+        return
+    print_console(STDERR, _render_preview_text(_summarize_preview_lines(text), console=STDERR))
 
 def _rel(root, path):
     try:
@@ -1030,11 +1245,9 @@ __all__ = [
     "_print",
     "_rel",
     "_save_cfg",
-    "_show_and_clip",
     "_shim_name",
     "_sys_file",
     "_truncate_long_lines",
-    "_wrap_code_block",
     "active_system_prompt",
     "ask",
     "base_system_prompt",
@@ -1066,6 +1279,7 @@ __all__ = [
     "note_tool",
     "os",
     "preview",
+    "preview_language_for_path",
     "prompt_session",
     "re",
     "read_only_tool_registry",

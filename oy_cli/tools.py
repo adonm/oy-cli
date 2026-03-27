@@ -37,8 +37,6 @@ from .providers import (
 )
 
 
-from dataclasses import MISSING, fields, is_dataclass
-
 class ValidationError(ValueError):
     pass
 
@@ -56,10 +54,6 @@ _SUPPORTED_PARAM_KINDS = {
 }
 
 
-def _is_dataclass_type(type_: Any) -> bool:
-    return isinstance(type_, type) and is_dataclass(type_)
-
-
 def _field_types(type_: type, *, include_extras: bool = False) -> dict[str, Any]:
     return get_type_hints(type_, include_extras=include_extras)
 
@@ -71,8 +65,6 @@ def _unwrap_required(type_: Any) -> Any:
     return type_
 
 def _jsonable(value: Any) -> Any:
-    if is_dataclass(value):
-        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
@@ -150,34 +142,7 @@ def coerce(value: Any, type_: Any) -> Any:
                 raise ValidationError(f"Invalid field '{name}': {exc}") from exc
         return items
 
-    if _is_dataclass_type(type_):
-        if isinstance(value, type_):
-            return value
-        if not isinstance(value, dict):
-            raise ValidationError(f"Expected object for {type_.__name__}")
-        type_hints = _field_types(type_)
-        dataclass_fields = {field.name: field for field in fields(type_)}
-        extra = set(value) - set(dataclass_fields)
-        if extra:
-            names = ", ".join(sorted(map(str, extra)))
-            raise ValidationError(f"Unexpected fields: {names}")
-        kwargs: dict[str, Any] = {}
-        for field in dataclass_fields.values():
-            if not field.init:
-                if field.name in value and field.default is not MISSING and value[field.name] != field.default:
-                    raise ValidationError(
-                        f"Invalid field '{field.name}': expected {field.default!r}"
-                    )
-                continue
-            if field.name not in value:
-                if field.default is not MISSING or field.default_factory is not MISSING:
-                    continue
-                raise ValidationError(f"Missing required field '{field.name}'")
-            try:
-                kwargs[field.name] = coerce(value[field.name], type_hints[field.name])
-            except ValidationError as exc:
-                raise ValidationError(f"Invalid field '{field.name}': {exc}") from exc
-        return type_(**kwargs)
+
 
     if type_ is str:
         if not isinstance(value, str):
@@ -246,21 +211,6 @@ def json_schema(type_: Any) -> dict[str, Any]:
         }
         required_keys = getattr(type_, "__required_keys__", frozenset(type_hints))
         required = [name for name in type_hints if name in required_keys]
-        schema = {"type": "object", "properties": properties, "additionalProperties": False}
-        if required:
-            schema["required"] = required
-        return schema
-
-    if _is_dataclass_type(type_):
-        type_hints = _field_types(type_)
-        properties: dict[str, Any] = {}
-        required: list[str] = []
-        for field in fields(type_):
-            if not field.init:
-                continue
-            properties[field.name] = json_schema(type_hints[field.name])
-            if field.default is MISSING and field.default_factory is MISSING:
-                required.append(field.name)
         schema = {"type": "object", "properties": properties, "additionalProperties": False}
         if required:
             schema["required"] = required
@@ -519,6 +469,10 @@ def _render_selected_lines(lines: list[str], keep: set[int]) -> str:
     return "\n".join(selected)
 
 
+def _indented_preview_lines(text: str, *, indent: str = "  ") -> list[str]:
+    return [f"{indent}{line}" if line else indent for line in text.splitlines()] or [indent]
+
+
 def _parse_bash_json_output(stdout: str, stderr: str):
     if stderr.strip() or not stdout.strip():
         return None
@@ -617,13 +571,27 @@ def tool_ask(state: Any, question: str, choices: list[str] | None = None):
     ).strip()
 
 
+def _todo_line(item: dict[str, str]) -> str:
+    status_icons = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
+    todo_id = " ".join(str(item.get("id", "")).split())
+    task = " ".join(str(item.get("task", "")).split())
+    prefix = status_icons.get(item.get("status", "pending"), "[ ]")
+    return f"{prefix} {todo_id}: {task}" if task else f"{prefix} {todo_id}"
+
+
 def _format_todos(todos: list[dict[str, str]]) -> str:
     if not todos:
         return "<empty todo list>"
-    status_icons = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
-    return "\n".join(
-        f"{status_icons.get(item.get('status', 'pending'), '[ ]')} {item['id']}: {item['task']}" for item in todos
-    )
+    return "\n".join(_todo_line(item) for item in todos)
+
+
+def _todo_preview(todos: list[dict[str, str]]) -> str:
+    preview_lines = [f"count: {len(todos)}", "todos:"]
+    if not todos:
+        preview_lines.append("  <empty todo list>")
+        return "\n".join(preview_lines)
+    preview_lines.extend(f"  {_todo_line(item)}" for item in todos)
+    return "\n".join(preview_lines)
 
 
 @tool()
@@ -648,7 +616,7 @@ def tool_todo(state: Any, todos: list[TodoItemInput]):
         state["todos"].append({"id": todo_id, "task": task, "status": status})
     payload = {"items": list(state["todos"]), "count": len(state["todos"])}
     rt.note_tool(state, 'todo', _suffix=f'({len(state["todos"])} items)')
-    rt.show(serialize_toon(payload))
+    rt.show(_todo_preview(state["todos"]))
     return payload
 
 
@@ -664,12 +632,12 @@ def _merge_bash_streams(stdout: str, stderr: str) -> str:
     return ""
 
 
-def _bash_payload(command: str, result) -> dict[str, Any]:
+def _bash_payload(command: str, result) -> tuple[dict[str, Any], str]:
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     summarized_stdout, stdout_truncated = _summarize_text_output(stdout)
     summarized_stderr, stderr_truncated = _summarize_text_output(stderr)
-    return {
+    payload = {
         "command": command,
         "returncode": result.returncode,
         "stdout": summarized_stdout,
@@ -677,6 +645,16 @@ def _bash_payload(command: str, result) -> dict[str, Any]:
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
     }
+    preview_lines = [f"$ {command}", f"exit: {result.returncode}"]
+    if summarized_stdout:
+        preview_lines.append("stdout:")
+        preview_lines.extend(_indented_preview_lines(summarized_stdout))
+    if summarized_stderr:
+        preview_lines.append("stderr:")
+        preview_lines.extend(_indented_preview_lines(summarized_stderr))
+    if not summarized_stdout and not summarized_stderr:
+        preview_lines.append("<no output>")
+    return payload, "\n".join(preview_lines)
 
 
 @tool(mutating=True)
@@ -702,8 +680,8 @@ def tool_bash(state: Any, command: str, timeout_seconds: int = 120):
         env=env,
         timeout=timeout_seconds,
     )
-    payload = _bash_payload(command, result)
-    rt.show(serialize_toon(payload))
+    payload, preview = _bash_payload(command, result)
+    rt.show(preview)
     return payload
 
 
@@ -936,6 +914,7 @@ _STREAM_OPENERS = {
 _ARCHIVE_SUFFIXES = frozenset({".zip", ".tar"})
 _ARCHIVE_NAMES = (".tar", ".tgz", ".tar.gz")
 _DEFAULT_THREADS = min(32, (os.cpu_count() or 4))
+_DEFAULT_SLOC_TOP_FILES = 20
 
 def _ignore_spec(root: Path) -> pathspec.PathSpec:
     patterns = [".git/"]
@@ -994,15 +973,70 @@ def _streams(path: Path) -> Iterable[tuple[str, BinaryIO]]:
     opener = _STREAM_OPENERS.get(path.suffix, open)
     yield str(path), opener(path, "rb")
 
-def _search_file(path: Path, compiled: regex.Pattern) -> list[dict[str, Any]]:
+def _search_pattern(pattern: str, *, fuzzy: str | None = None) -> str:
+    if fuzzy is None:
+        return pattern
+    constraint = fuzzy.strip()
+    if constraint.startswith("{") and constraint.endswith("}"):
+        constraint = constraint[1:-1].strip()
+    if not constraint:
+        raise ValueError("fuzzy must not be empty")
+    return f"(?:{pattern}){{{constraint}}}"
+
+
+def _search_flags(*, best_match: bool = False, enhance_match: bool = False) -> regex.RegexFlag:
+    flags = regex.RegexFlag(0)
+    if best_match:
+        flags |= regex.BESTMATCH
+    if enhance_match:
+        flags |= regex.ENHANCEMATCH
+    return flags
+
+
+def _highlight_search_text(text: str, compiled: regex.Pattern) -> tuple[str, int]:
+    spans: list[tuple[int, int]] = []
+    for match in compiled.finditer(text):
+        start, end = match.span()
+        if spans and start <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], end))
+        else:
+            spans.append((start, end))
+    if not spans:
+        return text, 1
+    parts: list[str] = []
+    last = 0
+    for start, end in spans:
+        parts.append(text[last:start])
+        if start < end:
+            parts.append(f"{rt._SEARCH_HIGHLIGHT_OPEN}{text[start:end]}{rt._SEARCH_HIGHLIGHT_CLOSE}")
+        last = end
+    parts.append(text[last:])
+    return "".join(parts), spans[0][0] + 1
+
+
+def _search_file(
+    path: Path,
+    compiled_bytes: regex.Pattern,
+    compiled_text: regex.Pattern,
+) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for source, stream in _streams(path):
         try:
             with stream as handle:
                 for line_number, raw_line in enumerate(handle, 1):
-                    if compiled.search(raw_line):
-                        text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                        matches.append({"source": source, "line_number": line_number, "text": text})
+                    if not compiled_bytes.search(raw_line):
+                        continue
+                    text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    highlighted_text, column = _highlight_search_text(text, compiled_text)
+                    matches.append(
+                        {
+                            "source": source,
+                            "line_number": line_number,
+                            "column": column,
+                            "text": text,
+                            "preview_text": highlighted_text,
+                        }
+                    )
         except Exception as exc:
             matches.append({"source": source, "error": str(exc)})
     return matches
@@ -1011,6 +1045,9 @@ def search(
     target: str | Path,
     pattern: str,
     *,
+    fuzzy: str | None = None,
+    best_match: bool = False,
+    enhance_match: bool = False,
     threads: int | None = None,
     ignore_root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -1019,22 +1056,30 @@ def search(
         raise ValueError(f"Path not found: {target}")
     if not (path.is_dir() or path.is_file()):
         raise ValueError(f"Unsupported search target: {target}")
+    search_pattern = _search_pattern(pattern, fuzzy=fuzzy)
+    flags = _search_flags(best_match=best_match, enhance_match=enhance_match)
     try:
-        compiled = regex.compile(pattern.encode("utf-8"))
+        compiled_bytes = regex.compile(search_pattern.encode("utf-8"), flags)
+        compiled_text = regex.compile(search_pattern, flags)
     except regex.error as exc:
         raise ValueError(f"Invalid search pattern: {exc}") from exc
     files = _iter_files(path, ignore_root=ignore_root)
     if not files:
         return []
     worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
+    worker = partial(
+        _search_file,
+        compiled_bytes=compiled_bytes,
+        compiled_text=compiled_text,
+    )
     if worker_count == 1:
         results: list[dict[str, Any]] = []
         for file_path in files:
-            results.extend(_search_file(file_path, compiled))
+            results.extend(worker(file_path))
         return results
     results: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-        for batch in pool.map(partial(_search_file, compiled=compiled), files):
+        for batch in pool.map(worker, files):
             results.extend(batch)
     return results
 
@@ -1105,6 +1150,9 @@ def replace(
             )
         )
 
+type _SlocFileSummary = dict[str, str | int]
+
+
 def sloc(
     target: str | Path,
     *,
@@ -1120,6 +1168,7 @@ def sloc(
     duplicate_pool = DuplicatePool()
     state_counts: Counter[str] = Counter()
     errors: list[dict[str, str]] = []
+    file_summaries: list[_SlocFileSummary] = []
     group = path.name if path.is_dir() else (path.parent.name or ".")
 
     for file_path in _iter_files(path, ignore_root=ignore_root):
@@ -1135,6 +1184,17 @@ def sloc(
         )
         summary.add(analysis)
         if analysis.is_countable:
+            file_summaries.append(
+                {
+                    "path": str(file_path),
+                    "language": analysis.language,
+                    "code_count": analysis.code_count,
+                    "documentation_count": analysis.documentation_count,
+                    "empty_count": analysis.empty_count,
+                    "string_count": analysis.string_count,
+                    "line_count": analysis.line_count,
+                }
+            )
             continue
         state_counts[analysis.state.name] += 1
         if analysis.state.name == "error":
@@ -1155,6 +1215,13 @@ def sloc(
         ),
         key=lambda item: (-item["code_count"], -item["file_count"], item["language"].lower()),
     )
+    top_files = [
+        item
+        for item in sorted(
+            file_summaries,
+            key=lambda item: (-int(item["code_count"]), -int(item["line_count"]), str(item["path"]).lower()),
+        )
+    ]
     ordered_states = tuple(
         {"state": state, "file_count": file_count}
         for state, file_count in sorted(
@@ -1170,6 +1237,7 @@ def sloc(
         "total_string_count": summary.total_string_count,
         "total_line_count": summary.total_line_count,
         "languages": languages,
+        "top_files": top_files,
         "state_counts": list(ordered_states),
         "errors": errors,
     }
@@ -1245,17 +1313,26 @@ def tool_read(
     start = max(_positive_int(offset, "offset"), 1) - 1
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     shown = lines[start : start + _shown_line_limit(limit)]
+    text = "\n".join(shown)
     payload = {
         "path": path,
         "offset": offset,
         "limit": limit,
-        "text": "\n".join(
-            f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1)
-        ) or "<empty file>",
+        "text": text,
         "line_count": len(lines),
         "truncated": start + len(shown) < len(lines),
     }
-    rt.show(serialize_toon(payload))
+    end_line = start + len(shown)
+    if text:
+        language = rt.preview_language_for_path(path, text)
+        preview = {
+            "path": path,
+            "lines": f"{start + 1}-{end_line} of {len(lines)}",
+            f"text.{language}" if language != "text" else "text": text,
+        }
+        rt.show(serialize_toon(preview))
+    else:
+        rt.show(f"path: {path}\nlines: {start + 1}-{end_line} of {len(lines)}\n<empty file>")
     return payload
 
 def _search_summary(matches: int, shown: int, errors: int = 0) -> str:
@@ -1281,8 +1358,8 @@ def _search_preview_line(root: Path, match: dict[str, Any]) -> str:
     path_text = _search_display_path(root, match["source"])
     if match.get("error"):
         return f"[!] {path_text}: {match['error']}"
-    text = rt._truncate_long_lines(match["text"])
-    return f"{path_text}:{match['line_number']}:1:{text}"
+    text = rt._truncate_long_lines(match.get("preview_text") or match["text"])
+    return f"{path_text}:{match['line_number']}:{match.get('column', 1)}:{text}"
 
 def _optional_counts(**counts: int) -> dict[str, int]:
     return {
@@ -1297,6 +1374,9 @@ def _search_payload(
     path: str,
     results: list[dict[str, Any]],
     *,
+    fuzzy: str | None = None,
+    best_match: bool = False,
+    enhance_match: bool = False,
     limit: int,
 ) -> tuple[dict[str, Any], str, int, int, int]:
     matches = [match for match in results if not match.get("error")]
@@ -1311,13 +1391,24 @@ def _search_payload(
             {
                 "path": _search_display_path(root, match["source"]),
                 "line_number": match["line_number"],
-                "column": 1,
+                "column": match.get("column", 1),
                 "text": rt._truncate_long_lines(match["text"]),
             }
             for match in shown_matches
         ],
         "truncated": len(matches) > len(shown_matches),
     }
+    payload.update(
+        {
+            key: value
+            for key, value in {
+                "fuzzy": fuzzy,
+                "best_match": best_match or None,
+                "enhance_match": enhance_match or None,
+            }.items()
+            if value is not None
+        }
+    )
     payload.update(_optional_counts(error=len(errors)))
     if errors:
         payload["errors"] = [
@@ -1334,20 +1425,63 @@ def _search_payload(
         preview += f"\n... [{len(matches) - len(shown_matches)} more matches omitted]"
     return payload, preview, len(matches), len(shown_matches), len(errors)
 
-def _search_contents(root: Path, pattern: str, path: str, *, limit: int):
+def _search_contents(
+    root: Path,
+    pattern: str,
+    path: str,
+    *,
+    fuzzy: str | None = None,
+    best_match: bool = False,
+    enhance_match: bool = False,
+    limit: int,
+):
     target = rt.resolve_path(root, path)
     if not target.exists():
         raise ValueError(f"search path does not exist: {rt._rel(root, target)}")
-    results = search(target, pattern, ignore_root=root)
-    return _search_payload(root, pattern, path, results, limit=limit)
+    results = search(
+        target,
+        pattern,
+        fuzzy=fuzzy,
+        best_match=best_match,
+        enhance_match=enhance_match,
+        ignore_root=root,
+    )
+    return _search_payload(
+        root,
+        pattern,
+        path,
+        results,
+        fuzzy=fuzzy,
+        best_match=best_match,
+        enhance_match=enhance_match,
+        limit=limit,
+    )
 
 @tool()
 def tool_search(
-    state: Any, pattern: str, path: str = ".", limit: int = rt.BUDGETS["default_line_limit"]
+    state: Any,
+    pattern: str,
+    path: str = ".",
+    fuzzy: str | None = None,
+    best_match: bool = False,
+    enhance_match: bool = False,
+    limit: int = rt.BUDGETS["default_line_limit"],
 ):
-    defaults = {"path": ".", "limit": rt.BUDGETS["default_line_limit"]}
+    defaults = {
+        "path": ".",
+        "fuzzy": None,
+        "best_match": False,
+        "enhance_match": False,
+        "limit": rt.BUDGETS["default_line_limit"],
+    }
     payload, preview, matches, shown, errors = _search_contents(
-        state["root"], pattern, path, limit=limit
+        state["root"],
+        pattern,
+        path,
+        fuzzy=fuzzy,
+        best_match=best_match,
+        enhance_match=enhance_match,
+        limit=limit,
     )
     rt.note_tool(
         state,
@@ -1356,6 +1490,9 @@ def tool_search(
         _suffix=_search_summary(matches, shown, errors),
         pattern=pattern,
         path=path,
+        fuzzy=fuzzy,
+        best_match=best_match,
+        enhance_match=enhance_match,
         limit=limit,
     )
     rt.show(preview)
@@ -1384,10 +1521,12 @@ def _replace_summary(
 def _replace_preview_line(root: Path, result: dict[str, Any]) -> str:
     path_text = rt._rel(root, Path(result["source"]))
     if result.get("error"):
-        return f"[!] {path_text}: {result['error']}"
+        return f"[!] {path_text} — {result['error']}"
     if result.get("skipped"):
-        return f"[-] {path_text}: skipped ({result['skipped']})"
-    return f"{path_text}: {result.get('replacements', 0)} replacement(s)"
+        return f"skip: {path_text} — {result['skipped']}"
+    replacements = result.get("replacements", 0)
+    plural = "s" if replacements != 1 else ""
+    return f"change: {path_text} — {replacements} replacement{plural}"
 
 def _replace_payload(
     root: Path,
@@ -1430,16 +1569,26 @@ def _replace_payload(
             {"path": rt._rel(root, Path(result["source"])), "message": result["error"]}
             for result in errors[:shown_limit]
         ]
-    preview_lines = [_replace_preview_line(root, result) for result in shown_changed]
-    if skipped:
+    preview_lines = [
+        f"replace: /{pattern}/ -> {replacement!r}",
+        f"path: {path}",
+    ]
+    if shown_changed:
+        preview_lines.append("changed:")
         preview_lines.extend(
-            _replace_preview_line(root, result) for result in skipped[:shown_limit]
+            f"  {_replace_preview_line(root, result)}" for result in shown_changed
+        )
+    if skipped:
+        preview_lines.append("skipped:")
+        preview_lines.extend(
+            f"  {_replace_preview_line(root, result)}" for result in skipped[:shown_limit]
         )
     if errors:
+        preview_lines.append("errors:")
         preview_lines.extend(
-            _replace_preview_line(root, result) for result in errors[:shown_limit]
+            f"  {_replace_preview_line(root, result)}" for result in errors[:shown_limit]
         )
-    preview = "\n".join(preview_lines) if preview_lines else "<no changes>"
+    preview = "\n".join(preview_lines) if len(preview_lines) > 2 else "<no changes>"
     if len(changed) > len(shown_changed):
         preview += (
             f"\n... [{len(changed) - len(shown_changed)} more changed files omitted]"
@@ -1528,11 +1677,23 @@ def _sloc_state_preview_line(state_count: Any) -> str:
     file_plural = "s" if state_count["file_count"] != 1 else ""
     return f"other/{state_count['state']}: {state_count['file_count']} file{file_plural}"
 
+
+def _sloc_file_preview_line(file_summary: Any) -> str:
+    file_plural = "s" if file_summary["code_count"] != 1 else ""
+    return (
+        f"file: {file_summary['path']} — "
+        f"{file_summary['code_count']} code line{file_plural}, "
+        f"{file_summary['line_count']} total, "
+        f"{file_summary['language']}"
+    )
+
+
 def _sloc_payload(
     root: Path, path: str, report: dict[str, Any], *, limit: int
 ) -> tuple[dict[str, Any], str]:
     shown_limit = _shown_line_limit(limit)
     shown_languages = list(report["languages"][:shown_limit])
+    shown_top_files = list(report["top_files"][:_DEFAULT_SLOC_TOP_FILES])
     payload: dict[str, Any] = {
         "path": path,
         "total_file_count": report["total_file_count"],
@@ -1553,7 +1714,23 @@ def _sloc_payload(
             }
             for language in shown_languages
         ],
-        "truncated": len(report["languages"]) > len(shown_languages),
+        "top_file_count": len(report["top_files"]),
+        "top_files": [
+            {
+                "path": rt._rel(root, Path(file_summary["path"])),
+                "language": file_summary["language"],
+                "code_count": file_summary["code_count"],
+                "documentation_count": file_summary["documentation_count"],
+                "empty_count": file_summary["empty_count"],
+                "string_count": file_summary["string_count"],
+                "line_count": file_summary["line_count"],
+            }
+            for file_summary in shown_top_files
+        ],
+        "truncated": (
+            len(report["languages"]) > len(shown_languages)
+            or len(report["top_files"]) > len(shown_top_files)
+        ),
     }
     if report["state_counts"]:
         payload["state_counts"] = [
@@ -1577,6 +1754,13 @@ def _sloc_payload(
             f"... [{len(report['languages']) - len(shown_languages)} more languages omitted]"
         )
     preview_lines.extend(
+        _sloc_file_preview_line(file_summary) for file_summary in payload["top_files"]
+    )
+    if len(report["top_files"]) > len(shown_top_files):
+        preview_lines.append(
+            f"... [{len(report['top_files']) - len(shown_top_files)} more files omitted]"
+        )
+    preview_lines.extend(
         _sloc_state_preview_line(state_count) for state_count in report["state_counts"]
     )
     preview_lines.extend(
@@ -1584,6 +1768,7 @@ def _sloc_payload(
         for error in report["errors"][:shown_limit]
     )
     return payload, "\n".join(preview_lines)
+
 
 def _sloc_contents(root: Path, path: str, *, limit: int):
     target = rt.resolve_path(root, path)
@@ -1615,6 +1800,7 @@ __all__ = [
     "_bash_payload",
     "_collapse_repeated_lines",
     "_format_todos",
+    "_todo_preview",
     "_html_to_markdown",
     "_iter_files",
     "_parse_bash_json_output",
