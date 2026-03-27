@@ -40,13 +40,13 @@ repo_user_prompt = "Conduct a security and complexity audit of this repository."
 focus_suffix = " Additional focus: {focus}"
 
 [tools.list]
-description = "List paths with `pathlib.Path.glob()`. Defaults to `path: \"*\"`; use standard pathlib glob syntax. Returns sorted entries, one per line, with `/` for directories."
+description = "List paths with `pathlib.Path.glob()`. Defaults to `path: \"*\"`; use standard pathlib glob syntax. Returns `items`, `count`, and `truncated`; directories end with `/`."
 
 [tools.read]
-description = "Read a file or directory with `pathlib`. Files return line-numbered text; directories return sorted entries with `/` for directories. Use `offset` and `limit` for large files."
+description = "Read a file with `pathlib`. Returns line-numbered `text` plus `path`, `offset`, `limit`, `line_count`, and `truncated`. Use `offset` and `limit` for large files."
 
 [tools.bash]
-description = "Run a system subprocess with Python `subprocess`."
+description = "Run a system subprocess with Python `subprocess`. Returns `returncode`, summarized `stdout`/`stderr`, and truncation flags."
 
 [tools.search]
 description = "Search text with Python `regex`. Respects `.gitignore` via `pathspec`, scans common archives/compressed files, and returns `match_count`, `matches`, and optional `errors`."
@@ -61,7 +61,7 @@ description = "Count source lines with `pygount`. Respects `.gitignore` and retu
 description = "Ask the user in interactive runs. Use only for genuine ambiguity or irreversible user-facing choices; provide choices when useful."
 
 [tools.webfetch]
-description = "Fetch a public URL with `urllib.request`. Methods: GET/HEAD/OPTIONS. Returns `status_code`, `headers`, `content`, and `content_format`; may convert large HTML to markdown. Blocks localhost/private IPs. Params: `url`, optional `method`, `headers`, `follow_redirects`, `timeout_seconds`."
+description = "Fetch a public URL with `urllib.request`. Methods: GET/HEAD/OPTIONS. Returns response metadata plus summarized `text` for text responses, or `binary`/`content_bytes` for non-text responses. May convert large HTML to markdown. Blocks localhost/private IPs."
 
 [tools.todo]
-description = "Replace the in-memory todo list with `todos` (`{id, task, status}`; status: pending/in_progress/done). Use it to track multi-step work; the list persists across compaction."
+description = "Replace the in-memory todo list with `todos` (`{id, task, status}`; status: pending/in_progress/done). Returns `items` and `count`; the list persists across compaction."

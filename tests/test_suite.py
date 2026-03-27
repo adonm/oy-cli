@@ -80,6 +80,12 @@ def tool_handler(name: str, fn, *, mutating: bool = False):
     }
 
 
+def test_tool_specs_use_closed_object_schemas():
+    specs = {tool["name"]: tool for tool in tools.tool_specs()}
+    assert specs["todo"]["parameters"]["additionalProperties"] is False
+    assert specs["todo"]["parameters"]["properties"]["todos"]["items"]["additionalProperties"] is False
+
+
 class DummyHttpClient:
     def __init__(self, response=None, error=None, **kwargs):
         self.response = response
@@ -129,11 +135,11 @@ def test_adapt_response_and_webfetch_accept_response_objects(monkeypatch, tmp_pa
 
     assert created[0].kwargs == {"timeout": 9, "follow_redirects": True}
     assert created[0].called == ("GET", "https://example.com", {"Accept": "text/plain"})
-    assert payload["ok"] is True
     assert payload["status_code"] == 200
     assert payload["http_version"] == "HTTP/2"
     assert payload["headers"]["Content-Type"] == "text/plain"
-    assert payload["content"] == "hello world"
+    assert payload["text"] == "hello world"
+    assert payload["format"] == "text"
     assert any("hello world" in text for text in shown)
 
 
@@ -526,8 +532,8 @@ def test_ask_and_todo_tools_update_state_and_use_prompt_helpers(monkeypatch, tmp
         [{"id": "t1", "task": "ship it", "status": "in_progress"}],
     )
     assert state["todos"] == [{"id": "t1", "task": "ship it", "status": "in_progress"}]
-    assert rendered == "[~] t1: ship it"
-    assert shown[-1] == rendered
+    assert rendered == {"items": [{"id": "t1", "task": "ship it", "status": "in_progress"}], "count": 1}
+    assert "count: 1" in shown[-1]
     with pytest.raises(tools.ValidationError):
         tools.tool_todo(state, [{"id": "t2", "task": "bad", "status": "wat"}])
 
@@ -550,12 +556,13 @@ def test_bash_tool_summarizes_json_and_text(monkeypatch, tmp_path):
     json_payload = tools.tool_bash(state, command="echo json")
     text_payload = tools.tool_bash(state, command="echo text")
 
-    assert json_payload["content_format"] == "toon"
-    assert "ok" in json_payload["content"]
-    assert text_payload["content_format"] == "text"
-    assert text_payload["exit_code"] == 1
-    assert "[stderr]" in text_payload["content"]
-    assert any("$ echo json" in text or "$ echo text" in text for text in shown)
+    assert json_payload["returncode"] == 0
+    assert '"ok":true' in json_payload["stdout"]
+    assert json_payload["stderr"] == ""
+    assert text_payload["returncode"] == 1
+    assert text_payload["stdout"] == "line1\nline2"
+    assert text_payload["stderr"] == "boom"
+    assert any("returncode: 0" in text or "returncode: 1" in text for text in shown)
 
 
 def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monkeypatch):
@@ -572,10 +579,15 @@ def test_file_tools_cover_listing_reading_search_replace_and_sloc(tmp_path, monk
     monkeypatch.setattr(rt, "show", lambda *a, **k: None)
     monkeypatch.setattr(rt, "note_tool", lambda *a, **k: None)
 
-    assert "a.txt" in tools.tool_list(state, "*")
-    assert "dir/" in tools.tool_list(state, "*")
-    assert tools.tool_read(state, "a.txt", offset=2, limit=1) == "2: beta"
-    assert tools.tool_read(state, "dir") == "dir/b.py"
+    list_payload = tools.tool_list(state, "*")
+    assert "a.txt" in list_payload["items"]
+    assert "dir/" in list_payload["items"]
+    assert list_payload["count"] >= 2
+    read_payload = tools.tool_read(state, "a.txt", offset=2, limit=1)
+    assert read_payload["text"] == "2: beta"
+    assert read_payload["line_count"] == 2
+    with pytest.raises(ValueError):
+        tools.tool_read(state, "dir")
 
     search_payload = tools.tool_search(state, "alpha|print", ".", limit=20)
     found = {match["path"] for match in search_payload["matches"]}
@@ -633,22 +645,22 @@ def test_webfetch_validation_markdown_redaction_and_error_payloads(monkeypatch, 
     monkeypatch.setattr(rt, "http_client", lambda **kw: DummyHttpClient(response=response, **kw))
 
     payload = tools.tool_webfetch(state, url="https://example.com/page")
-    assert payload["content_format"] == "markdown"
-    assert "Title\n=====" in payload["content"]
+    assert payload["format"] == "markdown"
+    assert "Title\n=====" in payload["text"]
     assert payload["headers"]["Location"] == "<redacted>"
     assert payload["headers"]["Set-Cookie"] == "<redacted>"
 
     monkeypatch.setattr(
         rt,
         "http_client",
-        lambda **kw: DummyHttpClient(error=providers.APIConnectionError("boom"), **kw),
+        lambda **kw: DummyHttpClient(error=providers.TransportError("boom"), **kw),
     )
     error_payload = tools.tool_webfetch(state, url="https://example.com/page")
     assert error_payload == {
         "method": "GET",
         "url": "https://example.com/page",
         "ok": False,
-        "error_type": "APIConnectionError",
+        "error_type": "TransportError",
         "message": "boom",
     }
     assert any("boom" in text for text in shown)

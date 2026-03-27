@@ -15,7 +15,7 @@ from functools import partial
 import inspect
 from pathlib import Path
 import types
-from typing import Any, BinaryIO, Callable, Iterable, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
+from typing import Any, BinaryIO, Callable, Iterable, Literal, NotRequired, Required, TypedDict, Union, get_args, get_origin, get_type_hints, is_typeddict
 from urllib.parse import urlparse
 
 import pathspec
@@ -33,7 +33,6 @@ from .providers import (
     ToolResult,
     TransportError,
     adapt_response,
-    response_is_success,
     serialize_toon,
 )
 
@@ -247,7 +246,7 @@ def json_schema(type_: Any) -> dict[str, Any]:
         }
         required_keys = getattr(type_, "__required_keys__", frozenset(type_hints))
         required = [name for name in type_hints if name in required_keys]
-        schema = {"type": "object", "properties": properties}
+        schema = {"type": "object", "properties": properties, "additionalProperties": False}
         if required:
             schema["required"] = required
         return schema
@@ -262,7 +261,7 @@ def json_schema(type_: Any) -> dict[str, Any]:
             properties[field.name] = json_schema(type_hints[field.name])
             if field.default is MISSING and field.default_factory is MISSING:
                 required.append(field.name)
-        schema = {"type": "object", "properties": properties}
+        schema = {"type": "object", "properties": properties, "additionalProperties": False}
         if required:
             schema["required"] = required
         return schema
@@ -328,7 +327,7 @@ def signature_schema(
         else:
             schema = {**schema, "default": _jsonable(parameter.default)}
         properties[parameter.name] = schema
-    result = {"type": "object", "properties": properties}
+    result = {"type": "object", "properties": properties, "additionalProperties": False}
     if required:
         result["required"] = required
     return result
@@ -336,6 +335,12 @@ def signature_schema(
 
 _TODO_STATUSES = ("pending", "in_progress", "done")
 _TODO_ITEM_KEYS = frozenset({"id", "task", "status"})
+
+
+class TodoItemInput(TypedDict, total=False):
+    id: Required[str]
+    task: Required[str]
+    status: NotRequired[Literal["pending", "in_progress", "done"]]
 
 
 def _tool_name(name: str) -> str:
@@ -622,7 +627,7 @@ def _format_todos(todos: list[dict[str, str]]) -> str:
 
 
 @tool()
-def tool_todo(state: Any, todos: list[dict[str, Any]]):
+def tool_todo(state: Any, todos: list[TodoItemInput]):
     state["todos"] = []
     for item in todos:
         if not isinstance(item, dict):
@@ -641,10 +646,10 @@ def tool_todo(state: Any, todos: list[dict[str, Any]]):
         if status not in _TODO_STATUSES:
             raise ValidationError(f"Invalid enum value {status!r}")
         state["todos"].append({"id": todo_id, "task": task, "status": status})
-    result = _format_todos(state["todos"])
+    payload = {"items": list(state["todos"]), "count": len(state["todos"])}
     rt.note_tool(state, 'todo', _suffix=f'({len(state["todos"])} items)')
-    rt.show(result)
-    return result
+    rt.show(serialize_toon(payload))
+    return payload
 
 
 def _merge_bash_streams(stdout: str, stderr: str) -> str:
@@ -660,38 +665,18 @@ def _merge_bash_streams(stdout: str, stderr: str) -> str:
 
 
 def _bash_payload(command: str, result) -> dict[str, Any]:
-    parsed = _parse_bash_json_output(result.stdout, result.stderr)
-    if parsed is not None:
-        content, truncated, content_format = _summarize_json_output(parsed)
-    else:
-        content, truncated = _summarize_text_output(
-            _merge_bash_streams(result.stdout, result.stderr)
-        )
-        content_format = "text"
-    return _tool_content_payload(
-        command=command,
-        exit_code=result.returncode,
-        ok=result.returncode == 0,
-        content=content,
-        content_format=content_format,
-        truncated=truncated,
-    )
-
-
-def _render_bash_preview(command: str, result, payload: dict[str, Any]) -> str:
-    if payload.get("content_format") != "toon":
-        return rt._fmt("bash", command, (result.stdout, result.returncode, result.stderr))
-
-    toon_text = payload.get("content") or result.stdout
-    blocks = [
-        rt._fmt("block", f"$ {command}", "bash"),
-        rt._fmt("block", toon_text, "text"),
-    ]
-    if result.returncode:
-        blocks.append(rt._fmt("status", f"exit {result.returncode}"))
-    if result.stderr.strip():
-        blocks.extend(["**stderr**", rt._fmt("block", result.stderr.rstrip(), "text")])
-    return "\n\n".join(blocks)
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    summarized_stdout, stdout_truncated = _summarize_text_output(stdout)
+    summarized_stderr, stderr_truncated = _summarize_text_output(stderr)
+    return {
+        "command": command,
+        "returncode": result.returncode,
+        "stdout": summarized_stdout,
+        "stderr": summarized_stderr,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    }
 
 
 @tool(mutating=True)
@@ -718,7 +703,7 @@ def tool_bash(state: Any, command: str, timeout_seconds: int = 120):
         timeout=timeout_seconds,
     )
     payload = _bash_payload(command, result)
-    rt.show(_render_bash_preview(command, result, payload))
+    rt.show(serialize_toon(payload))
     return payload
 
 
@@ -768,6 +753,24 @@ _WEBFETCH_REDACTED_RESPONSE_HEADERS = frozenset(
     {"set-cookie", "www-authenticate", "proxy-authenticate", "location"}
 )
 _WEBFETCH_HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+
+
+def _webfetch_is_text_response(response: ResponseAdapter) -> bool:
+    content_type = response["headers"].get("content-type", "").split(";", 1)[0].strip().lower()
+    return (
+        not content_type
+        or content_type.startswith("text/")
+        or content_type in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/x-javascript",
+            "application/x-www-form-urlencoded",
+            "image/svg+xml",
+        }
+        or content_type.endswith("+json")
+        or content_type.endswith("+xml")
+    )
 
 
 def _sanitize_webfetch_headers(headers: dict[str, str] | None) -> dict[str, str]:
@@ -830,32 +833,31 @@ def _webfetch_response_headers(response: ResponseAdapter) -> dict[str, str]:
     }
 
 
-def _webfetch_structured_text(payload: dict[str, Any]) -> str:
-    return serialize_toon(payload)
-
-
-
 
 def _webfetch_payload(
     response: ResponseAdapter,
     *,
     method: str,
-    text: str,
-    truncated: bool,
+    text: str | None = None,
+    truncated: bool | None = None,
     content_format: str = "text",
 ) -> dict[str, Any]:
-    return _tool_content_payload(
-        method=method,
-        url=str(response["url"]),
-        ok=response_is_success(response),
-        status_code=response["status_code"],
-        reason_phrase=response["reason_phrase"],
-        http_version=response["http_version"] or "HTTP/1.1",
-        headers=_webfetch_response_headers(response),
-        content=text,
-        content_format=content_format,
-        truncated=truncated,
-    )
+    payload = {
+        "method": method,
+        "url": str(response["url"]),
+        "status_code": response["status_code"],
+        "reason_phrase": response["reason_phrase"],
+        "http_version": response["http_version"] or "HTTP/1.1",
+        "headers": _webfetch_response_headers(response),
+    }
+    if text is None:
+        payload["binary"] = True
+        payload["content_bytes"] = len(response["content"])
+        return payload
+    payload["text"] = text
+    payload["format"] = content_format
+    payload["truncated"] = bool(truncated)
+    return payload
 
 
 def _webfetch_error_payload(
@@ -909,17 +911,20 @@ def tool_webfetch(
             response = adapt_response(client.request(method, url, headers=headers))
     except (HTTPError, TransportError) as exc:
         payload = _webfetch_error_payload(url, method=method, exc=exc)
-        rt.show(f"[!] {type(exc).__name__}: {exc}")
+        rt.show(serialize_toon(payload))
         return payload
-    text, truncated, content_format = _webfetch_summarize_response_body(response)
-    payload = _webfetch_payload(
-        response,
-        method=method,
-        text=text,
-        truncated=truncated,
-        content_format=content_format,
-    )
-    rt.show(_webfetch_structured_text(payload))
+    if _webfetch_is_text_response(response):
+        text, truncated, content_format = _webfetch_summarize_response_body(response)
+        payload = _webfetch_payload(
+            response,
+            method=method,
+            text=text,
+            truncated=truncated,
+            content_format=content_format,
+        )
+    else:
+        payload = _webfetch_payload(response, method=method)
+    rt.show(serialize_toon(payload))
     return payload
 
 _STREAM_OPENERS = {
@@ -1207,8 +1212,18 @@ def tool_list(state: Any, path: str = "*", limit: int = rt.BUDGETS["default_line
         path=path,
         limit=limit,
     )
-    text = _path_listing(_glob_paths(state["root"], path), state["root"], limit=limit)
-    return rt._show_and_clip(text)
+    matches = _glob_paths(state["root"], path)
+    payload = {
+        "path": path,
+        "items": [
+            rt._rel(state["root"], item) + ("/" if item.is_dir() else "")
+            for item in matches[: _shown_line_limit(limit)]
+        ],
+        "count": len(matches),
+        "truncated": len(matches) > _shown_line_limit(limit),
+    }
+    rt.show(serialize_toon(payload))
+    return payload
 
 @tool()
 def tool_read(
@@ -1226,20 +1241,22 @@ def tool_read(
     if not target.exists():
         raise ValueError(f"read path does not exist: {rt._rel(state['root'], target)}")
     if target.is_dir():
-        text = _path_listing(
-            sorted(target.iterdir(), key=lambda item: item.as_posix()),
-            state["root"],
-            limit=limit,
-            empty="<empty directory>",
-        )
-        return rt._show_and_clip(text)
+        raise ValueError(f"read path is a directory: {rt._rel(state['root'], target)}")
     start = max(_positive_int(offset, "offset"), 1) - 1
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     shown = lines[start : start + _shown_line_limit(limit)]
-    text = "\n".join(
-        f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1)
-    )
-    return rt._show_and_clip(text or "<empty file>")
+    payload = {
+        "path": path,
+        "offset": offset,
+        "limit": limit,
+        "text": "\n".join(
+            f"{lineno}: {line}" for lineno, line in enumerate(shown, start + 1)
+        ) or "<empty file>",
+        "line_count": len(lines),
+        "truncated": start + len(shown) < len(lines),
+    }
+    rt.show(serialize_toon(payload))
+    return payload
 
 def _search_summary(matches: int, shown: int, errors: int = 0) -> str:
     if not matches and not errors:
@@ -1602,7 +1619,6 @@ __all__ = [
     "_iter_files",
     "_parse_bash_json_output",
     "_positive_int",
-    "_render_bash_preview",
     "_render_selected_lines",
     "_shown_line_limit",
     "_summarize_json_output",
@@ -1611,7 +1627,6 @@ __all__ = [
     "_validate_url_safe",
     "_webfetch_payload",
     "_webfetch_response_headers",
-    "_webfetch_structured_text",
     "replace",
     "search",
     "sloc",
