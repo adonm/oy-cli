@@ -33,7 +33,7 @@ def make_state(
     return agent.agent_state(
         root=root,
         tool_registry=tools.TOOL_REGISTRY if registry is None else registry,
-        unattended_timeout_seconds=3600,
+        unattended_limit_seconds=3600,
         unattended_deadline=float("inf"),
         interactive=interactive,
         approve_all_mutating_tools=yolo,

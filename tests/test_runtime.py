@@ -42,6 +42,21 @@ class TestModelConfig:
         assert set(rt.read_only_tool_registry()) == rt._READ_ONLY_TOOLS
 
 
+class TestDurationEnvHelpers:
+    def test_unattended_limit_prefers_new_name(self, monkeypatch):
+        monkeypatch.setenv("OY_UNATTENDED_LIMIT", "30m")
+        assert rt.unattended_limit_seconds() == 1800
+
+    def test_unattended_limit_rejects_invalid_value(self, monkeypatch):
+        monkeypatch.setenv("OY_UNATTENDED_LIMIT", "bad")
+        with pytest.raises(SystemExit):
+            rt.unattended_limit_seconds()
+
+    def test_unattended_limit_default_is_one_hour(self, monkeypatch):
+        monkeypatch.delenv("OY_UNATTENDED_LIMIT", raising=False)
+        assert rt.unattended_limit_seconds() == rt.DEFAULT_UNATTENDED_LIMIT_SECONDS
+
+
 class TestDisplayHelpers:
     def test_render_search_preview_text_uses_text_color(self):
         rendered = rt._render_search_preview_text("pre ⟦match⟧ post")
