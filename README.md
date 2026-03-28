@@ -32,6 +32,7 @@ oy audit "focus on authentication"
 oy "prompt"              # Run with a prompt (default)
 oy chat                   # Interactive multi-turn session
 oy audit                  # Security audit against OWASP ASVS/MASVS
+oy ralph "prompt"         # Re-run a prompt in yolo mode every minute until OY_RALPH_LIMIT (default: 3h)
 oy model                  # Show current model, pick model from available endpoints
 oy --help                 # Show all commands
 ```
@@ -68,6 +69,8 @@ Code that reads and composes this content now lives mainly in [`oy_cli/runtime.p
 | `OY_MODEL` | Override model for this session (bare name or `shim:model`) |
 | `OY_SHIM` | Force a specific shim: `openai`, `codex`, `copilot`, `opencode`, `opencode-go`, or `bedrock-mantle` |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable approval/checkpoint pauses |
+| `OY_UNATTENDED_LIMIT` | Agent turn deadline window, like `1h`, `30m`, or `3600s` |
+| `OY_RALPH_LIMIT` | Ralph deadline window, like `3h`, `90m`, or `3600s` |
 | `OY_ROOT` | Run against different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |

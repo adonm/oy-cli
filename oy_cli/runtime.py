@@ -650,7 +650,7 @@ def _env(name, default, t=None):
 
 MAX_BASH_CMD_BYTES = _env("MAX_BASH_CMD_BYTES", 65536)
 MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
-DEFAULT_UNATTENDED_TIMEOUT_SECONDS = _env("UNATTENDED_TIMEOUT_SECONDS", 3600)
+DEFAULT_UNATTENDED_LIMIT_SECONDS = 3600
 CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
 
 type RuntimeBudgets = dict[str, int]
@@ -925,6 +925,47 @@ def _format_duration(seconds: int) -> str:
     if seconds % 60 == 0:
         return f"{seconds // 60}m"
     return f"{seconds}s"
+
+
+def parse_duration_seconds(value: str, *, name: str = "duration") -> int:
+    text = value.strip().lower()
+    if not text:
+        abort(f"Invalid {name}={value!r}. Use a positive duration like 3h, 90m, or 3600s.")
+    if text.isdigit():
+        seconds = int(text)
+    else:
+        match = re.fullmatch(r"([0-9]+)([hms])", text)
+        if not match:
+            abort(f"Invalid {name}={value!r}. Use a positive duration like 3h, 90m, or 3600s.")
+        amount = int(match.group(1))
+        unit = match.group(2)
+        seconds = amount * {"h": 3600, "m": 60, "s": 1}[unit]
+    if seconds <= 0:
+        abort(f"Invalid {name}={value!r}. Duration must be positive.")
+    return seconds
+
+
+def _duration_env_seconds(*names: str, default: int) -> int:
+    values = [(name, os.environ.get(name)) for name in names]
+    configured = [(name, value) for name, value in values if value is not None]
+    if not configured:
+        return default
+    if len(configured) > 1:
+        rendered = ", ".join(f"{name}={value!r}" for name, value in configured)
+        abort(f"Conflicting duration env vars: {rendered}. Set only one.")
+    name, value = configured[0]
+    return parse_duration_seconds(value, name=name)
+
+
+def unattended_limit_seconds(default: int = DEFAULT_UNATTENDED_LIMIT_SECONDS) -> int:
+    return _duration_env_seconds(
+        "OY_UNATTENDED_LIMIT",
+        default=default,
+    )
+
+
+def ralph_limit_seconds(default: int = 3 * 3600) -> int:
+    return _duration_env_seconds("OY_RALPH_LIMIT", default=default)
 
 _MAX_PREVIEW_LINES = 20
 _MAX_LINE_WIDTH = 512
@@ -1213,7 +1254,7 @@ __all__ = [
     "INTERACTIVE_SYSTEM_PROMPT",
     "NONINTERACTIVE_SYSTEM_PROMPT",
     "CONFIG_PATH",
-    "DEFAULT_UNATTENDED_TIMEOUT_SECONDS",
+    "DEFAULT_UNATTENDED_LIMIT_SECONDS",
     "MAX_BASH_CMD_BYTES",
     "MAX_CONTEXT_TOKENS",
     "STDERR",
@@ -1232,11 +1273,15 @@ __all__ = [
     "_debug_log_path",
     "_debug_logger",
     "_derive_runtime_budgets",
+    "_duration_env_seconds",
     "_ensure_private_dir",
     "_flag",
     "_fmt",
     "_format_duration",
     "_init_debug_log",
+    "parse_duration_seconds",
+    "ralph_limit_seconds",
+    "unattended_limit_seconds",
     "_load_cfg",
     "_model",
     "_msg_to_dict",

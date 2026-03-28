@@ -159,7 +159,7 @@ def audit(focus: str = ""):
             session['model'],
             session['workspace'],
             session['system_prompt'],
-            rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+            rt.unattended_limit_seconds(),
             interactive=False,
     )
     return code
@@ -374,7 +374,7 @@ def _handle_ask(question, current_model, session, transcript):
     state = new_agent_state(
         root=session['workspace'],
         tool_registry=read_only_registry,
-        unattended_timeout_seconds=rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+        unattended_limit_seconds=rt.unattended_limit_seconds(),
         interactive=session['interactive'],
     )
     add_user(ask_transcript, question)
@@ -407,7 +407,7 @@ def _handle_audit(focus, current_model, session):
                 current_model,
                 session['workspace'],
                 AUDIT_SYSTEM_PROMPT,
-                rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+                rt.unattended_limit_seconds(),
                 interactive=False,
                 transcript=audit_transcript,
         )
@@ -563,7 +563,7 @@ def chat(*, yolo: bool = False):
                     current_model,
                     session['workspace'],
                     session['system_prompt'],
-                    rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+                    rt.unattended_limit_seconds(),
                     session['interactive'],
                     yolo=session['yolo'],
                     transcript=transcript,
@@ -610,9 +610,69 @@ def run(*task: str):
             session['model'],
             session['workspace'],
             session['system_prompt'],
-            rt.DEFAULT_UNATTENDED_TIMEOUT_SECONDS,
+            rt.unattended_limit_seconds(),
             session['interactive'],
     )[0]
+
+def ralph(*task: str):
+    """Run a task in yolo mode every minute until the configured deadline.
+
+    Controlled by `OY_RALPH_LIMIT` (default: `3h`).
+
+    :param task: Task text. If omitted, read from stdin.
+    """
+    task_text = (
+        " ".join(task)
+        if task
+        else (sys.stdin.read().strip() if not rt.has_tty_stdin() else "")
+    )
+    if not task_text:
+        rt._print(
+            value="Usage: `oy ralph <prompt>` — or pipe prompt text on stdin.",
+            err=True,
+        )
+        return 1
+
+    session = resolve_session(interactive=False)
+    session['yolo'] = True
+    delay_seconds = 60
+    limit_seconds = rt.ralph_limit_seconds()
+    deadline = time.monotonic() + limit_seconds
+    _print_session_intro(
+        "Ralph",
+        session,
+        prompt=rt.preview(task_text, 100),
+        schedule=f"until {rt._format_duration(limit_seconds)} deadline, {rt._format_duration(delay_seconds)} delay",
+    )
+
+    exit_code = 0
+    run_number = 0
+    while True:
+        now = time.monotonic()
+        if run_number > 0 and now >= deadline:
+            break
+        run_number += 1
+        remaining = max(int(deadline - now), 0)
+        rt._note(
+            f"ralph run {run_number} (~{rt._format_duration(remaining)} remaining)",
+            tag="note",
+        )
+        code, _ = run_agent(
+                task_text,
+                session['model'],
+                session['workspace'],
+                session['system_prompt'],
+                rt.unattended_limit_seconds(),
+                session['interactive'],
+                yolo=True,
+        )
+        if code != 0:
+            exit_code = code
+        sleep_seconds = deadline - time.monotonic()
+        if sleep_seconds <= 0:
+            break
+        time.sleep(min(delay_seconds, sleep_seconds))
+    return exit_code
 
 def _current_model_text(model_spec: str) -> str:
     shim = rt.resolve_active_shim(model_spec)
@@ -701,7 +761,7 @@ def main(argv: list[str] | None = None):
     """
     args = list(sys.argv[1:] if argv is None else argv)
 
-    commands = {"run", "chat", "model", "audit", "-h", "--help"}
+    commands = {"run", "chat", "ralph", "model", "audit", "-h", "--help"}
     if not args:
         args = ["run"] if not rt.stdin_is_interactive() else ["--help"]
     elif args[0] in {"-v", "--version"}:
@@ -710,7 +770,7 @@ def main(argv: list[str] | None = None):
     elif not args[0].startswith("-") and args[0] not in commands:
         args = ["run", *args]
     result = defopt.run(
-        [run, chat, model, audit],
+        [run, chat, ralph, model, audit],
         argv=args,
         version=rt.__version__,
         short={},
@@ -722,6 +782,7 @@ def main(argv: list[str] | None = None):
   oy "fix the failing tests"
   oy chat
   oy chat --yolo
+  oy ralph "fix the flaky test"
   oy audit auth
   oy model gpt-5""",
             "formatter_class": argparse.RawDescriptionHelpFormatter,
@@ -751,6 +812,7 @@ __all__ = [
     "main",
     "model",
     "load_system_prompt",
+    "ralph",
     "resolve_model_choice",
     "run",
 ]

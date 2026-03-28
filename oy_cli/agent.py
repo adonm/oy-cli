@@ -31,7 +31,7 @@ def agent_state(
     *,
     root: rt.Path,
     tool_registry: dict[str, dict[str, Any]],
-    unattended_timeout_seconds: int,
+    unattended_limit_seconds: int,
     unattended_deadline: float,
     interactive: bool = False,
     approve_all_mutating_tools: bool = False,
@@ -41,7 +41,7 @@ def agent_state(
     return {
         "root": root,
         "tool_registry": tool_registry,
-        "unattended_timeout_seconds": unattended_timeout_seconds,
+        "unattended_limit_seconds": unattended_limit_seconds,
         "unattended_deadline": unattended_deadline,
         "interactive": interactive,
         "approve_all_mutating_tools": approve_all_mutating_tools,
@@ -54,15 +54,15 @@ def new_agent_state(
     *,
     root: rt.Path,
     tool_registry: dict[str, dict[str, Any]],
-    unattended_timeout_seconds: int,
+    unattended_limit_seconds: int,
     interactive: bool = False,
     yolo: bool = False,
 ) -> AgentState:
     return agent_state(
         root=root,
         tool_registry=tool_registry,
-        unattended_timeout_seconds=unattended_timeout_seconds,
-        unattended_deadline=time.monotonic() + unattended_timeout_seconds,
+        unattended_limit_seconds=unattended_limit_seconds,
+        unattended_deadline=time.monotonic() + unattended_limit_seconds,
         interactive=interactive,
         yolo=yolo,
         approve_all_mutating_tools=yolo,
@@ -77,7 +77,7 @@ def note_progress(state: AgentState) -> None:
     if remaining_unattended_seconds(state) <= 0:
         raise TimeoutError(
             "reached unattended timeout "
-            f"({rt._format_duration(state['unattended_timeout_seconds'])}) without a final response"
+            f"({rt._format_duration(state['unattended_limit_seconds'])}) without a final response"
         )
 
 
@@ -359,7 +359,7 @@ def run_turn(
             if remaining_unattended_seconds(state) <= 0:
                 raise TimeoutError(
                     "reached unattended timeout "
-                    f"({rt._format_duration(state['unattended_timeout_seconds'])}) without a final response"
+                    f"({rt._format_duration(state['unattended_limit_seconds'])}) without a final response"
                 )
             started = time.monotonic()
             message = client["chat_completion"](
@@ -372,7 +372,7 @@ def run_turn(
             if time.monotonic() - started > remaining_unattended_seconds(state):
                 raise TimeoutError(
                     "reached unattended timeout "
-                    f"({rt._format_duration(state['unattended_timeout_seconds'])}) without a final response"
+                    f"({rt._format_duration(state['unattended_limit_seconds'])}) without a final response"
                 )
         finally:
             stop_wait(spinner)
@@ -409,19 +409,19 @@ def run_agent(
     model,
     root,
     system_prompt,
-    unattended_timeout_seconds,
+    unattended_limit_seconds,
     interactive,
     yolo: bool = False,
     transcript: Transcript | None = None,
 ):
     tool_registry = active_tool_registry(interactive)
-    unattended_timeout_seconds = _positive_int(
-        unattended_timeout_seconds, "unattended_timeout_seconds"
+    unattended_limit_seconds = _positive_int(
+        unattended_limit_seconds, "unattended_limit_seconds"
     )
     state = new_agent_state(
         root=root,
         tool_registry=tool_registry,
-        unattended_timeout_seconds=unattended_timeout_seconds,
+        unattended_limit_seconds=unattended_limit_seconds,
         interactive=interactive,
         yolo=yolo,
     )
