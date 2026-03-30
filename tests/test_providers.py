@@ -12,6 +12,12 @@ from oy_cli.providers import AssistantMessage, ToolCall, ToolMessage, ToolResult
 from tests.conftest import api_error, raw_response
 
 
+class TestJSONHelpers:
+    def test_normalize_jsonlike_converts_pathlike(self, tmp_path):
+        path = tmp_path / "demo.txt"
+        assert providers.normalize_jsonlike({"path": path}) == {"path": str(path)}
+
+
 class TestHTTPClient:
     def test_adapt_response_accepts_response_objects(self):
         response = raw_response()
@@ -227,19 +233,16 @@ class TestShimRegistry:
 
         specs = {
             "alpha": {
-                "name": "alpha",
                 "ensure_env": ok("alpha"),
                 "build_client": lambda cwd: sentinel,
                 "list_models": lambda cwd: ["demo"],
             },
             "beta": {
-                "name": "beta",
                 "ensure_env": fail("beta"),
                 "build_client": lambda cwd: None,
                 "list_models": lambda cwd: [],
             },
             "gamma": {
-                "name": "gamma",
                 "ensure_env": ok("gamma"),
                 "build_client": lambda cwd: None,
                 "list_models": lambda cwd: [],
@@ -262,7 +265,6 @@ class TestShimRegistry:
 
         specs = {
             "gamma": {
-                "name": "gamma",
                 "ensure_env": lambda cwd: calls.append(cwd),
                 "build_client": lambda cwd: None,
                 "list_models": lambda cwd: (_ for _ in ()).throw(RuntimeError("boom")),

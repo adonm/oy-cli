@@ -5,7 +5,6 @@ from collections import Counter
 import concurrent.futures
 import gzip
 import ipaddress
-import json
 import lzma
 import os
 import socket
@@ -15,7 +14,21 @@ from functools import partial
 import inspect
 from pathlib import Path
 import types
-from typing import Any, BinaryIO, Callable, Iterable, Literal, NotRequired, Required, TypedDict, Union, get_args, get_origin, get_type_hints, is_typeddict
+from typing import (
+    Any,
+    BinaryIO,
+    Callable,
+    Iterable,
+    Literal,
+    NotRequired,
+    Required,
+    TypedDict,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    is_typeddict,
+)
 from urllib3.util import parse_url
 
 import pathspec
@@ -33,6 +46,7 @@ from .providers import (
     ToolResult,
     TransportError,
     adapt_response,
+    normalize_jsonlike,
     serialize_toon,
 )
 
@@ -52,6 +66,20 @@ _SUPPORTED_PARAM_KINDS = {
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
     inspect.Parameter.KEYWORD_ONLY,
 }
+_DEFAULT_LINE_LIMIT = rt.BUDGETS["default_line_limit"]
+_LIST_DEFAULTS = {"path": "*", "exclude": None, "limit": _DEFAULT_LINE_LIMIT}
+_PATH_EXCLUDE_LIMIT_DEFAULTS = {
+    "path": ".",
+    "exclude": None,
+    "limit": _DEFAULT_LINE_LIMIT,
+}
+_READ_DEFAULTS = {"offset": 1, "limit": _DEFAULT_LINE_LIMIT}
+_SEARCH_DEFAULTS = {
+    **_PATH_EXCLUDE_LIMIT_DEFAULTS,
+    "fuzzy": None,
+    "best_match": False,
+    "enhance_match": False,
+}
 
 
 def _field_types(type_: type, *, include_extras: bool = False) -> dict[str, Any]:
@@ -64,14 +92,6 @@ def _unwrap_required(type_: Any) -> Any:
         return get_args(type_)[0]
     return type_
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, Path):
-        return str(value)
-    return value
 
 def coerce(value: Any, type_: Any) -> Any:
     type_ = _unwrap_required(type_)
@@ -124,7 +144,10 @@ def coerce(value: Any, type_: Any) -> Any:
         if not isinstance(value, dict):
             raise ValidationError(f"Expected object for {type_.__name__}")
         type_hints = _field_types(type_, include_extras=True)
-        fields_by_name = {name: _unwrap_required(annotation) for name, annotation in type_hints.items()}
+        fields_by_name = {
+            name: _unwrap_required(annotation)
+            for name, annotation in type_hints.items()
+        }
         extra = set(value) - set(fields_by_name)
         if extra:
             names = ", ".join(sorted(map(str, extra)))
@@ -141,8 +164,6 @@ def coerce(value: Any, type_: Any) -> Any:
             except ValidationError as exc:
                 raise ValidationError(f"Invalid field '{name}': {exc}") from exc
         return items
-
-
 
     if type_ is str:
         if not isinstance(value, str):
@@ -162,7 +183,6 @@ def coerce(value: Any, type_: Any) -> Any:
         return value
 
     return value
-
 
 
 def json_schema(type_: Any) -> dict[str, Any]:
@@ -211,7 +231,11 @@ def json_schema(type_: Any) -> dict[str, Any]:
         }
         required_keys = getattr(type_, "__required_keys__", frozenset(type_hints))
         required = [name for name in type_hints if name in required_keys]
-        schema = {"type": "object", "properties": properties, "additionalProperties": False}
+        schema = {
+            "type": "object",
+            "properties": properties,
+            "additionalProperties": False,
+        }
         if required:
             schema["required"] = required
         return schema
@@ -225,9 +249,11 @@ def json_schema(type_: Any) -> dict[str, Any]:
     return {}
 
 
-
 def coerce_arguments(
-    fn: Callable[..., Any], args: dict[str, Any] | None, *, skip: set[str] | frozenset[str]
+    fn: Callable[..., Any],
+    args: dict[str, Any] | None,
+    *,
+    skip: set[str] | frozenset[str],
 ) -> dict[str, Any]:
     if args is None:
         args = {}
@@ -252,13 +278,14 @@ def coerce_arguments(
             try:
                 kwargs[parameter.name] = coerce(args[parameter.name], annotation)
             except ValidationError as exc:
-                raise ValidationError(f"Invalid field '{parameter.name}': {exc}") from exc
+                raise ValidationError(
+                    f"Invalid field '{parameter.name}': {exc}"
+                ) from exc
             continue
         if parameter.default is inspect.Signature.empty:
             raise ValidationError(f"Missing required field '{parameter.name}'")
         kwargs[parameter.name] = parameter.default
     return kwargs
-
 
 
 def signature_schema(
@@ -275,16 +302,12 @@ def signature_schema(
         if parameter.default is inspect.Signature.empty:
             required.append(parameter.name)
         else:
-            schema = {**schema, "default": _jsonable(parameter.default)}
+            schema = {**schema, "default": normalize_jsonlike(parameter.default)}
         properties[parameter.name] = schema
     result = {"type": "object", "properties": properties, "additionalProperties": False}
     if required:
         result["required"] = required
     return result
-
-
-_TODO_STATUSES = ("pending", "in_progress", "done")
-_TODO_ITEM_KEYS = frozenset({"id", "task", "status"})
 
 
 class TodoItemInput(TypedDict, total=False):
@@ -301,11 +324,15 @@ def _tool_schema(fn: Callable[..., Any]):
     return signature_schema(fn, skip={"state"})
 
 
-def _invoke_tool(handler: dict[str, Any], state: Any, args: dict[str, Any] | None = None):
+def _invoke_tool(
+    handler: dict[str, Any], state: Any, args: dict[str, Any] | None = None
+):
     name = handler["name"]
     try:
         builtins = coerce_arguments(handler["fn"], args or {}, skip={"state"})
-        if handler.get("mutating") and not _approve_mutating_tool(state, name, builtins):
+        if handler.get("mutating") and not _approve_mutating_tool(
+            state, name, builtins
+        ):
             return ToolResult(
                 ok=False,
                 content={
@@ -318,7 +345,11 @@ def _invoke_tool(handler: dict[str, Any], state: Any, args: dict[str, Any] | Non
     except Exception as exc:
         return ToolResult(
             ok=False,
-            content={"tool": name, "error_type": type(exc).__name__, "message": str(exc)},
+            content={
+                "tool": name,
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            },
         )
 
 
@@ -362,9 +393,18 @@ def select_tools(*, include=None, exclude=frozenset()):
     }
 
 
-def invoke_tool(registry: dict[str, dict[str, Any]], state: Any, name: str, args: dict[str, Any] | None = None):
+def invoke_tool(
+    registry: dict[str, dict[str, Any]],
+    state: Any,
+    name: str,
+    args: dict[str, Any] | None = None,
+):
     handler = registry.get(name)
-    return _invoke_tool(handler, state, args) if handler else {"ok": False, "content": f"Tool '{name}' unavailable"}
+    return (
+        _invoke_tool(handler, state, args)
+        if handler
+        else {"ok": False, "content": f"Tool '{name}' unavailable"}
+    )
 
 
 TOOL_REGISTRY = _TOOLS
@@ -426,6 +466,11 @@ def _count_text(count: int, singular: str, plural: str | None = None) -> str:
     return f"{count} {singular if count == 1 else (plural or singular + 's')}"
 
 
+def _update_optional(payload: dict[str, Any], /, **items: Any) -> dict[str, Any]:
+    payload.update({key: value for key, value in items.items() if value is not None})
+    return payload
+
+
 def _rel_path(root: Path, path: str | Path) -> str:
     return rt._rel(root, Path(path))
 
@@ -437,7 +482,9 @@ def _existing_tool_target(root: Path, path: str, *, tool: str) -> Path:
     return target
 
 
-def _map_files(files: list[Path], worker: Callable[[Path], Any], *, threads: int | None = None) -> list[Any]:
+def _map_files(
+    files: list[Path], worker: Callable[[Path], Any], *, threads: int | None = None
+) -> list[Any]:
     worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
     if worker_count == 1:
         return [worker(file_path) for file_path in files]
@@ -482,68 +529,9 @@ def _render_selected_lines(lines: list[str], keep: set[int]) -> str:
 
 
 def _indented_preview_lines(text: str, *, indent: str = "  ") -> list[str]:
-    return [f"{indent}{line}" if line else indent for line in text.splitlines()] or [indent]
-
-
-def _parse_bash_json_output(stdout: str, stderr: str):
-    if stderr.strip() or not stdout.strip():
-        return None
-    try:
-        return json.loads(stdout)
-    except json.JSONDecodeError:
-        return None
-
-
-def _summarize_json_value(value: Any, *, depth: int = 0, width: int = 32):
-    if depth >= 6:
-        return "<max-depth>", True
-    if isinstance(value, dict):
-        items = list(value.items())
-        limit = width if depth == 0 else max(width // 2, 8)
-        out: dict[str, Any] = {}
-        truncated = False
-        for key, child in items[:limit]:
-            summarized, child_truncated = _summarize_json_value(
-                child, depth=depth + 1, width=width
-            )
-            out[str(key)] = summarized
-            truncated = truncated or child_truncated
-        if len(items) > limit:
-            out["..."] = f"{len(items) - limit} more keys"
-            truncated = True
-        return out, truncated
-    if isinstance(value, list):
-        limit = width if depth == 0 else max(width // 2, 8)
-        out = []
-        truncated = False
-        for child in value[:limit]:
-            summarized, child_truncated = _summarize_json_value(
-                child, depth=depth + 1, width=width
-            )
-            out.append(summarized)
-            truncated = truncated or child_truncated
-        if len(value) > limit:
-            out.append(f"... {len(value) - limit} more items")
-            truncated = True
-        return out, truncated
-    if isinstance(value, str):
-        clipped = rt.clip_tokens(value, limit=512 if depth == 0 else 128, tail=32)
-        return clipped, clipped != value
-    return value, False
-
-
-def _summarize_json_output(value: Any) -> tuple[Any, bool, str]:
-    for width in (32, 16, 8, 4):
-        summarized, truncated = _summarize_json_value(value, width=width)
-        rendered = serialize_toon(summarized)
-        if rt.count_tokens(rendered) <= rt.BUDGETS["tool_output_tokens"]:
-            return rendered, truncated, "toon"
-    rendered = rt.clip_tokens(
-        serialize_toon(value),
-        limit=rt.BUDGETS["tool_output_tokens"],
-        tail=rt.BUDGETS["tool_tail_tokens"],
-    )
-    return rendered, True, "toon"
+    return [f"{indent}{line}" if line else indent for line in text.splitlines()] or [
+        indent
+    ]
 
 
 def _summarize_text_output(text: str) -> tuple[str, bool]:
@@ -598,39 +586,25 @@ def _format_todos(todos: list[dict[str, str]]) -> str:
 
 
 def _todo_preview(todos: list[dict[str, str]]) -> str:
-    preview_lines = [f"count: {len(todos)}", "todos:"]
-    if not todos:
-        preview_lines.append("  <empty todo list>")
-        return "\n".join(preview_lines)
-    preview_lines.extend(f"  {_todo_line(item)}" for item in todos)
-    return "\n".join(preview_lines)
+    return "\n".join(
+        [
+            f"count: {len(todos)}",
+            "todos:",
+            *(f"  {line}" for line in _format_todos(todos).splitlines()),
+        ]
+    )
 
 
 @tool()
 def tool_todo(state: Any, todos: list[TodoItemInput]):
-    state["todos"] = []
-    for item in todos:
-        if not isinstance(item, dict):
-            raise ValidationError("Expected object")
-        extra = set(item) - _TODO_ITEM_KEYS
-        if extra:
-            names = ", ".join(sorted(map(str, extra)))
-            raise ValidationError(f"Unexpected fields: {names}")
-        todo_id = item.get("id")
-        task = item.get("task")
-        status = item.get("status", "pending")
-        if not isinstance(todo_id, str):
-            raise ValidationError("Invalid field 'id': Expected string")
-        if not isinstance(task, str):
-            raise ValidationError("Invalid field 'task': Expected string")
-        if status not in _TODO_STATUSES:
-            raise ValidationError(f"Invalid enum value {status!r}")
-        state["todos"].append({"id": todo_id, "task": task, "status": status})
+    state["todos"] = [
+        {**item, "status": item.get("status", "pending")}
+        for item in coerce(todos, list[TodoItemInput])
+    ]
     payload = {"items": list(state["todos"]), "count": len(state["todos"])}
-    rt.note_tool(state, 'todo', _suffix=f'({len(state["todos"])} items)')
+    rt.note_tool(state, "todo", _suffix=f"({len(state['todos'])} items)")
     rt.show(_todo_preview(state["todos"]))
     return payload
-
 
 
 def _bash_payload(command: str, result) -> tuple[dict[str, Any], str]:
@@ -734,12 +708,17 @@ _WEBFETCH_REDACTED_RESPONSE_HEADERS = frozenset(
 _WEBFETCH_HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
 
 
+def _response_content_type(response: ResponseAdapter) -> str:
+    return response["headers"].get("content-type", "").split(";", 1)[0].strip().lower()
+
+
 def _webfetch_is_text_response(response: ResponseAdapter) -> bool:
-    content_type = response["headers"].get("content-type", "").split(";", 1)[0].strip().lower()
+    content_type = _response_content_type(response)
     return (
         not content_type
         or content_type.startswith("text/")
-        or content_type in {
+        or content_type
+        in {
             "application/json",
             "application/xml",
             "application/javascript",
@@ -769,9 +748,7 @@ def _sanitize_webfetch_headers(headers: dict[str, str] | None) -> dict[str, str]
 
 
 def _webfetch_is_html_response(response: ResponseAdapter, text: str) -> bool:
-    content_type = (
-        response["headers"].get("content-type", "").split(";", 1)[0].strip().lower()
-    )
+    content_type = _response_content_type(response)
     if content_type in _WEBFETCH_HTML_CONTENT_TYPES:
         return True
     return text.lstrip().lower().startswith(("<!doctype html", "<html"))
@@ -812,7 +789,6 @@ def _webfetch_response_headers(response: ResponseAdapter) -> dict[str, str]:
     }
 
 
-
 def _webfetch_payload(
     response: ResponseAdapter,
     *,
@@ -839,9 +815,7 @@ def _webfetch_payload(
     return payload
 
 
-def _webfetch_error_payload(
-    url: str, *, method: str, exc: HTTPError
-) -> dict[str, Any]:
+def _webfetch_error_payload(url: str, *, method: str, exc: HTTPError) -> dict[str, Any]:
     return {
         "method": method,
         "url": url,
@@ -906,6 +880,7 @@ def tool_webfetch(
     rt.show(serialize_toon(payload))
     return payload
 
+
 _STREAM_OPENERS = {
     ".gz": gzip.open,
     ".bz2": bz2.open,
@@ -917,6 +892,7 @@ _ARCHIVE_NAMES = (".tar", ".tgz", ".tar.gz")
 _DEFAULT_THREADS = min(32, (os.cpu_count() or 4))
 _DEFAULT_SLOC_TOP_FILES = 20
 
+
 def _ignore_spec(
     root: Path,
     exclude: str | list[str] | None = None,
@@ -926,12 +902,15 @@ def _ignore_spec(
     patterns = [".git/"]
     gitignore = root / ".gitignore"
     if include_gitignore and gitignore.is_file():
-        patterns.extend(gitignore.read_text(encoding="utf-8", errors="replace").splitlines())
+        patterns.extend(
+            gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
+        )
     if isinstance(exclude, str):
         patterns.extend(line.strip() for line in exclude.splitlines() if line.strip())
     elif exclude:
         patterns.extend(str(item).strip() for item in exclude if str(item).strip())
     return pathspec.GitIgnoreSpec.from_lines(patterns)
+
 
 def _resolve_ignore_root(target: Path, ignore_root: str | Path | None) -> Path:
     root = (
@@ -945,11 +924,13 @@ def _resolve_ignore_root(target: Path, ignore_root: str | Path | None) -> Path:
         return (target if target.is_dir() else target.parent).resolve()
     return root
 
+
 def _is_ignored(path: Path, spec: pathspec.PathSpec, root: Path) -> bool:
     rel_path = path.relative_to(root).as_posix()
     if path.is_dir():
         rel_path += "/"
     return spec.match_file(rel_path)
+
 
 def _iter_files(
     target: Path,
@@ -972,6 +953,7 @@ def _iter_files(
     files.sort()
     return files
 
+
 def _streams(path: Path) -> Iterable[tuple[str, BinaryIO]]:
     if path.suffix == ".zip":
         with zipfile.ZipFile(path, "r") as archive:
@@ -982,11 +964,15 @@ def _streams(path: Path) -> Iterable[tuple[str, BinaryIO]]:
     if path.name.endswith(_ARCHIVE_NAMES):
         with tarfile.open(path, "r:*") as archive:
             for member in archive.getmembers():
-                if member.isfile() and (stream := archive.extractfile(member)) is not None:
+                if (
+                    member.isfile()
+                    and (stream := archive.extractfile(member)) is not None
+                ):
                     yield f"{path}::{member.name}", stream
         return
     opener = _STREAM_OPENERS.get(path.suffix, open)
     yield str(path), opener(path, "rb")
+
 
 def _search_pattern(pattern: str, *, fuzzy: str | None = None) -> str:
     if fuzzy is None:
@@ -999,7 +985,9 @@ def _search_pattern(pattern: str, *, fuzzy: str | None = None) -> str:
     return f"(?:{pattern}){{{constraint}}}"
 
 
-def _search_flags(*, best_match: bool = False, enhance_match: bool = False) -> regex.RegexFlag:
+def _search_flags(
+    *, best_match: bool = False, enhance_match: bool = False
+) -> regex.RegexFlag:
     flags = regex.RegexFlag(0)
     if best_match:
         flags |= regex.BESTMATCH
@@ -1023,7 +1011,9 @@ def _highlight_search_text(text: str, compiled: regex.Pattern) -> tuple[str, int
     for start, end in spans:
         parts.append(text[last:start])
         if start < end:
-            parts.append(f"{rt._SEARCH_HIGHLIGHT_OPEN}{text[start:end]}{rt._SEARCH_HIGHLIGHT_CLOSE}")
+            parts.append(
+                f"{rt._SEARCH_HIGHLIGHT_OPEN}{text[start:end]}{rt._SEARCH_HIGHLIGHT_CLOSE}"
+            )
         last = end
     parts.append(text[last:])
     return "".join(parts), spans[0][0] + 1
@@ -1042,7 +1032,9 @@ def _search_file(
                     if not compiled_bytes.search(raw_line):
                         continue
                     text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                    highlighted_text, column = _highlight_search_text(text, compiled_text)
+                    highlighted_text, column = _highlight_search_text(
+                        text, compiled_text
+                    )
                     matches.append(
                         {
                             "source": source,
@@ -1055,6 +1047,7 @@ def _search_file(
         except Exception as exc:
             matches.append({"source": source, "error": str(exc)})
     return matches
+
 
 def search(
     target: str | Path,
@@ -1092,12 +1085,14 @@ def search(
         results.extend(batch)
     return results
 
+
 def _is_archive(path: Path) -> bool:
     return (
         path.suffix in _STREAM_OPENERS
         or path.suffix in _ARCHIVE_SUFFIXES
         or path.name.endswith(_ARCHIVE_NAMES)
     )
+
 
 def _replace_file(
     path: Path,
@@ -1128,6 +1123,7 @@ def _replace_file(
         return {"source": str(path), "error": str(exc)}
     return {"source": str(path), "replacements": replacements}
 
+
 def replace(
     target: str | Path,
     pattern: str,
@@ -1154,6 +1150,7 @@ def replace(
         partial(_replace_file, compiled=compiled, replacement=replacement),
         threads=threads,
     )
+
 
 type _SlocFileSummary = dict[str, str | int]
 
@@ -1204,7 +1201,12 @@ def sloc(
             continue
         state_counts[analysis.state.name] += 1
         if analysis.state.name == "error":
-            errors.append({"path": str(file_path), "message": analysis.state_info or "unknown pygount error"})
+            errors.append(
+                {
+                    "path": str(file_path),
+                    "message": analysis.state_info or "unknown pygount error",
+                }
+            )
 
     languages = sorted(
         (
@@ -1219,13 +1221,21 @@ def sloc(
             for language_summary in summary.language_to_language_summary_map.values()
             if not language_summary.is_pseudo_language
         ),
-        key=lambda item: (-item["code_count"], -item["file_count"], item["language"].lower()),
+        key=lambda item: (
+            -item["code_count"],
+            -item["file_count"],
+            item["language"].lower(),
+        ),
     )
     top_files = [
         item
         for item in sorted(
             file_summaries,
-            key=lambda item: (-int(item["code_count"]), -int(item["line_count"]), str(item["path"]).lower()),
+            key=lambda item: (
+                -int(item["code_count"]),
+                -int(item["line_count"]),
+                str(item["path"]).lower(),
+            ),
         )
     ]
     ordered_states = tuple(
@@ -1247,6 +1257,7 @@ def sloc(
         "state_counts": list(ordered_states),
         "errors": errors,
     }
+
 
 def _glob_paths(
     root: Path,
@@ -1270,9 +1281,12 @@ def _glob_paths(
             resolved = candidate.resolve()
         except OSError:
             continue
-        if (resolved == root or root in resolved.parents) and not _is_ignored(resolved, spec, root):
+        if (resolved == root or root in resolved.parents) and not _is_ignored(
+            resolved, spec, root
+        ):
             matches.append(resolved)
     return sorted(set(matches), key=lambda item: item.as_posix())
+
 
 @tool()
 def tool_list(
@@ -1284,25 +1298,27 @@ def tool_list(
     rt.note_tool(
         state,
         "list",
-        _defaults={"path": "*", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]},
+        _defaults=_LIST_DEFAULTS,
         path=path,
         exclude=exclude,
         limit=limit,
     )
     matches = _glob_paths(state["root"], path, exclude=exclude)
-    payload = {
-        "path": path,
-        "items": [
-            rt._rel(state["root"], item) + ("/" if item.is_dir() else "")
-            for item in matches[: _shown_line_limit(limit)]
-        ],
-        "count": len(matches),
-        "truncated": len(matches) > _shown_line_limit(limit),
-    }
-    if exclude is not None:
-        payload["exclude"] = exclude
+    payload = _update_optional(
+        {
+            "path": path,
+            "items": [
+                rt._rel(state["root"], item) + ("/" if item.is_dir() else "")
+                for item in matches[: _shown_line_limit(limit)]
+            ],
+            "count": len(matches),
+            "truncated": len(matches) > _shown_line_limit(limit),
+        },
+        exclude=exclude,
+    )
     rt.show(serialize_toon(payload))
     return payload
+
 
 def _read_lines(path: Path, *, start: int, limit: int) -> tuple[list[str], int, bool]:
     lines: list[str] = []
@@ -1320,21 +1336,23 @@ def _read_lines(path: Path, *, start: int, limit: int) -> tuple[list[str], int, 
             break
     return lines, line_count, truncated
 
+
 @tool()
 def tool_read(
-    state: Any, path: str, offset: int = 1, limit: int = rt.BUDGETS["default_line_limit"]
+    state: Any,
+    path: str,
+    offset: int = 1,
+    limit: int = rt.BUDGETS["default_line_limit"],
 ):
     rt.note_tool(
         state,
         "read",
-        _defaults={"offset": 1, "limit": rt.BUDGETS["default_line_limit"]},
+        _defaults=_READ_DEFAULTS,
         path=path,
         offset=offset,
         limit=limit,
     )
-    target = rt.resolve_path(state["root"], path)
-    if not target.exists():
-        raise ValueError(f"read path does not exist: {rt._rel(state['root'], target)}")
+    target = _existing_tool_target(state["root"], path, tool="read")
     if target.is_dir():
         raise ValueError(f"read path is a directory: {rt._rel(state['root'], target)}")
     start = _positive_int(offset, "offset") - 1
@@ -1359,8 +1377,11 @@ def tool_read(
         }
         rt.show(serialize_toon(preview))
     else:
-        rt.show(f"path: {path}\nlines: {start + 1}-{end_line} of {line_count}\n<empty file>")
+        rt.show(
+            f"path: {path}\nlines: {start + 1}-{end_line} of {line_count}\n<empty file>"
+        )
     return payload
+
 
 def _search_summary(matches: int, shown: int, errors: int = 0) -> str:
     if not matches and not errors:
@@ -1375,11 +1396,13 @@ def _search_summary(matches: int, shown: int, errors: int = 0) -> str:
         parts.append(f"{errors} error{plural}")
     return "(" + "; ".join(parts) + ")"
 
+
 def _search_display_path(root: Path, source: str) -> str:
     if "::" in source:
         container, member = source.split("::", 1)
         return f"{rt._rel(root, Path(container))}::{member}"
     return rt._rel(root, Path(source))
+
 
 def _search_preview_line(root: Path, match: dict[str, Any]) -> str:
     path_text = _search_display_path(root, match["source"])
@@ -1388,12 +1411,10 @@ def _search_preview_line(root: Path, match: dict[str, Any]) -> str:
     text = rt._truncate_long_lines(match.get("preview_text") or match["text"])
     return f"{path_text}:{match['line_number']}:{match.get('column', 1)}:{text}"
 
+
 def _optional_counts(**counts: int) -> dict[str, int]:
-    return {
-        f"{name}_count": value
-        for name, value in counts.items()
-        if value
-    }
+    return {f"{name}_count": value for name, value in counts.items() if value}
+
 
 def _search_payload(
     root: Path,
@@ -1426,22 +1447,20 @@ def _search_payload(
         ],
         "truncated": len(matches) > len(shown_matches),
     }
-    payload.update(
-        {
-            key: value
-            for key, value in {
-                "fuzzy": fuzzy,
-                "best_match": best_match or None,
-                "enhance_match": enhance_match or None,
-                "exclude": exclude,
-            }.items()
-            if value is not None
-        }
+    _update_optional(
+        payload,
+        fuzzy=fuzzy,
+        best_match=best_match or None,
+        enhance_match=enhance_match or None,
+        exclude=exclude,
     )
     payload.update(_optional_counts(error=len(errors)))
     if errors:
         payload["errors"] = [
-            {"path": _search_display_path(root, match["source"]), "message": match["error"]}
+            {
+                "path": _search_display_path(root, match["source"]),
+                "message": match["error"],
+            }
             for match in errors[:shown_limit]
         ]
     preview_lines = [_search_preview_line(root, match) for match in shown_matches]
@@ -1454,6 +1473,7 @@ def _search_payload(
         preview += f"\n... [{len(matches) - len(shown_matches)} more matches omitted]"
     return payload, preview, len(matches), len(shown_matches), len(errors)
 
+
 @tool()
 def tool_search(
     state: Any,
@@ -1465,14 +1485,7 @@ def tool_search(
     exclude: str | list[str] | None = None,
     limit: int = rt.BUDGETS["default_line_limit"],
 ):
-    defaults = {
-        "path": ".",
-        "fuzzy": None,
-        "best_match": False,
-        "enhance_match": False,
-        "exclude": None,
-        "limit": rt.BUDGETS["default_line_limit"],
-    }
+    defaults = _SEARCH_DEFAULTS
     target = _existing_tool_target(state["root"], path, tool="search")
     results = search(
         target,
@@ -1510,6 +1523,7 @@ def tool_search(
     rt.show(preview)
     return payload
 
+
 def _replace_summary(
     changed_files: int, replacements: int, skipped: int = 0, errors: int = 0
 ) -> str:
@@ -1526,6 +1540,7 @@ def _replace_summary(
         parts.append(_count_text(errors, "error"))
     return "(" + "; ".join(parts) + ")"
 
+
 def _replace_preview_line(root: Path, result: dict[str, Any]) -> str:
     path_text = _rel_path(root, result["source"])
     if result.get("error"):
@@ -1533,6 +1548,7 @@ def _replace_preview_line(root: Path, result: dict[str, Any]) -> str:
     if result.get("skipped"):
         return f"skip: {path_text} — {result['skipped']}"
     return f"change: {path_text} — {_count_text(result.get('replacements', 0), 'replacement')}"
+
 
 def _replace_payload(
     root: Path,
@@ -1565,8 +1581,7 @@ def _replace_payload(
         ],
         "truncated": len(changed) > len(shown_changed),
     }
-    if exclude is not None:
-        payload["exclude"] = exclude
+    _update_optional(payload, exclude=exclude)
     payload.update(_optional_counts(skipped=len(skipped), error=len(errors)))
     if skipped:
         payload["skipped"] = [
@@ -1590,12 +1605,14 @@ def _replace_payload(
     if skipped:
         preview_lines.append("skipped:")
         preview_lines.extend(
-            f"  {_replace_preview_line(root, result)}" for result in skipped[:shown_limit]
+            f"  {_replace_preview_line(root, result)}"
+            for result in skipped[:shown_limit]
         )
     if errors:
         preview_lines.append("errors:")
         preview_lines.extend(
-            f"  {_replace_preview_line(root, result)}" for result in errors[:shown_limit]
+            f"  {_replace_preview_line(root, result)}"
+            for result in errors[:shown_limit]
         )
     preview = "\n".join(preview_lines) if len(preview_lines) > 2 else "<no changes>"
     if len(changed) > len(shown_changed):
@@ -1611,6 +1628,7 @@ def _replace_payload(
         len(errors),
     )
 
+
 @tool(mutating=True)
 def tool_replace(
     state: Any,
@@ -1620,7 +1638,7 @@ def tool_replace(
     exclude: str | list[str] | None = None,
     limit: int = rt.BUDGETS["default_line_limit"],
 ):
-    defaults = {"path": ".", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]}
+    defaults = _PATH_EXCLUDE_LIMIT_DEFAULTS
     target = _existing_tool_target(state["root"], path, tool="replace")
     results = replace(
         target,
@@ -1652,6 +1670,7 @@ def tool_replace(
     rt.show(preview)
     return payload
 
+
 def _sloc_summary(report: dict[str, Any]) -> str:
     parts = []
     if report["total_file_count"]:
@@ -1665,6 +1684,7 @@ def _sloc_summary(report: dict[str, Any]) -> str:
         parts.append(_count_text(len(report["errors"]), "error"))
     return "(" + "; ".join(parts) + ")" if parts else "(no source files)"
 
+
 def _sloc_totals_line(report: dict[str, Any]) -> str:
     return (
         "totals: "
@@ -1676,6 +1696,7 @@ def _sloc_totals_line(report: dict[str, Any]) -> str:
         f"{report['total_line_count']} lines"
     )
 
+
 def _sloc_language_preview_line(language: Any) -> str:
     return (
         f"{language['language']}: "
@@ -1685,6 +1706,7 @@ def _sloc_language_preview_line(language: Any) -> str:
         f"{language['string_count']} strings "
         f"({_count_text(language['file_count'], 'file')})"
     )
+
 
 def _sloc_state_preview_line(state_count: Any) -> str:
     return f"other/{state_count['state']}: {_count_text(state_count['file_count'], 'file')}"
@@ -1748,8 +1770,7 @@ def _sloc_payload(
             or len(report["top_files"]) > len(shown_top_files)
         ),
     }
-    if exclude is not None:
-        payload["exclude"] = exclude
+    _update_optional(payload, exclude=exclude)
     if report["state_counts"]:
         payload["state_counts"] = [
             {"state": state_count["state"], "file_count": state_count["file_count"]}
@@ -1788,17 +1809,6 @@ def _sloc_payload(
     return payload, "\n".join(preview_lines)
 
 
-def _sloc_contents(
-    root: Path,
-    path: str,
-    *,
-    exclude: str | list[str] | None = None,
-    limit: int,
-):
-    target = _existing_tool_target(root, path, tool="sloc")
-    report = sloc(target, ignore_root=root, exclude=exclude)
-    return _sloc_payload(root, path, report, exclude=exclude, limit=limit), report
-
 @tool()
 def tool_sloc(
     state: Any,
@@ -1806,9 +1816,11 @@ def tool_sloc(
     exclude: str | list[str] | None = None,
     limit: int = rt.BUDGETS["default_line_limit"],
 ):
-    defaults = {"path": ".", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]}
-    (payload, preview), report = _sloc_contents(
-        state["root"], path, exclude=exclude, limit=limit
+    defaults = _PATH_EXCLUDE_LIMIT_DEFAULTS
+    target = _existing_tool_target(state["root"], path, tool="sloc")
+    report = sloc(target, ignore_root=state["root"], exclude=exclude)
+    payload, preview = _sloc_payload(
+        state["root"], path, report, exclude=exclude, limit=limit
     )
     rt.note_tool(
         state,
@@ -1825,7 +1837,6 @@ def tool_sloc(
 
 __all__ = [
     "TOOL_REGISTRY",
-    "_TODO_STATUSES",
     "_WEBFETCH_ALLOWED_METHODS",
     "_bash_payload",
     "_collapse_repeated_lines",
@@ -1833,11 +1844,9 @@ __all__ = [
     "_todo_preview",
     "_html_to_markdown",
     "_iter_files",
-    "_parse_bash_json_output",
     "_positive_int",
     "_render_selected_lines",
     "_shown_line_limit",
-    "_summarize_json_output",
     "_summarize_text_output",
     "_validate_url_safe",
     "_webfetch_payload",

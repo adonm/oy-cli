@@ -2,126 +2,96 @@
 
 [![PyPI](https://img.shields.io/pypi/v/oy-cli)](https://pypi.org/project/oy-cli/)
 
-**AI coding assistant for your shell.** Reads files, searches content, and runs commands.
+Small local AI coding CLI for your shell. It reads files, searches content, fetches public docs, and runs commands in the current workspace.
+
+## Quick start
 
 ```bash
 uv tool install oy-cli
 oy "add docstrings to public functions"
+oy chat
+oy audit "focus on authentication"
 ```
 
-## Examples
+## Common use
 
 ```bash
-# Basic usage
 oy "inspect the main module and suggest improvements"
-
-# Work in a specific directory
 OY_ROOT=./my-project oy "fix the failing tests"
-
-# Non-interactive mode (CI/pipelines)
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy
-
-# Increase accuracy with self-consistency voting
-oy --help  # subcommands expose --best-of
 OY_BEST_OF=5 oy "fix the flaky test"
-
-# Security audit
 oy audit
-oy audit "focus on authentication"
 ```
 
 ## Commands
 
 ```bash
-oy "prompt"              # Run with a prompt (default)
-oy chat                   # Interactive multi-turn session
-oy audit                  # Security audit against OWASP ASVS/MASVS
-oy ralph "prompt"         # Re-run a prompt in yolo mode every minute until OY_RALPH_LIMIT (default: 3h)
-oy model                  # Show current model, pick model from available endpoints
-oy --help                 # Show all commands
+oy "prompt"        # one-shot prompt
+oy chat             # interactive session
+oy audit [focus]    # security/complexity audit
+oy ralph "prompt"   # rerun in yolo mode on a timer
+oy model [filter]   # show or choose model
+oy --help
 ```
 
-## Why This Exists
+In chat, `/ask <question>` is research-only and no-write: no `bash`, no file changes, but public `webfetch` is still allowed.
 
-`oy` is small, auditable, and built around a narrow tool surface.
+## Design goals
 
-**Design goals:** small auditable codebase, minimal tool surface,
-OpenAI-completions-focused CLI loop, multiple backends behind shims,
-new session each run, and explicit checkpoints when needed.
+- keep the codebase small and auditable
+- expose a narrow built-in tool set
+- keep provider support behind thin shims
+- start fresh by default for one-shot runs
+- make approvals and checkpoints explicit when they matter
 
-## Session Text and Prompts
-
-All text that is sent as part of model sessions lives in [`oy_cli/session_text.toml`](oy_cli/session_text.toml).
-
-That includes:
-
-- base system prompt text
-- interactive/non-interactive prompt suffixes
-- audit prompt text
-- research-only `/ask` suffix (no bash or file changes; `webfetch` still allowed)
-- transcript compaction text (`Current todo list`, omitted-history note, TOON packed-history note)
-- built-in tool descriptions exposed to the model
-
-Code that reads and composes this content now lives mainly in [`oy_cli/runtime.py`](oy_cli/runtime.py), with transcript/agent flow in [`oy_cli/agent.py`](oy_cli/agent.py) and CLI entrypoints in [`oy_cli/cli.py`](oy_cli/cli.py).
+Model-facing prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/session_text.toml). Core modules are [`oy_cli/runtime.py`](oy_cli/runtime.py), [`oy_cli/agent.py`](oy_cli/agent.py), [`oy_cli/cli.py`](oy_cli/cli.py), [`oy_cli/tools.py`](oy_cli/tools.py), and [`oy_cli/providers.py`](oy_cli/providers.py). Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Configuration
 
-**Environment variables:**
+### Environment variables
 
 | Variable | Purpose |
-|----------|---------|
-| `OY_MODEL` | Override model for this session (bare name or `shim:model`) |
-| `OY_SHIM` | Force a specific shim: `openai`, `codex`, `copilot`, `opencode`, `opencode-go`, or `bedrock-mantle` |
+|---|---|
+| `OY_MODEL` | Override model for this session (`model` or `shim:model`) |
+| `OY_SHIM` | Force a shim: `openai`, `codex`, `copilot`, `opencode`, `opencode-go`, or `bedrock-mantle` |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable approval/checkpoint pauses |
-| `OY_UNATTENDED_LIMIT` | Agent turn deadline window, like `1h`, `30m`, or `3600s` |
+| `OY_UNATTENDED_LIMIT` | Agent deadline window, like `1h`, `30m`, or `3600s` |
 | `OY_RALPH_LIMIT` | Ralph deadline window, like `3h`, `90m`, or `3600s` |
-| `OY_BEST_OF` | Override self-consistency sample count with a positive integer |
+| `OY_BEST_OF` | Override self-consistency sample count |
 | `OY_ROOT` | Run against a different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
 | `OY_DEBUG` | Enable debug logging |
 | `OY_YOLO` | Start with all tool approvals enabled |
-| `OY_MAX_CONTEXT_TOKENS` | Override the model context budget used for transcript/tool budgeting |
-| `OY_MAX_BASH_CMD_BYTES` | Override the maximum accepted bash command size |
+| `OY_MAX_CONTEXT_TOKENS` | Override transcript/tool context budget |
+| `OY_MAX_BASH_CMD_BYTES` | Override max accepted bash command size |
 
-**Config file** (`~/.config/oy/config.json`):
+### Config file
+
 ```json
 {"shim": "openai", "model": "glm-5"}
 ```
 
-Only the `model` and `shim` fields are used for saved runtime configuration.
-The `shim` field pins which backend to use regardless of what else is signed in.
-Use `oy model <filter>` to pick interactively; it merges models from available
-signed-in shims into a single list using `shim:model` prefixes.
+Only `model` and `shim` are persisted. Selection order is `OY_MODEL`, then saved config, then the first-run picker. `OY_SHIM` only changes backend choice when the model name is bare or no model has been saved yet.
 
-On first run, if no model is configured, `oy` prompts you to pick one from
-the available backends. Set `OY_MODEL`, `OY_SHIM`, or save a config with
-`oy model` to pin behavior.
-
-**Model notes:** From testing, `glm-5` balances intelligence,
-cost, and tool-use ability. `kimi-k2.5` is another option.
-For these models, `oy` defaults self-consistency / best-of sampling to `3`,
-which is a pragmatic accuracy/latency trade-off; override with `--best-of` or `OY_BEST_OF`.
-The [Artificial Analysis Comparison of Open Source Models](https://artificialanalysis.ai/models/open-source)
-is a useful reference.
+From local testing, `glm-5` and `kimi-k2.5` are good defaults. `oy` uses best-of `3` for those models by default; override with `--best-of` or `OY_BEST_OF`.
 
 ## Requirements
 
 - Python 3.13+
 - `bash`
-- OpenAI API key or compatible endpoint credentials, Codex local auth, Copilot auth, OpenCode auth, or AWS CLI configured for Bedrock Mantle
+- OpenAI-compatible credentials, Codex auth, Copilot auth, OpenCode auth, or AWS credentials for Bedrock Mantle
 
 ## Installation
 
 ```bash
-uv tool install oy-cli  # Preferred
-pip install oy-cli       # Alternative
+uv tool install oy-cli  # preferred
+pip install oy-cli      # alternative
 ```
 
 ## Development
 
-For local development, linting, tests, and builds, use `uv`.
-Do not run bare `pytest`, `ruff`, or `pip install -e .` commands in this repo.
+Use `uv` for local development, formatting, linting, tests, and builds.
 
 ```bash
 uv sync
@@ -132,25 +102,18 @@ uv run oy --help
 uv build
 ```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contributor workflow.
-
 ## Authentication
 
-**OpenAI:**
-```bash
-export OPENAI_API_KEY=sk-...
-```
+OpenAI or compatible endpoint:
 
-For OpenAI-compatible endpoints:
 ```bash
-export OPENAI_BASE_URL=https://your-endpoint.example/v1
 export OPENAI_API_KEY=...
+export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 ```
 
-Copilot and Codex (OpenAI) creds are introspected
-and used, if creds are available `oy model` will show them in the model list.
+Copilot and Codex credentials are discovered automatically when available.
 
-**AWS Bedrock Mantle:** `oy` uses the Bedrock Mantle OpenAI-compatible endpoint (`https://bedrock-mantle.<region>.api.aws/v1`) and signs requests directly with SigV4 service `bedrock-mantle`.
+Bedrock Mantle:
 
 ```bash
 export OY_SHIM=bedrock-mantle
@@ -158,32 +121,26 @@ export AWS_PROFILE=my-profile
 export AWS_REGION=ap-southeast-2
 ```
 
-`oy` loads models from `GET /models` on the Mantle endpoint and sends chat requests to `POST /chat/completions` on the same endpoint.
+`oy` loads models from `GET /models` and sends chat requests to `POST /chat/completions` on the Mantle endpoint.
 
 ## Troubleshooting
 
-**"Missing API credentials"** -> Set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or for Bedrock Mantle configure AWS credentials / SSO and set `AWS_REGION`.
-
-**"stdin is not a TTY"** -> Piping input disables `ask`. Set `OY_NON_INTERACTIVE=1` to make explicit.
-
-**"AWS SSO session is stale"** -> Run `aws sso login --use-device-code --no-browser`.
+- **Missing credentials** — set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or configure AWS credentials / SSO for Bedrock Mantle.
+- **stdin is not a TTY** — piping input disables `ask`; set `OY_NON_INTERACTIVE=1` to make that explicit.
+- **AWS SSO session is stale** — run `aws sso login --use-device-code --no-browser`.
 
 ## Security
 
-`oy` can run shell commands and modify files with your permissions. Treat it like any other local automation tool.
+`oy` can run shell commands and modify files with your permissions. `bash` also inherits your environment, so git/cloud/SSH credentials visible to your shell are visible to the command.
 
 Recommended:
+
 - run in a repo or workspace you trust
 - mount only needed directories in containers
 - avoid exposing long-lived secrets in the environment
 - review generated changes before shipping
 
-**Protections:** workspace-bound file access for built-in file tools and default SDK credential flows for supported providers.
-
-## Links
-
-- [Issues](ISSUES.md) - Known issues and audit findings
-- [Contributing](CONTRIBUTING.md) - Development and release notes
+Protections include workspace-bound file tools, public-only `webfetch`, and default credential flows for supported providers.
 
 ## License
 

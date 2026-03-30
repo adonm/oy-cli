@@ -1,16 +1,21 @@
 """Shared fixtures and helpers for oy-cli tests."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
 from oy_cli import agent, providers, runtime as rt, tools
 from oy_cli.providers import (
-    AssistantMessage, SystemMessage, ToolCall, ToolMessage, ToolResult, UserMessage,
+    AssistantMessage,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+    ToolResult,
+    UserMessage,
 )
 
 
@@ -70,6 +75,15 @@ def api_error(message: str, *, status_code: int = 400):
     )
 
 
+def noop(*args, **kwargs):
+    return None
+
+
+def patch_runtime(monkeypatch, /, **attrs):
+    for name, value in attrs.items():
+        monkeypatch.setattr(rt, name, noop if value is None else value)
+
+
 def tool_handler(name: str, fn, *, mutating: bool = False):
     return {
         name: {
@@ -103,6 +117,17 @@ class DummyHttpClient:
 
 
 __all__ = [
-    "make_state", "raw_response", "api_error", "tool_handler", "DummyHttpClient",
-    "AssistantMessage", "SystemMessage", "ToolCall", "ToolMessage", "ToolResult", "UserMessage",
+    "make_state",
+    "raw_response",
+    "api_error",
+    "noop",
+    "patch_runtime",
+    "tool_handler",
+    "DummyHttpClient",
+    "AssistantMessage",
+    "SystemMessage",
+    "ToolCall",
+    "ToolMessage",
+    "ToolResult",
+    "UserMessage",
 ]

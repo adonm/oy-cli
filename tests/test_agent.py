@@ -1,9 +1,31 @@
 """Tests for agent module: transcript, messages, run_turn."""
+
 from __future__ import annotations
 
-from oy_cli import agent
-from oy_cli.providers import AssistantMessage, SystemMessage, ToolCall, ToolMessage, ToolResult, UserMessage
-from tests.conftest import make_state, tool_handler
+from oy_cli import agent, tools
+from oy_cli.providers import (
+    AssistantMessage,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+    ToolResult,
+    UserMessage,
+)
+from tests.conftest import make_state, patch_runtime, tool_handler
+
+
+def _call(id: str, name: str, **arguments) -> ToolCall:
+    return ToolCall(id=id, name=name, arguments=arguments)
+
+
+def _assistant_call(id: str, name: str, **arguments) -> AssistantMessage:
+    return AssistantMessage("", tool_calls=[_call(id, name, **arguments)])
+
+
+def _transcript(text: str = "hello"):
+    tx = agent.transcript_with_system_prompt("sys")
+    agent.add_user(tx, text)
+    return tx
 
 
 class TestTranscriptLifecycle:
@@ -16,7 +38,6 @@ class TestTranscriptLifecycle:
 
     def test_prepared_messages_truncate(self, monkeypatch):
         monkeypatch.setattr(agent, "count_tokens", lambda text: len(text))
-
         truncated = agent.prepared_messages(
             agent.transcript(
                 messages=[
@@ -36,8 +57,9 @@ class TestTranscriptLifecycle:
 
     def test_prepared_messages_pack_with_toons(self, monkeypatch):
         monkeypatch.setattr(agent, "count_tokens", lambda text: len(text))
-        monkeypatch.setattr(agent, "_packed_history_note", lambda messages: SystemMessage("packed"))
-
+        monkeypatch.setattr(
+            agent, "_packed_history_note", lambda messages: SystemMessage("packed")
+        )
         packed = agent.prepared_messages(
             agent.transcript(
                 messages=[
@@ -52,18 +74,24 @@ class TestTranscriptLifecycle:
             ),
             model="gpt-4o",
         )
-        assert packed == [SystemMessage("sys"), SystemMessage("packed"), UserMessage("mnop"), UserMessage("kl")]
+        assert packed == [
+            SystemMessage("sys"),
+            SystemMessage("packed"),
+            UserMessage("mnop"),
+            UserMessage("kl"),
+        ]
 
     def test_tool_call_units_kept_together(self, monkeypatch):
         monkeypatch.setattr(agent, "count_tokens", lambda text: len(text))
-
         kept_as_unit = agent.prepared_messages(
             agent.transcript(
                 messages=[
                     SystemMessage("sys"),
                     UserMessage("earlier"),
-                    AssistantMessage("", tool_calls=[ToolCall(id="call_1", name="bash", arguments={})]),
-                    ToolMessage("call_1", "bash", ToolResult(ok=True, content="tool output")),
+                    _assistant_call("call_1", "bash"),
+                    ToolMessage(
+                        "call_1", "bash", ToolResult(ok=True, content="tool output")
+                    ),
                     UserMessage("tail"),
                 ],
                 max_context_tokens=23,
@@ -79,28 +107,23 @@ class TestTranscriptLifecycle:
 
 class TestRunTurn:
     def test_executes_tool_calls_until_final_answer(self, monkeypatch, tmp_path):
-        from oy_cli import runtime as rt, tools
-        from oy_cli.providers import AssistantMessage, ToolCall, ToolMessage, ToolResult
-
-        def echo(state, text: str):
-            return f"{state['root'].name}:{text}"
-
-        registry = tool_handler("echo", echo)
-        transcript = agent.transcript_with_system_prompt("sys")
-        agent.add_user(transcript, "hello")
-
-        responses = iter([
-            AssistantMessage("", tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})]),
-            AssistantMessage("done"),
-        ])
+        registry = tool_handler(
+            "echo", lambda state, text: f"{state['root'].name}:{text}"
+        )
+        responses = iter(
+            [_assistant_call("call_1", "echo", text="hi"), AssistantMessage("done")]
+        )
         printed: list[str] = []
-        monkeypatch.setattr(rt, "_print", lambda *a, value="", **k: printed.append(value))
-        monkeypatch.setattr(rt, "_debug_log", lambda *a, **k: None)
-        monkeypatch.setattr(rt, "_note", lambda *a, **k: None)
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, value="", **k: printed.append(value),
+            _debug_log=None,
+            _note=None,
+        )
 
-        client = {"chat_completion": lambda **kwargs: next(responses)}
+        transcript = _transcript()
         code, content = agent.run_turn(
-            client,
+            {"chat_completion": lambda **kwargs: next(responses)},
             transcript,
             make_state(tmp_path, registry=registry),
             "openai:gpt-test",
@@ -109,35 +132,34 @@ class TestRunTurn:
 
         assert (code, content) == (0, "done")
         assert printed == ["done"]
-        assert transcript["messages"][2] == AssistantMessage(
-            "", tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})]
-        )
+        assert transcript["messages"][2] == _assistant_call("call_1", "echo", text="hi")
         assert transcript["messages"][3] == ToolMessage(
-            "call_1", "echo", ToolResult(content=f"{tmp_path.name}:hi"),
+            "call_1", "echo", ToolResult(content=f"{tmp_path.name}:hi")
         )
 
     def test_self_consistency_picks_majority_text_answer(self, monkeypatch, tmp_path):
-        from oy_cli import runtime as rt, tools
-
-        transcript = agent.transcript_with_system_prompt("sys")
-        agent.add_user(transcript, "hello")
-
-        responses = iter([
-            AssistantMessage("wrong"),
-            AssistantMessage("done"),
-            AssistantMessage("done"),
-        ])
+        responses = iter(
+            [
+                AssistantMessage("wrong"),
+                AssistantMessage("done"),
+                AssistantMessage("done"),
+            ]
+        )
         printed: list[str] = []
         notes: list[str] = []
-        monkeypatch.setattr(rt, "_print", lambda *a, value="", **k: printed.append(value))
-        monkeypatch.setattr(rt, "_debug_log", lambda *a, **k: None)
-        monkeypatch.setattr(rt, "_note", lambda message, *a, **k: notes.append(message))
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, value="", **k: printed.append(value),
+            _debug_log=None,
+            _note=lambda message, *a, **k: notes.append(message),
+        )
 
-        client = {"chat_completion": lambda **kwargs: next(responses)}
         code, content = agent.run_turn(
-            client,
-            transcript,
-            make_state(tmp_path, registry=tool_handler("echo", lambda state, text: text)),
+            {"chat_completion": lambda **kwargs: next(responses)},
+            _transcript(),
+            make_state(
+                tmp_path, registry=tool_handler("echo", lambda state, text: text)
+            ),
             "openai:gpt-test",
             tools.tool_specs({}),
             best_of=3,
@@ -145,7 +167,10 @@ class TestRunTurn:
 
         assert (code, content) == (0, "done")
         assert printed == ["done"]
-        assert any("self-consistency selected sample" in note and "2/3 votes" in note for note in notes)
+        assert any(
+            "self-consistency selected sample" in note and "2/3 votes" in note
+            for note in notes
+        )
 
     def test_choose_self_consistent_message_prefers_high_support_text(self):
         messages = [
@@ -153,59 +178,47 @@ class TestRunTurn:
             AssistantMessage("Implement auth fix; add regression tests."),
             AssistantMessage("Rewrite the README."),
         ]
-
         chosen, index, votes = agent._choose_self_consistent_message(messages)
-
         assert chosen == messages[0]
         assert index == 0
         assert votes == 2
 
     def test_choose_self_consistent_message_prefers_similar_tool_plans(self):
         messages = [
-            AssistantMessage("", tool_calls=[ToolCall(id="call_1", name="search", arguments={"pattern": "auth token", "path": "src"})]),
-            AssistantMessage("", tool_calls=[ToolCall(id="call_2", name="search", arguments={"pattern": "token auth", "path": "src"})]),
-            AssistantMessage("", tool_calls=[ToolCall(id="call_3", name="read", arguments={"path": "README.md"})]),
+            _assistant_call("call_1", "search", pattern="auth token", path="src"),
+            _assistant_call("call_2", "search", pattern="token auth", path="src"),
+            _assistant_call("call_3", "read", path="README.md"),
         ]
-
         chosen, index, votes = agent._choose_self_consistent_message(messages)
-
         assert chosen == messages[0]
         assert index == 0
         assert votes == 2
 
     def test_self_consistency_prefers_matching_tool_plan(self, monkeypatch, tmp_path):
-        from oy_cli import runtime as rt, tools
+        responses = iter(
+            [
+                AssistantMessage("draft a summary"),
+                _assistant_call("call_1", "echo", text="hi"),
+                _assistant_call("call_2", "echo", text="hi"),
+                AssistantMessage("done"),
+                AssistantMessage("done"),
+                AssistantMessage("done"),
+            ]
+        )
+        patch_runtime(monkeypatch, _print=None, _debug_log=None, _note=None)
 
-        def echo(state, text: str):
-            return text
-
-        registry = tool_handler("echo", echo)
-        transcript = agent.transcript_with_system_prompt("sys")
-        agent.add_user(transcript, "hello")
-
-        responses = iter([
-            AssistantMessage("draft a summary"),
-            AssistantMessage("", tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})]),
-            AssistantMessage("", tool_calls=[ToolCall(id="call_2", name="echo", arguments={"text": "hi"})]),
-            AssistantMessage("done"),
-            AssistantMessage("done"),
-            AssistantMessage("done"),
-        ])
-        monkeypatch.setattr(rt, "_print", lambda *a, **k: None)
-        monkeypatch.setattr(rt, "_debug_log", lambda *a, **k: None)
-        monkeypatch.setattr(rt, "_note", lambda *a, **k: None)
-
-        client = {"chat_completion": lambda **kwargs: next(responses)}
+        transcript = _transcript()
         code, content = agent.run_turn(
-            client,
+            {"chat_completion": lambda **kwargs: next(responses)},
             transcript,
-            make_state(tmp_path, registry=registry),
+            make_state(
+                tmp_path, registry=tool_handler("echo", lambda state, text: text)
+            ),
             "openai:gpt-test",
-            tools.tool_specs(registry),
+            tools.tool_specs(tool_handler("echo", lambda state, text: text)),
             best_of=3,
         )
 
         assert (code, content) == (0, "done")
-        tool_call = transcript["messages"][2]["tool_calls"][0]
-        assert tool_call["name"] == "echo"
-        assert tool_call["arguments"] == {"text": "hi"}
+        assert transcript["messages"][2]["tool_calls"][0]["name"] == "echo"
+        assert transcript["messages"][2]["tool_calls"][0]["arguments"] == {"text": "hi"}

@@ -25,14 +25,18 @@ from .aws_sigv4 import sigv4_headers
 
 JSONLike: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
+
 def normalize_jsonlike(value: Any) -> JSONLike:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
     if isinstance(value, dict):
         return {str(key): normalize_jsonlike(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [normalize_jsonlike(item) for item in value]
     return str(value)
+
 
 def serialize_json(value: Any) -> str:
     normalized = normalize_jsonlike(value)
@@ -42,11 +46,15 @@ def serialize_json(value: Any) -> str:
         else json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
     )
 
+
 def serialize_toon(value: Any) -> str:
     normalized = normalize_jsonlike(value)
     return normalized if isinstance(normalized, str) else toons.dumps(normalized)
 
-def ToolCall(id: str, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+
+def ToolCall(
+    id: str, name: str, arguments: dict[str, Any] | None = None
+) -> dict[str, Any]:
     return {"id": id, "name": name, "arguments": dict(arguments or {})}
 
 
@@ -54,12 +62,16 @@ def ToolResult(*, ok: bool = True, content: JSONLike = None) -> dict[str, Any]:
     return {"ok": ok, "content": content}
 
 
+def _message(role: str, content: Any = "", /, **extra: Any) -> dict[str, Any]:
+    return {"role": role, "content": content, **extra}
+
+
 def SystemMessage(content: str) -> dict[str, Any]:
-    return {"role": "system", "content": content}
+    return _message("system", content)
 
 
 def UserMessage(content: str) -> dict[str, Any]:
-    return {"role": "user", "content": content}
+    return _message("user", content)
 
 
 def AssistantMessage(
@@ -67,12 +79,12 @@ def AssistantMessage(
     tool_calls: list[dict[str, Any]] | None = None,
     thought_signatures: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "role": "assistant",
-        "content": content,
-        "tool_calls": list(tool_calls or []),
-        "thought_signatures": dict(thought_signatures or {}),
-    }
+    return _message(
+        "assistant",
+        content,
+        tool_calls=list(tool_calls or []),
+        thought_signatures=dict(thought_signatures or {}),
+    )
 
 
 def ToolMessage(
@@ -80,12 +92,12 @@ def ToolMessage(
     name: str = "",
     content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "role": "tool",
-        "tool_call_id": tool_call_id,
-        "name": name,
-        "content": content or ToolResult(),
-    }
+    return _message(
+        "tool",
+        content or ToolResult(),
+        tool_call_id=tool_call_id,
+        name=name,
+    )
 
 
 ChatMessage: TypeAlias = dict[str, Any]
@@ -135,6 +147,7 @@ DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 5.0
 DEFAULT_RETRY_MAX_DELAY_SECONDS = 30.0
 TRANSPORT_ERROR_RETRY_DELAY = 3.0
 
+
 def _tool_output_value(result: dict[str, Any]) -> JSONLike:
     content = normalize_jsonlike(result.get("content"))
     if result.get("ok", True):
@@ -143,8 +156,10 @@ def _tool_output_value(result: dict[str, Any]) -> JSONLike:
         return {"ok": False, **content}
     return {"ok": False, "message": content}
 
+
 def _tool_output_text(result: dict[str, Any]) -> str:
     return serialize_toon(_tool_output_value(result))
+
 
 def _openai_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -156,14 +171,13 @@ def _openai_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
+
 def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
     role = message.get("role")
-    if role == "system":
-        return {"role": "system", "content": message["content"]}
-    if role == "user":
-        return {"role": "user", "content": message["content"]}
+    if role in {"system", "user"}:
+        return _message(role, message["content"])
     if role == "assistant":
-        payload = {"role": "assistant", "content": message["content"]}
+        payload = _message("assistant", message["content"])
         if message["tool_calls"]:
             payload["tool_calls"] = [
                 _openai_tool_call(tool_call) for tool_call in message["tool_calls"]
@@ -172,17 +186,19 @@ def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
             payload["thought_signatures"] = message["thought_signatures"]
         return payload
     if role == "tool":
-        return {
-            "role": "tool",
-            "tool_call_id": message["tool_call_id"],
-            "name": message["name"],
-            "content": _tool_output_text(message["content"]),
-        }
+        return _message(
+            "tool",
+            _tool_output_text(message["content"]),
+            tool_call_id=message["tool_call_id"],
+            name=message["name"],
+        )
     raise TypeError(f"Unsupported message role: {role!r}")
+
 
 # ---------------------------------------------------------------------------
 # Local persistence and shell/runtime helpers
 # ---------------------------------------------------------------------------
+
 
 def load_json(path, default):
     try:
@@ -190,19 +206,24 @@ def load_json(path, default):
     except (OSError, json.JSONDecodeError):
         return default
 
+
 def _ensure_private_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
     return path
 
+
 def save_json(path, data):
     try:
         _ensure_private_dir(path.parent)
-        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         path.chmod(0o600)
         return True
     except OSError:
         return False
+
 
 def _first_nonempty_string(data: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
@@ -211,10 +232,12 @@ def _first_nonempty_string(data: dict[str, Any], *keys: str) -> str | None:
             return value
     return None
 
+
 def _require_string(value: Any, error: str) -> str:
     if not isinstance(value, str) or not value:
         raise RuntimeError(error)
     return value
+
 
 def _post_form_json(
     url: str, data: dict[str, str], *, error_prefix: str
@@ -235,6 +258,7 @@ def _post_form_json(
         raise RuntimeError(f"{error_prefix}: invalid JSON response")
     return payload
 
+
 def _extract_model_ids(items: Any, *keys: str) -> list[str]:
     if not isinstance(items, list):
         return []
@@ -248,8 +272,10 @@ def _extract_model_ids(items: Any, *keys: str) -> list[str]:
         )
     )
 
+
 def which(command, path=None):
     return shutil.which(command, path=path)
+
 
 def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
     if not cmd:
@@ -267,12 +293,14 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
     except subprocess.TimeoutExpired as e:
         raise ValueError(f"command timed out after {timeout}s") from e
 
+
 # lru_cache is intentional: the launch environment is expected to be stable
 # within a single oy run. If env vars change mid-process (e.g. in tests), the
 # cache will be stale.
 @lru_cache(maxsize=8)
 def command_env(_cwd=None):
     return MappingProxyType(os.environ.copy())
+
 
 DEFAULT_HTTP_TIMEOUT = 300.0
 SHORT_HTTP_TIMEOUT = 30.0
@@ -285,20 +313,16 @@ class HTTPError(RuntimeError):
         super().__init__(message)
 
 
-class TransportError(RuntimeError):
-    pass
+class TransportError(RuntimeError): ...
 
 
-class TimeoutException(TransportError):
-    pass
+class TimeoutException(TransportError): ...
 
 
-class APIConnectionError(TransportError):
-    pass
+class APIConnectionError(TransportError): ...
 
 
-class APITimeoutError(TimeoutException):
-    pass
+class APITimeoutError(TimeoutException): ...
 
 
 class APIStatusError(HTTPError):
@@ -307,20 +331,16 @@ class APIStatusError(HTTPError):
         super().__init__(message, response=response)
 
 
-class AuthenticationError(APIStatusError):
-    pass
+class AuthenticationError(APIStatusError): ...
 
 
-class PermissionDeniedError(APIStatusError):
-    pass
+class PermissionDeniedError(APIStatusError): ...
 
 
-class RateLimitError(APIStatusError):
-    pass
+class RateLimitError(APIStatusError): ...
 
 
-class BadRequestError(APIStatusError):
-    pass
+class BadRequestError(APIStatusError): ...
 
 
 ResponseAdapter: TypeAlias = dict[str, Any]
@@ -338,7 +358,14 @@ def _normalize_headers(headers: Any) -> dict[str, str]:
 
 def adapt_response(response: Any) -> ResponseAdapter:
     is_mapping = isinstance(response, dict)
-    status_code = int((response.get("status_code") if is_mapping else getattr(response, "status_code", 0)) or 0)
+    status_code = int(
+        (
+            response.get("status_code")
+            if is_mapping
+            else getattr(response, "status_code", 0)
+        )
+        or 0
+    )
     reason_phrase = str(
         (
             response.get("reason_phrase", "")
@@ -349,13 +376,30 @@ def adapt_response(response: Any) -> ResponseAdapter:
     )
     return response_adapter(
         status_code=status_code,
-        headers=response.get("headers") if is_mapping else getattr(response, "headers", None),
-        text=str((response.get("text", "") if is_mapping else getattr(response, "text", "")) or ""),
-        content=bytes((response.get("content", b"") if is_mapping else getattr(response, "content", b"")) or b""),
-        url=str((response.get("url", "") if is_mapping else getattr(response, "url", "")) or ""),
+        headers=response.get("headers")
+        if is_mapping
+        else getattr(response, "headers", None),
+        text=str(
+            (response.get("text", "") if is_mapping else getattr(response, "text", ""))
+            or ""
+        ),
+        content=bytes(
+            (
+                response.get("content", b"")
+                if is_mapping
+                else getattr(response, "content", b"")
+            )
+            or b""
+        ),
+        url=str(
+            (response.get("url", "") if is_mapping else getattr(response, "url", ""))
+            or ""
+        ),
         reason_phrase=reason_phrase,
         http_version=_http_version_name(
-            response.get("http_version") if is_mapping else getattr(response, "http_version", None)
+            response.get("http_version")
+            if is_mapping
+            else getattr(response, "http_version", None)
         ),
     )
 
@@ -403,7 +447,6 @@ def _coerce_form_fields(value: dict[Any, Any]) -> dict[str, str]:
     return {str(key): str(item) for key, item in value.items()}
 
 
-
 def _encode_request_data(value: Any) -> bytes | None:
     if value is None:
         return None
@@ -442,7 +485,6 @@ def _http_request_timeout(value: float) -> urllib3.Timeout:
     return urllib3.Timeout(total=float(value))
 
 
-
 def _http_request_retries(follow_redirects: bool) -> Retry | bool:
     if not follow_redirects:
         return False
@@ -457,12 +499,10 @@ def _http_request_retries(follow_redirects: bool) -> Retry | bool:
     )
 
 
-
 def _transport_error_reason(exc: BaseException) -> str:
     if isinstance(exc, urllib3.exceptions.MaxRetryError) and exc.reason is not None:
         return _transport_error_reason(exc.reason)
     return str(exc)
-
 
 
 def _transport_error_is_timeout(exc: BaseException) -> bool:
@@ -473,7 +513,6 @@ def _transport_error_is_timeout(exc: BaseException) -> bool:
     return isinstance(exc, urllib3.exceptions.TimeoutError) and not isinstance(
         exc, urllib3.exceptions.NewConnectionError
     )
-
 
 
 def _response_url_from_raw(response: Any, request_url: str) -> str:
@@ -525,7 +564,9 @@ class HTTPClient:
         method = method.upper()
         request_kwargs: dict[str, Any] = {
             "headers": {str(key): str(value) for key, value in (headers or {}).items()},
-            "timeout": _http_request_timeout(self.timeout if timeout is None else float(timeout)),
+            "timeout": _http_request_timeout(
+                self.timeout if timeout is None else float(timeout)
+            ),
             "redirect": self.follow_redirects,
             "retries": _http_request_retries(self.follow_redirects),
             "preload_content": True,
@@ -554,7 +595,9 @@ class HTTPClient:
             text=_decode_response_text(content, response_headers),
             content=content,
             url=_response_url_from_raw(raw, url),
-            reason_phrase=str(getattr(raw, "reason", None) or _status_reason(status_code)),
+            reason_phrase=str(
+                getattr(raw, "reason", None) or _status_reason(status_code)
+            ),
             http_version=_http_version_name(
                 getattr(raw, "version_string", None) or getattr(raw, "version", None)
             ),
@@ -564,19 +607,14 @@ class HTTPClient:
 OpenAI: TypeAlias = dict[str, Any]
 
 
-
 def llm_session(**kw):
-    kw.setdefault("timeout", DEFAULT_HTTP_TIMEOUT)
-    kw.setdefault("follow_redirects", False)
-    return http_client(**kw)
-
+    return http_client(timeout=DEFAULT_HTTP_TIMEOUT, follow_redirects=False, **kw)
 
 
 def tool_session(**kw):
-    kw.setdefault("timeout", DEFAULT_WEBFETCH_TIMEOUT_SECONDS)
-    kw.setdefault("follow_redirects", False)
-    return http_client(**kw)
-
+    return http_client(
+        timeout=DEFAULT_WEBFETCH_TIMEOUT_SECONDS, follow_redirects=False, **kw
+    )
 
 
 def _openai(
@@ -683,7 +721,6 @@ def _model_ids(api: OpenAI) -> list[str]:
     )
 
 
-
 def _status_reason(status_code: int) -> str:
     try:
         return HTTPStatus(status_code).phrase
@@ -708,27 +745,26 @@ def _http_version_name(value: Any) -> str:
     return f"HTTP/{value}"
 
 
-
-
 def _status_error_from_response(response: ResponseAdapter) -> APIStatusError:
-    message = _response_error_message(response) or response["reason_phrase"] or f"HTTP {response['status_code']}"
-    cls: type[APIStatusError]
-    if response["status_code"] == 400:
-        cls = BadRequestError
-    elif response["status_code"] == 401:
-        cls = AuthenticationError
-    elif response["status_code"] == 403:
-        cls = PermissionDeniedError
-    elif response["status_code"] == 429:
-        cls = RateLimitError
-    else:
-        cls = APIStatusError
+    message = (
+        _response_error_message(response)
+        or response["reason_phrase"]
+        or f"HTTP {response['status_code']}"
+    )
+    cls = {
+        400: BadRequestError,
+        401: AuthenticationError,
+        403: PermissionDeniedError,
+        429: RateLimitError,
+    }.get(response["status_code"], APIStatusError)
     return cls(message, response=response)
 
 
 def http_client(**kw):
     timeout = float(kw.pop("timeout", DEFAULT_HTTP_TIMEOUT))
-    follow_redirects = bool(kw.pop("follow_redirects", kw.pop("allow_redirects", False)))
+    follow_redirects = bool(
+        kw.pop("follow_redirects", kw.pop("allow_redirects", False))
+    )
     if kw:
         raise TypeError(f"Unsupported http_client kwargs: {', '.join(sorted(kw))}")
     return HTTPClient(timeout=timeout, follow_redirects=follow_redirects)
@@ -738,23 +774,29 @@ def bedrock_base_url(region: str) -> str:
     return f"https://bedrock-mantle.{region}.api.aws/v1"
 
 
-def load_bedrock_model_list(cwd: Path | None = None, region: str | None = None) -> list[str]:
+def load_bedrock_model_list(
+    cwd: Path | None = None, region: str | None = None
+) -> list[str]:
     current = default_region(region)
     url = f"{bedrock_base_url(current).rstrip('/')}/models"
     with llm_session(timeout=SHORT_HTTP_TIMEOUT, follow_redirects=False) as client:
         response = client.request(
             "GET",
             url,
-            headers=_bedrock_request_headers(load_aws_credentials(cwd), current, "GET", url),
+            headers=_bedrock_request_headers(
+                load_aws_credentials(cwd), current, "GET", url
+            ),
         )
     response_raise_for_status(response)
     return _extract_model_ids(response_json(response).get("data"), "id")
+
 
 def aws_cli(parts, cwd=None, timeout=10):
     env = command_env(cwd)
     if not (aws := which("aws", env.get("PATH"))):
         raise RuntimeError("AWS CLI is not installed or not on PATH")
     return run_cmd([aws, *parts], cwd=cwd, env=env, timeout=timeout)
+
 
 def run_aws_sso_login(cwd=None):
     env = command_env(cwd)
@@ -772,6 +814,7 @@ def run_aws_sso_login(cwd=None):
     )
     if r.returncode:
         raise RuntimeError(f"AWS SSO login failed with exit code {r.returncode}")
+
 
 def load_aws_credentials(
     cwd: Path | None = None, allow_login: bool = True
@@ -808,6 +851,7 @@ def load_aws_credentials(
         creds["session_token"] = token
     return creds
 
+
 def default_region(choice: str | None = None) -> str:
     return (
         choice
@@ -816,13 +860,16 @@ def default_region(choice: str | None = None) -> str:
         or "ap-southeast-2"
     )
 
+
 # ---------------------------------------------------------------------------
 # Credential loading and model discovery helpers
 # ---------------------------------------------------------------------------
 
+
 def load_codex_auth() -> dict[str, Any]:
     data = load_json(CODEX_AUTH_PATH, {})
     return data if isinstance(data, dict) else {}
+
 
 def get_openai_api_key() -> str | None:
     return os.environ.get("OPENAI_API_KEY")
@@ -842,10 +889,12 @@ def load_codex_session() -> dict[str, Any]:
         return auth
     raise RuntimeError("Codex CLI auth file does not contain a usable session")
 
+
 def get_codex_api_key() -> str | None:
     auth = load_codex_auth()
     key = auth.get("OPENAI_API_KEY")
     return key if isinstance(key, str) and key else None
+
 
 def _jwt_expiry_epoch(token: str) -> float | None:
     try:
@@ -862,6 +911,7 @@ def _jwt_expiry_epoch(token: str) -> float | None:
         return float(exp)
     return None
 
+
 def _codex_tokens(auth: dict[str, Any]) -> dict[str, str]:
     tokens = auth.get("tokens")
     if not isinstance(tokens, dict):
@@ -872,6 +922,7 @@ def _codex_tokens(auth: dict[str, Any]) -> dict[str, str]:
         if isinstance(value, str) and value:
             result[key] = value
     return result
+
 
 def refresh_codex_chatgpt_session(refresh_token: str) -> dict[str, Any]:
     data = _post_form_json(
@@ -899,6 +950,7 @@ def refresh_codex_chatgpt_session(refresh_token: str) -> dict[str, Any]:
     )
     save_json(CODEX_AUTH_PATH, auth)
     return auth
+
 
 def get_codex_chatgpt_session(force_refresh: bool = False) -> dict[str, str]:
     auth = load_codex_session()
@@ -932,6 +984,7 @@ def get_codex_chatgpt_session(force_refresh: bool = False) -> dict[str, str]:
         "account_id": account_id,
     }
 
+
 def load_codex_model_list() -> list[str]:
     data = load_json(CODEX_MODELS_CACHE_PATH, {})
     return _extract_model_ids(
@@ -943,9 +996,11 @@ def load_codex_model_list() -> list[str]:
         "model_id",
     )
 
+
 # ---------------------------------------------------------------------------
 # Provider client factories and protocol adapters
 # ---------------------------------------------------------------------------
+
 
 def split_model_spec(spec: str) -> tuple[str | None, str]:
     if ":" in spec:
@@ -954,20 +1009,25 @@ def split_model_spec(spec: str) -> tuple[str | None, str]:
             return shim, model
     return None, spec
 
+
 def join_model_spec(shim: str, model: str) -> str:
     return f"{shim}:{model}"
+
 
 # ---------------------------------------------------------------------------
 # Retry plumbing
 # ---------------------------------------------------------------------------
 
+
 def _is_retryable_status(status_code: int) -> bool:
     return status_code in {429, 499} or 500 <= status_code < 600
+
 
 class RetryableHttpError(RuntimeError):
     def __init__(self, response: ResponseAdapter):
         self.response = response
         super().__init__(f"retryable HTTP {response['status_code']}")
+
 
 def _parse_retry_after_seconds(value: str | None) -> float | None:
     if not value:
@@ -983,6 +1043,7 @@ def _parse_retry_after_seconds(value: str | None) -> float | None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
         seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
     return max(0.0, seconds)
+
 
 class WaitForRetryableResponse(wait_base):
     def __init__(
@@ -1010,24 +1071,17 @@ class WaitForRetryableResponse(wait_base):
             return max(TRANSPORT_ERROR_RETRY_DELAY, min(base, self.maximum))
         return base
 
+
 def _retry_error_context(exc: BaseException | None) -> str | None:
-    if isinstance(exc, RetryableHttpError):
+    if isinstance(exc, RetryableHttpError | APIStatusError):
         msg = _response_error_message(exc.response)
         return msg or f"HTTP {exc.response['status_code']}"
-    if isinstance(exc, APIStatusError):
-        msg = _response_error_message(exc.response)
-        return msg or f"HTTP {exc.response['status_code']}"
-    if isinstance(exc, APITimeoutError):
-        return f"timeout ({type(exc).__name__})"
-    if isinstance(exc, APIConnectionError):
-        return f"transport error ({type(exc).__name__}): {exc}"
     if isinstance(exc, TimeoutException):
         return f"timeout ({type(exc).__name__})"
     if isinstance(exc, TransportError):
         return f"transport error ({type(exc).__name__}): {exc}"
-    if exc is not None:
-        return str(exc)
-    return None
+    return None if exc is None else str(exc)
+
 
 def _call_with_retry(
     call,
@@ -1062,6 +1116,7 @@ def _call_with_retry(
                 raise
     raise RuntimeError("SDK retry loop exited unexpectedly")
 
+
 def _response_error_message(response: ResponseAdapter) -> str:
     try:
         payload = response_json(response)
@@ -1077,10 +1132,12 @@ def _response_error_message(response: ResponseAdapter) -> str:
             return f"{error_type}: {top_msg}" if error_type else top_msg
     return response["text"]
 
+
 def _responses_instructions(messages: list[ChatMessage]) -> str | None:
     parts = [msg["content"] for msg in messages if msg.get("role") == "system"]
     joined = "\n\n".join(part for part in parts if part)
     return joined or None
+
 
 def _responses_input_from_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
@@ -1093,7 +1150,9 @@ def _responses_input_from_messages(messages: list[ChatMessage]) -> list[dict[str
             continue
         if role == "assistant":
             if msg["content"]:
-                items.append({"type": "message", "role": "assistant", "content": msg["content"]})
+                items.append(
+                    {"type": "message", "role": "assistant", "content": msg["content"]}
+                )
             items.extend(
                 {
                     "type": "function_call",
@@ -1115,6 +1174,7 @@ def _responses_input_from_messages(messages: list[ChatMessage]) -> list[dict[str
             )
     return items
 
+
 def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     result = [
         {
@@ -1127,6 +1187,7 @@ def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]
         for tool in tools or []
     ]
     return result or None
+
 
 def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
     # Provider boundaries are loose here: some SDKs hand back dicts, some
@@ -1161,24 +1222,30 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
                     pass
         raise RuntimeError(f"Could not parse tool arguments JSON: {exc}") from exc
 
+
 def _drop_reasoning_arg(payload: dict[str, Any]) -> dict[str, Any]:
-    stripped = dict(payload)
-    stripped.pop("reasoning", None)
-    stripped.pop("reasoning_effort", None)
-    return stripped
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in {"reasoning", "reasoning_effort"}
+    }
+
 
 # Thread-safe cache for reasoning support per (api_kind, model).
 # Background threads (/ask, /audit) may probe this concurrently.
 _REASONING_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
 _REASONING_CACHE_LOCK = _threading.Lock()
 
+
 def _should_send_reasoning(api_kind: str, model: str) -> bool:
     with _REASONING_CACHE_LOCK:
         return _REASONING_SUPPORT_CACHE.get((api_kind, model), True)
 
+
 def _mark_reasoning_unsupported(api_kind: str, model: str) -> None:
     with _REASONING_CACHE_LOCK:
         _REASONING_SUPPORT_CACHE[(api_kind, model)] = False
+
 
 def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
     if exc.response["status_code"] != 400:
@@ -1195,6 +1262,7 @@ def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
             "extra inputs",
         )
     )
+
 
 def _call_with_reasoning_fallback(
     api_kind: str,
@@ -1239,6 +1307,7 @@ def _responses_payload(
         payload["tool_choice"] = tool_choice
         payload["parallel_tool_calls"] = True
     return payload
+
 
 def _decode_responses_output(response: Any) -> AssistantMessage:
     data = (
@@ -1287,15 +1356,14 @@ def _decode_responses_output(response: Any) -> AssistantMessage:
         tool_calls=tool_calls,
     )
 
+
 def _http_error_message(prefix: str, response: ResponseAdapter) -> str:
     try:
         data = response_json(response)
     except ValueError:
         body = response["text"].strip()
         body = body[:200] if body else ""
-        return (
-            f"{prefix} error {response['status_code']}: {body or response['reason_phrase']}"
-        )
+        return f"{prefix} error {response['status_code']}: {body or response['reason_phrase']}"
     detail = data.get("error") or data.get("detail") if isinstance(data, dict) else data
     if isinstance(detail, dict):
         message = detail.get("message") or detail.get("code") or json.dumps(detail)
@@ -1304,6 +1372,7 @@ def _http_error_message(prefix: str, response: ResponseAdapter) -> str:
     else:
         message = json.dumps(detail, ensure_ascii=True)
     return f"{prefix} error {response['status_code']}: {message}"
+
 
 def _list_models(
     list_models: Callable[[], list[str]],
@@ -1350,6 +1419,7 @@ def _responses_client(
         ),
     }
 
+
 def _message_like_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return {key: item for key, item in value.items() if item is not None}
@@ -1358,6 +1428,7 @@ def _message_like_dict(value: Any) -> dict[str, Any]:
         if isinstance(data, dict):
             return data
     return {}
+
 
 def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
     if data := _message_like_dict(message):
@@ -1379,6 +1450,7 @@ def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
         elif isinstance(value, str):
             result[key] = value
     return result
+
 
 def _chat_completion_tool_call(tool_call: Any) -> dict[str, Any] | None:
     data = _message_like_dict(tool_call)
@@ -1405,10 +1477,16 @@ def _chat_completion_tool_call(tool_call: Any) -> dict[str, Any] | None:
         arguments=_decode_tool_call_arguments(arguments),
     )
 
+
 def _is_blank_chat_value(value: Any) -> bool:
-    return value is None or value == "" or value == [] or value == {} or (
-        isinstance(value, str) and not value.strip()
+    return (
+        value is None
+        or value == ""
+        or value == []
+        or value == {}
+        or (isinstance(value, str) and not value.strip())
     )
+
 
 def _merged_chat_completion_message(choices: list[Any]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
@@ -1427,6 +1505,7 @@ def _merged_chat_completion_message(choices: list[Any]) -> dict[str, Any]:
         merged = candidate
     return merged
 
+
 def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
     data = _message_like_dict(response)
     choices = data.get("choices") if data else getattr(response, "choices", None)
@@ -1434,7 +1513,9 @@ def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
         _merged_chat_completion_message(choices)
         if isinstance(choices, list) and len(choices) > 1
         else _chat_completion_message_dict(
-            (choices[0] or {}).get("message") if isinstance(choices[0], dict) else getattr(choices[0], "message", None)
+            (choices[0] or {}).get("message")
+            if isinstance(choices[0], dict)
+            else getattr(choices[0], "message", None)
         )
         if isinstance(choices, list) and choices
         else {}
@@ -1450,6 +1531,7 @@ def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
             if (call := _chat_completion_tool_call(tool_call)) is not None
         ],
     )
+
 
 def _chat_client(
     create: Callable[[dict[str, Any]], dict[str, Any]],
@@ -1482,6 +1564,7 @@ def _chat_client(
         "list_models": lambda: _list_models(list_models),
     }
 
+
 def _tool_specs_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -1494,6 +1577,7 @@ def _tool_specs_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for tool in tools
     ]
+
 
 def _codex_chatgpt_client() -> CompletionClient:
     api = _openai(
@@ -1534,9 +1618,13 @@ def _codex_chatgpt_client() -> CompletionClient:
                         "ChatGPT-Account-Id": session["account_id"],
                     }
                     continue
-                raise RuntimeError("Codex ChatGPT authentication failed after token refresh")
+                raise RuntimeError(
+                    "Codex ChatGPT authentication failed after token refresh"
+                )
             except APIStatusError as exc:
-                raise RuntimeError(_http_error_message("Codex ChatGPT", exc.response)) from exc
+                raise RuntimeError(
+                    _http_error_message("Codex ChatGPT", exc.response)
+                ) from exc
             except HTTPError as exc:
                 raise RuntimeError(f"Codex ChatGPT request failed: {exc}") from exc
             return _decode_responses_output(data)
@@ -1547,12 +1635,12 @@ def _codex_chatgpt_client() -> CompletionClient:
         "list_models": lambda: load_codex_model_list() or [CODEX_DEFAULT_MODEL],
     }
 
+
 KNOWN_SHIMS = set(SHIM_ORDER)
-_COPILOT_BASE_URL = os.environ.get(
-    "COPILOT_BASE_URL", "https://api.githubcopilot.com"
-)
+_COPILOT_BASE_URL = os.environ.get("COPILOT_BASE_URL", "https://api.githubcopilot.com")
 _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
+
 
 def _responses_from_key(
     api_key: str,
@@ -1589,7 +1677,8 @@ def _chat_from_key(
     base_url: str | None = None,
     max_retries: int = 3,
     timeout: Any = None,
-    tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = _tool_specs_to_openai,
+    tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
+    | None = _tool_specs_to_openai,
 ) -> CompletionClient:
     api = _openai(
         api_key,
@@ -1609,26 +1698,28 @@ def _chat_from_key(
         tools_map=tools_map,
     )
 
+
 def _require_openai_env(_cwd: Path | None = None) -> None:
     _require_string(get_openai_api_key(), "OPENAI_API_KEY is not set")
 
+
 def _openai_client(
-    cwd: Path | None = None,
+    _cwd: Path | None = None,
     *,
     max_retries: int = 3,
 ) -> CompletionClient:
-    _ = cwd
     return _responses_from_key(
         _require_string(get_openai_api_key(), "No OpenAI credentials found"),
         base_url=os.environ.get("OPENAI_BASE_URL"),
         max_retries=max_retries,
     )
 
+
 def _require_codex_env(_cwd: Path | None = None) -> None:
     load_codex_session()
 
-def _codex_client(cwd: Path | None = None) -> CompletionClient:
-    _ = cwd
+
+def _codex_client(_cwd: Path | None = None) -> CompletionClient:
     if api_key := get_codex_api_key():
         return _responses_from_key(
             api_key,
@@ -1637,8 +1728,10 @@ def _codex_client(cwd: Path | None = None) -> CompletionClient:
         )
     return _codex_chatgpt_client()
 
+
 def _require_aws_env(cwd: Path | None = None) -> None:
     load_aws_credentials(cwd, allow_login=False)
+
 
 def _bedrock_mantle_client(
     credentials: dict[str, str],
@@ -1685,7 +1778,6 @@ def _bedrock_mantle_client(
     )
 
 
-
 def _mantle_completion_client(
     cwd: Path | None = None,
     *,
@@ -1693,6 +1785,7 @@ def _mantle_completion_client(
 ) -> CompletionClient:
     current = default_region(region)
     return _bedrock_mantle_client(load_aws_credentials(cwd), current)
+
 
 def _get_github_token() -> str | None:
     for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
@@ -1714,17 +1807,20 @@ def _get_github_token() -> str | None:
     token = proc.stdout.strip()
     return token if proc.returncode == 0 and token else None
 
+
 def _copilot_default_headers() -> dict[str, str]:
     return {
         "Copilot-Integration-Id": _COPILOT_INTEGRATION_ID,
         "Editor-Version": _COPILOT_EDITOR_VERSION,
     }
 
+
 def _require_copilot_env(_cwd: Path | None = None) -> None:
     _require_string(
         _get_github_token(),
         "No GitHub token found (set GH_TOKEN, GITHUB_TOKEN, or run `gh auth login`)",
     )
+
 
 def _fetch_copilot_models_raw(token: str) -> list[dict[str, Any]]:
     api = _openai(
@@ -1735,6 +1831,7 @@ def _fetch_copilot_models_raw(token: str) -> list[dict[str, Any]]:
     )
     data = _req_json(api, "GET", "/models", source="Copilot models")
     return data.get("data", []) if isinstance(data, dict) else []
+
 
 def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
     raw = _fetch_copilot_models_raw(token)
@@ -1750,8 +1847,8 @@ def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
             responses_ids.add(model_id)
     return sorted(chat_ids), responses_ids
 
-def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
-    _ = cwd
+
+def _copilot_completion_client(_cwd: Path | None = None) -> CompletionClient:
     token = _require_string(_get_github_token(), "No GitHub token found")
     client = _openai(
         token,
@@ -1812,20 +1909,23 @@ def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
         except Exception:
             return _list_models(lambda: _model_ids(client), fallback=None, default=[])
 
-
     return {"chat_completion": chat_completion, "list_models": list_models}
+
 
 def _load_opencode_auth() -> dict[str, Any]:
     data = load_json(OPENCODE_AUTH_PATH, {})
     return data if isinstance(data, dict) else {}
 
+
 def get_opencode_zen_api_key() -> str | None:
     entry = _load_opencode_auth().get("opencode", {})
     return (entry.get("key") or None) if isinstance(entry, dict) else None
 
+
 def get_opencode_go_api_key() -> str | None:
     entry = _load_opencode_auth().get("opencode-go", {})
     return (entry.get("key") or None) if isinstance(entry, dict) else None
+
 
 def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
     _require_string(
@@ -1833,97 +1933,88 @@ def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
         f"No OpenCode Zen credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
     )
 
+
 def _require_opencode_go_env(_cwd: Path | None = None) -> None:
     _require_string(
         get_opencode_go_api_key(),
         f"No OpenCode Go credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
     )
 
-def _opencode_client(api_key: str, *, base_url: str) -> CompletionClient:
-    return _chat_from_key(api_key, base_url=base_url)
 
-def _opencode_zen_client(cwd: Path | None = None) -> CompletionClient:
-    _ = cwd
-    return _opencode_client(
-        _require_string(get_opencode_zen_api_key(), "No OpenCode Zen credentials found"),
+def _opencode_zen_client(_cwd: Path | None = None) -> CompletionClient:
+    return _chat_from_key(
+        _require_string(
+            get_opencode_zen_api_key(), "No OpenCode Zen credentials found"
+        ),
         base_url=OPENCODE_ZEN_URL,
     )
 
-def _opencode_go_client(cwd: Path | None = None) -> CompletionClient:
-    _ = cwd
-    return _opencode_client(
+
+def _opencode_go_client(_cwd: Path | None = None) -> CompletionClient:
+    return _chat_from_key(
         _require_string(get_opencode_go_api_key(), "No OpenCode Go credentials found"),
         base_url=OPENCODE_GO_URL,
     )
 
-ShimEnvChecker: TypeAlias = Callable[[Path | None], None]
-ShimClientBuilder: TypeAlias = Callable[..., CompletionClient]
-ShimModelLister: TypeAlias = Callable[[Path | None], list[str]]
 
 ShimSpec: TypeAlias = dict[str, Any]
 
 
 def _client_model_lister(
-    build_client: ShimClientBuilder,
-    /,
-    **kwargs: Any,
-) -> ShimModelLister:
+    build_client: Callable[..., CompletionClient], /, **kwargs: Any
+):
     def list_models(cwd: Path | None = None) -> list[str]:
         return build_client(cwd=cwd, **kwargs)["list_models"]()
 
     return list_models
 
+
 def _make_shim_spec(
-    name: str,
     *,
-    ensure_env: ShimEnvChecker,
-    build_client: ShimClientBuilder,
-    list_models: ShimModelLister | None = None,
+    ensure_env: Callable[[Path | None], None],
+    build_client: Callable[..., CompletionClient],
+    list_models: Callable[[Path | None], list[str]] | None = None,
 ) -> ShimSpec:
     return {
-        "name": name,
         "ensure_env": ensure_env,
         "build_client": build_client,
         "list_models": list_models or _client_model_lister(build_client),
     }
 
+
 SHIM_SPECS: dict[str, ShimSpec] = {
     SHIM_OPENAI: _make_shim_spec(
-        SHIM_OPENAI,
         ensure_env=_require_openai_env,
         build_client=_openai_client,
         list_models=_client_model_lister(_openai_client, max_retries=0),
     ),
     SHIM_CODEX: _make_shim_spec(
-        SHIM_CODEX,
         ensure_env=_require_codex_env,
         build_client=_codex_client,
     ),
     SHIM_MANTLE: _make_shim_spec(
-        SHIM_MANTLE,
         ensure_env=_require_aws_env,
         build_client=_mantle_completion_client,
         list_models=load_bedrock_model_list,
     ),
     SHIM_COPILOT: _make_shim_spec(
-        SHIM_COPILOT,
         ensure_env=_require_copilot_env,
         build_client=_copilot_completion_client,
     ),
     SHIM_OPENCODE: _make_shim_spec(
-        SHIM_OPENCODE,
         ensure_env=_require_opencode_zen_env,
         build_client=_opencode_zen_client,
     ),
     SHIM_OPENCODE_GO: _make_shim_spec(
-        SHIM_OPENCODE_GO,
         ensure_env=_require_opencode_go_env,
         build_client=_opencode_go_client,
     ),
 }
 
+
 def _shim_spec(shim: str) -> ShimSpec:
     return SHIM_SPECS[validate_shim(shim)]
+
 
 def _shim_env_error(spec: ShimSpec, cwd: Path | None) -> str | None:
     try:
@@ -1932,11 +2023,14 @@ def _shim_env_error(spec: ShimSpec, cwd: Path | None) -> str | None:
         return str(exc)
     return None
 
+
 def _shim_available(shim: str) -> bool:
     return _shim_env_error(_shim_spec(shim), None) is None
 
+
 def detect_available_shims() -> list[str]:
     return [shim for shim in SHIM_ORDER if _shim_available(shim)]
+
 
 def resolve_shim(
     model_spec: str | None = None, configured_shim: str | None = None
@@ -1952,12 +2046,14 @@ def resolve_shim(
     shims = detect_available_shims()
     return shims[0] if shims else SHIM_OPENAI
 
+
 def validate_shim(shim: str) -> str:
     if shim not in KNOWN_SHIMS:
         raise RuntimeError(
             f"Unknown shim value: `{shim}`. Use one of: {', '.join(SHIM_ORDER)}"
         )
     return shim
+
 
 def ensure_api_env(
     model_spec: str | None = None,
@@ -1968,6 +2064,7 @@ def ensure_api_env(
     error = _shim_env_error(spec, cwd)
     return error is None, error
 
+
 _MISSING_API_CREDENTIALS_MESSAGE = (
     "Missing API credentials.\n\n"
     "- set `OPENAI_API_KEY`, or\n"
@@ -1977,12 +2074,14 @@ _MISSING_API_CREDENTIALS_MESSAGE = (
     "- for Bedrock Mantle: configure AWS CLI credentials / SSO and set `AWS_REGION` (or `AWS_DEFAULT_REGION`) for the target region"
 )
 
+
 def _missing_api_credentials_message(error: str | None) -> str:
     return (
         _MISSING_API_CREDENTIALS_MESSAGE
         if not error
         else f"{_MISSING_API_CREDENTIALS_MESSAGE}\n- error: {error}"
     )
+
 
 def require_api_env(
     model_spec: str | None = None,
@@ -1994,8 +2093,10 @@ def require_api_env(
         raise RuntimeError(_missing_api_credentials_message(error))
     return shim
 
+
 def get_client(shim: str, cwd: Path | None = None) -> CompletionClient:
     return _shim_spec(shim)["build_client"](cwd)
+
 
 def list_models_for_shim(
     shim: str,
@@ -2010,6 +2111,7 @@ def list_models_for_shim(
         if ignore_errors:
             return []
         raise
+
 
 __all__ = [
     "APIStatusError",

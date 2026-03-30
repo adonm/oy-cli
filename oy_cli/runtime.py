@@ -38,13 +38,14 @@ from .providers import (
     _ensure_private_dir,
     command_env,
     http_client,
-    llm_session,
-    tool_session,
     join_model_spec,
+    llm_session,
     load_json,
+    normalize_jsonlike,
     run_cmd,
     save_json,
     split_model_spec,
+    tool_session,
     which,
 )
 from .providers import (
@@ -812,15 +813,6 @@ def read_only_tool_registry():
 
     return select_tools(include=_READ_ONLY_TOOLS)
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, Path):
-        return str(value)
-    return value
-
 def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
     if os.environ.get("OY_DEBUG", "").strip().lower() not in _TRUTHY_VALUES:
         return None, None
@@ -841,7 +833,8 @@ def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
 _debug_logger, _debug_log_path = _init_debug_log()
 
 def _msg_to_dict(msg) -> dict[str, Any]:
-    return _jsonable(msg)
+    data = normalize_jsonlike(msg)
+    return data if isinstance(data, dict) else {"message": data}
 
 def _debug_log(event: str, **data: Any) -> None:
     if _debug_logger is None:
