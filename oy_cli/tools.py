@@ -1259,20 +1259,6 @@ def sloc(
         "errors": errors,
     }
 
-def _join_paths(paths: list[Path], root: Path, empty: str = "<no matches>") -> str:
-    return (
-        "\n".join(
-            rt._rel(root, path) + ("/" if path.is_dir() else "")
-            for path in paths
-        )
-        or empty
-    )
-
-def _path_listing(
-    paths: list[Path], root: Path, *, limit: int, empty: str = "<no matches>"
-) -> str:
-    return _join_paths(paths[: _shown_line_limit(limit)], root, empty)
-
 def _glob_paths(
     root: Path,
     pattern: str,
@@ -1329,6 +1315,22 @@ def tool_list(
     rt.show(serialize_toon(payload))
     return payload
 
+def _read_lines(path: Path, *, start: int, limit: int) -> tuple[list[str], int, bool]:
+    lines: list[str] = []
+    line_count = 0
+    truncated = False
+    stop = start + limit
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line_count, line in enumerate(handle, 1):
+            if line_count <= start:
+                continue
+            if line_count <= stop:
+                lines.append(line.rstrip("\r\n"))
+                continue
+            truncated = True
+            break
+    return lines, line_count, truncated
+
 @tool()
 def tool_read(
     state: Any, path: str, offset: int = 1, limit: int = rt.BUDGETS["default_line_limit"]
@@ -1346,29 +1348,29 @@ def tool_read(
         raise ValueError(f"read path does not exist: {rt._rel(state['root'], target)}")
     if target.is_dir():
         raise ValueError(f"read path is a directory: {rt._rel(state['root'], target)}")
-    start = max(_positive_int(offset, "offset"), 1) - 1
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    shown = lines[start : start + _shown_line_limit(limit)]
+    start = _positive_int(offset, "offset") - 1
+    shown_limit = _shown_line_limit(limit)
+    shown, line_count, truncated = _read_lines(target, start=start, limit=shown_limit)
     text = "\n".join(shown)
     payload = {
         "path": path,
         "offset": offset,
         "limit": limit,
         "text": text,
-        "line_count": len(lines),
-        "truncated": start + len(shown) < len(lines),
+        "line_count": line_count,
+        "truncated": truncated,
     }
     end_line = start + len(shown)
     if text:
         language = rt.preview_language_for_path(path, text)
         preview = {
             "path": path,
-            "lines": f"{start + 1}-{end_line} of {len(lines)}",
+            "lines": f"{start + 1}-{end_line} of {line_count}",
             f"text.{language}" if language != "text" else "text": text,
         }
         rt.show(serialize_toon(preview))
     else:
-        rt.show(f"path: {path}\nlines: {start + 1}-{end_line} of {len(lines)}\n<empty file>")
+        rt.show(f"path: {path}\nlines: {start + 1}-{end_line} of {line_count}\n<empty file>")
     return payload
 
 def _search_summary(matches: int, shown: int, errors: int = 0) -> str:
@@ -1463,41 +1465,6 @@ def _search_payload(
         preview += f"\n... [{len(matches) - len(shown_matches)} more matches omitted]"
     return payload, preview, len(matches), len(shown_matches), len(errors)
 
-def _search_contents(
-    root: Path,
-    pattern: str,
-    path: str,
-    *,
-    fuzzy: str | None = None,
-    best_match: bool = False,
-    enhance_match: bool = False,
-    exclude: str | list[str] | None = None,
-    limit: int,
-):
-    target = rt.resolve_path(root, path)
-    if not target.exists():
-        raise ValueError(f"search path does not exist: {rt._rel(root, target)}")
-    results = search(
-        target,
-        pattern,
-        fuzzy=fuzzy,
-        best_match=best_match,
-        enhance_match=enhance_match,
-        ignore_root=root,
-        exclude=exclude,
-    )
-    return _search_payload(
-        root,
-        pattern,
-        path,
-        results,
-        fuzzy=fuzzy,
-        best_match=best_match,
-        enhance_match=enhance_match,
-        exclude=exclude,
-        limit=limit,
-    )
-
 @tool()
 def tool_search(
     state: Any,
@@ -1517,10 +1484,23 @@ def tool_search(
         "exclude": None,
         "limit": rt.BUDGETS["default_line_limit"],
     }
-    payload, preview, matches, shown, errors = _search_contents(
+    target = rt.resolve_path(state["root"], path)
+    if not target.exists():
+        raise ValueError(f"search path does not exist: {rt._rel(state['root'], target)}")
+    results = search(
+        target,
+        pattern,
+        fuzzy=fuzzy,
+        best_match=best_match,
+        enhance_match=enhance_match,
+        ignore_root=state["root"],
+        exclude=exclude,
+    )
+    payload, preview, matches, shown, errors = _search_payload(
         state["root"],
         pattern,
         path,
+        results,
         fuzzy=fuzzy,
         best_match=best_match,
         enhance_match=enhance_match,
@@ -1650,21 +1630,6 @@ def _replace_payload(
         len(errors),
     )
 
-def _replace_contents(
-    root: Path,
-    pattern: str,
-    replacement: str,
-    path: str,
-    *,
-    exclude: str | list[str] | None = None,
-    limit: int,
-):
-    target = rt.resolve_path(root, path)
-    if not target.exists():
-        raise ValueError(f"replace path does not exist: {rt._rel(root, target)}")
-    results = replace(target, pattern, replacement, ignore_root=root, exclude=exclude)
-    return _replace_payload(root, pattern, replacement, path, results, exclude=exclude, limit=limit)
-
 @tool(mutating=True)
 def tool_replace(
     state: Any,
@@ -1675,8 +1640,24 @@ def tool_replace(
     limit: int = rt.BUDGETS["default_line_limit"],
 ):
     defaults = {"path": ".", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]}
-    payload, preview, changed, replacements, skipped, errors = _replace_contents(
-        state["root"], pattern, replacement, path, exclude=exclude, limit=limit
+    target = rt.resolve_path(state["root"], path)
+    if not target.exists():
+        raise ValueError(f"replace path does not exist: {rt._rel(state['root'], target)}")
+    results = replace(
+        target,
+        pattern,
+        replacement,
+        ignore_root=state["root"],
+        exclude=exclude,
+    )
+    payload, preview, changed, replacements, skipped, errors = _replace_payload(
+        state["root"],
+        pattern,
+        replacement,
+        path,
+        results,
+        exclude=exclude,
+        limit=limit,
     )
     rt.note_tool(
         state,

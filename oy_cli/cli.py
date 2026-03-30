@@ -241,7 +241,7 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
                     "- `/model [filter]` -- show or switch model",
                     "- `/debug` -- toggle debug logging",
                     "- `/yolo` -- allow all tools for the rest of this session",
-                    "- `/ask <question>` -- research-only query (read-only, no changes)",
+                    "- `/ask <question>` -- research-only query (no bash or file changes; webfetch still allowed)",
                     "- `/audit [focus]` -- run a security/complexity audit",
                     "- `/save [name]` -- save session transcript",
                     "- `/load [name]` -- load a saved session",
@@ -367,7 +367,7 @@ def _handle_yolo_toggle(session):
 def _handle_ask(question, current_model, session, transcript):
     if not question:
         rt._print(
-            value="Usage: `/ask <question>` — research the codebase without making changes.",
+            value="Usage: `/ask <question>` — research the codebase without bash or file changes. Public webfetch is still allowed.",
             err=True,
         )
         return
@@ -377,7 +377,7 @@ def _handle_ask(question, current_model, session, transcript):
         if msg.get("role") != "system":
             ask_transcript["messages"].append(msg)
 
-    rt._note("research mode (read-only)", tag="note")
+    rt._note("research mode (no bash or file changes; public webfetch allowed)", tag="note")
     state = new_agent_state(
         root=session['workspace'],
         tool_registry=read_only_registry,

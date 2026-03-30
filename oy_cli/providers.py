@@ -204,9 +204,6 @@ def save_json(path, data):
     except OSError:
         return False
 
-def unique_strings(values):
-    return list(dict.fromkeys(value for value in values if value))
-
 def _first_nonempty_string(data: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         value = data.get(key)
@@ -241,8 +238,14 @@ def _post_form_json(
 def _extract_model_ids(items: Any, *keys: str) -> list[str]:
     if not isinstance(items, list):
         return []
-    return unique_strings(
-        _first_nonempty_string(item, *keys) for item in items if isinstance(item, dict)
+    return list(
+        dict.fromkeys(
+            value
+            for item in items
+            if isinstance(item, dict)
+            for value in [_first_nonempty_string(item, *keys)]
+            if value
+        )
     )
 
 def which(command, path=None):
@@ -661,10 +664,14 @@ def _req_json(
     data: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    return _json_dict(
-        _req(api, method, path, json_body=json_body, data=data, headers=headers),
-        source,
-    )
+    response = _req(api, method, path, json_body=json_body, data=data, headers=headers)
+    try:
+        payload = response_json(response)
+    except Exception as exc:
+        raise RuntimeError(f"{source}: invalid JSON response") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{source}: invalid JSON response")
+    return payload
 
 
 def _model_ids(api: OpenAI) -> list[str]:
@@ -702,15 +709,6 @@ def _http_version_name(value: Any) -> str:
 
 
 
-def _json_dict(response: ResponseAdapter, source: str) -> dict[str, Any]:
-    try:
-        payload = response_json(response)
-    except Exception as exc:
-        raise RuntimeError(f"{source}: invalid JSON response") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"{source}: invalid JSON response")
-    return payload
-
 
 def _status_error_from_response(response: ResponseAdapter) -> APIStatusError:
     message = _response_error_message(response) or response["reason_phrase"] or f"HTTP {response['status_code']}"
@@ -743,11 +741,12 @@ def bedrock_base_url(region: str) -> str:
 def load_bedrock_model_list(cwd: Path | None = None, region: str | None = None) -> list[str]:
     current = default_region(region)
     url = f"{bedrock_base_url(current).rstrip('/')}/models"
-    response = llm_session(timeout=SHORT_HTTP_TIMEOUT, follow_redirects=False).request(
-        "GET",
-        url,
-        headers=_bedrock_request_headers(load_aws_credentials(cwd), current, "GET", url),
-    )
+    with llm_session(timeout=SHORT_HTTP_TIMEOUT, follow_redirects=False) as client:
+        response = client.request(
+            "GET",
+            url,
+            headers=_bedrock_request_headers(load_aws_credentials(cwd), current, "GET", url),
+        )
     response_raise_for_status(response)
     return _extract_model_ids(response_json(response).get("data"), "id")
 
@@ -985,13 +984,6 @@ def _parse_retry_after_seconds(value: str | None) -> float | None:
         seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
     return max(0.0, seconds)
 
-def _response_json(response: ResponseAdapter) -> dict[str, Any] | None:
-    try:
-        payload = response_json(response)
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
-
 class WaitForRetryableResponse(wait_base):
     def __init__(
         self,
@@ -1071,7 +1063,10 @@ def _call_with_retry(
     raise RuntimeError("SDK retry loop exited unexpectedly")
 
 def _response_error_message(response: ResponseAdapter) -> str:
-    payload = _response_json(response)
+    try:
+        payload = response_json(response)
+    except Exception:
+        payload = None
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict) and isinstance(error.get("message"), str):
@@ -1675,7 +1670,13 @@ def _bedrock_mantle_client(
             ),
         )
         response_raise_for_status(response)
-        return _json_dict(response, "Chat Completions API")
+        try:
+            payload = response_json(response)
+        except Exception as exc:
+            raise RuntimeError("Chat Completions API: invalid JSON response") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Chat Completions API: invalid JSON response")
+        return payload
 
     return _chat_client(
         create,

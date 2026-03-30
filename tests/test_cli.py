@@ -4,8 +4,7 @@ from __future__ import annotations
 import json
 
 from oy_cli import agent, cli, runtime as rt
-from oy_cli.providers import AssistantMessage, SystemMessage, UserMessage
-from tests.conftest import tool_handler
+from oy_cli.providers import SystemMessage, UserMessage
 
 
 class TestCLI:
@@ -128,6 +127,28 @@ class TestRalph:
 
 
 class TestChatCommands:
+    def test_ask_usage_and_note_are_explicit_about_webfetch(self, tmp_path, monkeypatch):
+        printed = []
+        notes = []
+        monkeypatch.setattr(rt, "_print", lambda *a, **k: printed.append(k.get("value", a[1] if len(a) > 1 else a[0] if a else "")))
+        monkeypatch.setattr(rt, "_note", lambda message, **k: notes.append(message))
+        monkeypatch.setattr(cli, "read_only_tool_registry", lambda: {"list": object(), "webfetch": object()})
+        monkeypatch.setattr(cli, "transcript_with_system_prompt", lambda prompt: {"messages": []})
+        monkeypatch.setattr(cli, "new_agent_state", lambda **k: {"state": True})
+        monkeypatch.setattr(cli, "add_user", lambda tx, question: tx.update({"question": question}))
+        monkeypatch.setattr(rt, "unattended_limit_seconds", lambda: 60)
+        monkeypatch.setattr(rt, "get_client", lambda model: object())
+        monkeypatch.setattr(cli, "tool_specs", lambda registry: [])
+        seen = {}
+        monkeypatch.setattr(cli, "run_turn", lambda *args, **kwargs: seen.update({"called": True}))
+
+        cli._handle_ask("", "openai:gpt-test", {"workspace": tmp_path, "system_prompt": "sys", "interactive": True, "best_of": 1}, {"messages": []})
+        assert printed[-1] == "Usage: `/ask <question>` — research the codebase without bash or file changes. Public webfetch is still allowed."
+
+        cli._handle_ask("where is auth?", "openai:gpt-test", {"workspace": tmp_path, "system_prompt": "sys", "interactive": True, "best_of": 1}, {"messages": []})
+        assert notes[-1] == "research mode (no bash or file changes; public webfetch allowed)"
+        assert seen == {"called": True}
+
     def test_load_and_chat_commands(self, tmp_path, monkeypatch):
         monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         monkeypatch.setattr(rt, "_note", lambda *a, **k: None)

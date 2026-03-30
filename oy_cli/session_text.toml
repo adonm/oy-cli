@@ -28,7 +28,7 @@ Each finding should include location, category (security, complexity, or perform
 Manage context tightly: record findings, not long evidence dumps; keep paths, impact, and remediation concise. Verify links and ids carefully.
 """
 ask_suffix = """
-RESEARCH-ONLY mode. Use only read-only tools (list, read, search, sloc, webfetch). Do not run bash, modify files, or propose edits. Be concise, specific, and evidence-driven. Summarise only the facts needed to answer the question, with file paths and brief supporting context.
+RESEARCH-ONLY mode. Use only research tools (list, read, search, sloc, webfetch). Do not run bash or modify files. `webfetch` is still allowed, so this mode is no-write rather than no-network. Do not propose edits. Be concise, specific, and evidence-driven. Summarise only the facts needed to answer the question, with file paths and brief supporting context.
 """
 
 [transcript]

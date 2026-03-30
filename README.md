@@ -58,7 +58,7 @@ That includes:
 - base system prompt text
 - interactive/non-interactive prompt suffixes
 - audit prompt text
-- research-only `/ask` suffix
+- research-only `/ask` suffix (no bash or file changes; `webfetch` still allowed)
 - transcript compaction text (`Current todo list`, omitted-history note, TOON packed-history note)
 - built-in tool descriptions exposed to the model
 

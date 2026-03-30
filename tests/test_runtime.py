@@ -13,6 +13,7 @@ class TestSessionText:
         rt.load_session_text.cache_clear()
         assert "Never guess" in rt.base_system_prompt()
         assert "`webfetch` freely" in rt.base_system_prompt()
+        assert "no-write rather than no-network" in rt.ask_system_prompt("sys")
         assert "exclude" in rt.tool_description("list")
         assert "exclude" in rt.tool_description("search")
         assert "exclude" in rt.tool_description("replace")

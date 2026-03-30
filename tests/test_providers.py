@@ -9,7 +9,7 @@ import pytest
 
 from oy_cli import providers
 from oy_cli.providers import AssistantMessage, ToolCall, ToolMessage, ToolResult
-from tests.conftest import api_error, DummyHttpClient, raw_response
+from tests.conftest import api_error, raw_response
 
 
 class TestHTTPClient:
@@ -182,19 +182,25 @@ class TestMantleClient:
                 **(headers or {}),
             },
         )
-        monkeypatch.setattr(
-            providers, "llm_session",
-            lambda **kwargs: SimpleNamespace(
-                request=lambda method, url, **req: requested.update({"method": method, "url": url, **req})
-                    or providers.response_adapter(
-                        status_code=200,
-                        headers={"Content-Type": "application/json"},
-                        text='{"data":[{"id":"zai.glm-4.6"},{"id":"moonshotai.kimi-k2-thinking"}]}',
-                        content=b'{"data":[{"id":"zai.glm-4.6"},{"id":"moonshotai.kimi-k2-thinking"}]}',
-                        url=url, reason_phrase="OK",
-                    )
-            ),
-        )
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, **req):
+                requested.update({"method": method, "url": url, **req})
+                return providers.response_adapter(
+                    status_code=200,
+                    headers={"Content-Type": "application/json"},
+                    text='{"data":[{"id":"zai.glm-4.6"},{"id":"moonshotai.kimi-k2-thinking"}]}',
+                    content=b'{"data":[{"id":"zai.glm-4.6"},{"id":"moonshotai.kimi-k2-thinking"}]}',
+                    url=url,
+                    reason_phrase="OK",
+                )
+
+        monkeypatch.setattr(providers, "llm_session", lambda **kwargs: FakeSession())
         assert providers.load_bedrock_model_list(tmp_path) == ["zai.glm-4.6", "moonshotai.kimi-k2-thinking"]
         assert requested["method"] == "GET"
         assert requested["url"] == "https://bedrock-mantle.ap-southeast-2.api.aws/v1/models"

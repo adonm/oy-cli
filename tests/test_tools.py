@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import zipfile
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -145,6 +144,13 @@ class TestFileTools:
         python_read = tools.tool_read(state, "dir/b.py", offset=1, limit=1)
         assert python_read["text"] == "print('hello')"
         assert shown[-1] == "path: dir/b.py\nlines: 1-1 of 1\ntext.python: print('hello')"
+
+        shown.clear()
+        beyond_end = tools.tool_read(state, "a.txt", offset=5, limit=1)
+        assert beyond_end["text"] == ""
+        assert beyond_end["line_count"] == 2
+        assert beyond_end["truncated"] is False
+        assert shown[-1] == "path: a.txt\nlines: 5-4 of 2\n<empty file>"
 
         with pytest.raises(ValueError):
             tools.tool_read(state, "dir")
