@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oy-cli"
-version = "0.4.3"
+version = "0.4.4"
 description = "Tiny local coding CLI with a small tool surface"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "oy-cli contributors" }]
 dependencies = [
+  "rapidfuzz>=3.0.0",
   "defopt>=7.0.0",
   "markdownify>=1.2.0",
   "pygments>=2.19.0",

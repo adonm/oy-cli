@@ -21,6 +21,10 @@ OY_ROOT=./my-project oy "fix the failing tests"
 # Non-interactive mode (CI/pipelines)
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy
 
+# Increase accuracy with self-consistency voting
+oy --help  # subcommands expose --best-of
+OY_BEST_OF=5 oy "fix the flaky test"
+
 # Security audit
 oy audit
 oy audit "focus on authentication"
@@ -71,6 +75,7 @@ Code that reads and composes this content now lives mainly in [`oy_cli/runtime.p
 | `OY_NON_INTERACTIVE` | Set to `1` to disable approval/checkpoint pauses |
 | `OY_UNATTENDED_LIMIT` | Agent turn deadline window, like `1h`, `30m`, or `3600s` |
 | `OY_RALPH_LIMIT` | Ralph deadline window, like `3h`, `90m`, or `3600s` |
+| `OY_BEST_OF` | Number of generations to sample for self-consistency voting; defaults to `3` for `glm-5` / `kimi-k2.5`-style models, otherwise `1` |
 | `OY_ROOT` | Run against different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
@@ -90,6 +95,8 @@ the available backends. Set `OY_MODEL`, `OY_SHIM`, or save a config with
 
 **Model notes:** From testing, `glm-5` balances intelligence,
 cost, and tool-use ability. `kimi-k2.5` is another option.
+For these models, `oy` now defaults self-consistency / best-of sampling to `3`,
+which is a pragmatic accuracy/latency trade-off; override with `--best-of` or `OY_BEST_OF`.
 The [Artificial Analysis Comparison of Open Source Models](https://artificialanalysis.ai/models/open-source)
 is a reference.
 

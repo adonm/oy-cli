@@ -54,6 +54,7 @@ class TestRalph:
                 "system_prompt": "sys",
                 "system_file": None,
                 "yolo": False,
+                "best_of": 3,
             },
         )
         monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: intro.update(k))
@@ -72,6 +73,7 @@ class TestRalph:
         assert cli.ralph("fix", "tests") == 0
         assert len(calls) == 2
         assert all(call[1].get("yolo") is True for call in calls)
+        assert all(call[1].get("best_of") == 3 for call in calls)
         assert all(call[0][0] == "fix tests" for call in calls)
         assert sleeps == [60]
         assert intro["schedule"] == "until 2m deadline, 1m delay"
@@ -93,6 +95,7 @@ class TestRalph:
                 "system_prompt": "sys",
                 "system_file": None,
                 "yolo": False,
+                "best_of": 3,
             },
         )
         monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: None)
@@ -109,6 +112,7 @@ class TestRalph:
 
         assert cli.ralph() == 0
         assert len(calls) == 1
+        assert calls[0][1].get("best_of") == 3
         assert calls[0][0][0] == "from stdin"
 
     def test_ralph_limit_seconds_parses_env(self, monkeypatch):
@@ -167,6 +171,7 @@ class TestChatRollback:
                 "system_prompt": "sys",
                 "system_file": None,
                 "yolo": False,
+                "best_of": 3,
             },
         )
         monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: None)

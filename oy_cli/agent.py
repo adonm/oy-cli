@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import concurrent.futures
+import threading
 import time
 from typing import Any
 
 import tiktoken
 import toons
+from rapidfuzz import fuzz
 from . import runtime as rt
 from .providers import (
     AuthenticationError,
@@ -17,6 +20,7 @@ from .providers import (
     ToolMessage,
     UserMessage,
     _tool_output_text,
+    serialize_json,
 )
 from .runtime import active_tool_registry, session_text
 from .tools import _format_todos, _positive_int, invoke_tool, tool_specs
@@ -324,6 +328,89 @@ def log_wait(item: Wait, message: str) -> None:
     _ = item
     rt._note(message, tag="wait")
 
+def _normalized_vote_text(text: str) -> str:
+    return " ".join(text.split()).strip().lower()
+
+
+def _text_match_score(text1: str, text2: str) -> float:
+    left = _normalized_vote_text(text1)
+    right = _normalized_vote_text(text2)
+    if not left or not right:
+        return 100.0 if left == right else 0.0
+    return max(
+        fuzz.ratio(left, right),
+        fuzz.token_sort_ratio(left, right),
+        fuzz.token_set_ratio(left, right),
+    )
+
+
+def _tool_call_signature(call: dict[str, Any]) -> str:
+    return f"{call['name']}({serialize_json(call['arguments'])})"
+
+
+def _tool_plan_match_score(calls1: list[dict[str, Any]], calls2: list[dict[str, Any]]) -> float:
+    if not calls1 or not calls2:
+        return 100.0 if calls1 == calls2 else 0.0
+    name_score = fuzz.ratio(
+        "\n".join(call["name"] for call in calls1),
+        "\n".join(call["name"] for call in calls2),
+    )
+    if name_score == 0:
+        return 0.0
+    plan_score = fuzz.WRatio(
+        "\n".join(_tool_call_signature(call) for call in calls1),
+        "\n".join(_tool_call_signature(call) for call in calls2),
+    )
+    length_penalty = min(len(calls1), len(calls2)) / max(len(calls1), len(calls2))
+    return length_penalty * ((0.4 * name_score) + (0.6 * plan_score))
+
+
+def _message_match_score(left: AssistantMessage, right: AssistantMessage) -> float:
+    left_calls = left["tool_calls"]
+    right_calls = right["tool_calls"]
+    if bool(left_calls) != bool(right_calls):
+        return 0.0
+    if left_calls:
+        plan_score = _tool_plan_match_score(left_calls, right_calls)
+        if not left["content"] and not right["content"]:
+            return plan_score
+        return (0.85 * plan_score) + (0.15 * _text_match_score(left["content"], right["content"]))
+    return _text_match_score(left["content"], right["content"])
+
+
+def _choose_self_consistent_message(
+    messages: list[AssistantMessage],
+    *,
+    threshold: float = 85.0,
+) -> tuple[AssistantMessage, int, int]:
+    """Choose the sample with the strongest fuzzy support from its peers."""
+    if not messages:
+        raise ValueError("messages must not be empty")
+    if len(messages) == 1:
+        return messages[0], 0, 1
+
+    best_index = 0
+    best_vote_count = -1
+    best_support = -1.0
+
+    for index, candidate in enumerate(messages):
+        vote_count = 0
+        support = 0.0
+        for other in messages:
+            score = _message_match_score(candidate, other)
+            support += score
+            if score >= threshold:
+                vote_count += 1
+        if vote_count > best_vote_count or (
+            vote_count == best_vote_count
+            and (support > best_support or (support == best_support and index < best_index))
+        ):
+            best_index = index
+            best_vote_count = vote_count
+            best_support = support
+
+    return messages[best_index], best_index, best_vote_count
+
 
 def run_turn(
     client,
@@ -331,8 +418,11 @@ def run_turn(
     state: AgentState,
     model_spec,
     tool_definitions,
+    *,
+    best_of: int = 1,
 ):
     _, model = rt.split_model_spec(model_spec)
+    best_of = _positive_int(best_of, "best_of")
     step = 0
     while True:
         note_progress(state)
@@ -341,11 +431,15 @@ def run_turn(
             "request",
             model=model_spec,
             step=step,
+            best_of=best_of,
             messages=[rt._msg_to_dict(message) for message in prepared],
             tool_count=len(tool_definitions),
         )
         size_str = rt.format_tokens(sum(map(_message_tokens, prepared)))
-        spinner = wait(f"Waiting for {model_spec} | {size_str}")
+        spinner = wait(
+            f"Waiting for {model_spec} | {size_str}"
+            + (f" | best-of {best_of}" if best_of > 1 else "")
+        )
         start_wait(spinner)
 
         def on_retry(attempt, max_attempts, error_ctx=None):
@@ -362,22 +456,57 @@ def run_turn(
                     f"({rt._format_duration(state['unattended_limit_seconds'])}) without a final response"
                 )
             started = time.monotonic()
-            message = client["chat_completion"](
-                model=model,
-                messages=prepared,
-                tools=tool_definitions,
-                tool_choice="auto",
-                on_retry=on_retry,
-            )
-            if time.monotonic() - started > remaining_unattended_seconds(state):
+            messages: list[AssistantMessage | None] = [None] * best_of
+            completed_count = 0
+            completed_lock = threading.Lock()
+
+            def sample(index: int) -> None:
+                result = client["chat_completion"](
+                    model=model,
+                    messages=prepared,
+                    tools=tool_definitions,
+                    tool_choice="auto",
+                    on_retry=on_retry,
+                )
+                messages[index] = result
+                with completed_lock:
+                    nonlocal completed_count
+                    completed_count += 1
+                    log_wait(spinner, f"sample {completed_count}/{best_of}")
+
+            if best_of > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=best_of) as executor:
+                    futures = [executor.submit(sample, i) for i in range(best_of)]
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
+            else:
+                sample(0)
+            messages = [message for message in messages if message is not None]
+            elapsed = time.monotonic() - started
+            if elapsed > remaining_unattended_seconds(state):
                 raise TimeoutError(
                     "reached unattended timeout "
                     f"({rt._format_duration(state['unattended_limit_seconds'])}) without a final response"
                 )
         finally:
             stop_wait(spinner)
+        message, chosen_index, vote_count = _choose_self_consistent_message(messages)
+        rt._debug_log(
+            "response",
+            model=model_spec,
+            step=step,
+            best_of=best_of,
+            chosen_index=chosen_index,
+            vote_count=vote_count,
+            assistants=[rt._msg_to_dict(item) for item in messages],
+            assistant=rt._msg_to_dict(message),
+        )
+        if best_of > 1:
+            rt._note(
+                f"self-consistency selected sample {chosen_index + 1}/{best_of} ({vote_count}/{best_of} votes)",
+                tag="note",
+            )
         calls = list(message["tool_calls"])
-        rt._debug_log("response", model=model_spec, step=step, assistant=rt._msg_to_dict(message))
         if calls:
             add_assistant(transcript, message)
             results = [
@@ -413,11 +542,13 @@ def run_agent(
     interactive,
     yolo: bool = False,
     transcript: Transcript | None = None,
+    best_of: int = 1,
 ):
     tool_registry = active_tool_registry(interactive)
     unattended_limit_seconds = _positive_int(
         unattended_limit_seconds, "unattended_limit_seconds"
     )
+    best_of = _positive_int(best_of, "best_of")
     state = new_agent_state(
         root=root,
         tool_registry=tool_registry,
@@ -432,7 +563,14 @@ def run_agent(
     add_user(transcript, prompt)
 
     def runner(client):
-        return run_turn(client, transcript, state, model, tool_specs(tool_registry))
+        return run_turn(
+            client,
+            transcript,
+            state,
+            model,
+            tool_specs(tool_registry),
+            best_of=best_of,
+        )
 
     try:
         return runner(rt.get_client(model))

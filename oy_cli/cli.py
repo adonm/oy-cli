@@ -101,6 +101,7 @@ def _print_session_intro(heading: str, session, **extras) -> None:
         f"- workspace: {rt._fmt('inline', session['workspace'])}",
         f"- model: {rt._fmt('inline', session['model'])}",
         f"- mode: {rt._fmt('inline', 'interactive' if session['interactive'] else 'non-interactive')}",
+        f"- best-of: {rt._fmt('inline', session['best_of'])}",
     ]
     if session['system_file'] is not None:
         extras["system file"] = session['system_file'].resolve()
@@ -124,12 +125,14 @@ def resolve_session(
     interactive: bool | None = None,
     system_prompt: str | None = None,
     include_system_file: bool = True,
+    best_of: int | None = None,
 ):
     resolved_interactive = rt.can_prompt() if interactive is None else interactive
     system_file = rt._sys_file() if include_system_file else None
+    model_spec = rt._model(None)
     return rt.session_context(
         workspace=workspace_root(),
-        model=rt._model(None),
+        model=model_spec,
         interactive=resolved_interactive,
         system_prompt=(
             load_system_prompt(system_file, resolved_interactive)
@@ -138,17 +141,20 @@ def resolve_session(
         ),
         system_file=system_file,
         yolo=rt.yolo_enabled(),
+        best_of=rt.self_consistency_best_of(best_of, model_spec=model_spec),
     )
 
-def audit(focus: str = ""):
+def audit(focus: str = "", *, best_of: int | None = None):
     """Run a one-shot security and complexity audit.
 
     :param focus: Optional area to focus on, such as auth, tests, or a file path.
+    :param best_of: Number of generations to sample for self-consistency voting.
     """
     session = resolve_session(
         interactive=False,
         system_prompt=AUDIT_SYSTEM_PROMPT,
         include_system_file=False,
+        best_of=best_of,
     )
     audit_prompt = session_text("audit", "default_user_prompt")
     if focus:
@@ -161,6 +167,7 @@ def audit(focus: str = ""):
             session['system_prompt'],
             rt.unattended_limit_seconds(),
             interactive=False,
+            best_of=session['best_of'],
     )
     return code
 
@@ -387,6 +394,7 @@ def _handle_ask(question, current_model, session, transcript):
             state,
             current_model,
             tool_specs(read_only_registry),
+            best_of=session['best_of'],
         )
     except KeyboardInterrupt:
         rt._note("research cancelled", tag="note")
@@ -410,6 +418,7 @@ def _handle_audit(focus, current_model, session):
                 rt.unattended_limit_seconds(),
                 interactive=False,
                 transcript=audit_transcript,
+                best_of=session['best_of'],
         )
     except KeyboardInterrupt:
         rt._note("audit cancelled", tag="note")
@@ -488,15 +497,16 @@ def _handle_load(name, transcript, current_model, system_prompt):
         rt._error(f"Failed to load session: {exc}")
         return transcript, current_model
 
-def chat(*, yolo: bool = False):
+def chat(*, yolo: bool = False, best_of: int | None = None):
     """Start an interactive multi-turn chat session.
 
     :param yolo: Allow all tools without per-action approval prompts.
+    :param best_of: Number of generations to sample for self-consistency voting.
     """
     if yolo:
         os.environ["OY_YOLO"] = "1"
     prompt_session = _create_prompt_session()
-    session = resolve_session(interactive=True)
+    session = resolve_session(interactive=True, best_of=best_of)
     _print_session_intro("Chat", session)
     rt._note(
         "chat mode; /help for commands"
@@ -567,6 +577,7 @@ def chat(*, yolo: bool = False):
                     session['interactive'],
                     yolo=session['yolo'],
                     transcript=transcript,
+                    best_of=session['best_of'],
             )
         except KeyboardInterrupt:
             rollback(transcript, checkpoint_point)
@@ -590,10 +601,11 @@ def chat(*, yolo: bool = False):
     _set_terminal_title("")
     return 0
 
-def run(*task: str):
+def run(*task: str, best_of: int | None = None):
     """Run a one-shot task.
 
     :param task: Task text. If omitted, read from stdin or start chat in a TTY.
+    :param best_of: Number of generations to sample for self-consistency voting.
     """
     task_text = (
         " ".join(task)
@@ -601,9 +613,9 @@ def run(*task: str):
         else (sys.stdin.read().strip() if not rt.has_tty_stdin() else "")
     )
     if not task_text:
-        return chat()
+        return chat(best_of=best_of)
 
-    session = resolve_session(interactive=False)
+    session = resolve_session(interactive=False, best_of=best_of)
     _print_session_intro("Run", session, prompt=rt.preview(task_text, 100))
     return run_agent(
             task_text,
@@ -612,14 +624,16 @@ def run(*task: str):
             session['system_prompt'],
             rt.unattended_limit_seconds(),
             session['interactive'],
+            best_of=session['best_of'],
     )[0]
 
-def ralph(*task: str):
+def ralph(*task: str, best_of: int | None = None):
     """Run a task in yolo mode every minute until the configured deadline.
 
     Controlled by `OY_RALPH_LIMIT` (default: `3h`).
 
     :param task: Task text. If omitted, read from stdin.
+    :param best_of: Number of generations to sample for self-consistency voting.
     """
     task_text = (
         " ".join(task)
@@ -633,7 +647,7 @@ def ralph(*task: str):
         )
         return 1
 
-    session = resolve_session(interactive=False)
+    session = resolve_session(interactive=False, best_of=best_of)
     session['yolo'] = True
     delay_seconds = 60
     limit_seconds = rt.ralph_limit_seconds()
@@ -665,6 +679,7 @@ def ralph(*task: str):
                 rt.unattended_limit_seconds(),
                 session['interactive'],
                 yolo=True,
+                best_of=session['best_of'],
         )
         if code != 0:
             exit_code = code
@@ -780,10 +795,11 @@ def main(argv: list[str] | None = None):
             "description": "AI coding assistant for your shell.",
             "epilog": """Examples:
   oy "fix the failing tests"
+  oy run --best-of 5 "fix the flaky test"
   oy chat
-  oy chat --yolo
+  oy chat --yolo --best-of 3
   oy ralph "fix the flaky test"
-  oy audit auth
+  oy audit --best-of 3 auth
   oy model gpt-5""",
             "formatter_class": argparse.RawDescriptionHelpFormatter,
         },

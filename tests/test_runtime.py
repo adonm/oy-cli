@@ -36,10 +36,25 @@ class TestModelConfig:
         monkeypatch.setenv("OY_SHIM", "copilot")
         monkeypatch.setenv("OY_MODEL", "gpt-live")
         monkeypatch.setenv("OY_YOLO", "yes")
+        monkeypatch.setenv("OY_BEST_OF", "5")
         assert rt._model(None) == "copilot:gpt-live"
         assert rt.yolo_enabled() is True
+        assert rt.self_consistency_best_of(model_spec="copilot:gpt-live") == 5
         assert "ask" not in rt.active_tool_registry(False)
         assert set(rt.read_only_tool_registry()) == rt._READ_ONLY_TOOLS
+
+
+class TestBestOfHelpers:
+    def test_model_defaults_enable_self_consistency_for_glm_and_kimi(self, monkeypatch):
+        monkeypatch.delenv("OY_BEST_OF", raising=False)
+        assert rt.default_best_of_for_model("openai:glm-5") == rt.DEFAULT_SELF_CONSISTENCY_BEST_OF
+        assert rt.default_best_of_for_model("bedrock-mantle:moonshotai.kimi-k2.5") == rt.DEFAULT_SELF_CONSISTENCY_BEST_OF
+        assert rt.default_best_of_for_model("openai:gpt-5") == 1
+
+    def test_best_of_rejects_invalid_env(self, monkeypatch):
+        monkeypatch.setenv("OY_BEST_OF", "bad")
+        with pytest.raises(SystemExit):
+            rt.self_consistency_best_of(model_spec="openai:glm-5")
 
 
 class TestDurationEnvHelpers:

@@ -651,6 +651,7 @@ def _env(name, default, t=None):
 MAX_BASH_CMD_BYTES = _env("MAX_BASH_CMD_BYTES", 65536)
 MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
 DEFAULT_UNATTENDED_LIMIT_SECONDS = 3600
+DEFAULT_SELF_CONSISTENCY_BEST_OF = 3
 CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
 
 type RuntimeBudgets = dict[str, int]
@@ -681,6 +682,7 @@ def session_context(
     system_prompt: str,
     system_file: Path | None = None,
     yolo: bool = False,
+    best_of: int = 1,
 ) -> SessionContext:
     return {
         "workspace": workspace,
@@ -689,6 +691,7 @@ def session_context(
         "system_prompt": system_prompt,
         "system_file": system_file,
         "yolo": yolo,
+        "best_of": best_of,
     }
 
 
@@ -1131,6 +1134,28 @@ def yolo_enabled(default: bool = False) -> bool:
     return _flag("OY_YOLO", default)
 
 
+def default_best_of_for_model(model_spec: str | None = None) -> int:
+    _, model = split_model_spec(model_spec or _model())
+    lowered = model.lower()
+    if "glm-5" in lowered or "kimi-k2.5" in lowered or "kimi-k2" in lowered:
+        return DEFAULT_SELF_CONSISTENCY_BEST_OF
+    return 1
+
+
+def self_consistency_best_of(default: int | None = None, *, model_spec: str | None = None) -> int:
+    fallback = default_best_of_for_model(model_spec) if default is None else default
+    value = os.environ.get("OY_BEST_OF")
+    if value is None or not value.strip():
+        return fallback
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        abort(f"Invalid OY_BEST_OF={value.strip()}. Use a positive integer.")
+    if parsed <= 0:
+        abort(f"Invalid OY_BEST_OF={parsed}. Use a positive integer.")
+    return parsed
+
+
 def _flag(name, default=False):
     value = os.environ.get(name)
     if not value or not value.strip():
@@ -1254,6 +1279,7 @@ __all__ = [
     "INTERACTIVE_SYSTEM_PROMPT",
     "NONINTERACTIVE_SYSTEM_PROMPT",
     "CONFIG_PATH",
+    "DEFAULT_SELF_CONSISTENCY_BEST_OF",
     "DEFAULT_UNATTENDED_LIMIT_SECONDS",
     "MAX_BASH_CMD_BYTES",
     "MAX_CONTEXT_TOKENS",
@@ -1344,6 +1370,8 @@ __all__ = [
     "save_model_config",
     "show",
     "split_model_spec",
+    "self_consistency_best_of",
+    "default_best_of_for_model",
     "sys",
     "time",
     "tool_description",

@@ -115,3 +115,97 @@ class TestRunTurn:
         assert transcript["messages"][3] == ToolMessage(
             "call_1", "echo", ToolResult(content=f"{tmp_path.name}:hi"),
         )
+
+    def test_self_consistency_picks_majority_text_answer(self, monkeypatch, tmp_path):
+        from oy_cli import runtime as rt, tools
+
+        transcript = agent.transcript_with_system_prompt("sys")
+        agent.add_user(transcript, "hello")
+
+        responses = iter([
+            AssistantMessage("wrong"),
+            AssistantMessage("done"),
+            AssistantMessage("done"),
+        ])
+        printed: list[str] = []
+        notes: list[str] = []
+        monkeypatch.setattr(rt, "_print", lambda *a, value="", **k: printed.append(value))
+        monkeypatch.setattr(rt, "_debug_log", lambda *a, **k: None)
+        monkeypatch.setattr(rt, "_note", lambda message, *a, **k: notes.append(message))
+
+        client = {"chat_completion": lambda **kwargs: next(responses)}
+        code, content = agent.run_turn(
+            client,
+            transcript,
+            make_state(tmp_path, registry=tool_handler("echo", lambda state, text: text)),
+            "openai:gpt-test",
+            tools.tool_specs({}),
+            best_of=3,
+        )
+
+        assert (code, content) == (0, "done")
+        assert printed == ["done"]
+        assert any("self-consistency selected sample" in note and "2/3 votes" in note for note in notes)
+
+    def test_choose_self_consistent_message_prefers_high_support_text(self):
+        messages = [
+            AssistantMessage("Implement the auth fix and add regression tests."),
+            AssistantMessage("Implement auth fix; add regression tests."),
+            AssistantMessage("Rewrite the README."),
+        ]
+
+        chosen, index, votes = agent._choose_self_consistent_message(messages)
+
+        assert chosen == messages[0]
+        assert index == 0
+        assert votes == 2
+
+    def test_choose_self_consistent_message_prefers_similar_tool_plans(self):
+        messages = [
+            AssistantMessage("", tool_calls=[ToolCall(id="call_1", name="search", arguments={"pattern": "auth token", "path": "src"})]),
+            AssistantMessage("", tool_calls=[ToolCall(id="call_2", name="search", arguments={"pattern": "token auth", "path": "src"})]),
+            AssistantMessage("", tool_calls=[ToolCall(id="call_3", name="read", arguments={"path": "README.md"})]),
+        ]
+
+        chosen, index, votes = agent._choose_self_consistent_message(messages)
+
+        assert chosen == messages[0]
+        assert index == 0
+        assert votes == 2
+
+    def test_self_consistency_prefers_matching_tool_plan(self, monkeypatch, tmp_path):
+        from oy_cli import runtime as rt, tools
+
+        def echo(state, text: str):
+            return text
+
+        registry = tool_handler("echo", echo)
+        transcript = agent.transcript_with_system_prompt("sys")
+        agent.add_user(transcript, "hello")
+
+        responses = iter([
+            AssistantMessage("draft a summary"),
+            AssistantMessage("", tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})]),
+            AssistantMessage("", tool_calls=[ToolCall(id="call_2", name="echo", arguments={"text": "hi"})]),
+            AssistantMessage("done"),
+            AssistantMessage("done"),
+            AssistantMessage("done"),
+        ])
+        monkeypatch.setattr(rt, "_print", lambda *a, **k: None)
+        monkeypatch.setattr(rt, "_debug_log", lambda *a, **k: None)
+        monkeypatch.setattr(rt, "_note", lambda *a, **k: None)
+
+        client = {"chat_completion": lambda **kwargs: next(responses)}
+        code, content = agent.run_turn(
+            client,
+            transcript,
+            make_state(tmp_path, registry=registry),
+            "openai:gpt-test",
+            tools.tool_specs(registry),
+            best_of=3,
+        )
+
+        assert (code, content) == (0, "done")
+        tool_call = transcript["messages"][2]["tool_calls"][0]
+        assert tool_call["name"] == "echo"
+        assert tool_call["arguments"] == {"text": "hi"}
