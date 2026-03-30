@@ -33,17 +33,26 @@ def _stub_session(monkeypatch, tmp_path, *, interactive=False):
     )
 
 
+def _capture_defopt_run(monkeypatch):
+    seen = {}
+
+    def fake_run(functions, *, argv, **kwargs):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(cli.defopt, "run", fake_run)
+    return seen
+
+
 class TestCLI:
-    def test_main_wraps_bare_args(self, monkeypatch):
-        seen = {}
-
-        def fake_run(functions, *, argv, **kwargs):
-            seen["argv"] = argv
-            return 0
-
-        monkeypatch.setattr(cli.defopt, "run", fake_run)
-        assert cli.main(["fix", "tests"]) == 0
-        assert seen["argv"] == ["run", "fix", "tests"]
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [(["fix", "tests"], ["run", "fix", "tests"]), (["ralph", "fix", "tests"], ["ralph", "fix", "tests"])],
+    )
+    def test_main_normalizes_commands(self, monkeypatch, argv, expected):
+        seen = _capture_defopt_run(monkeypatch)
+        assert cli.main(argv) == 0
+        assert seen["argv"] == expected
 
     def test_main_rejects_top_level_yolo(self, monkeypatch):
         monkeypatch.delenv("OY_YOLO", raising=False)
@@ -53,17 +62,6 @@ class TestCLI:
 
 
 class TestRalph:
-    def test_main_accepts_ralph_command(self, monkeypatch):
-        seen = {}
-
-        def fake_run(functions, *, argv, **kwargs):
-            seen["argv"] = argv
-            return 0
-
-        monkeypatch.setattr(cli.defopt, "run", fake_run)
-        assert cli.main(["ralph", "fix", "tests"]) == 0
-        assert seen["argv"] == ["ralph", "fix", "tests"]
-
     def test_ralph_runs_prompt_until_deadline(self, tmp_path, monkeypatch):
         notes = []
         sleeps = []

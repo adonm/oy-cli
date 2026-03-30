@@ -2,9 +2,9 @@
 
 Thanks for contributing to `oy-cli`.
 
-## Development setup
+## Development loop
 
-Use `uv` for installs, formatting, linting, tests, and builds.
+Use `uv` for installs, linting, tests, and builds.
 
 ```bash
 uv sync
@@ -50,6 +50,14 @@ uv build
 - prefer early returns and flat control flow
 - avoid clever tricks, hidden mutation, and framework-style indirection
 
+## Change checklist
+
+- keep `README.md` user-focused and task-oriented
+- keep contributor workflow here in `CONTRIBUTING.md`
+- keep `/ask` wording explicit: no-write, but public `webfetch` is still allowed
+- add or extend focused regression tests next to changed behavior
+- run targeted tests before broader checks when iterating
+
 ## Release process
 
 1. Run pre-flight checks:
@@ -65,11 +73,4 @@ uv build
 3. Commit, tag, push, and create the GitHub release.
 4. Install the published build and verify `oy --help`.
 
-The `release.yml` workflow builds the wheel/sdist and publishes to PyPI via trusted publishing.
-
-## Hygiene
-
-- keep `README.md` user-focused and task-oriented
-- keep contributor workflow here in `CONTRIBUTING.md`
-- keep `/ask` wording explicit: no-write, but public `webfetch` is still allowed
-- prefer adding or extending focused regression tests next to the behavior you changed
+The `release.yml` workflow builds the wheel and sdist and publishes to PyPI via trusted publishing.

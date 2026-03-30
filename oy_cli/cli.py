@@ -38,21 +38,16 @@ from .tools import tool_specs
 
 _SESSIONS_DIR: Path | None = None
 
-_ASK_USAGE = (
-    "Usage: `/ask <question>` — research the codebase without bash or file changes. "
-    "Public webfetch is still allowed."
-)
-_ASK_MODE_NOTE = "research mode (no bash or file changes; public webfetch allowed)"
+_ASK_RULES = "no bash or file changes; public webfetch still allowed"
+_ASK_USAGE = f"Usage: `/ask <question>` — research the codebase with {_ASK_RULES}."
+_ASK_MODE_NOTE = f"research mode ({_ASK_RULES})"
 _CHAT_COMMAND_HELP = (
     ("/help", "show this help"),
     ("/tokens", "show context usage"),
     ("/model [filter]", "show or switch model"),
     ("/debug", "toggle debug logging"),
     ("/yolo", "allow all tools for the rest of this session"),
-    (
-        "/ask <question>",
-        "research-only query (no bash or file changes; public webfetch still allowed)",
-    ),
+    ("/ask <question>", f"research-only query ({_ASK_RULES})"),
     ("/audit [focus]", "run a security/complexity audit"),
     ("/save [name]", "save session transcript"),
     ("/load [name]", "load a saved session"),
@@ -92,9 +87,7 @@ def _apply_session_title(workspace: Path, model_spec: str) -> None:
 
 
 def _task_text(task: tuple[str, ...]) -> str:
-    if task:
-        return " ".join(task)
-    return sys.stdin.read().strip() if not rt.has_tty_stdin() else ""
+    return " ".join(task) or (sys.stdin.read().strip() if not rt.has_tty_stdin() else "")
 
 
 def _transcript_data(transcript: Transcript) -> dict[str, object]:
@@ -379,6 +372,15 @@ def _handle_debug_toggle():
         rt._note(f"debug logging enabled: {rt._debug_log_path}", tag="note")
 
 
+def _run_mode(fn, *, cancel_note: str, error_prefix: str) -> None:
+    try:
+        fn()
+    except KeyboardInterrupt:
+        rt._note(cancel_note, tag="note")
+    except Exception as exc:
+        rt._error(f"{error_prefix}: {exc}")
+
+
 def _handle_ask(question, current_model, session, transcript):
     if not question:
         rt._print(value=_ASK_USAGE, err=True)
@@ -387,10 +389,9 @@ def _handle_ask(question, current_model, session, transcript):
     ask_transcript = transcript_with_system_prompt(
         ask_system_prompt(session["system_prompt"])
     )
-    for msg in transcript["messages"][-6:]:
-        if msg.get("role") != "system":
-            ask_transcript["messages"].append(msg)
-
+    ask_transcript["messages"].extend(
+        msg for msg in transcript["messages"][-6:] if msg.get("role") != "system"
+    )
     rt._note(_ASK_MODE_NOTE, tag="note")
     state = new_agent_state(
         root=session["workspace"],
@@ -400,20 +401,21 @@ def _handle_ask(question, current_model, session, transcript):
     )
     add_user(ask_transcript, question)
 
-    try:
-        client = rt.get_client(current_model)
+    def run_research():
         run_turn(
-            client,
+            rt.get_client(current_model),
             ask_transcript,
             state,
             current_model,
             tool_specs(read_only_registry),
             best_of=session["best_of"],
         )
-    except KeyboardInterrupt:
-        rt._note("research cancelled", tag="note")
-    except Exception as exc:
-        rt._error(f"Research error: {exc}")
+
+    _run_mode(
+        run_research,
+        cancel_note="research cancelled",
+        error_prefix="Research error",
+    )
 
 
 def _handle_audit(focus, current_model, session):
@@ -424,7 +426,7 @@ def _handle_audit(focus, current_model, session):
     rt._note("audit mode", tag="note")
     audit_transcript = transcript_with_system_prompt(AUDIT_SYSTEM_PROMPT)
 
-    try:
+    def run_audit():
         run_agent(
             audit_prompt,
             current_model,
@@ -435,10 +437,8 @@ def _handle_audit(focus, current_model, session):
             transcript=audit_transcript,
             best_of=session["best_of"],
         )
-    except KeyboardInterrupt:
-        rt._note("audit cancelled", tag="note")
-    except Exception as exc:
-        rt._error(f"Audit error: {exc}")
+
+    _run_mode(run_audit, cancel_note="audit cancelled", error_prefix="Audit error")
 
 
 def _handle_save(name, transcript, current_model):
@@ -466,16 +466,16 @@ def _handle_load(name, transcript, current_model, system_prompt):
     if not name:
         lines = ["## Saved Sessions", ""]
         for index, path in enumerate(sessions[:20], 1):
-            try:
-                meta = rt.load_json(path, {})
-                model = meta.get("model", "?")
-                saved = meta.get("saved_at", "?")
-                msgs = len(meta.get("transcript", {}).get("messages", []))
-                lines.append(
-                    f"{index}. {rt._fmt('inline', path.stem)} — {model}, {msgs} msgs, {saved}"
-                )
-            except Exception:
+            meta = rt.load_json(path, {})
+            if not isinstance(meta, dict):
                 lines.append(f"{index}. {rt._fmt('inline', path.stem)} — (unreadable)")
+                continue
+            model = meta.get("model", "?")
+            saved = meta.get("saved_at", "?")
+            msgs = len(meta.get("transcript", {}).get("messages", []))
+            lines.append(
+                f"{index}. {rt._fmt('inline', path.stem)} — {model}, {msgs} msgs, {saved}"
+            )
         lines.extend(["", "Usage: `/load <name>` or `/load <number>`"])
         rt._print(value="\n".join(lines), err=True)
         return transcript, current_model

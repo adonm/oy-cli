@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/oy-cli)](https://pypi.org/project/oy-cli/)
 
-Small local AI coding CLI for your shell. It reads files, searches content, fetches public docs, and runs commands in the current workspace.
+Small local AI coding CLI for your shell. It can inspect files, search content, fetch public docs, and run commands in the current workspace.
 
 ## Quick start
 
@@ -13,7 +13,7 @@ oy chat
 oy audit "focus on authentication"
 ```
 
-## Use
+## Common tasks
 
 ```bash
 oy "inspect the main module and suggest improvements"
@@ -27,7 +27,7 @@ oy model [filter]
 oy --help
 ```
 
-In chat, `/ask <question>` is research-only and no-write: no `bash`, no file changes, but public `webfetch` is still allowed.
+In chat, `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed. It is no-write rather than no-network.
 
 ## Design goals
 
@@ -37,7 +37,7 @@ In chat, `/ask <question>` is research-only and no-write: no `bash`, no file cha
 - start fresh by default for one-shot runs
 - make approvals and checkpoints explicit when they matter
 
-Model-facing prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/session_text.toml). Core modules are [`oy_cli/runtime.py`](oy_cli/runtime.py), [`oy_cli/agent.py`](oy_cli/agent.py), [`oy_cli/cli.py`](oy_cli/cli.py), [`oy_cli/tools.py`](oy_cli/tools.py), and [`oy_cli/providers.py`](oy_cli/providers.py). Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/session_text.toml). Core modules are [`oy_cli/runtime.py`](oy_cli/runtime.py), [`oy_cli/agent.py`](oy_cli/agent.py), [`oy_cli/cli.py`](oy_cli/cli.py), [`oy_cli/tools.py`](oy_cli/tools.py), and [`oy_cli/providers.py`](oy_cli/providers.py). Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Configuration
 
@@ -45,18 +45,18 @@ Model-facing prompt text and tool descriptions live in [`oy_cli/session_text.tom
 
 | Variable | Purpose |
 |---|---|
-| `OY_MODEL` | Override model for this session (`model` or `shim:model`) |
-| `OY_SHIM` | Force a shim: `openai`, `codex`, `copilot`, `opencode`, `opencode-go`, or `bedrock-mantle` |
-| `OY_NON_INTERACTIVE` | Set to `1` to disable approval/checkpoint pauses |
-| `OY_UNATTENDED_LIMIT` | Agent deadline window, like `1h`, `30m`, or `3600s` |
-| `OY_RALPH_LIMIT` | Ralph deadline window, like `3h`, `90m`, or `3600s` |
+| `OY_MODEL` | Override the model for this session (`model` or `shim:model`) |
+| `OY_SHIM` | Force a shim when the model name is bare |
+| `OY_NON_INTERACTIVE` | Set to `1` to disable approval and prompt pauses |
+| `OY_UNATTENDED_LIMIT` | Agent deadline window, such as `1h`, `30m`, or `3600s` |
+| `OY_RALPH_LIMIT` | Ralph deadline window, such as `3h`, `90m`, or `3600s` |
 | `OY_BEST_OF` | Override self-consistency sample count |
 | `OY_ROOT` | Run against a different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
 | `OY_DEBUG` | Enable debug logging |
 | `OY_YOLO` | Start with all tool approvals enabled |
-| `OY_MAX_CONTEXT_TOKENS` | Override transcript/tool context budget |
+| `OY_MAX_CONTEXT_TOKENS` | Override transcript and tool context budget |
 | `OY_MAX_BASH_CMD_BYTES` | Override max accepted bash command size |
 
 ### Config file
@@ -69,18 +69,18 @@ Only `model` and `shim` are persisted. Selection order is `OY_MODEL`, then saved
 
 From local testing, `glm-5` and `kimi-k2.5` are good defaults. `oy` uses best-of `3` for those models by default; override with `--best-of` or `OY_BEST_OF`.
 
-## Requirements
-
-- Python 3.13+
-- `bash`
-- OpenAI-compatible credentials, Codex auth, Copilot auth, OpenCode auth, or AWS credentials for Bedrock Mantle
-
 ## Installation
 
 ```bash
 uv tool install oy-cli  # preferred
 pip install oy-cli      # alternative
 ```
+
+## Requirements
+
+- Python 3.13+
+- `bash`
+- OpenAI-compatible credentials, Codex auth, Copilot auth, OpenCode auth, or AWS credentials for Bedrock Mantle
 
 ## Development
 
@@ -90,6 +90,7 @@ Use `uv` for local development. Contributor workflow lives in [`CONTRIBUTING.md`
 uv sync
 uv run ruff check .
 uv run pytest -q
+uv run pytest tests/test_providers.py -q
 uv run oy --help
 uv build
 ```
@@ -123,12 +124,12 @@ export AWS_REGION=ap-southeast-2
 
 ## Security
 
-`oy` can run shell commands and modify files with your permissions. `bash` also inherits your environment, so git/cloud/SSH credentials visible to your shell are visible to the command.
+`oy` can run shell commands and modify files with your permissions. `bash` also inherits your environment, so git, cloud, and SSH credentials visible to your shell are visible to the command.
 
 Recommended:
 
 - run in a repo or workspace you trust
-- mount only needed directories in containers
+- mount only the directories you need in containers
 - avoid exposing long-lived secrets in the environment
 - use `/ask` when you want no-write research mode
 - review generated changes before shipping

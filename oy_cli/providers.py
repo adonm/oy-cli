@@ -262,10 +262,9 @@ def _post_form_json(
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         response_raise_for_status(response)
-        payload = response_json(response)
+        return _response_json_object(response, f"{error_prefix}: invalid JSON response")
     except HTTPError as exc:
         raise RuntimeError(f"{error_prefix}: {exc}") from exc
-    return _require_json_object(payload, f"{error_prefix}: invalid JSON response")
 
 
 def _extract_model_ids(items: Any, *keys: str) -> list[str]:
@@ -358,58 +357,33 @@ ResponseAdapter: TypeAlias = dict[str, Any]
 def _normalize_headers(headers: Any) -> dict[str, str]:
     if headers is None:
         return {}
-    if hasattr(headers, "items"):
-        items = headers.items()
-    else:
-        items = dict(headers).items()
+    items = headers.items() if hasattr(headers, "items") else dict(headers).items()
     return {str(key).lower(): str(value) for key, value in items}
 
 
+def _response_value(
+    response: Any, key: str, default: Any = None, *, attr: str | None = None
+) -> Any:
+    if isinstance(response, dict):
+        return response.get(key, default)
+    return getattr(response, attr or key, default)
+
+
 def adapt_response(response: Any) -> ResponseAdapter:
-    is_mapping = isinstance(response, dict)
-    status_code = int(
-        (
-            response.get("status_code")
-            if is_mapping
-            else getattr(response, "status_code", 0)
-        )
-        or 0
-    )
+    status_code = int(_response_value(response, "status_code", 0) or 0)
     reason_phrase = str(
-        (
-            response.get("reason_phrase", "")
-            if is_mapping
-            else getattr(response, "reason", "") or _status_reason(status_code)
-        )
+        _response_value(response, "reason_phrase", "", attr="reason")
+        or _status_reason(status_code)
         or ""
     )
     return response_adapter(
         status_code=status_code,
-        headers=response.get("headers")
-        if is_mapping
-        else getattr(response, "headers", None),
-        text=str(
-            (response.get("text", "") if is_mapping else getattr(response, "text", ""))
-            or ""
-        ),
-        content=bytes(
-            (
-                response.get("content", b"")
-                if is_mapping
-                else getattr(response, "content", b"")
-            )
-            or b""
-        ),
-        url=str(
-            (response.get("url", "") if is_mapping else getattr(response, "url", ""))
-            or ""
-        ),
+        headers=_response_value(response, "headers"),
+        text=str(_response_value(response, "text", "") or ""),
+        content=bytes(_response_value(response, "content", b"") or b""),
+        url=str(_response_value(response, "url", "") or ""),
         reason_phrase=reason_phrase,
-        http_version=_http_version_name(
-            response.get("http_version")
-            if is_mapping
-            else getattr(response, "http_version", None)
-        ),
+        http_version=_http_version_name(_response_value(response, "http_version")),
     )
 
 
@@ -440,6 +414,13 @@ def response_is_success(response: ResponseAdapter) -> bool:
 
 def response_json(response: ResponseAdapter) -> Any:
     return json.loads(response["text"])
+
+
+def _response_json_object(response: ResponseAdapter, error: str) -> dict[str, Any]:
+    try:
+        return _require_json_object(response_json(response), error)
+    except Exception as exc:
+        raise RuntimeError(error) from exc
 
 
 def response_raise_for_status(response: ResponseAdapter) -> None:
@@ -712,11 +693,7 @@ def _req_json(
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     response = _req(api, method, path, json_body=json_body, data=data, headers=headers)
-    try:
-        payload = response_json(response)
-    except Exception as exc:
-        raise RuntimeError(f"{source}: invalid JSON response") from exc
-    return _require_json_object(payload, f"{source}: invalid JSON response")
+    return _response_json_object(response, f"{source}: invalid JSON response")
 
 
 def _openai_json_create(
@@ -1788,13 +1765,7 @@ def _bedrock_mantle_client(
             ),
         )
         response_raise_for_status(response)
-        try:
-            payload = response_json(response)
-        except Exception as exc:
-            raise RuntimeError("Chat Completions API: invalid JSON response") from exc
-        return _require_json_object(
-            payload, "Chat Completions API: invalid JSON response"
-        )
+        return _response_json_object(response, "Chat Completions API: invalid JSON response")
 
     return _chat_client(
         create,
