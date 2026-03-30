@@ -8,16 +8,9 @@ Use `uv` for installs, formatting, linting, tests, and builds.
 
 ```bash
 uv sync
-```
-
-## Common commands
-
-```bash
-uv sync
-uv run ruff format .
 uv run ruff check .
-uv run python -m pytest tests/ -v
-uv run python -m pytest tests/test_providers.py -q
+uv run pytest -q
+uv run pytest tests/test_providers.py -q
 uv run oy --help
 uv build
 ```

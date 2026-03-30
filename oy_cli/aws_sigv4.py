@@ -21,13 +21,13 @@ def _normalize_path(path: str) -> str:
     return quote(path or "/", safe="/~")
 
 
-
 def _canonical_query_string(query: str) -> str:
     if not query:
         return ""
     pairs = [part.partition("=") for part in query.split("&")]
     return "&".join(
-        f"{key}={value}" for key, _, value in sorted(pairs, key=lambda pair: (pair[0], pair[2]))
+        f"{key}={value}"
+        for key, _, value in sorted(pairs, key=lambda pair: (pair[0], pair[2]))
     )
 
 
@@ -84,7 +84,9 @@ def sigv4_headers(
             method.upper(),
             _normalize_path(parsed.path),
             _canonical_query_string(parsed.query),
-            "".join(f"{key}:{canonical_headers[key]}\n" for key in sorted(canonical_headers)),
+            "".join(
+                f"{key}:{canonical_headers[key]}\n" for key in sorted(canonical_headers)
+            ),
             signed_headers,
             hashlib.sha256(body).hexdigest(),
         ]
@@ -114,4 +116,3 @@ def sigv4_headers(
         ),
         "Authorization": auth,
     }
-

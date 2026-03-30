@@ -102,7 +102,11 @@ def _message_tokens(message: ChatMessage) -> int:
 def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
     if message.get("role") == "tool" or not message["content"]:
         return message
-    if (truncated := rt.truncate_str_to_tokens(message["content"], max_tokens=max_tokens)) is message["content"]:
+    if (
+        truncated := rt.truncate_str_to_tokens(
+            message["content"], max_tokens=max_tokens
+        )
+    ) is message["content"]:
         return message
     role = message.get("role")
     if role == "system":
@@ -139,7 +143,9 @@ def _packed_history_note(messages: list[ChatMessage]) -> SystemMessage:
             ]
         }
     )
-    return SystemMessage(session_text("transcript", "packed_history_note", packed=packed).strip())
+    return SystemMessage(
+        session_text("transcript", "packed_history_note", packed=packed).strip()
+    )
 
 
 def _pack_messages_with_toons(messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -252,7 +258,11 @@ def add_assistant(tx: Transcript, message: AssistantMessage) -> None:
 
 def add_tool_results(tx: Transcript, results: list[dict[str, Any]]) -> None:
     tx["messages"].extend(
-        ToolMessage(tool_call_id=result["call_id"], name=result["name"], content=result["result"])
+        ToolMessage(
+            tool_call_id=result["call_id"],
+            name=result["name"],
+            content=result["result"],
+        )
         for result in results
     )
 
@@ -262,13 +272,22 @@ def prepared_messages(
     model: str | None = None,
     todos: list[dict[str, str]] | None = None,
 ) -> list[ChatMessage]:
-    messages = [_truncate_message(message, tx["max_message_tokens"]) for message in tx["messages"]]
+    messages = [
+        _truncate_message(message, tx["max_message_tokens"])
+        for message in tx["messages"]
+    ]
     if model:
         messages = _pack_messages_with_toons(messages)
-    system_messages = [message for message in messages if message.get("role") == "system"]
+    system_messages = [
+        message for message in messages if message.get("role") == "system"
+    ]
     if todos:
         system_messages.append(
-            SystemMessage(session_text("transcript", "todo_system", todos=_format_todos(todos)).strip())
+            SystemMessage(
+                session_text(
+                    "transcript", "todo_system", todos=_format_todos(todos)
+                ).strip()
+            )
         )
     other = [message for message in messages if message.get("role") != "system"]
     budget = tx["max_context_tokens"] - sum(map(_message_tokens, system_messages))
@@ -283,11 +302,23 @@ def prepared_messages(
             used += cost
     kept = [message for unit in reversed(kept_units) for message in unit]
     omitted_messages = len(other) - len(kept)
-    return system_messages + (
-        [UserMessage(session_text("transcript", "omitted_messages", omitted_messages=omitted_messages))]
-        if omitted_messages > 0
-        else []
-    ) + kept
+    return (
+        system_messages
+        + (
+            [
+                UserMessage(
+                    session_text(
+                        "transcript",
+                        "omitted_messages",
+                        omitted_messages=omitted_messages,
+                    )
+                )
+            ]
+            if omitted_messages > 0
+            else []
+        )
+        + kept
+    )
 
 
 def session_tokens(tx: Transcript) -> int:
@@ -328,6 +359,7 @@ def log_wait(item: Wait, message: str) -> None:
     _ = item
     rt._note(message, tag="wait")
 
+
 def _normalized_vote_text(text: str) -> str:
     return " ".join(text.split()).strip().lower()
 
@@ -348,7 +380,9 @@ def _tool_call_signature(call: dict[str, Any]) -> str:
     return f"{call['name']}({serialize_json(call['arguments'])})"
 
 
-def _tool_plan_match_score(calls1: list[dict[str, Any]], calls2: list[dict[str, Any]]) -> float:
+def _tool_plan_match_score(
+    calls1: list[dict[str, Any]], calls2: list[dict[str, Any]]
+) -> float:
     if not calls1 or not calls2:
         return 100.0 if calls1 == calls2 else 0.0
     name_score = fuzz.ratio(
@@ -374,7 +408,9 @@ def _message_match_score(left: AssistantMessage, right: AssistantMessage) -> flo
         plan_score = _tool_plan_match_score(left_calls, right_calls)
         if not left["content"] and not right["content"]:
             return plan_score
-        return (0.85 * plan_score) + (0.15 * _text_match_score(left["content"], right["content"]))
+        return (0.85 * plan_score) + (
+            0.15 * _text_match_score(left["content"], right["content"])
+        )
     return _text_match_score(left["content"], right["content"])
 
 
@@ -403,7 +439,10 @@ def _choose_self_consistent_message(
                 vote_count += 1
         if vote_count > best_vote_count or (
             vote_count == best_vote_count
-            and (support > best_support or (support == best_support and index < best_index))
+            and (
+                support > best_support
+                or (support == best_support and index < best_index)
+            )
         ):
             best_index = index
             best_vote_count = vote_count
@@ -445,9 +484,19 @@ def run_turn(
         def on_retry(attempt, max_attempts, error_ctx=None):
             excerpt = ""
             if error_ctx:
-                excerpt = " | ".join(line.strip() for line in error_ctx.strip().splitlines()[:3] if line.strip())
-            log_wait(spinner, f"retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}")
-            update_wait(spinner, f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) | {size_str}")
+                excerpt = " | ".join(
+                    line.strip()
+                    for line in error_ctx.strip().splitlines()[:3]
+                    if line.strip()
+                )
+            log_wait(
+                spinner,
+                f"retry {attempt}/{max_attempts}{': ' + excerpt if excerpt else ''}",
+            )
+            update_wait(
+                spinner,
+                f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) | {size_str}",
+            )
 
         try:
             if remaining_unattended_seconds(state) <= 0:
@@ -475,7 +524,9 @@ def run_turn(
                     log_wait(spinner, f"sample {completed_count}/{best_of}")
 
             if best_of > 1:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=best_of) as executor:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=best_of
+                ) as executor:
                     futures = [executor.submit(sample, i) for i in range(best_of)]
                     for future in concurrent.futures.as_completed(futures):
                         future.result()
@@ -513,7 +564,9 @@ def run_turn(
                 {
                     "call_id": call["id"],
                     "name": call["name"],
-                    "result": invoke_tool(state["tool_registry"], state, call["name"], call["arguments"]),
+                    "result": invoke_tool(
+                        state["tool_registry"], state, call["name"], call["arguments"]
+                    ),
                 }
                 for call in calls
             ]
@@ -522,7 +575,11 @@ def run_turn(
                 model=model_spec,
                 step=step,
                 results=[
-                    {"call_id": result["call_id"], "name": result["name"], "ok": result["result"]["ok"]}
+                    {
+                        "call_id": result["call_id"],
+                        "name": result["name"],
+                        "ok": result["result"]["ok"],
+                    }
                     for result in results
                 ],
             )

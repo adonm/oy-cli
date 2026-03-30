@@ -13,24 +13,17 @@ oy chat
 oy audit "focus on authentication"
 ```
 
-## Common use
+## Use
 
 ```bash
 oy "inspect the main module and suggest improvements"
 OY_ROOT=./my-project oy "fix the failing tests"
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy
 OY_BEST_OF=5 oy "fix the flaky test"
-oy audit
-```
-
-## Commands
-
-```bash
-oy "prompt"        # one-shot prompt
-oy chat             # interactive session
-oy audit [focus]    # security/complexity audit
-oy ralph "prompt"   # rerun in yolo mode on a timer
-oy model [filter]   # show or choose model
+oy chat
+oy audit [focus]
+oy ralph "prompt"
+oy model [filter]
 oy --help
 ```
 
@@ -91,14 +84,12 @@ pip install oy-cli      # alternative
 
 ## Development
 
-Use `uv` for local development, formatting, linting, tests, and builds. Run the full suite before release; use targeted pytest paths while iterating.
+Use `uv` for local development. Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ```bash
 uv sync
-uv run ruff format .
 uv run ruff check .
-uv run python -m pytest tests/ -v
-uv run python -m pytest tests/test_providers.py -q
+uv run pytest -q
 uv run oy --help
 uv build
 ```

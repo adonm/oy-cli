@@ -1,4 +1,5 @@
 """Tests for providers module: HTTP, auth, shims, message handling."""
+
 from __future__ import annotations
 
 import json
@@ -19,9 +20,9 @@ class TestJSONHelpers:
 
     def test_auth_loaders_ignore_non_object_json(self, monkeypatch, tmp_path):
         codex = tmp_path / "codex.json"
-        codex.write_text('[]', encoding="utf-8")
+        codex.write_text("[]", encoding="utf-8")
         opencode = tmp_path / "opencode.json"
-        opencode.write_text('[]', encoding="utf-8")
+        opencode.write_text("[]", encoding="utf-8")
         monkeypatch.setattr(providers, "CODEX_AUTH_PATH", codex)
         monkeypatch.setattr(providers, "OPENCODE_AUTH_PATH", opencode)
         assert providers.load_codex_auth() == {}
@@ -73,25 +74,35 @@ class TestSigV4Signing:
 
 class TestMessageDecoding:
     def test_tool_call_arguments_json_variants(self):
-        assert providers._decode_tool_call_arguments(json.dumps('{"count":2}')) == {"count": 2}
-        assert providers._decode_tool_call_arguments('{"ok":true}{"ok":true}') == {"ok": True}
+        assert providers._decode_tool_call_arguments(json.dumps('{"count":2}')) == {
+            "count": 2
+        }
+        assert providers._decode_tool_call_arguments('{"ok":true}{"ok":true}') == {
+            "ok": True
+        }
 
     def test_responses_output_decoding(self):
-        decoded = providers._decode_responses_output({
-            "output": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"text": "hello"}, {"refusal": "nope"}, {"text": "   "}],
-                },
-                {
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "name": "echo",
-                    "arguments": '{"value":"x"}',
-                },
-            ]
-        })
+        decoded = providers._decode_responses_output(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"text": "hello"},
+                            {"refusal": "nope"},
+                            {"text": "   "},
+                        ],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "echo",
+                        "arguments": '{"value":"x"}',
+                    },
+                ]
+            }
+        )
         assert decoded == AssistantMessage(
             "hello\n\nnope",
             tool_calls=[ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
@@ -101,14 +112,18 @@ class TestMessageDecoding:
         chat_message = providers._chat_completion_to_assistant_message(
             SimpleNamespace(
                 choices=[
-                    SimpleNamespace(message=SimpleNamespace(content="hello", tool_calls=None)),
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="hello", tool_calls=None)
+                    ),
                     SimpleNamespace(
                         message=SimpleNamespace(
                             content="hello",
                             tool_calls=[
                                 SimpleNamespace(
                                     id="call_2",
-                                    function=SimpleNamespace(name="echo", arguments='{"count":2}'),
+                                    function=SimpleNamespace(
+                                        name="echo", arguments='{"count":2}'
+                                    ),
                                 )
                             ],
                         )
@@ -126,7 +141,9 @@ class TestMessageDecoding:
             SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        message=SimpleNamespace(content="", reasoning="thoughts", tool_calls=None)
+                        message=SimpleNamespace(
+                            content="", reasoning="thoughts", tool_calls=None
+                        )
                     )
                 ]
             )
@@ -139,26 +156,40 @@ class TestReasoningFallback:
         responses_create = Mock(
             side_effect=[api_error("Unsupported parameter: reasoning"), {"output": []}]
         )
-        responses_client = providers._responses_client(responses_create, lambda: ["gpt-test"])
+        responses_client = providers._responses_client(
+            responses_create, lambda: ["gpt-test"]
+        )
         assert responses_client["chat_completion"]("gpt-test", [])["content"] == ""
-        assert responses_create.call_args_list[0].args[0]["reasoning"] == {"effort": "high"}
+        assert responses_create.call_args_list[0].args[0]["reasoning"] == {
+            "effort": "high"
+        }
         assert "reasoning" not in responses_create.call_args_list[1].args[0]
 
         # Cached call should not include reasoning
         responses_cached = Mock(return_value={"output": []})
-        responses_client = providers._responses_client(responses_cached, lambda: ["gpt-test"])
+        responses_client = providers._responses_client(
+            responses_cached, lambda: ["gpt-test"]
+        )
         responses_client["chat_completion"]("gpt-test", [])
         assert "reasoning" not in responses_cached.call_args.args[0]
 
     def test_drops_reasoning_effort_for_chat_completions(self):
         final = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=None))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="done", tool_calls=None)
+                )
+            ]
         )
         chat_create = Mock(
             side_effect=[api_error("Unknown parameter: reasoning_effort"), final]
         )
-        chat_client = providers._chat_client(chat_create, lambda: ["gpt-test"], tools_map=lambda _: [])
-        assert chat_client["chat_completion"]("gpt-test", []) == AssistantMessage("done")
+        chat_client = providers._chat_client(
+            chat_create, lambda: ["gpt-test"], tools_map=lambda _: []
+        )
+        assert chat_client["chat_completion"]("gpt-test", []) == AssistantMessage(
+            "done"
+        )
         assert chat_create.call_args_list[0].args[0]["reasoning_effort"] == "high"
         assert "reasoning_effort" not in chat_create.call_args_list[1].args[0]
 
@@ -176,7 +207,9 @@ class TestClientFactories:
 
         monkeypatch.setattr(providers, "_openai", fake_openai)
         monkeypatch.setattr(providers, "_openai_json_create", fake_create)
-        monkeypatch.setattr(providers, "_openai_model_lister", lambda api: f"models:{api['api']}")
+        monkeypatch.setattr(
+            providers, "_openai_model_lister", lambda api: f"models:{api['api']}"
+        )
         monkeypatch.setattr(
             providers,
             "_responses_client",
@@ -198,7 +231,9 @@ class TestClientFactories:
             },
         )
 
-        responses = providers._responses_from_key("key", fallback=list, default=["demo"])
+        responses = providers._responses_from_key(
+            "key", fallback=list, default=["demo"]
+        )
         chat = providers._chat_from_key("key")
 
         assert responses == {
@@ -226,13 +261,22 @@ class TestClientFactories:
         monkeypatch.setattr(
             providers,
             "_chat_from_key",
-            lambda api_key, *, base_url=None, **kwargs: seen.append((api_key, base_url, kwargs)) or {"api_key": api_key, "base_url": base_url},
+            lambda api_key, *, base_url=None, **kwargs: (
+                seen.append((api_key, base_url, kwargs))
+                or {"api_key": api_key, "base_url": base_url}
+            ),
         )
 
         assert providers._opencode_api_key("opencode") == "zen-key"
         assert providers._opencode_api_key("opencode-go") == "go-key"
-        assert providers._opencode_zen_client() == {"api_key": "zen-key", "base_url": providers.OPENCODE_ZEN_URL}
-        assert providers._opencode_go_client() == {"api_key": "go-key", "base_url": providers.OPENCODE_GO_URL}
+        assert providers._opencode_zen_client() == {
+            "api_key": "zen-key",
+            "base_url": providers.OPENCODE_ZEN_URL,
+        }
+        assert providers._opencode_go_client() == {
+            "api_key": "go-key",
+            "base_url": providers.OPENCODE_GO_URL,
+        }
         assert seen == [
             ("zen-key", providers.OPENCODE_ZEN_URL, {}),
             ("go-key", providers.OPENCODE_GO_URL, {}),
@@ -241,15 +285,27 @@ class TestClientFactories:
 
 class TestMantleClient:
     def test_uses_sigv4_client_in_aws_credentials_mode(self, monkeypatch, tmp_path):
-        sentinel = {"chat_completion": lambda *a, **k: None, "list_models": lambda: ["alpha", "beta"]}
-        monkeypatch.setattr(providers, "default_region", lambda choice=None: "ap-southeast-2")
+        sentinel = {
+            "chat_completion": lambda *a, **k: None,
+            "list_models": lambda: ["alpha", "beta"],
+        }
         monkeypatch.setattr(
-            providers, "load_aws_credentials",
-            lambda cwd=None, allow_login=True: {"access_key": "AKIA", "secret_key": "SECRET"},
+            providers, "default_region", lambda choice=None: "ap-southeast-2"
         )
         monkeypatch.setattr(
-            providers, "_bedrock_mantle_client",
-            lambda credentials, region, timeout=providers.DEFAULT_HTTP_TIMEOUT: dict(sentinel),
+            providers,
+            "load_aws_credentials",
+            lambda cwd=None, allow_login=True: {
+                "access_key": "AKIA",
+                "secret_key": "SECRET",
+            },
+        )
+        monkeypatch.setattr(
+            providers,
+            "_bedrock_mantle_client",
+            lambda credentials, region, timeout=providers.DEFAULT_HTTP_TIMEOUT: dict(
+                sentinel
+            ),
         )
         client = providers._mantle_completion_client(tmp_path)
         assert client["list_models"]() == ["alpha", "beta"]
@@ -257,9 +313,12 @@ class TestMantleClient:
 
     def test_load_bedrock_model_list_uses_mantle_endpoint(self, monkeypatch, tmp_path):
         requested = {}
-        monkeypatch.setattr(providers, "default_region", lambda choice=None: "ap-southeast-2")
         monkeypatch.setattr(
-            providers, "load_aws_credentials",
+            providers, "default_region", lambda choice=None: "ap-southeast-2"
+        )
+        monkeypatch.setattr(
+            providers,
+            "load_aws_credentials",
             lambda cwd=None, allow_login=True: {
                 "access_key": "AKIDEXAMPLE",
                 "secret_key": "wJalrXUtnFEMI/I/K7MDENG+bPxRfiCYEXAMPLEKEY",
@@ -267,7 +326,8 @@ class TestMantleClient:
             },
         )
         monkeypatch.setattr(
-            providers, "_bedrock_request_headers",
+            providers,
+            "_bedrock_request_headers",
             lambda credentials, region, method, url, body=b"", headers=None: {
                 "Authorization": "AWS4-HMAC-SHA256 test",
                 "X-Amz-Date": "20260327T062009Z",
@@ -275,6 +335,7 @@ class TestMantleClient:
                 **(headers or {}),
             },
         )
+
         class FakeSession:
             def __enter__(self):
                 return self
@@ -294,21 +355,31 @@ class TestMantleClient:
                 )
 
         monkeypatch.setattr(providers, "llm_session", lambda **kwargs: FakeSession())
-        assert providers.load_bedrock_model_list(tmp_path) == ["zai.glm-4.6", "moonshotai.kimi-k2-thinking"]
+        assert providers.load_bedrock_model_list(tmp_path) == [
+            "zai.glm-4.6",
+            "moonshotai.kimi-k2-thinking",
+        ]
         assert requested["method"] == "GET"
-        assert requested["url"] == "https://bedrock-mantle.ap-southeast-2.api.aws/v1/models"
+        assert (
+            requested["url"]
+            == "https://bedrock-mantle.ap-southeast-2.api.aws/v1/models"
+        )
         assert requested["headers"]["Authorization"] == "AWS4-HMAC-SHA256 test"
 
 
 class TestShimRegistry:
     def test_registry_order_and_client_building(self, monkeypatch, tmp_path):
         calls: list[str] = []
-        sentinel = {"chat_completion": lambda *a, **k: None, "list_models": lambda: ["demo"]}
+        sentinel = {
+            "chat_completion": lambda *a, **k: None,
+            "list_models": lambda: ["demo"],
+        }
 
         def ok(name: str):
             def ensure_env(cwd):
                 assert cwd == tmp_path
                 calls.append(name)
+
             return ensure_env
 
         def fail(name: str):
@@ -316,6 +387,7 @@ class TestShimRegistry:
                 assert cwd == tmp_path
                 calls.append(name)
                 raise RuntimeError(name)
+
             return ensure_env
 
         specs = {
@@ -335,10 +407,16 @@ class TestShimRegistry:
                 "list_models": lambda cwd: [],
             },
         }
-        monkeypatch.setattr(providers, "SHIM_ORDER", ("alpha", "beta", "gamma"), raising=False)
+        monkeypatch.setattr(
+            providers, "SHIM_ORDER", ("alpha", "beta", "gamma"), raising=False
+        )
         monkeypatch.setattr(providers, "KNOWN_SHIMS", set(specs), raising=False)
         monkeypatch.setattr(providers, "SHIM_SPECS", specs, raising=False)
-        monkeypatch.setattr(providers, "_shim_available", lambda shim: providers._shim_env_error(specs[shim], tmp_path) is None)
+        monkeypatch.setattr(
+            providers,
+            "_shim_available",
+            lambda shim: providers._shim_env_error(specs[shim], tmp_path) is None,
+        )
 
         assert providers.detect_available_shims() == ["alpha", "gamma"]
         assert calls == ["alpha", "beta", "gamma"]
@@ -371,7 +449,11 @@ class TestToolOutputRoundTrip:
     def test_failed_tool_results_keep_failure_metadata(self):
         result = ToolResult(
             ok=False,
-            content={"tool": "read", "error_type": "ValueError", "message": "read path does not exist: missing.txt"},
+            content={
+                "tool": "read",
+                "error_type": "ValueError",
+                "message": "read path does not exist: missing.txt",
+            },
         )
         assert providers._tool_output_value(result) == {
             "ok": False,
@@ -380,11 +462,15 @@ class TestToolOutputRoundTrip:
             "message": "read path does not exist: missing.txt",
         }
 
-        openai_tool = providers._openai_chat_message(ToolMessage("call_1", "read", result))
-        assert 'ok: false' in openai_tool["content"]
-        assert 'read path does not exist: missing.txt' in openai_tool["content"]
+        openai_tool = providers._openai_chat_message(
+            ToolMessage("call_1", "read", result)
+        )
+        assert "ok: false" in openai_tool["content"]
+        assert "read path does not exist: missing.txt" in openai_tool["content"]
 
-        responses_input = providers._responses_input_from_messages([ToolMessage("call_1", "read", result)])
+        responses_input = providers._responses_input_from_messages(
+            [ToolMessage("call_1", "read", result)]
+        )
         assert len(responses_input) == 1
         assert responses_input[0]["type"] == "function_call_output"
-        assert 'ok: false' in responses_input[0]["output"]
+        assert "ok: false" in responses_input[0]["output"]

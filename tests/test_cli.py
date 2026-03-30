@@ -11,19 +11,25 @@ from oy_cli.providers import SystemMessage, UserMessage
 from tests.conftest import patch_runtime
 
 
+def _session_state(tmp_path, **overrides):
+    session = {
+        "workspace": tmp_path,
+        "model": "openai:gpt-test",
+        "interactive": False,
+        "system_prompt": "sys",
+        "system_file": None,
+        "yolo": False,
+        "best_of": 3,
+    }
+    session.update(overrides)
+    return session
+
+
 def _stub_session(monkeypatch, tmp_path, *, interactive=False):
     monkeypatch.setattr(
         cli,
         "resolve_session",
-        lambda **kwargs: {
-            "workspace": tmp_path,
-            "model": "openai:gpt-test",
-            "interactive": interactive,
-            "system_prompt": "sys",
-            "system_file": None,
-            "yolo": False,
-            "best_of": 3,
-        },
+        lambda **kwargs: _session_state(tmp_path, interactive=interactive),
     )
 
 
@@ -121,6 +127,22 @@ class TestRalph:
 
 
 class TestChatCommands:
+    def test_help_lists_chat_commands(self, monkeypatch):
+        printed = []
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, **k: printed.append(
+                k.get("value", a[1] if len(a) > 1 else a[0] if a else "")
+            ),
+        )
+
+        assert (
+            cli._chat_command("/help", {"messages": []}, "sys", "openai:gpt-test")
+            is True
+        )
+        assert "- `/ask <question>` -- research-only query" in printed[-1]
+        assert "- `/quit` or `/exit` -- end session" in printed[-1]
+
     def test_ask_usage_and_note_are_explicit_about_webfetch(
         self, tmp_path, monkeypatch
     ):
@@ -152,38 +174,13 @@ class TestChatCommands:
         monkeypatch.setattr(
             cli, "run_turn", lambda *args, **kwargs: seen.update({"called": True})
         )
+        session = _session_state(tmp_path, interactive=True, best_of=1)
 
-        cli._handle_ask(
-            "",
-            "openai:gpt-test",
-            {
-                "workspace": tmp_path,
-                "system_prompt": "sys",
-                "interactive": True,
-                "best_of": 1,
-            },
-            {"messages": []},
-        )
-        assert (
-            printed[-1]
-            == "Usage: `/ask <question>` — research the codebase without bash or file changes. Public webfetch is still allowed."
-        )
+        cli._handle_ask("", "openai:gpt-test", session, {"messages": []})
+        assert printed[-1] == cli._ASK_USAGE
 
-        cli._handle_ask(
-            "where is auth?",
-            "openai:gpt-test",
-            {
-                "workspace": tmp_path,
-                "system_prompt": "sys",
-                "interactive": True,
-                "best_of": 1,
-            },
-            {"messages": []},
-        )
-        assert (
-            notes[-1]
-            == "research mode (no bash or file changes; public webfetch allowed)"
-        )
+        cli._handle_ask("where is auth?", "openai:gpt-test", session, {"messages": []})
+        assert notes[-1] == cli._ASK_MODE_NOTE
         assert seen == {"called": True}
 
     def test_load_and_chat_commands(self, tmp_path, monkeypatch):

@@ -71,14 +71,23 @@ _BASH_IMPORTANT_LINE_RE = re.compile(
 _FENCE_RE = re.compile(r"^```([a-zA-Z0-9_+.-]*)\s*$")
 _INLINE_TOKEN_RE = re.compile(r"`[^`\n]+`|\*\*[^*\n]+?\*\*|\*[^*\n]+?\*")
 _CONTROL_TEXT_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-_TOON_LINE_RE = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+(?:\[\d+\])?(?:\{[^}]+\})?)(?:: ?(?P<value>.*))?$")
-_SEARCH_PREVIEW_LINE_RE = re.compile(r"^(?P<path>.+):(?P<line>\d+):(?P<column>\d+):(?P<text>.*)$")
-_REPLACE_SKIPPED_PREVIEW_LINE_RE = re.compile(r"^(?P<path>.+): skipped \((?P<reason>.+)\)$")
-_REPLACE_CHANGED_PREVIEW_LINE_RE = re.compile(r"^(?P<path>.+): (?P<count>\d+) replacement\(s\)$")
+_TOON_LINE_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+(?:\[\d+\])?(?:\{[^}]+\})?)(?:: ?(?P<value>.*))?$"
+)
+_SEARCH_PREVIEW_LINE_RE = re.compile(
+    r"^(?P<path>.+):(?P<line>\d+):(?P<column>\d+):(?P<text>.*)$"
+)
+_REPLACE_SKIPPED_PREVIEW_LINE_RE = re.compile(
+    r"^(?P<path>.+): skipped \((?P<reason>.+)\)$"
+)
+_REPLACE_CHANGED_PREVIEW_LINE_RE = re.compile(
+    r"^(?P<path>.+): (?P<count>\d+) replacement\(s\)$"
+)
 _SEARCH_HIGHLIGHT_OPEN = "⟦"
 _SEARCH_HIGHLIGHT_CLOSE = "⟧"
 _MULTILINE_PREVIEW_KEYS = frozenset({"stderr", "stdout", "text"})
 _RICH_REPR_HIGHLIGHTER = ReprHighlighter()
+
 
 def _ansi(style: str, text: str) -> str:
     return f"\x1b[{style}m{text}\x1b[0m" if text else ""
@@ -94,7 +103,6 @@ def has_tty_stdin() -> bool:
 
 def stdin_is_interactive() -> bool:
     return has_tty_stdin() and not _flag("OY_NON_INTERACTIVE", False)
-
 
 
 def prompt_unavailable_reason() -> str | None:
@@ -123,7 +131,6 @@ def _history_path(name: str = "history") -> Path:
 
 
 type Console = dict[str, bool]
-
 
 
 def console_stream(console: Console):
@@ -182,7 +189,11 @@ def _prompt_session(
         auto_suggest=auto_suggest,
         multiline=multiline,
         enable_open_in_editor=enable_open_in_editor,
-        output=(console_output(console) if console is not None else create_output(stdout=sys.stderr)),
+        output=(
+            console_output(console)
+            if console is not None
+            else create_output(stdout=sys.stderr)
+        ),
         include_default_pygments_style=False,
         complete_while_typing=bool(completer),
         validate_while_typing=bool(validator),
@@ -197,7 +208,9 @@ def _choice_completer(choices: list[str] | None):
     return FuzzyCompleter(WordCompleter(choices, sentence=True, match_middle=True))
 
 
-def _prompt_text(label: str, *, default: str | None = None, choices: list[str] | None = None) -> str:
+def _prompt_text(
+    label: str, *, default: str | None = None, choices: list[str] | None = None
+) -> str:
     prompt_text = _ansi("1;36", _sanitize_terminal_text(str(label)))
     if choices:
         prompt_text += _ansi("2", f" ({'/'.join(map(str, choices))})")
@@ -229,15 +242,21 @@ def ask(
     history=None,
     prompt_label: str | None = None,
 ) -> str:
-    response = _prompt_session(
-        console=console,
-        history=history,
-        completer=_choice_completer(choices),
-        validator=(_ChoiceValidator(choices) if choices else None),
-    ).prompt(
-        ANSI(_prompt_text(prompt_label or message, default=default, choices=choices)),
-        default="" if default is None else str(default),
-    ).strip()
+    response = (
+        _prompt_session(
+            console=console,
+            history=history,
+            completer=_choice_completer(choices),
+            validator=(_ChoiceValidator(choices) if choices else None),
+        )
+        .prompt(
+            ANSI(
+                _prompt_text(prompt_label or message, default=default, choices=choices)
+            ),
+            default="" if default is None else str(default),
+        )
+        .strip()
+    )
     return response if response or default is None else str(default)
 
 
@@ -257,7 +276,8 @@ def select(
     render = option_text or (lambda option, index: f"{index}. {option}")
     _print("prompt", message, err=True)
     _print(
-        value="## Options\n\n" + "\n".join(render(option, index) for index, option in enumerate(options, 1)),
+        value="## Options\n\n"
+        + "\n".join(render(option, index) for index, option in enumerate(options, 1)),
         err=True,
     )
     aliases = {str(index): option for index, option in enumerate(options, 1)}
@@ -275,15 +295,19 @@ def select(
             )
             raise ValidationError(message=hint, cursor_position=len(document.text))
 
-    response = _prompt_session(
-        console=console,
-        history=history,
-        completer=_choice_completer(allowed),
-        validator=_SelectValidator(),
-    ).prompt(
-        ANSI(_prompt_text(prompt_label, default=default)),
-        default="" if default is None else str(default),
-    ).strip()
+    response = (
+        _prompt_session(
+            console=console,
+            history=history,
+            completer=_choice_completer(allowed),
+            validator=_SelectValidator(),
+        )
+        .prompt(
+            ANSI(_prompt_text(prompt_label, default=default)),
+            default="" if default is None else str(default),
+        )
+        .strip()
+    )
     value = response if response or default is None else str(default)
     if value in aliases:
         return aliases[value]
@@ -320,13 +344,16 @@ def yes_no(
     history=None,
 ) -> bool:
     default_choice = "y" if default else "n"
-    return ask(
-        message,
-        console=console,
-        default=default_choice,
-        choices=["y", "n"],
-        history=history,
-    ) == "y"
+    return (
+        ask(
+            message,
+            console=console,
+            default=default_choice,
+            choices=["y", "n"],
+            history=history,
+        )
+        == "y"
+    )
 
 
 STDOUT, STDERR = {"stderr": False}, {"stderr": True}
@@ -405,7 +432,7 @@ def _render_text_line(line: str) -> str:
         return _ansi("2", "[tool]") + " " + _apply_inline_styles(line[7:])
     if line.startswith("[wait] "):
         return _ansi("2", "[wait]") + " " + _apply_inline_styles(line[7:])
-    if line.startswith("[!] "): 
+    if line.startswith("[!] "):
         return _ansi("1;33", "[!]") + " " + _apply_inline_styles(line[4:])
     if line.startswith("... ["):
         return _ansi("2", _sanitize_terminal_text(line))
@@ -439,7 +466,9 @@ def _render_markdownish(text: str) -> str:
     return "\n".join(rendered)
 
 
-def _rich_console_buffer(console: Console, *, width: int | None = None) -> tuple[RichConsole, io.StringIO]:
+def _rich_console_buffer(
+    console: Console, *, width: int | None = None
+) -> tuple[RichConsole, io.StringIO]:
     buffer = io.StringIO()
     stream = console_stream(console)
     return (
@@ -586,7 +615,9 @@ def _render_preview_line(line: str) -> list[Any]:
             text.append(" ")
             text.append(_sanitize_terminal_text(path), style="cyan")
             text.append(" — ", style="dim")
-            text.append_text(_preview_repr(count_match.group("count"), style="bold magenta"))
+            text.append_text(
+                _preview_repr(count_match.group("count"), style="bold magenta")
+            )
             plural = "s" if count_match.group("count") != "1" else ""
             text.append(f" replacement{plural}", style="dim")
             return [text]
@@ -623,9 +654,18 @@ def _render_preview_line(line: str) -> list[Any]:
         header.append(":", style="dim")
         if value:
             base_key, _, explicit_language = key.partition(".")
-            decoded = _decode_preview_string(value) if base_key in _MULTILINE_PREVIEW_KEYS else None
+            decoded = (
+                _decode_preview_string(value)
+                if base_key in _MULTILINE_PREVIEW_KEYS
+                else None
+            )
             if explicit_language:
-                return [header, _render_preview_multiline(key, decoded if decoded is not None else value, indent=indent)]
+                return [
+                    header,
+                    _render_preview_multiline(
+                        key, decoded if decoded is not None else value, indent=indent
+                    ),
+                ]
             if decoded and "\n" in decoded:
                 return [header, _render_preview_multiline(key, decoded, indent=indent)]
             header.append(" ")
@@ -642,12 +682,22 @@ def _render_preview_line(line: str) -> list[Any]:
 
 def _render_preview_text(text: str, *, console: Console = STDERR) -> str:
     rich_console, buffer = _rich_console_buffer(console)
-    rich_console.print(Group(*[renderable for line in str(text).splitlines() for renderable in _render_preview_line(line)]))
+    rich_console.print(
+        Group(
+            *[
+                renderable
+                for line in str(text).splitlines()
+                for renderable in _render_preview_line(line)
+            ]
+        )
+    )
     return buffer.getvalue().rstrip("\n")
+
 
 def _env(name, default, t=None):
     value = os.environ.get(f"OY_{name}")
     return default if value is None else (t or type(default))(value)
+
 
 MAX_BASH_CMD_BYTES = _env("MAX_BASH_CMD_BYTES", 65536)
 MAX_CONTEXT_TOKENS = _env("MAX_CONTEXT_TOKENS", 131072)
@@ -729,8 +779,10 @@ def merge_model_config(
         data.pop("shim", None)
     return data
 
+
 def _clamp_int(value: int, lower: int, upper: int) -> int:
     return max(lower, min(value, upper))
+
 
 def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
     tool_output_tokens = _clamp_int(context_tokens // 24, 2048, 8192)
@@ -741,7 +793,9 @@ def _derive_runtime_budgets(context_tokens: int) -> RuntimeBudgets:
         default_line_limit=_clamp_int(tool_output_tokens // 6, 200, 1200),
     )
 
+
 BUDGETS = _derive_runtime_budgets(MAX_CONTEXT_TOKENS)
+
 
 @lru_cache(maxsize=1)
 def load_session_text() -> dict[str, Any]:
@@ -813,6 +867,7 @@ def read_only_tool_registry():
 
     return select_tools(include=_READ_ONLY_TOOLS)
 
+
 def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
     if os.environ.get("OY_DEBUG", "").strip().lower() not in _TRUTHY_VALUES:
         return None, None
@@ -830,18 +885,24 @@ def _init_debug_log() -> tuple[logging.Logger | None, str | None]:
         logger.addHandler(handler)
     return logger, str(log_path)
 
+
 _debug_logger, _debug_log_path = _init_debug_log()
+
 
 def _msg_to_dict(msg) -> dict[str, Any]:
     data = normalize_jsonlike(msg)
     return data if isinstance(data, dict) else {"message": data}
 
+
 def _debug_log(event: str, **data: Any) -> None:
     if _debug_logger is None:
         return
     _debug_logger.debug(
-        json.dumps({"ts": time.time(), "event": event, **data}, default=str, ensure_ascii=False)
+        json.dumps(
+            {"ts": time.time(), "event": event, **data}, default=str, ensure_ascii=False
+        )
     )
+
 
 def _fmt(kind, value="", extra=None):
     text = str(value)
@@ -853,7 +914,7 @@ def _fmt(kind, value="", extra=None):
                 f"$ {value}",
                 (out or "").rstrip(),
                 *([f"# exit {rc}"] if rc else []),
-                *( ["# stderr:", err.rstrip()] if err else []),
+                *(["# stderr:", err.rstrip()] if err else []),
                 "```",
             ]
         )
@@ -867,9 +928,12 @@ def _fmt(kind, value="", extra=None):
         "error": f"## Error\n\n{text if chr(10) in text else f'- {text}'}",
     }[kind]
 
+
 def _print(kind="md", value="", *, err=False, extra=None):
     console = STDERR if err else STDOUT
-    print_console(console, _render_markdownish(_fmt(kind, value, extra))) if value else print_console(console)
+    print_console(
+        console, _render_markdownish(_fmt(kind, value, extra))
+    ) if value else print_console(console)
 
 
 def _note(label: str, *, tag: str | None = None) -> None:
@@ -890,8 +954,10 @@ def fail(message, code=1):
     _print("error", str(message).strip(), err=True)
     return code
 
+
 def abort(message, code=1):
     raise SystemExit(fail(message, code))
+
 
 def clip_tokens(text, limit=None, tail=0):
     limit = BUDGETS["tool_output_tokens"] if limit is None else limit
@@ -909,11 +975,17 @@ def clip_tokens(text, limit=None, tail=0):
         )
     return f"{decode_tokens(token_ids[:limit])}\n... [{omitted} tokens omitted after {limit}]"
 
+
 def preview(value, limit=72):
     text = " ".join(
-        (value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))).split()
+        (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, separators=(",", ":"))
+        ).split()
     )
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
 
 def _format_duration(seconds: int) -> str:
     if seconds % 3600 == 0:
@@ -926,13 +998,17 @@ def _format_duration(seconds: int) -> str:
 def parse_duration_seconds(value: str, *, name: str = "duration") -> int:
     text = value.strip().lower()
     if not text:
-        abort(f"Invalid {name}={value!r}. Use a positive duration like 3h, 90m, or 3600s.")
+        abort(
+            f"Invalid {name}={value!r}. Use a positive duration like 3h, 90m, or 3600s."
+        )
     if text.isdigit():
         seconds = int(text)
     else:
         match = re.fullmatch(r"([0-9]+)([hms])", text)
         if not match:
-            abort(f"Invalid {name}={value!r}. Use a positive duration like 3h, 90m, or 3600s.")
+            abort(
+                f"Invalid {name}={value!r}. Use a positive duration like 3h, 90m, or 3600s."
+            )
         amount = int(match.group(1))
         unit = match.group(2)
         seconds = amount * {"h": 3600, "m": 60, "s": 1}[unit]
@@ -963,8 +1039,10 @@ def unattended_limit_seconds(default: int = DEFAULT_UNATTENDED_LIMIT_SECONDS) ->
 def ralph_limit_seconds(default: int = 3 * 3600) -> int:
     return _duration_env_seconds("OY_RALPH_LIMIT", default=default)
 
+
 _MAX_PREVIEW_LINES = 20
 _MAX_LINE_WIDTH = 512
+
 
 def _truncate_long_lines(text: str, limit: int = _MAX_LINE_WIDTH) -> str:
     lines = text.split("\n")
@@ -991,11 +1069,17 @@ def _summarize_preview_lines(text: str, *, max_lines: int = _MAX_PREVIEW_LINES) 
     keep.extend(range(len(lines) - tail_count, len(lines)))
     keep = sorted(set(keep))
     if len(keep) > max_lines:
-        important_mid = [index for index in keep if head_count <= index < len(lines) - tail_count]
+        important_mid = [
+            index for index in keep if head_count <= index < len(lines) - tail_count
+        ]
         budget = max_lines - head_count - tail_count
         important_mid = important_mid[:budget]
         keep = sorted(
-            set(list(range(head_count)) + important_mid + list(range(len(lines) - tail_count, len(lines))))
+            set(
+                list(range(head_count))
+                + important_mid
+                + list(range(len(lines) - tail_count, len(lines)))
+            )
         )
     selected: list[str] = []
     last = -1
@@ -1010,7 +1094,10 @@ def _summarize_preview_lines(text: str, *, max_lines: int = _MAX_PREVIEW_LINES) 
 def show(text):
     if not text:
         return
-    print_console(STDERR, _render_preview_text(_summarize_preview_lines(text), console=STDERR))
+    print_console(
+        STDERR, _render_preview_text(_summarize_preview_lines(text), console=STDERR)
+    )
+
 
 def _rel(root, path):
     try:
@@ -1018,12 +1105,15 @@ def _rel(root, path):
     except ValueError:
         return "<outside workspace>"
 
+
 def _cfg_path():
     return Path(os.environ.get("OY_CONFIG", str(CONFIG_PATH))).expanduser()
+
 
 def _load_cfg():
     data = load_json(_cfg_path(), {})
     return data if isinstance(data, dict) else {}
+
 
 def _save_cfg(data):
     save_json(_cfg_path(), data)
@@ -1054,10 +1144,14 @@ def render_model_list(items, *, title, query=None, current=None, err=False, limi
         lines += ["", f"- current model: {_fmt('inline', current)}"]
     if query:
         lines += ["", f"- filter: {_fmt('inline', query)}"]
-    lines += [""] + ([f"{i}. {_fmt('inline', item)}" for i, item in enumerate(shown, 1)] or ["- no matching models"])
+    lines += [""] + (
+        [f"{i}. {_fmt('inline', item)}" for i, item in enumerate(shown, 1)]
+        or ["- no matching models"]
+    )
     if len(items) > len(shown):
         lines += ["", f"- showing {len(shown)} of {len(items)} matches"]
     _print(value="\n".join(lines), err=err)
+
 
 def _pick_model():
     if not can_prompt():
@@ -1099,12 +1193,18 @@ def _pick_model():
             chosen = matches[0]
             break
         if matches:
-            render_model_list(matches, title="## Matching Models", query=response, err=True)
+            render_model_list(
+                matches, title="## Matching Models", query=response, err=True
+            )
             continue
         _warn(f"No match for {_fmt('inline', response)}. Try again.")
     save_model_config(chosen)
-    _print(value=f"## Default Model Saved\n\n- selected: {_fmt('inline', chosen)}", err=True)
+    _print(
+        value=f"## Default Model Saved\n\n- selected: {_fmt('inline', chosen)}",
+        err=True,
+    )
     return chosen
+
 
 def _shim_name(configured=None):
     if configured:
@@ -1118,10 +1218,15 @@ def _model(configured=None):
     if configured:
         return configured
     if value := os.environ.get("OY_MODEL"):
-        return join_model_spec(shim_name, value) if ":" not in value and (shim_name := _shim_name()) else value
+        return (
+            join_model_spec(shim_name, value)
+            if ":" not in value and (shim_name := _shim_name())
+            else value
+        )
     if value := resolved_model(load_model_config()):
         return value
     return _pick_model()
+
 
 def yolo_enabled(default: bool = False) -> bool:
     return _flag("OY_YOLO", default)
@@ -1135,7 +1240,9 @@ def default_best_of_for_model(model_spec: str | None = None) -> int:
     return 1
 
 
-def self_consistency_best_of(default: int | None = None, *, model_spec: str | None = None) -> int:
+def self_consistency_best_of(
+    default: int | None = None, *, model_spec: str | None = None
+) -> int:
     fallback = default_best_of_for_model(model_spec) if default is None else default
     value = os.environ.get("OY_BEST_OF")
     if value is None or not value.strip():
@@ -1160,8 +1267,14 @@ def _flag(name, default=False):
         return False
     abort(f"Invalid {name}={value}. Use 1/0, true/false, yes/no, on/off.")
 
+
 def _sys_file():
-    return Path(value).expanduser() if (value := os.environ.get("OY_SYSTEM_FILE")) else None
+    return (
+        Path(value).expanduser()
+        if (value := os.environ.get("OY_SYSTEM_FILE"))
+        else None
+    )
+
 
 def _wrap_runtime_error(fn, *args):
     try:
@@ -1169,28 +1282,35 @@ def _wrap_runtime_error(fn, *args):
     except RuntimeError as exc:
         abort(str(exc))
 
+
 def resolve_active_shim(spec=None):
     return _wrap_runtime_error(validate_shim, _shim_resolve_shim(spec, _shim_name()))
+
 
 def ensure_api_env(cwd=None):
     return _shim_ensure_api_env(_model(), _shim_name(), cwd)[0]
 
+
 def require_api_env(cwd=None):
     _wrap_runtime_error(_shim_require_api_env, _model(), _shim_name(), cwd)
 
+
 def require_command_env(cwd=None):
     return dict(_wrap_runtime_error(command_env, cwd))
+
 
 def get_client(spec=None):
     require_api_env(Path.cwd())
     model_spec = spec or _model()
     return _shim_get_client(resolve_active_shim(model_spec), cwd=Path.cwd())
 
+
 def resolve_path(root, path):
     resolved = (root / path).resolve()
     if resolved == root or root in resolved.parents:
         return resolved
     raise ValueError(f"Path traversal denied: '{path}'")
+
 
 def note_tool(state, name, *, _defaults=None, _suffix="", **details):
     from . import agent as ag
@@ -1211,22 +1331,29 @@ def note_tool(state, name, *, _defaults=None, _suffix="", **details):
         label += f"  {_sanitize_terminal_text(_suffix)}"
     _note(label, tag="tool")
 
+
 def get_tokenizer() -> tiktoken.Encoding:
     global _tokenizer
     if _tokenizer is None:
         _tokenizer = tiktoken.get_encoding("cl100k_base")
     return _tokenizer
 
+
 def encode_tokens(text: str) -> list[int]:
     return get_tokenizer().encode(text, disallowed_special=())
+
 
 def decode_tokens(token_ids: list[int]) -> str:
     return get_tokenizer().decode(token_ids)
 
+
 def count_tokens(text: str) -> int:
     return len(encode_tokens(text))
 
-def truncate_str_to_tokens(text: str, max_tokens: int = BUDGETS["message_tokens"]) -> str:
+
+def truncate_str_to_tokens(
+    text: str, max_tokens: int = BUDGETS["message_tokens"]
+) -> str:
     token_ids = encode_tokens(text)
     if len(token_ids) <= max_tokens:
         return text
@@ -1240,10 +1367,12 @@ def truncate_str_to_tokens(text: str, max_tokens: int = BUDGETS["message_tokens"
         f"... [truncated: {omitted_lines} {line_word}, {omitted_chars} chars omitted to fit {max_tokens}-token limit]"
     )
 
+
 def format_tokens(count: int) -> str:
     if count < 1000:
         return f"{count} tokens"
     return f"{count / 1000:.1f}k tokens"
+
 
 def list_all_model_ids() -> list[str]:
     shims = detect_available_shims()
@@ -1259,9 +1388,14 @@ def list_all_model_ids() -> list[str]:
                 list_models_for_shim(shim, cwd=Path.cwd(), ignore_errors=False)
             )
         except Exception as exc:
-            message = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+            message = (
+                str(exc).strip().splitlines()[0]
+                if str(exc).strip()
+                else type(exc).__name__
+            )
             _warn(f"Could not load models from {_fmt('inline', shim)}: {message}")
     return all_models
+
 
 _tokenizer: tiktoken.Encoding | None = None
 

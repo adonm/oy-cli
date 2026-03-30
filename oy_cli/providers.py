@@ -1654,6 +1654,30 @@ _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
 
 
+def _openai_completion_client(
+    api_key: str,
+    path: str,
+    *,
+    source: str,
+    build_client: Callable[..., CompletionClient],
+    base_url: str | None = None,
+    max_retries: int = 3,
+    timeout: Any = None,
+    **kwargs: Any,
+) -> CompletionClient:
+    api = _openai(
+        api_key,
+        base_url=base_url,
+        max_retries=max_retries,
+        timeout=timeout,
+    )
+    return build_client(
+        _openai_json_create(api, path, source=source),
+        _openai_model_lister(api),
+        **kwargs,
+    )
+
+
 def _responses_from_key(
     api_key: str,
     *,
@@ -1663,15 +1687,14 @@ def _responses_from_key(
     fallback: Callable[[], list[str]] | None = None,
     default: list[str] | None = None,
 ) -> CompletionClient:
-    api = _openai(
+    return _openai_completion_client(
         api_key,
+        "/responses",
+        source="Responses API",
+        build_client=_responses_client,
         base_url=base_url,
         max_retries=max_retries,
         timeout=timeout,
-    )
-    return _responses_client(
-        _openai_json_create(api, "/responses", source="Responses API"),
-        _openai_model_lister(api),
         fallback=fallback,
         default=default,
     )
@@ -1686,19 +1709,14 @@ def _chat_from_key(
     tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
     | None = _tool_specs_to_openai,
 ) -> CompletionClient:
-    api = _openai(
+    return _openai_completion_client(
         api_key,
+        "/chat/completions",
+        source="Chat Completions API",
+        build_client=_chat_client,
         base_url=base_url,
         max_retries=max_retries,
         timeout=timeout,
-    )
-    return _chat_client(
-        _openai_json_create(
-            api,
-            "/chat/completions",
-            source="Chat Completions API",
-        ),
-        _openai_model_lister(api),
         tools_map=tools_map,
     )
 
@@ -1713,7 +1731,9 @@ def _openai_client(
     max_retries: int = 3,
 ) -> CompletionClient:
     return _responses_from_key(
-        _require_string(os.environ.get("OPENAI_API_KEY"), "No OpenAI credentials found"),
+        _require_string(
+            os.environ.get("OPENAI_API_KEY"), "No OpenAI credentials found"
+        ),
         base_url=os.environ.get("OPENAI_BASE_URL"),
         max_retries=max_retries,
     )
@@ -1772,7 +1792,9 @@ def _bedrock_mantle_client(
             payload = response_json(response)
         except Exception as exc:
             raise RuntimeError("Chat Completions API: invalid JSON response") from exc
-        return _require_json_object(payload, "Chat Completions API: invalid JSON response")
+        return _require_json_object(
+            payload, "Chat Completions API: invalid JSON response"
+        )
 
     return _chat_client(
         create,
@@ -1934,7 +1956,9 @@ def _require_opencode_go_env(_cwd: Path | None = None) -> None:
 
 def _opencode_client(name: str, label: str, base_url: str) -> CompletionClient:
     return _chat_from_key(
-        _require_string(_opencode_api_key(name), f"No OpenCode {label} credentials found"),
+        _require_string(
+            _opencode_api_key(name), f"No OpenCode {label} credentials found"
+        ),
         base_url=base_url,
     )
 

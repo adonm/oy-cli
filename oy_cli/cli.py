@@ -38,6 +38,41 @@ from .tools import tool_specs
 
 _SESSIONS_DIR: Path | None = None
 
+_ASK_USAGE = (
+    "Usage: `/ask <question>` — research the codebase without bash or file changes. "
+    "Public webfetch is still allowed."
+)
+_ASK_MODE_NOTE = "research mode (no bash or file changes; public webfetch allowed)"
+_CHAT_COMMAND_HELP = (
+    ("/help", "show this help"),
+    ("/tokens", "show context usage"),
+    ("/model [filter]", "show or switch model"),
+    ("/debug", "toggle debug logging"),
+    ("/yolo", "allow all tools for the rest of this session"),
+    (
+        "/ask <question>",
+        "research-only query (no bash or file changes; public webfetch still allowed)",
+    ),
+    ("/audit [focus]", "run a security/complexity audit"),
+    ("/save [name]", "save session transcript"),
+    ("/load [name]", "load a saved session"),
+    ("/undo", "remove the last prompt and its follow-up messages"),
+    ("/clear", "reset conversation (keeps system prompt)"),
+    ("/quit", "end session"),
+    ("/exit", "end session"),
+)
+_PROMPT_COMMANDS = [command for command, _ in _CHAT_COMMAND_HELP if command != "/exit"]
+_CHAT_ACTIONS = {
+    "/model": "model",
+    "/debug": "debug",
+    "/yolo": "yolo",
+    "/ask": "ask",
+    "/audit": "audit",
+    "/save": "save",
+    "/load": "load",
+}
+_CHAT_ACTIONS_WITH_ARGS = {"model", "ask", "audit", "save", "load"}
+
 
 def _sessions_dir() -> Path:
     return _SESSIONS_DIR or (rt.CONFIG_PATH.parent / "sessions")
@@ -57,11 +92,9 @@ def _apply_session_title(workspace: Path, model_spec: str) -> None:
 
 
 def _task_text(task: tuple[str, ...]) -> str:
-    return (
-        " ".join(task)
-        if task
-        else (sys.stdin.read().strip() if not rt.has_tty_stdin() else "")
-    )
+    if task:
+        return " ".join(task)
+    return sys.stdin.read().strip() if not rt.has_tty_stdin() else ""
 
 
 def _transcript_data(transcript: Transcript) -> dict[str, object]:
@@ -195,25 +228,10 @@ def audit(focus: str = "", *, best_of: int | None = None):
 
 def _create_prompt_session():
     history_path = rt._history_path()
-    commands = [
-        "/help",
-        "/tokens",
-        "/model",
-        "/debug",
-        "/yolo",
-        "/ask",
-        "/audit",
-        "/save",
-        "/load",
-        "/undo",
-        "/clear",
-        "/quit",
-        "/exit",
-    ]
     return rt.prompt_session(
         console=rt.STDERR,
         history=FileHistory(str(history_path)),
-        choices=commands,
+        choices=_PROMPT_COMMANDS,
         multiline=False,
         enable_open_in_editor=True,
     )
@@ -254,32 +272,22 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
     name = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
     _, model = rt.split_model_spec(model_spec)
-    if name in ("/help", "/?"):
-        rt._print(
-            value="\n".join(
-                [
-                    "## Commands",
-                    "",
-                    "- `/help` -- show this help",
-                    "- `/tokens` -- show context usage",
-                    "- `/model [filter]` -- show or switch model",
-                    "- `/debug` -- toggle debug logging",
-                    "- `/yolo` -- allow all tools for the rest of this session",
-                    "- `/ask <question>` -- research-only query (no bash or file changes; public webfetch still allowed)",
-                    "- `/audit [focus]` -- run a security/complexity audit",
-                    "- `/save [name]` -- save session transcript",
-                    "- `/load [name]` -- load a saved session",
-                    "- `/undo` -- remove the last prompt and its follow-up messages",
-                    "- `/clear` -- reset conversation (keeps system prompt)",
-                    "- `/quit` or `/exit` -- end session",
-                    "",
-                    "Older conversation history may be packed into TOON before model requests.",
-                    "Paste multiline text directly — bracketed paste keeps it intact.",
-                    "Press Meta+E to open your $EDITOR for longer prompts.",
-                ]
-            ),
-            err=True,
+    if name in {"/help", "/?"}:
+        lines = ["## Commands", ""]
+        lines.extend(
+            f"- `{command}` -- {description}"
+            for command, description in _CHAT_COMMAND_HELP[:-2]
         )
+        lines.append("- `/quit` or `/exit` -- end session")
+        lines.extend(
+            [
+                "",
+                "Older conversation history may be packed into TOON before model requests.",
+                "Paste multiline text directly — bracketed paste keeps it intact.",
+                "Press Meta+E to open your $EDITOR for longer prompts.",
+            ]
+        )
+        rt._print(value="\n".join(lines), err=True)
         return True
     if name == "/tokens":
         total = session_tokens(transcript)
@@ -300,20 +308,8 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
             err=True,
         )
         return True
-    if name == "/model":
-        return ("model", arg)
-    if name == "/debug":
-        return ("debug",)
-    if name == "/yolo":
-        return ("yolo",)
-    if name == "/ask":
-        return ("ask", arg)
-    if name == "/audit":
-        return ("audit", arg)
-    if name == "/save":
-        return ("save", arg)
-    if name == "/load":
-        return ("load", arg)
+    if action := _CHAT_ACTIONS.get(name):
+        return (action, arg) if action in _CHAT_ACTIONS_WITH_ARGS else (action,)
     if name == "/undo":
         if undo_last_turn(transcript):
             rt._note("undid last turn", tag="note")
@@ -385,10 +381,7 @@ def _handle_debug_toggle():
 
 def _handle_ask(question, current_model, session, transcript):
     if not question:
-        rt._print(
-            value="Usage: `/ask <question>` — research the codebase without bash or file changes. Public webfetch is still allowed.",
-            err=True,
-        )
+        rt._print(value=_ASK_USAGE, err=True)
         return
     read_only_registry = read_only_tool_registry()
     ask_transcript = transcript_with_system_prompt(
@@ -398,9 +391,7 @@ def _handle_ask(question, current_model, session, transcript):
         if msg.get("role") != "system":
             ask_transcript["messages"].append(msg)
 
-    rt._note(
-        "research mode (no bash or file changes; public webfetch allowed)", tag="note"
-    )
+    rt._note(_ASK_MODE_NOTE, tag="note")
     state = new_agent_state(
         root=session["workspace"],
         tool_registry=read_only_registry,
