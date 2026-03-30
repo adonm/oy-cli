@@ -156,20 +156,6 @@ Evidence: `_streams()` opens `zip`, `tar`, `gz`, `bz2`, `xz`, and `zst` inputs, 
 
 ---
 
-## P5 · `tool_read()` loads the whole file before returning a small slice
-
-| | |
-|---|---|
-| **Location** | `oy_cli/tools.py:1333-1370` |
-| **Category** | Performance |
-| **Reference** | OWASP ASVS 5.0 `15.1.3` |
-| **Recommendation** | Read line-by-line until `offset + limit` is satisfied instead of `read_text().splitlines()`. |
-| **Status** | Open |
-
-Evidence: `tool_read()` calls `target.read_text(...).splitlines()` before applying `offset` and `limit`.
-
----
-
 ## P6 · Model discovery is serial, subprocess-heavy, and hides some failures behind broad `except Exception`
 
 | | |
@@ -196,6 +182,7 @@ Evidence: shim detection walks `SHIM_ORDER` serially; Copilot and Mantle checks 
 | Reasoning cache thread safety | **Resolved** | `_REASONING_SUPPORT_CACHE` is guarded by `_REASONING_CACHE_LOCK`. |
 | HTTP dependency surface | **Improved** | `httpx` was replaced with `urllib3`, reducing runtime dependencies. |
 | Workspace path traversal | **Resolved** | `resolve_path()` enforces workspace boundary at `oy_cli/runtime.py:1130-1133`. |
+| Streaming file reads | **Resolved** | `tool_read()` now reads line-by-line and stops once `offset + limit` is satisfied instead of loading the entire file first. |
 
 ## Short audit log
 

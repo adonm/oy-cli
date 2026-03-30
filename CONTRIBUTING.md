@@ -34,9 +34,10 @@ uv build
 - intended end-user install path: `uv tool install oy-cli`
 - current design goal: keep the implementation small and easy to audit
 - prefer env-first run configuration so common usage stays close to `oy "prompt"`
-- run env vars: `OY_MODEL`, `OY_SHIM`, `OY_NON_INTERACTIVE`, `OY_SYSTEM_FILE`, `OY_ROOT`, `OY_CONFIG`
-- tuning env vars: `OY_MAX_CONTEXT_TOKENS`, `OY_UNATTENDED_LIMIT`, `OY_MAX_BASH_CMD_BYTES`, `OY_BEDROCK_READ_TIMEOUT`, `OY_BEDROCK_MAX_OUTPUT_TOKENS`
+- run env vars: `OY_MODEL`, `OY_SHIM`, `OY_NON_INTERACTIVE`, `OY_SYSTEM_FILE`, `OY_ROOT`, `OY_CONFIG`, `OY_DEBUG`, `OY_YOLO`
+- tuning env vars: `OY_MAX_CONTEXT_TOKENS`, `OY_UNATTENDED_LIMIT`, `OY_RALPH_LIMIT`, `OY_BEST_OF`, `OY_MAX_BASH_CMD_BYTES`
 - prefer simple, direct changes over abstraction-heavy rewrites
+- when tightening docs, prefer exact behavior and current env names over aspirational wording
 - `except A, B:` syntax is valid Python 3.14+ (PEP 758) -- ruff formats it this way; parenthesised form also works
 - keep system prompts and tool descriptions in `oy_cli/session_text.toml`
 - complexity guidance should favor grugbrain.dev style simplicity

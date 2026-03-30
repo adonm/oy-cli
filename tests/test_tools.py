@@ -1,6 +1,7 @@
 """Tests for tools module: file ops, bash, webfetch, search/replace/sloc."""
 from __future__ import annotations
 
+from pathlib import Path
 import zipfile
 from types import SimpleNamespace
 
@@ -103,6 +104,73 @@ class TestBashTool:
 
 
 class TestFileTools:
+    def test_small_helper_functions(self, tmp_path):
+        assert tools._count_text(1, "file") == "1 file"
+        assert tools._count_text(2, "file") == "2 files"
+        assert tools._count_text(2, "match", "matches") == "2 matches"
+        assert tools._rel_path(tmp_path, tmp_path / "a.txt") == "a.txt"
+
+        target = tmp_path / "exists.txt"
+        target.write_text("ok\n", encoding="utf-8")
+        assert tools._existing_tool_target(tmp_path, "exists.txt", tool="read") == target
+        with pytest.raises(ValueError, match="read path does not exist"):
+            tools._existing_tool_target(tmp_path, "missing.txt", tool="read")
+
+        files = []
+        for i in range(3):
+            path = tmp_path / f"file_{i}.txt"
+            path.write_text(str(i), encoding="utf-8")
+            files.append(path)
+        def worker(path: Path) -> str:
+            return path.read_text(encoding="utf-8")
+
+        assert tools._map_files(files, worker, threads=1) == ["0", "1", "2"]
+        assert sorted(tools._map_files(files, worker, threads=2)) == ["0", "1", "2"]
+
+    def test_read_stops_after_requested_slice(self, tmp_path, monkeypatch):
+        target = tmp_path / "big.txt"
+        target.write_text("\n".join(f"line-{i}" for i in range(1, 200)) + "\n", encoding="utf-8")
+
+        state = make_state(tmp_path)
+        monkeypatch.setattr(rt, "show", lambda *a, **k: None)
+        monkeypatch.setattr(rt, "note_tool", lambda *a, **k: None)
+
+        counts = {"lines": 0}
+        original_open = Path.open
+
+        def counting_open(self, *args, **kwargs):
+            handle = original_open(self, *args, **kwargs)
+            if self != target:
+                return handle
+
+            class CountingHandle:
+                def __init__(self, wrapped):
+                    self.wrapped = wrapped
+
+                def __iter__(self):
+                    for line in self.wrapped:
+                        counts["lines"] += 1
+                        yield line
+
+                def __enter__(self):
+                    self.wrapped.__enter__()
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return self.wrapped.__exit__(exc_type, exc, tb)
+
+                def __getattr__(self, name):
+                    return getattr(self.wrapped, name)
+
+            return CountingHandle(handle)
+
+        monkeypatch.setattr(Path, "open", counting_open)
+
+        payload = tools.tool_read(state, "big.txt", offset=5, limit=3)
+        assert payload["text"] == "line-5\nline-6\nline-7"
+        assert payload["truncated"] is True
+        assert counts["lines"] == 8
+
     def test_list_read_search_replace_sloc(self, tmp_path, monkeypatch):
         (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
         (tmp_path / "a.txt").write_text("alpha\nbeta\n", encoding="utf-8")

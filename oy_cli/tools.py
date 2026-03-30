@@ -422,15 +422,27 @@ def _shown_line_limit(limit: int) -> int:
     return max(limit, 1)
 
 
-def _tool_content_payload(
-    *, content: str, content_format: str, truncated: bool, **fields: Any
-) -> dict[str, Any]:
-    return {
-        **fields,
-        "content": content,
-        "content_format": content_format,
-        "truncated": truncated,
-    }
+def _count_text(count: int, singular: str, plural: str | None = None) -> str:
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _rel_path(root: Path, path: str | Path) -> str:
+    return rt._rel(root, Path(path))
+
+
+def _existing_tool_target(root: Path, path: str, *, tool: str) -> Path:
+    target = rt.resolve_path(root, path)
+    if not target.exists():
+        raise ValueError(f"{tool} path does not exist: {rt._rel(root, target)}")
+    return target
+
+
+def _map_files(files: list[Path], worker: Callable[[Path], Any], *, threads: int | None = None) -> list[Any]:
+    worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
+    if worker_count == 1:
+        return [worker(file_path) for file_path in files]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+        return list(pool.map(worker, files))
 
 
 def _collapse_repeated_lines(lines: list[str]) -> tuple[list[str], bool]:
@@ -619,17 +631,6 @@ def tool_todo(state: Any, todos: list[TodoItemInput]):
     rt.show(_todo_preview(state["todos"]))
     return payload
 
-
-def _merge_bash_streams(stdout: str, stderr: str) -> str:
-    stdout = stdout.rstrip()
-    stderr = stderr.rstrip()
-    if stdout and stderr:
-        return f"[stdout]\n{stdout}\n\n[stderr]\n{stderr}"
-    if stdout:
-        return stdout
-    if stderr:
-        return f"[stderr]\n{stderr}"
-    return ""
 
 
 def _bash_payload(command: str, result) -> tuple[dict[str, Any], str]:
@@ -1081,21 +1082,14 @@ def search(
     files = _iter_files(path, ignore_root=ignore_root, exclude=exclude)
     if not files:
         return []
-    worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
+    results: list[dict[str, Any]] = []
     worker = partial(
         _search_file,
         compiled_bytes=compiled_bytes,
         compiled_text=compiled_text,
     )
-    if worker_count == 1:
-        results: list[dict[str, Any]] = []
-        for file_path in files:
-            results.extend(worker(file_path))
-        return results
-    results: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-        for batch in pool.map(worker, files):
-            results.extend(batch)
+    for batch in _map_files(files, worker, threads=threads):
+        results.extend(batch)
     return results
 
 def _is_archive(path: Path) -> bool:
@@ -1155,16 +1149,11 @@ def replace(
     files = _iter_files(path, ignore_root=ignore_root, exclude=exclude)
     if not files:
         return []
-    worker_count = min(len(files), max(1, threads or _DEFAULT_THREADS))
-    if worker_count == 1:
-        return [_replace_file(file_path, compiled, replacement) for file_path in files]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-        return list(
-            pool.map(
-                partial(_replace_file, compiled=compiled, replacement=replacement),
-                files,
-            )
-        )
+    return _map_files(
+        files,
+        partial(_replace_file, compiled=compiled, replacement=replacement),
+        threads=threads,
+    )
 
 type _SlocFileSummary = dict[str, str | int]
 
@@ -1484,9 +1473,7 @@ def tool_search(
         "exclude": None,
         "limit": rt.BUDGETS["default_line_limit"],
     }
-    target = rt.resolve_path(state["root"], path)
-    if not target.exists():
-        raise ValueError(f"search path does not exist: {rt._rel(state['root'], target)}")
+    target = _existing_tool_target(state["root"], path, tool="search")
     results = search(
         target,
         pattern,
@@ -1530,28 +1517,22 @@ def _replace_summary(
         return "(no changes)"
     parts = []
     if changed_files:
-        plural = "s" if changed_files != 1 else ""
-        parts.append(f"{changed_files} file{plural} changed")
+        parts.append(f"{_count_text(changed_files, 'file')} changed")
     if replacements:
-        plural = "s" if replacements != 1 else ""
-        parts.append(f"{replacements} replacement{plural}")
+        parts.append(_count_text(replacements, "replacement"))
     if skipped:
-        plural = "s" if skipped != 1 else ""
-        parts.append(f"{skipped} skipped")
+        parts.append(_count_text(skipped, "skipped", "skipped"))
     if errors:
-        plural = "s" if errors != 1 else ""
-        parts.append(f"{errors} error{plural}")
+        parts.append(_count_text(errors, "error"))
     return "(" + "; ".join(parts) + ")"
 
 def _replace_preview_line(root: Path, result: dict[str, Any]) -> str:
-    path_text = rt._rel(root, Path(result["source"]))
+    path_text = _rel_path(root, result["source"])
     if result.get("error"):
         return f"[!] {path_text} — {result['error']}"
     if result.get("skipped"):
         return f"skip: {path_text} — {result['skipped']}"
-    replacements = result.get("replacements", 0)
-    plural = "s" if replacements != 1 else ""
-    return f"change: {path_text} — {replacements} replacement{plural}"
+    return f"change: {path_text} — {_count_text(result.get('replacements', 0), 'replacement')}"
 
 def _replace_payload(
     root: Path,
@@ -1577,7 +1558,7 @@ def _replace_payload(
         "replacement_count": replacement_count,
         "changed_files": [
             {
-                "path": rt._rel(root, Path(result["source"])),
+                "path": _rel_path(root, result["source"]),
                 "replacements": result.get("replacements", 0),
             }
             for result in shown_changed
@@ -1589,12 +1570,12 @@ def _replace_payload(
     payload.update(_optional_counts(skipped=len(skipped), error=len(errors)))
     if skipped:
         payload["skipped"] = [
-            {"path": rt._rel(root, Path(result["source"])), "reason": result["skipped"]}
+            {"path": _rel_path(root, result["source"]), "reason": result["skipped"]}
             for result in skipped[:shown_limit]
         ]
     if errors:
         payload["errors"] = [
-            {"path": rt._rel(root, Path(result["source"])), "message": result["error"]}
+            {"path": _rel_path(root, result["source"]), "message": result["error"]}
             for result in errors[:shown_limit]
         ]
     preview_lines = [
@@ -1640,9 +1621,7 @@ def tool_replace(
     limit: int = rt.BUDGETS["default_line_limit"],
 ):
     defaults = {"path": ".", "exclude": None, "limit": rt.BUDGETS["default_line_limit"]}
-    target = rt.resolve_path(state["root"], path)
-    if not target.exists():
-        raise ValueError(f"replace path does not exist: {rt._rel(state['root'], target)}")
+    target = _existing_tool_target(state["root"], path, tool="replace")
     results = replace(
         target,
         pattern,
@@ -1676,16 +1655,14 @@ def tool_replace(
 def _sloc_summary(report: dict[str, Any]) -> str:
     parts = []
     if report["total_file_count"]:
-        plural = "s" if report["total_file_count"] != 1 else ""
-        parts.append(f"{report['total_file_count']} file{plural}")
+        parts.append(_count_text(report["total_file_count"], "file"))
     if report["total_code_count"]:
-        parts.append(f"{report['total_code_count']} code lines")
+        parts.append(_count_text(report["total_code_count"], "code line"))
     non_countable = sum(item["file_count"] for item in report["state_counts"])
     if non_countable:
-        parts.append(f"{non_countable} non-countable")
+        parts.append(_count_text(non_countable, "non-countable", "non-countable"))
     if report["errors"]:
-        plural = "s" if len(report["errors"]) != 1 else ""
-        parts.append(f"{len(report['errors'])} error{plural}")
+        parts.append(_count_text(len(report["errors"]), "error"))
     return "(" + "; ".join(parts) + ")" if parts else "(no source files)"
 
 def _sloc_totals_line(report: dict[str, Any]) -> str:
@@ -1700,26 +1677,23 @@ def _sloc_totals_line(report: dict[str, Any]) -> str:
     )
 
 def _sloc_language_preview_line(language: Any) -> str:
-    file_plural = "s" if language["file_count"] != 1 else ""
     return (
         f"{language['language']}: "
         f"{language['code_count']} code, "
         f"{language['documentation_count']} comments, "
         f"{language['empty_count']} empty, "
         f"{language['string_count']} strings "
-        f"({language['file_count']} file{file_plural})"
+        f"({_count_text(language['file_count'], 'file')})"
     )
 
 def _sloc_state_preview_line(state_count: Any) -> str:
-    file_plural = "s" if state_count["file_count"] != 1 else ""
-    return f"other/{state_count['state']}: {state_count['file_count']} file{file_plural}"
+    return f"other/{state_count['state']}: {_count_text(state_count['file_count'], 'file')}"
 
 
 def _sloc_file_preview_line(file_summary: Any) -> str:
-    file_plural = "s" if file_summary["code_count"] != 1 else ""
     return (
         f"file: {file_summary['path']} — "
-        f"{file_summary['code_count']} code line{file_plural}, "
+        f"{_count_text(file_summary['code_count'], 'code line')}, "
         f"{file_summary['line_count']} total, "
         f"{file_summary['language']}"
     )
@@ -1759,7 +1733,7 @@ def _sloc_payload(
         "top_file_count": len(report["top_files"]),
         "top_files": [
             {
-                "path": rt._rel(root, Path(file_summary["path"])),
+                "path": _rel_path(root, file_summary["path"]),
                 "language": file_summary["language"],
                 "code_count": file_summary["code_count"],
                 "documentation_count": file_summary["documentation_count"],
@@ -1784,7 +1758,7 @@ def _sloc_payload(
     payload.update(_optional_counts(error=len(report["errors"])))
     if report["errors"]:
         payload["errors"] = [
-            {"path": rt._rel(root, Path(error["path"])), "message": error["message"]}
+            {"path": _rel_path(root, error["path"]), "message": error["message"]}
             for error in report["errors"][:shown_limit]
         ]
     if not report["total_file_count"] and not report["state_counts"]:
@@ -1808,7 +1782,7 @@ def _sloc_payload(
         _sloc_state_preview_line(state_count) for state_count in report["state_counts"]
     )
     preview_lines.extend(
-        f"[!] {rt._rel(root, Path(error['path']))}: {error['message']}"
+        f"[!] {_rel_path(root, error['path'])}: {error['message']}"
         for error in report["errors"][:shown_limit]
     )
     return payload, "\n".join(preview_lines)
@@ -1821,9 +1795,7 @@ def _sloc_contents(
     exclude: str | list[str] | None = None,
     limit: int,
 ):
-    target = rt.resolve_path(root, path)
-    if not target.exists():
-        raise ValueError(f"sloc path does not exist: {rt._rel(root, target)}")
+    target = _existing_tool_target(root, path, tool="sloc")
     report = sloc(target, ignore_root=root, exclude=exclude)
     return _sloc_payload(root, path, report, exclude=exclude, limit=limit), report
 
@@ -1867,7 +1839,6 @@ __all__ = [
     "_shown_line_limit",
     "_summarize_json_output",
     "_summarize_text_output",
-    "_tool_content_payload",
     "_validate_url_safe",
     "_webfetch_payload",
     "_webfetch_response_headers",

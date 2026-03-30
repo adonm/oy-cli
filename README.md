@@ -75,16 +75,21 @@ Code that reads and composes this content now lives mainly in [`oy_cli/runtime.p
 | `OY_NON_INTERACTIVE` | Set to `1` to disable approval/checkpoint pauses |
 | `OY_UNATTENDED_LIMIT` | Agent turn deadline window, like `1h`, `30m`, or `3600s` |
 | `OY_RALPH_LIMIT` | Ralph deadline window, like `3h`, `90m`, or `3600s` |
-| `OY_BEST_OF` | Number of generations to sample for self-consistency voting; defaults to `3` for `glm-5` / `kimi-k2.5`-style models, otherwise `1` |
-| `OY_ROOT` | Run against different workspace |
+| `OY_BEST_OF` | Override self-consistency sample count with a positive integer |
+| `OY_ROOT` | Run against a different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
+| `OY_DEBUG` | Enable debug logging |
+| `OY_YOLO` | Start with all tool approvals enabled |
+| `OY_MAX_CONTEXT_TOKENS` | Override the model context budget used for transcript/tool budgeting |
+| `OY_MAX_BASH_CMD_BYTES` | Override the maximum accepted bash command size |
 
 **Config file** (`~/.config/oy/config.json`):
 ```json
 {"shim": "openai", "model": "glm-5"}
 ```
 
+Only the `model` and `shim` fields are used for saved runtime configuration.
 The `shim` field pins which backend to use regardless of what else is signed in.
 Use `oy model <filter>` to pick interactively; it merges models from available
 signed-in shims into a single list using `shim:model` prefixes.
@@ -95,10 +100,10 @@ the available backends. Set `OY_MODEL`, `OY_SHIM`, or save a config with
 
 **Model notes:** From testing, `glm-5` balances intelligence,
 cost, and tool-use ability. `kimi-k2.5` is another option.
-For these models, `oy` now defaults self-consistency / best-of sampling to `3`,
+For these models, `oy` defaults self-consistency / best-of sampling to `3`,
 which is a pragmatic accuracy/latency trade-off; override with `--best-of` or `OY_BEST_OF`.
 The [Artificial Analysis Comparison of Open Source Models](https://artificialanalysis.ai/models/open-source)
-is a reference.
+is a useful reference.
 
 ## Requirements
 
