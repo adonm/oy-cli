@@ -17,6 +17,17 @@ class TestJSONHelpers:
         path = tmp_path / "demo.txt"
         assert providers.normalize_jsonlike({"path": path}) == {"path": str(path)}
 
+    def test_auth_loaders_ignore_non_object_json(self, monkeypatch, tmp_path):
+        codex = tmp_path / "codex.json"
+        codex.write_text('[]', encoding="utf-8")
+        opencode = tmp_path / "opencode.json"
+        opencode.write_text('[]', encoding="utf-8")
+        monkeypatch.setattr(providers, "CODEX_AUTH_PATH", codex)
+        monkeypatch.setattr(providers, "OPENCODE_AUTH_PATH", opencode)
+        assert providers.load_codex_auth() == {}
+        assert providers._opencode_api_key("opencode") is None
+        assert providers._opencode_api_key("opencode-go") is None
+
 
 class TestHTTPClient:
     def test_adapt_response_accepts_response_objects(self):
@@ -150,6 +161,82 @@ class TestReasoningFallback:
         assert chat_client["chat_completion"]("gpt-test", []) == AssistantMessage("done")
         assert chat_create.call_args_list[0].args[0]["reasoning_effort"] == "high"
         assert "reasoning_effort" not in chat_create.call_args_list[1].args[0]
+
+
+class TestClientFactories:
+    def test_responses_and_chat_clients_share_openai_helpers(self, monkeypatch):
+        created = []
+
+        def fake_openai(*args, **kwargs):
+            return {"api": len(created)}
+
+        def fake_create(api, path, *, source):
+            created.append((api, path, source))
+            return f"create:{path}"
+
+        monkeypatch.setattr(providers, "_openai", fake_openai)
+        monkeypatch.setattr(providers, "_openai_json_create", fake_create)
+        monkeypatch.setattr(providers, "_openai_model_lister", lambda api: f"models:{api['api']}")
+        monkeypatch.setattr(
+            providers,
+            "_responses_client",
+            lambda create, list_models, **kwargs: {
+                "kind": "responses",
+                "create": create,
+                "list_models": list_models,
+                **kwargs,
+            },
+        )
+        monkeypatch.setattr(
+            providers,
+            "_chat_client",
+            lambda create, list_models, **kwargs: {
+                "kind": "chat",
+                "create": create,
+                "list_models": list_models,
+                **kwargs,
+            },
+        )
+
+        responses = providers._responses_from_key("key", fallback=list, default=["demo"])
+        chat = providers._chat_from_key("key")
+
+        assert responses == {
+            "kind": "responses",
+            "create": "create:/responses",
+            "list_models": "models:0",
+            "fallback": list,
+            "default": ["demo"],
+        }
+        assert chat["kind"] == "chat"
+        assert chat["create"] == "create:/chat/completions"
+        assert chat["list_models"] == "models:1"
+        assert created == [
+            ({"api": 0}, "/responses", "Responses API"),
+            ({"api": 1}, "/chat/completions", "Chat Completions API"),
+        ]
+
+    def test_opencode_clients_share_lookup_and_builder(self, monkeypatch):
+        monkeypatch.setattr(
+            providers,
+            "_load_opencode_auth",
+            lambda: {"opencode": {"key": "zen-key"}, "opencode-go": {"key": "go-key"}},
+        )
+        seen = []
+        monkeypatch.setattr(
+            providers,
+            "_chat_from_key",
+            lambda api_key, *, base_url=None, **kwargs: seen.append((api_key, base_url, kwargs)) or {"api_key": api_key, "base_url": base_url},
+        )
+
+        assert providers._opencode_api_key("opencode") == "zen-key"
+        assert providers._opencode_api_key("opencode-go") == "go-key"
+        assert providers._opencode_zen_client() == {"api_key": "zen-key", "base_url": providers.OPENCODE_ZEN_URL}
+        assert providers._opencode_go_client() == {"api_key": "go-key", "base_url": providers.OPENCODE_GO_URL}
+        assert seen == [
+            ("zen-key", providers.OPENCODE_ZEN_URL, {}),
+            ("go-key", providers.OPENCODE_GO_URL, {}),
+        ]
 
 
 class TestMantleClient:

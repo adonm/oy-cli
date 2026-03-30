@@ -91,13 +91,14 @@ pip install oy-cli      # alternative
 
 ## Development
 
-Use `uv` for local development, formatting, linting, tests, and builds.
+Use `uv` for local development, formatting, linting, tests, and builds. Run the full suite before release; use targeted pytest paths while iterating.
 
 ```bash
 uv sync
 uv run ruff format .
 uv run ruff check .
 uv run python -m pytest tests/ -v
+uv run python -m pytest tests/test_providers.py -q
 uv run oy --help
 uv build
 ```
@@ -138,9 +139,10 @@ Recommended:
 - run in a repo or workspace you trust
 - mount only needed directories in containers
 - avoid exposing long-lived secrets in the environment
+- use `/ask` when you want no-write research mode
 - review generated changes before shipping
 
-Protections include workspace-bound file tools, public-only `webfetch`, and default credential flows for supported providers.
+Protections include workspace-bound file tools, public-only `webfetch`, and default credential flows for supported providers. `oy` still acts with your user permissions, so treat generated shell commands and file edits as local code execution.
 
 ## License
 

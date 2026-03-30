@@ -17,6 +17,7 @@ uv sync
 uv run ruff format .
 uv run ruff check .
 uv run python -m pytest tests/ -v
+uv run python -m pytest tests/test_providers.py -q
 uv run oy --help
 uv build
 ```
@@ -40,6 +41,7 @@ uv build
 - prefer shared helpers in `tests/conftest.py` over repetitive setup
 - when docs, tests, and behavior disagree, fix them together
 - prefer simple changes over abstraction-heavy rewrites
+- collapse repeated helper code when it makes nearby call sites shorter and clearer
 - keep security guidance OWASP-minded and performance guidance measurement-first
 
 `except A, B:` syntax is valid Python 3.14+ (PEP 758); ruff may format it that way.
@@ -77,3 +79,4 @@ The `release.yml` workflow builds the wheel/sdist and publishes to PyPI via trus
 - keep `README.md` user-focused and task-oriented
 - keep contributor workflow here in `CONTRIBUTING.md`
 - keep `/ask` wording explicit: no-write, but public `webfetch` is still allowed
+- prefer adding or extending focused regression tests next to the behavior you changed

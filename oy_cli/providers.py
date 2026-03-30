@@ -207,6 +207,11 @@ def load_json(path, default):
         return default
 
 
+def _load_json_object(path: Path) -> dict[str, Any]:
+    data = load_json(path, {})
+    return data if isinstance(data, dict) else {}
+
+
 def _ensure_private_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
@@ -239,6 +244,12 @@ def _require_string(value: Any, error: str) -> str:
     return value
 
 
+def _require_json_object(value: Any, error: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError(error)
+    return value
+
+
 def _post_form_json(
     url: str, data: dict[str, str], *, error_prefix: str
 ) -> dict[str, Any]:
@@ -254,9 +265,7 @@ def _post_form_json(
         payload = response_json(response)
     except HTTPError as exc:
         raise RuntimeError(f"{error_prefix}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"{error_prefix}: invalid JSON response")
-    return payload
+    return _require_json_object(payload, f"{error_prefix}: invalid JSON response")
 
 
 def _extract_model_ids(items: Any, *keys: str) -> list[str]:
@@ -707,9 +716,23 @@ def _req_json(
         payload = response_json(response)
     except Exception as exc:
         raise RuntimeError(f"{source}: invalid JSON response") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"{source}: invalid JSON response")
-    return payload
+    return _require_json_object(payload, f"{source}: invalid JSON response")
+
+
+def _openai_json_create(
+    api: OpenAI, path: str, *, source: str
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    return lambda payload: _req_json(
+        api,
+        "POST",
+        path,
+        source=source,
+        json_body=payload,
+    )
+
+
+def _openai_model_lister(api: OpenAI) -> Callable[[], list[str]]:
+    return lambda: _model_ids(api)
 
 
 def _model_ids(api: OpenAI) -> list[str]:
@@ -867,12 +890,7 @@ def default_region(choice: str | None = None) -> str:
 
 
 def load_codex_auth() -> dict[str, Any]:
-    data = load_json(CODEX_AUTH_PATH, {})
-    return data if isinstance(data, dict) else {}
-
-
-def get_openai_api_key() -> str | None:
-    return os.environ.get("OPENAI_API_KEY")
+    return _load_json_object(CODEX_AUTH_PATH)
 
 
 def load_codex_session() -> dict[str, Any]:
@@ -888,12 +906,6 @@ def load_codex_session() -> dict[str, Any]:
     ):
         return auth
     raise RuntimeError("Codex CLI auth file does not contain a usable session")
-
-
-def get_codex_api_key() -> str | None:
-    auth = load_codex_auth()
-    key = auth.get("OPENAI_API_KEY")
-    return key if isinstance(key, str) and key else None
 
 
 def _jwt_expiry_epoch(token: str) -> float | None:
@@ -986,7 +998,7 @@ def get_codex_chatgpt_session(force_refresh: bool = False) -> dict[str, str]:
 
 
 def load_codex_model_list() -> list[str]:
-    data = load_json(CODEX_MODELS_CACHE_PATH, {})
+    data = _load_json_object(CODEX_MODELS_CACHE_PATH)
     return _extract_model_ids(
         data.get("models") if isinstance(data, dict) else None,
         "id",
@@ -1658,14 +1670,8 @@ def _responses_from_key(
         timeout=timeout,
     )
     return _responses_client(
-        lambda payload: _req_json(
-            api,
-            "POST",
-            "/responses",
-            source="Responses API",
-            json_body=payload,
-        ),
-        lambda: _model_ids(api),
+        _openai_json_create(api, "/responses", source="Responses API"),
+        _openai_model_lister(api),
         fallback=fallback,
         default=default,
     )
@@ -1687,20 +1693,18 @@ def _chat_from_key(
         timeout=timeout,
     )
     return _chat_client(
-        lambda payload: _req_json(
+        _openai_json_create(
             api,
-            "POST",
             "/chat/completions",
             source="Chat Completions API",
-            json_body=payload,
         ),
-        lambda: _model_ids(api),
+        _openai_model_lister(api),
         tools_map=tools_map,
     )
 
 
 def _require_openai_env(_cwd: Path | None = None) -> None:
-    _require_string(get_openai_api_key(), "OPENAI_API_KEY is not set")
+    _require_string(os.environ.get("OPENAI_API_KEY"), "OPENAI_API_KEY is not set")
 
 
 def _openai_client(
@@ -1709,7 +1713,7 @@ def _openai_client(
     max_retries: int = 3,
 ) -> CompletionClient:
     return _responses_from_key(
-        _require_string(get_openai_api_key(), "No OpenAI credentials found"),
+        _require_string(os.environ.get("OPENAI_API_KEY"), "No OpenAI credentials found"),
         base_url=os.environ.get("OPENAI_BASE_URL"),
         max_retries=max_retries,
     )
@@ -1720,7 +1724,8 @@ def _require_codex_env(_cwd: Path | None = None) -> None:
 
 
 def _codex_client(_cwd: Path | None = None) -> CompletionClient:
-    if api_key := get_codex_api_key():
+    api_key = load_codex_auth().get("OPENAI_API_KEY")
+    if isinstance(api_key, str) and api_key:
         return _responses_from_key(
             api_key,
             fallback=load_codex_model_list,
@@ -1767,9 +1772,7 @@ def _bedrock_mantle_client(
             payload = response_json(response)
         except Exception as exc:
             raise RuntimeError("Chat Completions API: invalid JSON response") from exc
-        if not isinstance(payload, dict):
-            raise RuntimeError("Chat Completions API: invalid JSON response")
-        return payload
+        return _require_json_object(payload, "Chat Completions API: invalid JSON response")
 
     return _chat_client(
         create,
@@ -1862,27 +1865,20 @@ def _copilot_completion_client(_cwd: Path | None = None) -> CompletionClient:
     except Exception:
         responses_models = set()
 
+    model_lister = _openai_model_lister(client)
     responses_inner = _responses_client(
-        lambda payload: _req_json(
-            client,
-            "POST",
-            "/responses",
-            source="Responses API",
-            json_body=payload,
-        ),
-        lambda: _model_ids(client),
+        _openai_json_create(client, "/responses", source="Responses API"),
+        model_lister,
         fallback=None,
         default=None,
     )
     chat_inner = _chat_client(
-        lambda payload: _req_json(
+        _openai_json_create(
             client,
-            "POST",
             "/chat/completions",
             source="Chat Completions API",
-            json_body=payload,
         ),
-        lambda: _model_ids(client),
+        model_lister,
         tools_map=_tool_specs_to_openai,
     )
 
@@ -1907,54 +1903,48 @@ def _copilot_completion_client(_cwd: Path | None = None) -> CompletionClient:
             chat_ids, _ = _classify_copilot_models(token)
             return chat_ids
         except Exception:
-            return _list_models(lambda: _model_ids(client), fallback=None, default=[])
+            return _list_models(model_lister, fallback=None, default=[])
 
     return {"chat_completion": chat_completion, "list_models": list_models}
 
 
 def _load_opencode_auth() -> dict[str, Any]:
-    data = load_json(OPENCODE_AUTH_PATH, {})
-    return data if isinstance(data, dict) else {}
+    return _load_json_object(OPENCODE_AUTH_PATH)
 
 
-def get_opencode_zen_api_key() -> str | None:
-    entry = _load_opencode_auth().get("opencode", {})
+def _opencode_api_key(name: str) -> str | None:
+    entry = _load_opencode_auth().get(name)
     return (entry.get("key") or None) if isinstance(entry, dict) else None
 
 
-def get_opencode_go_api_key() -> str | None:
-    entry = _load_opencode_auth().get("opencode-go", {})
-    return (entry.get("key") or None) if isinstance(entry, dict) else None
-
-
-def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
+def _require_opencode_env(name: str, label: str) -> None:
     _require_string(
-        get_opencode_zen_api_key(),
-        f"No OpenCode Zen credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
+        _opencode_api_key(name),
+        f"No OpenCode {label} credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
     )
 
 
+def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
+    _require_opencode_env("opencode", "Zen")
+
+
 def _require_opencode_go_env(_cwd: Path | None = None) -> None:
-    _require_string(
-        get_opencode_go_api_key(),
-        f"No OpenCode Go credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
+    _require_opencode_env("opencode-go", "Go")
+
+
+def _opencode_client(name: str, label: str, base_url: str) -> CompletionClient:
+    return _chat_from_key(
+        _require_string(_opencode_api_key(name), f"No OpenCode {label} credentials found"),
+        base_url=base_url,
     )
 
 
 def _opencode_zen_client(_cwd: Path | None = None) -> CompletionClient:
-    return _chat_from_key(
-        _require_string(
-            get_opencode_zen_api_key(), "No OpenCode Zen credentials found"
-        ),
-        base_url=OPENCODE_ZEN_URL,
-    )
+    return _opencode_client("opencode", "Zen", OPENCODE_ZEN_URL)
 
 
 def _opencode_go_client(_cwd: Path | None = None) -> CompletionClient:
-    return _chat_from_key(
-        _require_string(get_opencode_go_api_key(), "No OpenCode Go credentials found"),
-        base_url=OPENCODE_GO_URL,
-    )
+    return _opencode_client("opencode-go", "Go", OPENCODE_GO_URL)
 
 
 ShimSpec: TypeAlias = dict[str, Any]
