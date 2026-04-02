@@ -50,6 +50,18 @@ class TestHTTPClient:
             llm.close()
             tool.close()
 
+    def test_http_sessions_allow_timeout_and_redirect_overrides(self):
+        llm = providers.llm_session(timeout=1.5, follow_redirects=True)
+        tool = providers.tool_session(timeout=2.5, allow_redirects=True)
+        try:
+            assert llm.timeout == 1.5
+            assert llm.follow_redirects is True
+            assert tool.timeout == 2.5
+            assert tool.follow_redirects is True
+        finally:
+            llm.close()
+            tool.close()
+
 
 class TestSigV4Signing:
     def test_bedrock_mantle_request_headers(self):

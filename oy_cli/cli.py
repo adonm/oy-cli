@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -57,6 +58,21 @@ _CHAT_COMMAND_HELP = (
     ("/exit", "end session"),
 )
 _PROMPT_COMMANDS = [command for command, _ in _CHAT_COMMAND_HELP if command != "/exit"]
+_DEFAULT_RENOVATE_CONFIG = '''{
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"]
+}
+'''
+_RENOVATE_CONFIG_CANDIDATES = (
+    "renovate.json",
+    "renovate.json5",
+    ".github/renovate.json",
+    ".github/renovate.json5",
+    ".gitlab/renovate.json",
+    ".gitlab/renovate.json5",
+    ".renovaterc",
+    ".renovaterc.json",
+    ".renovaterc.json5",
+)
 _CHAT_ACTIONS = {
     "/model": "model",
     "/debug": "debug",
@@ -157,6 +173,45 @@ def _print_session_intro(heading: str, session, **extras) -> None:
     _apply_session_title(session["workspace"], session["model"])
 
 
+def _package_json_has_renovate_config(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and "renovate" in data
+
+
+
+def _existing_renovate_config(workspace: Path) -> Path | None:
+    for relative in _RENOVATE_CONFIG_CANDIDATES:
+        candidate = workspace / relative
+        if candidate.exists():
+            return candidate
+    package_json = workspace / "package.json"
+    if _package_json_has_renovate_config(package_json):
+        return package_json
+    return None
+
+
+
+def _ensure_renovate_config(workspace: Path) -> Path | None:
+    if _existing_renovate_config(workspace) is not None:
+        return None
+    path = workspace / "renovate.json"
+    try:
+        path.write_text(_DEFAULT_RENOVATE_CONFIG, encoding="utf-8")
+    except OSError as exc:
+        rt._warn(
+            f"Could not create default Renovate config {rt._fmt('inline', path)}: {exc}"
+        )
+        return None
+    rt._note(f"created default Renovate config: {path.name}", tag="note")
+    return path
+
+
+
 def workspace_root():
     workspace = Path(os.environ.get("OY_ROOT", ".")).expanduser().resolve()
     if not workspace.is_dir():
@@ -201,6 +256,7 @@ def audit(focus: str = "", *, best_of: int | None = None):
         include_system_file=False,
         best_of=best_of,
     )
+    _ensure_renovate_config(session["workspace"])
     audit_prompt = session_text("audit", "default_user_prompt")
     if focus:
         audit_prompt += session_text("audit", "focus_suffix", focus=focus)
@@ -419,6 +475,7 @@ def _handle_ask(question, current_model, session, transcript):
 
 
 def _handle_audit(focus, current_model, session):
+    _ensure_renovate_config(session["workspace"])
     audit_prompt = session_text("audit", "repo_user_prompt")
     if focus:
         audit_prompt += session_text("audit", "focus_suffix", focus=focus)

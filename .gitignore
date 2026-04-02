@@ -28,3 +28,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Local audit artifacts
+renovate-report.json

@@ -18,6 +18,15 @@ class TestSessionText:
         assert rt.active_system_prompt(True).startswith(rt.BASE_SYSTEM_PROMPT)
         assert rt.active_system_prompt(False).startswith(rt.BASE_SYSTEM_PROMPT)
         assert "no-write rather than no-network" in rt.ask_system_prompt("sys")
+        audit_prompt = rt.audit_system_prompt()
+        assert "Renovate lookup report command" in audit_prompt
+        assert "pnpm dlx --allow-build=re2 renovate" in audit_prompt
+        assert "npm exec --yes --package renovate -- renovate" in audit_prompt
+        assert "--dry-run=lookup" in audit_prompt
+        assert "--report-path=renovate-report.json" in audit_prompt
+        assert "throwaway local artifact" in audit_prompt
+        assert "delete it or leave it untracked" in audit_prompt
+        assert "`jq` when available or Python otherwise" in audit_prompt
         for name in ("list", "search", "replace", "sloc"):
             assert "exclude" in rt.tool_description(name)
         assert "broad browsing" in rt.tool_description("webfetch")

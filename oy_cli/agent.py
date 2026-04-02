@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import concurrent.futures
-import threading
 import time
 from typing import Any
 
@@ -506,22 +505,15 @@ def run_turn(
                 )
             started = time.monotonic()
             messages: list[AssistantMessage | None] = [None] * best_of
-            completed_count = 0
-            completed_lock = threading.Lock()
 
             def sample(index: int) -> None:
-                result = client["chat_completion"](
+                messages[index] = client["chat_completion"](
                     model=model,
                     messages=prepared,
                     tools=tool_definitions,
                     tool_choice="auto",
                     on_retry=on_retry,
                 )
-                messages[index] = result
-                with completed_lock:
-                    nonlocal completed_count
-                    completed_count += 1
-                    log_wait(spinner, f"sample {completed_count}/{best_of}")
 
             if best_of > 1:
                 with concurrent.futures.ThreadPoolExecutor(
@@ -552,9 +544,9 @@ def run_turn(
             assistants=[rt._msg_to_dict(item) for item in messages],
             assistant=rt._msg_to_dict(message),
         )
-        if best_of > 1:
+        if best_of > 1 and vote_count < best_of:
             rt._note(
-                f"self-consistency selected sample {chosen_index + 1}/{best_of} ({vote_count}/{best_of} votes)",
+                f"self-consistency: sample {chosen_index + 1} won {vote_count}/{best_of}",
                 tag="note",
             )
         calls = list(message["tool_calls"])

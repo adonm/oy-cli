@@ -598,13 +598,19 @@ OpenAI: TypeAlias = dict[str, Any]
 
 
 def llm_session(**kw):
-    return http_client(timeout=DEFAULT_HTTP_TIMEOUT, follow_redirects=False, **kw)
+    kw = dict(kw)
+    kw.setdefault("timeout", DEFAULT_HTTP_TIMEOUT)
+    if "follow_redirects" not in kw and "allow_redirects" not in kw:
+        kw["follow_redirects"] = False
+    return http_client(**kw)
 
 
 def tool_session(**kw):
-    return http_client(
-        timeout=DEFAULT_WEBFETCH_TIMEOUT_SECONDS, follow_redirects=False, **kw
-    )
+    kw = dict(kw)
+    kw.setdefault("timeout", DEFAULT_WEBFETCH_TIMEOUT_SECONDS)
+    if "follow_redirects" not in kw and "allow_redirects" not in kw:
+        kw["follow_redirects"] = False
+    return http_client(**kw)
 
 
 def _openai(

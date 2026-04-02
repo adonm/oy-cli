@@ -137,7 +137,33 @@ class TestRunTurn:
             "call_1", "echo", ToolResult(content=f"{tmp_path.name}:hi")
         )
 
-    def test_self_consistency_picks_majority_text_answer(self, monkeypatch, tmp_path):
+    def test_best_of_one_does_not_log_sample_progress(self, monkeypatch, tmp_path):
+        printed: list[str] = []
+        notes: list[str] = []
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, value="", **k: printed.append(value),
+            _debug_log=None,
+            _note=lambda message, *a, **k: notes.append(message),
+        )
+
+        code, content = agent.run_turn(
+            {"chat_completion": lambda **kwargs: AssistantMessage("done")},
+            _transcript(),
+            make_state(
+                tmp_path, registry=tool_handler("echo", lambda state, text: text)
+            ),
+            "openai:gpt-test",
+            tools.tool_specs({}),
+            best_of=1,
+        )
+
+        assert (code, content) == (0, "done")
+        assert printed == ["done"]
+        assert all(not note.startswith("sample ") for note in notes)
+        assert all("self-consistency selected sample" not in note for note in notes)
+
+    def test_self_consistency_logs_only_non_unanimous_choice(self, monkeypatch, tmp_path):
         responses = iter(
             [
                 AssistantMessage("wrong"),
@@ -167,10 +193,32 @@ class TestRunTurn:
 
         assert (code, content) == (0, "done")
         assert printed == ["done"]
-        assert any(
-            "self-consistency selected sample" in note and "2/3 votes" in note
-            for note in notes
+        assert "self-consistency: sample 2 won 2/3" in notes
+
+    def test_self_consistency_skips_unanimous_note(self, monkeypatch, tmp_path):
+        printed: list[str] = []
+        notes: list[str] = []
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, value="", **k: printed.append(value),
+            _debug_log=None,
+            _note=lambda message, *a, **k: notes.append(message),
         )
+
+        code, content = agent.run_turn(
+            {"chat_completion": lambda **kwargs: AssistantMessage("done")},
+            _transcript(),
+            make_state(
+                tmp_path, registry=tool_handler("echo", lambda state, text: text)
+            ),
+            "openai:gpt-test",
+            tools.tool_specs({}),
+            best_of=3,
+        )
+
+        assert (code, content) == (0, "done")
+        assert printed == ["done"]
+        assert all("self-consistency:" not in note for note in notes)
 
     def test_choose_self_consistent_message_prefers_high_support_text(self):
         messages = [

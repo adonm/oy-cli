@@ -124,6 +124,52 @@ class TestRalph:
         assert rt.ralph_limit_seconds() == 5400
 
 
+class TestAudit:
+    def test_audit_creates_default_renovate_config_when_missing(self, tmp_path, monkeypatch):
+        notes = []
+        seen = {}
+
+        _stub_session(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: None)
+        monkeypatch.setattr(rt, "unattended_limit_seconds", lambda: 60)
+
+        def fake_run_agent(*args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+        patch_runtime(monkeypatch, _note=lambda message, **k: notes.append(message))
+
+        assert not (tmp_path / "renovate.json").exists()
+
+        assert cli.audit("deps") == 0
+
+        assert (tmp_path / "renovate.json").read_text(encoding="utf-8") == cli._DEFAULT_RENOVATE_CONFIG
+        assert notes == ["created default Renovate config: renovate.json"]
+        assert seen["args"][0] == "Conduct a security and complexity audit. Additional focus: deps"
+        assert seen["kwargs"]["best_of"] == 3
+
+    def test_audit_keeps_existing_supported_renovate_config(self, tmp_path, monkeypatch):
+        notes = []
+        config_dir = tmp_path / ".github"
+        config_dir.mkdir()
+        existing = config_dir / "renovate.json"
+        existing.write_text('{"extends": ["local>example/preset"]}\n', encoding="utf-8")
+
+        _stub_session(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: None)
+        monkeypatch.setattr(rt, "unattended_limit_seconds", lambda: 60)
+        monkeypatch.setattr(cli, "run_agent", lambda *args, **kwargs: (0, ""))
+        patch_runtime(monkeypatch, _note=lambda message, **k: notes.append(message))
+
+        assert cli.audit() == 0
+
+        assert not (tmp_path / "renovate.json").exists()
+        assert existing.read_text(encoding="utf-8") == '{"extends": ["local>example/preset"]}\n'
+        assert notes == []
+
+
 class TestChatCommands:
     def test_help_lists_chat_commands(self, monkeypatch):
         printed = []
