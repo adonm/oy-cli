@@ -51,6 +51,24 @@ func TestMainRejectsTopLevelYolo(t *testing.T) {
 	_ = Main([]string{"--yolo", "fix", "tests"})
 }
 
+func TestMainSupportsChatYoloFlag(t *testing.T) {
+	oldChat := chatCommand
+	defer func() { chatCommand = oldChat }()
+	chatCommand = func() int {
+		if os.Getenv("OY_YOLO") != "1" {
+			t.Fatalf("expected OY_YOLO during chat command, got %q", os.Getenv("OY_YOLO"))
+		}
+		return 0
+	}
+	os.Unsetenv("OY_YOLO")
+	if code := Main([]string{"chat", "--yolo"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if value := os.Getenv("OY_YOLO"); value != "" {
+		t.Fatalf("expected OY_YOLO restored after chat command, got %q", value)
+	}
+}
+
 func TestAuditCreatesDefaultRenovateConfigWhenMissing(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("OY_ROOT", root)
@@ -298,11 +316,13 @@ func TestHandleLoadSupportsNumericSelectionByNewestFirst(t *testing.T) {
 }
 
 func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
-	oldList, oldStdout := listAllModelIDsFunc, stdoutWriter
+	oldList, oldStdout, oldCanPrompt := listAllModelIDsFunc, stdoutWriter, canPromptFunc
 	defer func() {
 		listAllModelIDsFunc = oldList
 		stdoutWriter = oldStdout
+		canPromptFunc = oldCanPrompt
 	}()
+	canPromptFunc = func() bool { return false }
 	listAllModelIDsFunc = func(string) ([]string, []string, error) {
 		return []string{"openai:gpt-5", "openai:gpt-4.1", "copilot:gpt-5"}, nil, nil
 	}
@@ -316,11 +336,69 @@ func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
 		t.Fatalf("missing shim in model output: %q", out.String())
 	}
 	out.Reset()
-	if code := Model("gpt-4.1"); code != 0 {
+	if code := Model("openai:gpt-4.1"); code != 0 {
 		t.Fatalf("unexpected code: %d", code)
 	}
 	if !strings.Contains(out.String(), "Default Model Updated") || !strings.Contains(out.String(), "openai:gpt-4.1") {
 		t.Fatalf("unexpected switch output: %q", out.String())
+	}
+}
+
+func TestModelInteractivePickerSavesSelection(t *testing.T) {
+	oldList, oldStdout, oldStderr := listAllModelIDsFunc, stdoutWriter, stderrWriter
+	oldCanPrompt, oldInput := canPromptFunc, modelInputReaderFunc
+	defer func() {
+		listAllModelIDsFunc = oldList
+		stdoutWriter = oldStdout
+		stderrWriter = oldStderr
+		canPromptFunc = oldCanPrompt
+		modelInputReaderFunc = oldInput
+	}()
+	canPromptFunc = func() bool { return true }
+	modelInputReaderFunc = func() io.Reader { return strings.NewReader("y\n2\n") }
+	listAllModelIDsFunc = func(string) ([]string, []string, error) {
+		return []string{"openai:gpt-5", "openai:gpt-4.1", "copilot:gpt-5"}, nil, nil
+	}
+	workspace := t.TempDir()
+	t.Setenv("OY_ROOT", workspace)
+	t.Setenv("OY_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("OY_MODEL", "openai:gpt-5")
+	var out, errOut strings.Builder
+	stdoutWriter = &out
+	stderrWriter = &errOut
+	if code := Model(""); code != 0 {
+		t.Fatalf("unexpected code: %d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Default Model Updated") || !strings.Contains(out.String(), "openai:gpt-4.1") {
+		t.Fatalf("unexpected model output: %q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "Pick a new model?") || !strings.Contains(errOut.String(), "## Available Models") {
+		t.Fatalf("unexpected interactive output: %q", errOut.String())
+	}
+	if got := runtime.LoadModelConfig(); got.Model != "gpt-4.1" || got.Shim != "openai" {
+		t.Fatalf("unexpected saved config: %#v", got)
+	}
+}
+
+func TestModelNonInteractiveRequiresExactMatch(t *testing.T) {
+	oldList, oldStderr, oldCanPrompt := listAllModelIDsFunc, stderrWriter, canPromptFunc
+	defer func() {
+		listAllModelIDsFunc = oldList
+		stderrWriter = oldStderr
+		canPromptFunc = oldCanPrompt
+	}()
+	canPromptFunc = func() bool { return false }
+	listAllModelIDsFunc = func(string) ([]string, []string, error) {
+		return []string{"openai:gpt-5", "openai:gpt-4.1", "copilot:gpt-5"}, nil, nil
+	}
+	t.Setenv("OY_MODEL", "openai:gpt-5")
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Model("gpt-4"); code != 1 {
+		t.Fatalf("unexpected code: %d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "## Matching Models") || !strings.Contains(errOut.String(), "No exact model match") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
 	}
 }
 

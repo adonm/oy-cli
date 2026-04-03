@@ -41,7 +41,7 @@ Approved candidates:
 
 ### Commands
 
-- [ ] `oy "prompt"`
+- [x] `oy "prompt"`
 - [x] `oy run`
 - [x] `oy chat`
 - [x] `oy ralph`
@@ -76,14 +76,14 @@ Approved candidates:
 
 ### Runtime and UX
 
-- [ ] embedded system prompt + tool descriptions
+- [x] embedded system prompt + tool descriptions
 - [x] config persistence
 - [x] model discovery/selection
 - [x] best-of defaults
 - [x] context budgeting and truncation
 - [x] saved sessions
 - [x] debug logging
-- [ ] workspace path confinement
+- [x] workspace path confinement
 
 ### Verification
 
@@ -107,3 +107,4 @@ Approved candidates:
 - 2026-04-03: Ported the remaining Go provider/auth parity slice: Codex model-cache/session refresh handling, Codex ChatGPT fallback client, Copilot model classification/routing, OpenCode endpoint alignment, and focused provider parity tests.
 - 2026-04-03: Added Go debug logging parity (`OY_DEBUG`, `/debug`, JSONL request/response/tool-result events), and fixed agent tool-state propagation so todo/approval state persists across turns.
 - 2026-04-03: Closed Go `list` parity gap for `.` and nested glob patterns, traversal denial, and exclude handling; also aligned the tracker tool checklist with already-ported/tested tool slices.
+- 2026-04-03: Added Go CLI parity for `oy chat --yolo` plus interactive/non-interactive model selection behavior, and reconciled tracker checklist items for already-ported prompt/embed and workspace-confinement slices.
