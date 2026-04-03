@@ -35,13 +35,25 @@ var (
 		data, _ := io.ReadAll(os.Stdin)
 		return strings.TrimSpace(string(data))
 	}
-	unattendedLimitFunc            = runtime.UnattendedLimitSeconds
-	ralphLimitFunc                 = runtime.RalphLimitSeconds
-	requireAPIEnvFunc              = providers.RequireAPIEnv
-	getClientFunc                  = providers.GetClient
-	listAllModelIDsFunc            = runtime.ListAllModelIDs
-	chatInputReaderFunc            = func() io.Reader { return os.Stdin }
-	modelInputReaderFunc           = func() io.Reader { return os.Stdin }
+	unattendedLimitFunc  = runtime.UnattendedLimitSeconds
+	ralphLimitFunc       = runtime.RalphLimitSeconds
+	requireAPIEnvFunc    = providers.RequireAPIEnv
+	getClientFunc        = providers.GetClient
+	listAllModelIDsFunc  = runtime.ListAllModelIDs
+	chatInputReaderFunc  = func() io.Reader { return os.Stdin }
+	modelInputReaderFunc = func() io.Reader { return os.Stdin }
+	stderrIsTTYFunc      = func() bool {
+		file, ok := stderrWriter.(*os.File)
+		if !ok {
+			return false
+		}
+		info, err := file.Stat()
+		if err != nil {
+			return false
+		}
+		return (info.Mode() & os.ModeCharDevice) != 0
+	}
+	gitDiffShortstatFunc           = gitDiffShortstat
 	stdoutWriter         io.Writer = os.Stdout
 	stderrWriter         io.Writer = os.Stderr
 	nowFunc                        = time.Now
@@ -81,6 +93,11 @@ var ChatCommandHelp = [][2]string{
 	{"/clear", "reset conversation (keeps system prompt)"},
 	{"/quit", "end session"},
 	{"/exit", "end session"},
+}
+
+type sessionField struct {
+	Key   string
+	Value string
 }
 
 func Main(argv []string) int {
@@ -330,6 +347,63 @@ func EnsureRenovateConfig(workspace string) (string, bool, error) {
 	return path, true, nil
 }
 
+func printSessionIntro(heading string, session runtime.SessionContext, extras ...sessionField) {
+	lines := []string{
+		fmt.Sprintf("## %s", heading),
+		"",
+		fmt.Sprintf("- workspace: `%s`", session.Workspace),
+		fmt.Sprintf("- model: `%s`", session.Model),
+		fmt.Sprintf("- mode: `%s`", map[bool]string{true: "interactive", false: "non-interactive"}[session.Interactive]),
+	}
+	if session.SystemFile != "" {
+		systemFile := session.SystemFile
+		if resolved, err := filepath.Abs(systemFile); err == nil {
+			systemFile = resolved
+		}
+		lines = append(lines, fmt.Sprintf("- system file: `%s`", systemFile))
+	}
+	for _, extra := range extras {
+		if strings.TrimSpace(extra.Value) != "" {
+			lines = append(lines, fmt.Sprintf("- %s: `%s`", extra.Key, extra.Value))
+		}
+	}
+	if debugPath := runtime.DebugLogPath(); debugPath != "" {
+		lines = append(lines, fmt.Sprintf("- debug log: `%s`", debugPath))
+	}
+	fmt.Fprintln(stderrWriter, strings.Join(lines, "\n"))
+	applySessionTitle(session.Workspace, session.Model)
+}
+
+func applySessionTitle(workspace, modelSpec string) {
+	_, model := providers.SplitModelSpec(modelSpec)
+	setTerminalTitle(fmt.Sprintf("oy · %s · %s", model, filepath.Base(workspace)))
+}
+
+func setTerminalTitle(title string) {
+	if !stderrIsTTYFunc() {
+		return
+	}
+	fmt.Fprintf(stderrWriter, "]0;%s", title)
+}
+
+func gitDiffShortstat(workspace string) string {
+	result, err := providers.RunCmd(
+		[]string{"git", "-C", workspace, "diff", "--shortstat", "--no-ext-diff", "HEAD", "--"},
+		"",
+		nil,
+		5*time.Second,
+		"",
+	)
+	if err != nil || result.ReturnCode != 0 {
+		return ""
+	}
+	summary := strings.TrimSpace(result.Stdout)
+	if summary == "" {
+		return "git diff: clean"
+	}
+	return summary
+}
+
 func ChatCommand(cmd string, tx *agent.Transcript, systemPrompt, modelSpec string) any {
 	parts := strings.Fields(strings.TrimSpace(cmd))
 	if len(parts) == 0 {
@@ -486,13 +560,7 @@ func Chat() int {
 	if err != nil {
 		return 1
 	}
-	fmt.Fprintf(stderrWriter, "## Chat\n\n- workspace: `%s`\n- model: `%s`\n- mode: `interactive`\n- best-of: `%d`\n", session.Workspace, session.Model, session.BestOf)
-	if session.SystemFile != "" {
-		fmt.Fprintf(stderrWriter, "- system file: `%s`\n", session.SystemFile)
-	}
-	if debugPath := runtime.DebugLogPath(); debugPath != "" {
-		fmt.Fprintf(stderrWriter, "- debug log: `%s`\n", debugPath)
-	}
+	printSessionIntro("Chat", session, sessionField{Key: "best-of", Value: strconv.Itoa(session.BestOf)})
 	fmt.Fprintf(stderrWriter, "[note] chat mode; /help for commands%s\n", map[bool]string{true: "; yolo on", false: ""}[session.Yolo])
 
 	transcript := agent.TranscriptWithSystemPrompt(session.SystemPrompt)
@@ -500,6 +568,9 @@ func Chat() int {
 	scanner := bufio.NewScanner(chatInputReaderFunc())
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for {
+		if summary := gitDiffShortstatFunc(session.Workspace); summary != "" {
+			fmt.Fprintln(stderrWriter, summary)
+		}
 		fmt.Fprint(stderrWriter, "oy > ")
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
@@ -594,12 +665,14 @@ func Chat() int {
 		remaining := maxInt(transcript.MaxContextTokens-used, 0)
 		fmt.Fprintf(stderrWriter, "[note] context: %s used, ~%s remaining\n", runtime.FormatTokens(used), runtime.FormatTokens(remaining))
 	}
+	setTerminalTitle("")
 	return 0
 }
 
 func Ralph(task ...string) int {
 	taskText := readTaskText(task)
 	if taskText == "" {
+		fmt.Fprintln(stderrWriter, "Usage: `oy ralph <prompt>` — or pipe prompt text on stdin.")
 		return 1
 	}
 	session, err := resolveSessionFunc(boolPtr(false), "", true, nil)
@@ -615,8 +688,14 @@ func Ralph(task ...string) int {
 	if err != nil {
 		return 1
 	}
-	deadline := nowFunc().Add(time.Duration(limitSeconds) * time.Second)
 	delay := time.Minute
+	printSessionIntro(
+		"Ralph",
+		session,
+		sessionField{Key: "prompt", Value: runtime.Preview(taskText, 100)},
+		sessionField{Key: "schedule", Value: fmt.Sprintf("until %s deadline, %s delay", runtime.FormatDuration(limitSeconds), runtime.FormatDuration(int(delay/time.Second)))},
+	)
+	deadline := nowFunc().Add(time.Duration(limitSeconds) * time.Second)
 	exitCode := 0
 	runNumber := 0
 	for {
@@ -625,6 +704,8 @@ func Ralph(task ...string) int {
 			break
 		}
 		runNumber++
+		remaining := maxInt(int(deadline.Sub(now).Seconds()), 0)
+		fmt.Fprintf(stderrWriter, "[note] ralph run %d (~%s remaining)\n", runNumber, runtime.FormatDuration(remaining))
 		code, _, err := runAgentFunc(taskText, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, true, nil, session.BestOf)
 		if err != nil {
 			return 1
@@ -649,25 +730,35 @@ func Audit(focus string) int {
 	if err != nil {
 		return 1
 	}
-	_, _, err = EnsureRenovateConfig(session.Workspace)
+	path, created, err := EnsureRenovateConfig(session.Workspace)
 	if err != nil {
 		return 1
+	}
+	if created {
+		fmt.Fprintf(stderrWriter, "[note] created default Renovate config: %s\n", filepath.Base(path))
 	}
 	auditPrompt, err := runtime.SessionText(nil, "audit", "repo_user_prompt")
 	if err != nil {
 		return 1
 	}
-	if strings.TrimSpace(focus) != "" {
+	focus = strings.TrimSpace(focus)
+	if focus != "" {
 		suffix, err := runtime.SessionText(map[string]string{"focus": focus}, "audit", "focus_suffix")
 		if err != nil {
 			return 1
 		}
 		auditPrompt += suffix
 	}
+	extras := []sessionField{}
+	if focus != "" {
+		extras = append(extras, sessionField{Key: "focus", Value: runtime.Preview(focus, 100)})
+	}
+	printSessionIntro("Audit", session, extras...)
 	unattendedLimitSeconds, err := unattendedLimitFunc()
 	if err != nil {
 		return 1
 	}
+	fmt.Fprintln(stderrWriter, "[note] audit mode")
 	code, _, err := runAgentFunc(auditPrompt, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, false, false, nil, session.BestOf)
 	if err != nil {
 		return 1
@@ -718,6 +809,7 @@ func Model(selection string) int {
 	if config.Shim != "" {
 		fmt.Fprintf(stdoutWriter, "- shim: `%s`\n", config.Shim)
 	}
+	setTerminalTitle("")
 	return 0
 }
 

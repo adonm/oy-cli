@@ -108,3 +108,4 @@ Approved candidates:
 - 2026-04-03: Added Go debug logging parity (`OY_DEBUG`, `/debug`, JSONL request/response/tool-result events), and fixed agent tool-state propagation so todo/approval state persists across turns.
 - 2026-04-03: Closed Go `list` parity gap for `.` and nested glob patterns, traversal denial, and exclude handling; also aligned the tracker tool checklist with already-ported/tested tool slices.
 - 2026-04-03: Added Go CLI parity for `oy chat --yolo` plus interactive/non-interactive model selection behavior, and reconciled tracker checklist items for already-ported prompt/embed and workspace-confinement slices.
+- 2026-04-03: Closed a major remaining Go CLI UX parity slice: shared session intro/title rendering, chat git-diff prompt summary, Ralph schedule/progress notes, audit Renovate/focus notes, and focused CLI test coverage; also hardened shim-dependent Go tests against ambient `OY_SHIM` leakage.

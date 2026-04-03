@@ -252,6 +252,7 @@ func TestLoadBedrockModelListUsesMantleEndpoint(t *testing.T) {
 }
 
 func TestShimRegistryOrderAndClientBuilding(t *testing.T) {
+	t.Setenv("OY_SHIM", "")
 	calls := []string{}
 	sentinel := stubClient{models: []string{"demo"}}
 	oldOrder, oldKnown, oldSpecs := ShimOrder, KnownShims, ShimSpecs
@@ -303,6 +304,7 @@ func TestShimRegistryOrderAndClientBuilding(t *testing.T) {
 }
 
 func TestListModelsErrorHandling(t *testing.T) {
+	t.Setenv("OY_SHIM", "")
 	oldOrder, oldKnown, oldSpecs := ShimOrder, KnownShims, ShimSpecs
 	defer func() {
 		ShimOrder, KnownShims, ShimSpecs = oldOrder, oldKnown, oldSpecs

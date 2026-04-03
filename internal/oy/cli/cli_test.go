@@ -194,10 +194,11 @@ func TestRalphRunsPromptUntilDeadline(t *testing.T) {
 	t.Setenv("OY_MODEL", "openai:gpt-test")
 	t.Setenv("OY_BEST_OF", "3")
 	oldRunAgent, oldUnattended, oldLimit := runAgentFunc, unattendedLimitFunc, ralphLimitFunc
-	oldNow, oldSleep := nowFunc, sleepFunc
+	oldNow, oldSleep, oldErr := nowFunc, sleepFunc, stderrWriter
 	defer func() {
 		runAgentFunc, unattendedLimitFunc, ralphLimitFunc = oldRunAgent, oldUnattended, oldLimit
 		nowFunc, sleepFunc = oldNow, oldSleep
+		stderrWriter = oldErr
 	}()
 	calls := []map[string]any{}
 	sleeps := []time.Duration{}
@@ -223,6 +224,8 @@ func TestRalphRunsPromptUntilDeadline(t *testing.T) {
 		calls = append(calls, map[string]any{"prompt": prompt, "model": model, "workspace": workspace, "interactive": interactive, "yolo": yolo, "best_of": bestOf})
 		return 0, "", nil
 	}
+	var errOut strings.Builder
+	stderrWriter = &errOut
 	if code := Ralph("fix", "tests"); code != 0 {
 		t.Fatalf("unexpected code: %d", code)
 	}
@@ -237,6 +240,9 @@ func TestRalphRunsPromptUntilDeadline(t *testing.T) {
 	if !reflect.DeepEqual(sleeps, []time.Duration{time.Minute}) {
 		t.Fatalf("unexpected sleeps: %#v", sleeps)
 	}
+	if !strings.Contains(errOut.String(), "## Ralph") || !strings.Contains(errOut.String(), "- schedule: `until 2m deadline, 1m delay`") || !strings.Contains(errOut.String(), "[note] ralph run 1 (~2m remaining)") || !strings.Contains(errOut.String(), "[note] ralph run 2 (~1m remaining)") {
+		t.Fatalf("unexpected ralph stderr: %q", errOut.String())
+	}
 }
 
 func TestAuditCreatesDefaultRenovateConfigAndRunsAgent(t *testing.T) {
@@ -244,14 +250,16 @@ func TestAuditCreatesDefaultRenovateConfigAndRunsAgent(t *testing.T) {
 	t.Setenv("OY_ROOT", root)
 	t.Setenv("OY_MODEL", "openai:gpt-test")
 	t.Setenv("OY_BEST_OF", "3")
-	oldRunAgent, oldUnattended := runAgentFunc, unattendedLimitFunc
-	defer func() { runAgentFunc, unattendedLimitFunc = oldRunAgent, oldUnattended }()
+	oldRunAgent, oldUnattended, oldErr := runAgentFunc, unattendedLimitFunc, stderrWriter
+	defer func() { runAgentFunc, unattendedLimitFunc = oldRunAgent, oldUnattended; stderrWriter = oldErr }()
 	seen := map[string]any{}
 	unattendedLimitFunc = func() (int, error) { return 60, nil }
 	runAgentFunc = func(prompt, model, workspace, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
 		seen = map[string]any{"prompt": prompt, "model": model, "workspace": workspace, "system_prompt": systemPrompt, "unattended": unattendedLimitSeconds, "interactive": interactive, "yolo": yolo, "best_of": bestOf}
 		return 0, "", nil
 	}
+	var errOut strings.Builder
+	stderrWriter = &errOut
 	if code := Audit("deps"); code != 0 {
 		t.Fatalf("unexpected code: %d", code)
 	}
@@ -264,6 +272,9 @@ func TestAuditCreatesDefaultRenovateConfigAndRunsAgent(t *testing.T) {
 	}
 	if seen["prompt"] != "Conduct a security and complexity audit of this repository. Additional focus: deps" || seen["model"] != "openai:gpt-test" || seen["workspace"] != root || seen["system_prompt"] != runtime.AuditSystemPrompt() || seen["unattended"] != 60 || seen["interactive"] != false || seen["yolo"] != false || seen["best_of"] != 3 {
 		t.Fatalf("unexpected audit args: %#v", seen)
+	}
+	if !strings.Contains(errOut.String(), "[note] created default Renovate config: renovate.json") || !strings.Contains(errOut.String(), "## Audit") || !strings.Contains(errOut.String(), "- focus: `deps`") || !strings.Contains(errOut.String(), "[note] audit mode") {
+		t.Fatalf("unexpected audit stderr: %q", errOut.String())
 	}
 }
 
@@ -329,6 +340,7 @@ func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
 	var out strings.Builder
 	stdoutWriter = &out
 	t.Setenv("OY_MODEL", "openai:gpt-5")
+	t.Setenv("OY_SHIM", "")
 	if code := Model(""); code != 0 {
 		t.Fatalf("unexpected code: %d", code)
 	}
@@ -363,6 +375,7 @@ func TestModelInteractivePickerSavesSelection(t *testing.T) {
 	t.Setenv("OY_ROOT", workspace)
 	t.Setenv("OY_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("OY_MODEL", "openai:gpt-5")
+	t.Setenv("OY_SHIM", "")
 	var out, errOut strings.Builder
 	stdoutWriter = &out
 	stderrWriter = &errOut
@@ -392,6 +405,7 @@ func TestModelNonInteractiveRequiresExactMatch(t *testing.T) {
 		return []string{"openai:gpt-5", "openai:gpt-4.1", "copilot:gpt-5"}, nil, nil
 	}
 	t.Setenv("OY_MODEL", "openai:gpt-5")
+	t.Setenv("OY_SHIM", "")
 	var errOut strings.Builder
 	stderrWriter = &errOut
 	if code := Model("gpt-4"); code != 1 {
@@ -425,6 +439,29 @@ func TestHandleDebugToggleTogglesDebugLog(t *testing.T) {
 	handleDebugToggle()
 	if !strings.Contains(errOut.String(), "debug logging disabled") || runtime.DebugLogPath() != "" {
 		t.Fatalf("unexpected disable output/path: %q %q", errOut.String(), runtime.DebugLogPath())
+	}
+}
+
+func TestChatShowsGitDiffSummaryBeforePrompt(t *testing.T) {
+	oldResolve, oldReader, oldStderr, oldGitDiff := resolveSessionFunc, chatInputReaderFunc, stderrWriter, gitDiffShortstatFunc
+	defer func() {
+		resolveSessionFunc = oldResolve
+		chatInputReaderFunc = oldReader
+		stderrWriter = oldStderr
+		gitDiffShortstatFunc = oldGitDiff
+	}()
+	resolveSessionFunc = func(interactive *bool, systemPrompt string, includeSystemFile bool, bestOf *int) (runtime.SessionContext, error) {
+		return runtime.Session(t.TempDir(), "openai:gpt-test", true, "sys", "", false, 1), nil
+	}
+	chatInputReaderFunc = func() io.Reader { return strings.NewReader("/quit\n") }
+	gitDiffShortstatFunc = func(string) string { return "git diff: clean" }
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Chat(); code != 0 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "git diff: clean\noy > ") {
+		t.Fatalf("missing git diff prompt summary: %q", errOut.String())
 	}
 }
 
