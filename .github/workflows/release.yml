@@ -19,7 +19,15 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Build
-        run: go build -o dist/oy ./cmd/oy
+        shell: bash
+        run: |
+          VERSION=dev
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          go build -ldflags "-X github.com/wagov-dtt/oy-cli/internal/oy/version.Version=${VERSION}" -o dist/oy ./cmd/oy
+      - name: Verify version
+        run: ./dist/oy --version
       - uses: actions/upload-artifact@v4
         with:
           name: oy-linux-amd64

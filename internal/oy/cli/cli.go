@@ -95,6 +95,14 @@ var ChatCommandHelp = [][2]string{
 	{"/exit", "end session"},
 }
 
+var TopLevelCommandHelp = [][2]string{
+	{"run", "Run a one-shot task."},
+	{"chat", "Start an interactive multi-turn chat session."},
+	{"ralph", "Run a task in yolo mode every minute until the configured deadline."},
+	{"model", "Show or change the default model."},
+	{"audit", "Run a one-shot security and complexity audit."},
+}
+
 type sessionField struct {
 	Key   string
 	Value string
@@ -152,10 +160,28 @@ func Main(argv []string) int {
 }
 
 func PrintHelp() {
-	fmt.Fprintln(stdoutWriter, "oy")
+	fmt.Fprintln(stdoutWriter, "usage: oy [-h] [--version] {run,chat,ralph,model,audit} ...")
 	fmt.Fprintln(stdoutWriter)
-	fmt.Fprintln(stdoutWriter, "Commands: run, chat, ralph, model, audit")
-	fmt.Fprintln(stdoutWriter, "Progress is tracked in GO_PORT_TRACKER.md")
+	fmt.Fprintln(stdoutWriter, "AI coding assistant for your shell.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "positional arguments:")
+	fmt.Fprintln(stdoutWriter, "  {run,chat,ralph,model,audit}")
+	for _, item := range TopLevelCommandHelp {
+		fmt.Fprintf(stdoutWriter, "    %-20s %s\n", item[0], item[1])
+	}
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "options:")
+	fmt.Fprintln(stdoutWriter, "  -h, --help            show this help message and exit")
+	fmt.Fprintln(stdoutWriter, "  --version             show program's version number and exit")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Examples:")
+	fmt.Fprintln(stdoutWriter, "  oy \"fix the failing tests\"")
+	fmt.Fprintln(stdoutWriter, "  oy run \"fix the flaky test\"")
+	fmt.Fprintln(stdoutWriter, "  oy chat")
+	fmt.Fprintln(stdoutWriter, "  oy chat --yolo")
+	fmt.Fprintln(stdoutWriter, "  oy ralph \"fix the flaky test\"")
+	fmt.Fprintln(stdoutWriter, "  oy audit auth")
+	fmt.Fprintln(stdoutWriter, "  oy model gpt-5")
 }
 
 func runChatCommand(args []string) int {
@@ -167,7 +193,13 @@ func runChatCommand(args []string) int {
 		case "--yolo":
 			yolo = true
 		case "-h", "--help":
-			fmt.Fprintln(stdoutWriter, "Usage: oy chat [--yolo]")
+			fmt.Fprintln(stdoutWriter, "usage: oy chat [-h] [--yolo]")
+			fmt.Fprintln(stdoutWriter)
+			fmt.Fprintln(stdoutWriter, "Start an interactive multi-turn chat session.")
+			fmt.Fprintln(stdoutWriter)
+			fmt.Fprintln(stdoutWriter, "options:")
+			fmt.Fprintln(stdoutWriter, "  -h, --help  show this help message and exit")
+			fmt.Fprintln(stdoutWriter, "  --yolo      Allow all tools without per-action approval prompts.")
 			return 0
 		default:
 			fmt.Fprintf(stderrWriter, "[error] unknown chat option: %s\n", arg)

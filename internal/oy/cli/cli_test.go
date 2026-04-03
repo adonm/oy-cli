@@ -14,6 +14,7 @@ import (
 	"github.com/wagov-dtt/oy-cli/internal/oy/agent"
 	"github.com/wagov-dtt/oy-cli/internal/oy/providers"
 	"github.com/wagov-dtt/oy-cli/internal/oy/runtime"
+	"github.com/wagov-dtt/oy-cli/internal/oy/version"
 )
 
 func TestMainNormalizesCommands(t *testing.T) {
@@ -66,6 +67,71 @@ func TestMainSupportsChatYoloFlag(t *testing.T) {
 	}
 	if value := os.Getenv("OY_YOLO"); value != "" {
 		t.Fatalf("expected OY_YOLO restored after chat command, got %q", value)
+	}
+}
+
+func TestMainHelpMatchesPythonStyleOutput(t *testing.T) {
+	oldStdout := stdoutWriter
+	defer func() { stdoutWriter = oldStdout }()
+	var out strings.Builder
+	stdoutWriter = &out
+	if code := Main([]string{"--help"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	text := out.String()
+	for _, needle := range []string{
+		"usage: oy [-h] [--version] {run,chat,ralph,model,audit} ...",
+		"AI coding assistant for your shell.",
+		"positional arguments:",
+		"run                  Run a one-shot task.",
+		"chat                 Start an interactive multi-turn chat session.",
+		"options:",
+		"--version             show program's version number and exit",
+		"Examples:",
+		"oy chat --yolo",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("missing help text %q in %q", needle, text)
+		}
+	}
+}
+
+func TestMainVersionUsesInjectedVersion(t *testing.T) {
+	oldStdout, oldVersion := stdoutWriter, version.Version
+	defer func() {
+		stdoutWriter = oldStdout
+		version.Version = oldVersion
+	}()
+	var out strings.Builder
+	stdoutWriter = &out
+	version.Version = "1.2.3"
+	if code := Main([]string{"--version"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if out.String() != "oy 1.2.3\n" {
+		t.Fatalf("unexpected version output: %q", out.String())
+	}
+}
+
+func TestChatHelpMatchesPythonStyleOutput(t *testing.T) {
+	oldStdout := stdoutWriter
+	defer func() { stdoutWriter = oldStdout }()
+	var out strings.Builder
+	stdoutWriter = &out
+	if code := Main([]string{"chat", "--help"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	text := out.String()
+	for _, needle := range []string{
+		"usage: oy chat [-h] [--yolo]",
+		"Start an interactive multi-turn chat session.",
+		"options:",
+		"-h, --help  show this help message and exit",
+		"--yolo      Allow all tools without per-action approval prompts.",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("missing chat help text %q in %q", needle, text)
+		}
 	}
 }
 
