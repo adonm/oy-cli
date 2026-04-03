@@ -1,6 +1,6 @@
 # Audit Findings
 
-> **Last audit**: 2026-04-03 · base commit `8f2e67e` (`Split provider shim hotspot`) · refreshed after the tool fs split · cross-checked against [OWASP ASVS 5.0](https://github.com/OWASP/ASVS/tree/master/5.0) and [grugbrain.dev](https://grugbrain.dev/)
+> **Last audit**: 2026-04-03 · base commit `8f2e67e` (`Split provider shim hotspot`) · refreshed after the provider protocol split · cross-checked against [OWASP ASVS 5.0](https://github.com/OWASP/ASVS/tree/master/5.0) and [grugbrain.dev](https://grugbrain.dev/)
 >
 > **Codebase**: `oy-cli` — Go local coding CLI with workspace-bound file tools, shell execution, outbound fetch, transcript/debug logging, session save/load, and 6 provider shims.
 >
@@ -72,17 +72,17 @@ Evidence: file permissions are hardened, but `runtime.DebugLog()` still serializ
 
 ---
 
-## M1 · Provider shim hotspot split; `protocol.go` is now the main provider complexity center
+## M1 · Provider shim and protocol hotspot split is complete
 
 | | |
 |---|---|
-| **Location** | `internal/oy/providers/protocol.go` (431 total lines; 295 code), `internal/oy/providers/codex.go` (243 total lines; 164 code), `internal/oy/providers/registry.go` (236 total lines; 153 code) |
+| **Location** | `internal/oy/providers/codex.go` (243 total lines; 164 code), `internal/oy/providers/registry.go` (236 total lines; 153 code), `internal/oy/providers/protocol_messages.go` (132 total lines; 87 code) |
 | **Category** | Complexity |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Keep the provider package API flat, but continue trimming `protocol.go` if more request/response conversion or reasoning-fallback behavior lands there. |
-| **Status** | Improved |
+| **Recommendation** | Keep the provider package API flat, but continue trimming shared provider helpers if new cross-provider protocol behavior lands. |
+| **Status** | Resolved |
 
-Evidence: the old `internal/oy/providers/shims.go` monolith is gone; provider code is now split across focused files (`registry.go`, `openai.go`, `codex.go`, `copilot.go`, `bedrock.go`, `protocol.go`, plus the existing `files.go`, `http.go`, and `types.go`). The remaining provider complexity is concentrated in shared request/response conversion and reasoning-fallback helpers inside `protocol.go` instead of one catch-all file.
+Evidence: the old `internal/oy/providers/shims.go` monolith and later `protocol.go` hotspot are gone; the package now keeps message encoding in `protocol_messages.go`, response decoding in `protocol_decode.go`, reasoning fallback in `protocol_reasoning.go`, and generic JSON/model helpers in `protocol_helpers.go` while preserving the same flat provider package API. The remaining provider complexity is spread across smaller focused files instead of one catch-all protocol file.
 
 ---
 
@@ -160,7 +160,7 @@ Evidence: `ToolRead()` calls `os.ReadFile(target)` and `splitLines()` before the
 
 | | |
 |---|---|
-| **Location** | `internal/oy/providers/registry.go:147-153`, `internal/oy/providers/registry.go:216-233`, `internal/oy/providers/protocol.go:313-326` |
+| **Location** | `internal/oy/providers/registry.go:147-153`, `internal/oy/providers/registry.go:216-233`, `internal/oy/providers/protocol_helpers.go:9-22` |
 | **Category** | Complexity |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
 | **Recommendation** | Memoize shim availability for the process lifetime, parallelize model discovery, and surface degraded fallback paths more explicitly. |
@@ -195,6 +195,10 @@ Evidence: the workflow still pins `actions/checkout@v4`, `actions/setup-go@v5`, 
 
 ## Short audit log
 
+- 2026-04-03: refreshed after splitting the remaining `internal/oy/providers/protocol.go` hotspot into focused provider protocol files.
+  - Header updated from a tracked-file text scan: 34 Go files, 5,023 non-comment/non-empty Go lines, 8,229 total repo lines, 43 tracked text files.
+  - M1 moved from Improved to Resolved because `protocol.go` is gone; `protocol_messages.go`, `protocol_decode.go`, `protocol_reasoning.go`, and `protocol_helpers.go` now carry the split behavior directly.
+  - Repointed stale `protocol.go` evidence to the new focused protocol files and updated the provider hotspot location list for the post-split layout.
 - 2026-04-03: refreshed after splitting the remaining `internal/oy/tools/fs.go` hotspot into focused filesystem/search files.
   - Header updated from a tracked-file text scan: 27 Go files, 5,017 non-comment/non-empty Go lines, 7,933 total repo lines, 39 tracked text files.
   - M2 moved from Improved to Resolved because `fs.go` is gone; `list_read.go`, `search.go`, `replace.go`, and `sloc.go` now carry the split behavior directly.
