@@ -28,8 +28,8 @@ Approved candidates:
 
 - [x] M1: inspect current Python implementation, tests, and parity targets
 - [x] M2: add migration tracker and Go module scaffold
-- [ ] M3: port shared types, provider primitives, and SigV4
-- [ ] M4: port runtime/config/model selection helpers
+- [x] M3: port shared types, provider primitives, and SigV4
+- [x] M4: port runtime/config/model selection helpers
 - [ ] M5: port tool registry and local file/web/search helpers
 - [ ] M6: port transcript management and agent loop
 - [ ] M7: port CLI commands: `run`, `chat`, `ralph`, `model`, `audit`
@@ -95,3 +95,4 @@ Approved candidates:
 
 - 2026-04-03: Baseline inspected. Python tests pass via `uv run pytest -q`. Started Go port scaffold and tracker.
 - 2026-04-03: Added initial Go module scaffold, shared types, runtime helpers, SigV4 signing, and first Go parity tests.
+- 2026-04-03: Ported embedded prompt loading, model config helpers, shim registry plumbing, JSON/file helpers, HTTP response utilities, and added Go parity tests for runtime/providers.

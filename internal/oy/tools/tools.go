@@ -10,5 +10,5 @@ type Spec struct {
 }
 
 func DefaultListLimit() int {
-	return runtime.DefaultBudgets.DefaultLineLimit
+	return runtime.DefaultBudgets().DefaultLineLimit
 }

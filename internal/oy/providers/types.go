@@ -108,20 +108,6 @@ func ToolMessage(toolCallID, name string, content ToolResult) ChatMessage {
 	return ChatMessage{Role: "tool", ToolCallID: toolCallID, Name: name, Content: SerializeJSON(content)}
 }
 
-func SplitModelSpec(spec string) (string, string) {
-	for _, shim := range ShimOrder {
-		prefix := shim + ":"
-		if len(spec) > len(prefix) && spec[:len(prefix)] == prefix {
-			return shim, spec[len(prefix):]
-		}
-	}
-	return "", spec
-}
-
-func JoinModelSpec(shim, model string) string {
-	return shim + ":" + model
-}
-
 const (
 	ShimOpenAI     = "openai"
 	ShimCodex      = "codex"
@@ -140,15 +126,31 @@ var ShimOrder = []string{
 	ShimOpenCodeGo,
 }
 
-func ValidateShim(shim string) error {
-	for _, item := range ShimOrder {
-		if item == shim {
-			return nil
+var KnownShims = func() map[string]struct{} {
+	items := make(map[string]struct{}, len(ShimOrder))
+	for _, shim := range ShimOrder {
+		items[shim] = struct{}{}
+	}
+	return items
+}()
+
+func SplitModelSpec(spec string) (string, string) {
+	for _, shim := range ShimOrder {
+		prefix := shim + ":"
+		if len(spec) > len(prefix) && spec[:len(prefix)] == prefix {
+			return shim, spec[len(prefix):]
 		}
 	}
-	return fmt.Errorf("unknown shim value: %q", shim)
+	return "", spec
 }
 
-func DetectAvailableShims() []string {
-	return append([]string(nil), ShimOrder...)
+func JoinModelSpec(shim, model string) string {
+	return shim + ":" + model
+}
+
+func ValidateShim(shim string) error {
+	if _, ok := KnownShims[shim]; !ok {
+		return fmt.Errorf("unknown shim value: `%s`. use one of: %v", shim, ShimOrder)
+	}
+	return nil
 }
