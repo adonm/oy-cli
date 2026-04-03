@@ -45,14 +45,13 @@ type PermissionError struct{ Message string }
 func (e *PermissionError) Error() string { return e.Message }
 
 var (
-	AskInputFunc    = func(_ string) string { return "" }
-	SelectInputFunc = func(_ string, choices []string) string {
+	AskFunc = func(_ *State, _ string, choices []string) (string, error) {
 		if len(choices) == 0 {
-			return ""
+			return "", nil
 		}
-		return choices[0]
+		return choices[0], nil
 	}
-	ApprovalPromptFunc = func(_ string, _ []string) string { return "deny" }
+	ApprovalPromptFunc = func(_ *State, _ string, _ []string) (string, error) { return "deny", nil }
 	ToolSessionFactory = func(timeout time.Duration, followRedirects bool) HTTPRequester {
 		return providers.ToolSession(timeout, followRedirects)
 	}

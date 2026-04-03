@@ -118,8 +118,11 @@ func approveMutatingTool(state *State, name string, args map[string]any) bool {
 	if state == nil || state.Yolo || !state.Interactive || state.ApproveAllMutatingTools {
 		return true
 	}
-	choice := strings.TrimSpace(ApprovalPromptFunc(toolApprovalPrompt(name, args), []string{"once", "all", "deny"}))
-	switch choice {
+	choice, err := ApprovalPromptFunc(state, toolApprovalPrompt(name, args), []string{"once", "all", "deny"})
+	if err != nil {
+		return false
+	}
+	switch strings.TrimSpace(choice) {
 	case "all":
 		state.ApproveAllMutatingTools = true
 		return true

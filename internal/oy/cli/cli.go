@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,10 +15,19 @@ import (
 	"github.com/wagov-dtt/oy-cli/internal/oy/providers"
 	"github.com/wagov-dtt/oy-cli/internal/oy/runtime"
 	"github.com/wagov-dtt/oy-cli/internal/oy/tools"
+	"github.com/wagov-dtt/oy-cli/internal/oy/ui"
 	"github.com/wagov-dtt/oy-cli/internal/oy/version"
 )
 
 var SessionsDir string
+
+type promptIO interface {
+	Close() error
+	Confirm(title, description string, defaultYes bool, affirmative, negative string) (bool, error)
+	Input(title, description, defaultValue string) (string, error)
+	Line(title string) (string, error)
+	Select(title, description string, options []ui.Option, value string, filtering bool) (string, error)
+}
 
 var (
 	runCommand         = Run
@@ -43,7 +51,10 @@ var (
 	listAllModelIDsFunc  = runtime.ListAllModelIDs
 	chatInputReaderFunc  = func() io.Reader { return os.Stdin }
 	modelInputReaderFunc = func() io.Reader { return os.Stdin }
-	stderrIsTTYFunc      = func() bool {
+	newPromptIOFunc      = func(input io.Reader, output io.Writer) promptIO {
+		return ui.NewPromptIO(input, output, canPromptFunc() && ui.InteractiveIO(input, output))
+	}
+	stderrIsTTYFunc = func() bool {
 		file, ok := stderrWriter.(*os.File)
 		if !ok {
 			return false
@@ -68,6 +79,34 @@ func init() {
 			return
 		}
 		fmt.Fprintf(stderrWriter, "[note] %s\n", value)
+	}
+	tools.AskFunc = func(_ *tools.State, question string, choices []string) (string, error) {
+		prompt := newPromptIOFunc(chatInputReaderFunc(), stderrWriter)
+		if len(choices) == 0 {
+			return prompt.Input(question, "", "")
+		}
+		options := make([]ui.Option, 0, len(choices))
+		for _, choice := range choices {
+			options = append(options, ui.Option{Key: choice, Value: choice})
+		}
+		return prompt.Select(question, "", options, "", false)
+	}
+	tools.ApprovalPromptFunc = func(_ *tools.State, question string, choices []string) (string, error) {
+		prompt := newPromptIOFunc(chatInputReaderFunc(), stderrWriter)
+		options := make([]ui.Option, 0, len(choices))
+		for _, choice := range choices {
+			label := choice
+			switch choice {
+			case "once":
+				label = "Approve once"
+			case "all":
+				label = "Approve all remaining"
+			case "deny":
+				label = "Deny"
+			}
+			options = append(options, ui.Option{Key: label, Value: choice, Selected: choice == "deny"})
+		}
+		return prompt.Select(question, "Choose how to proceed.", options, "deny", false)
 	}
 }
 
@@ -902,21 +941,20 @@ func Chat() int {
 
 	transcript := agent.TranscriptWithSystemPrompt(session.SystemPrompt)
 	currentModel := session.Model
-	scanner := bufio.NewScanner(chatInputReaderFunc())
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	promptIO := newPromptIOFunc(chatInputReaderFunc(), stderrWriter)
+	defer func() { _ = promptIO.Close() }()
 	for {
 		if summary := gitDiffShortstatFunc(session.Workspace); summary != "" {
 			fmt.Fprintln(stderrWriter, summary)
 		}
-		fmt.Fprint(stderrWriter, "oy > ")
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
+		prompt, err := promptIO.Line("oy >")
+		if err != nil {
+			if err != io.EOF {
 				fmt.Fprintf(stderrWriter, "[error] input error: %v\n", err)
 			}
 			fmt.Fprintln(stderrWriter, "[note] session ended")
 			break
 		}
-		prompt := strings.TrimSpace(scanner.Text())
 		if prompt == "" {
 			continue
 		}
@@ -1168,11 +1206,11 @@ func Model(selection string) int {
 		fmt.Fprintln(stdoutWriter, "[note] use `oy model list` to browse available models")
 		return 0
 	}
-	input := bufio.NewReader(modelInputReaderFunc())
+	prompt := newPromptIOFunc(modelInputReaderFunc(), stderrWriter)
 	if current != "" && canPromptFunc() {
 		fmt.Fprintln(stderrWriter, currentModelText(current))
 		if strings.TrimSpace(selection) == "" {
-			pickNew, err := promptYesNo(input, stderrWriter, "Pick a new model?", false)
+			pickNew, err := prompt.Confirm("Pick a new model?", "", false, "Yes", "No")
 			if err != nil {
 				fmt.Fprintf(stderrWriter, "[error] Failed to read model selection: %v\n", err)
 				return 1
@@ -1183,7 +1221,7 @@ func Model(selection string) int {
 		}
 	}
 	workspace, _ := WorkspaceRoot()
-	selected, err := resolveModelChoice(selection, current, workspace, input, stderrWriter)
+	selected, err := resolveModelChoice(selection, current, workspace, prompt, stderrWriter)
 	if err != nil {
 		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
@@ -1393,7 +1431,7 @@ func currentModelText(modelSpec string) string {
 	return fmt.Sprintf("## Current Model\n\n- model: `%s`\n- shim: `%s`", bare, shim)
 }
 
-func resolveModelChoice(selection, currentModel, cwd string, input io.Reader, output io.Writer) (string, error) {
+func resolveModelChoice(selection, currentModel, cwd string, prompt promptIO, output io.Writer) (string, error) {
 	allModels, warnings, err := listAllModelIDsFunc(cwd)
 	if err != nil {
 		return "", err
@@ -1423,35 +1461,20 @@ func resolveModelChoice(selection, currentModel, cwd string, input io.Reader, ou
 		}
 		return "", fmt.Errorf("No exact model match for `%s`. Re-run in a TTY to filter and choose interactively.", selection)
 	}
-	fmt.Fprintln(output, "## Choose a Model\n\n- Enter an exact model ID to save it.\n- Enter text to filter the list.\n- Enter a number to pick from the currently listed models.")
-	shown := append([]string(nil), allModels...)
+	fmt.Fprintln(output, "## Choose a Model")
+	fmt.Fprintln(output)
+	options := make([]ui.Option, 0, len(allModels))
+	for _, model := range allModels {
+		options = append(options, ui.Option{Key: modelLabel(model, currentModel), Value: model, Selected: model == currentModel})
+	}
 	if selection == "" {
-		printSelectableModelList(output, "## Available Models", shown, currentModel)
-		selection, err = promptLine(input, output, "Model or filter", currentModel)
-		if err != nil {
-			return "", err
-		}
+		selection = currentModel
 	}
-	for {
-		selection = strings.TrimSpace(selection)
-		if selection == "" {
-			selection = currentModel
-		}
-		for _, model := range allModels {
-			if model == selection {
-				return model, nil
-			}
-		}
-		if index, ok := parseIndex(selection); ok && index >= 0 && index < len(shown) {
-			return shown[index], nil
-		}
-		shown = filterModels(allModels, selection)
-		printSelectableModelList(output, "## Matching Models", shown, currentModel)
-		selection, err = promptLine(input, output, "Model or filter", "")
-		if err != nil {
-			return "", err
-		}
+	selected, err := prompt.Select("Model", "Browse or filter available models.", options, selection, true)
+	if err != nil {
+		return "", err
 	}
+	return strings.TrimSpace(selected), nil
 }
 
 func printModelList(output io.Writer, title string, models []string) {
@@ -1466,60 +1489,11 @@ func printModelList(output io.Writer, title string, models []string) {
 	fmt.Fprintln(output, strings.Join(lines, "\n"))
 }
 
-func printSelectableModelList(output io.Writer, title string, models []string, currentModel string) {
-	lines := []string{title, ""}
-	if len(models) == 0 {
-		lines = append(lines, "(no matches)")
-	} else {
-		for index, model := range models {
-			suffix := ""
-			if model == currentModel {
-				suffix = " — current"
-			}
-			lines = append(lines, fmt.Sprintf("%d. `%s`%s", index+1, model, suffix))
-		}
+func modelLabel(model, currentModel string) string {
+	if model == currentModel {
+		return model + " — current"
 	}
-	fmt.Fprintln(output, strings.Join(lines, "\n"))
-}
-
-func promptLine(input io.Reader, output io.Writer, label, defaultValue string) (string, error) {
-	if defaultValue != "" {
-		fmt.Fprintf(output, "%s [%s]: ", label, defaultValue)
-	} else {
-		fmt.Fprintf(output, "%s: ", label)
-	}
-	reader, ok := input.(*bufio.Reader)
-	if !ok {
-		reader = bufio.NewReader(input)
-	}
-	text, err := reader.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return "", err
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return defaultValue, nil
-	}
-	return text, nil
-}
-
-func promptYesNo(input io.Reader, output io.Writer, label string, defaultYes bool) (bool, error) {
-	defaultChoice := "n"
-	if defaultYes {
-		defaultChoice = "y"
-	}
-	choice, err := promptLine(input, output, label, defaultChoice)
-	if err != nil {
-		return false, err
-	}
-	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "y", "yes":
-		return true, nil
-	case "", "n", "no":
-		return false, nil
-	default:
-		return false, nil
-	}
+	return model
 }
 
 func isModelListSelection(selection string) bool {

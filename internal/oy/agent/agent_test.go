@@ -149,17 +149,23 @@ func TestRunTurnNotesToolCallsAndResultPreviews(t *testing.T) {
 	if err != nil || code != 0 || content != "done" {
 		t.Fatalf("unexpected result: %d %q %v", code, content, err)
 	}
-	if len(notes) != 3 {
+	if len(notes) != 5 {
 		t.Fatalf("unexpected notes: %#v", notes)
 	}
-	if notes[0] != "turn 1: 1 tool call" {
-		t.Fatalf("unexpected turn note: %q", notes[0])
+	if notes[0] != "waiting for llm: openai:gpt-test (turn 1)" {
+		t.Fatalf("unexpected wait note: %q", notes[0])
 	}
-	if notes[1] != "tool echo(text=hi)" {
-		t.Fatalf("unexpected tool call note: %q", notes[1])
+	if notes[1] != "llm requested 1 tool call" {
+		t.Fatalf("unexpected tool count note: %q", notes[1])
 	}
-	if !strings.HasPrefix(notes[2], "tool echo: ok ") || !strings.Contains(notes[2], ":hi") {
-		t.Fatalf("unexpected tool result note: %q", notes[2])
+	if notes[2] != "calling tool: echo(text=hi)" {
+		t.Fatalf("unexpected tool call note: %q", notes[2])
+	}
+	if !strings.HasPrefix(notes[3], "tool echo done: ok ") || !strings.Contains(notes[3], ":hi") {
+		t.Fatalf("unexpected tool result note: %q", notes[3])
+	}
+	if notes[4] != "waiting for llm: openai:gpt-test (turn 2)" {
+		t.Fatalf("unexpected second wait note: %q", notes[4])
 	}
 }
 
@@ -217,9 +223,9 @@ func TestRunTurnPropagatesApprovalStateAcrossTurns(t *testing.T) {
 		tools.ApprovalPromptFunc = oldApproval
 		PrintFunc = oldPrint
 	}()
-	tools.ApprovalPromptFunc = func(_ string, _ []string) string {
+	tools.ApprovalPromptFunc = func(_ *tools.State, _ string, _ []string) (string, error) {
 		prompts++
-		return "all"
+		return "all", nil
 	}
 	PrintFunc = func(string) {}
 	transcript := TranscriptWithSystemPrompt("sys")
@@ -252,8 +258,14 @@ func TestSelfConsistencyLogsOnlyNonUnanimousChoice(t *testing.T) {
 	if err != nil || code != 0 || content != "done" {
 		t.Fatalf("unexpected result: %d %q %v", code, content, err)
 	}
-	if len(notes) != 1 || notes[0] != "self-consistency: sample 2 won 2/3" {
+	if len(notes) != 2 {
 		t.Fatalf("unexpected notes: %#v", notes)
+	}
+	if notes[0] != "waiting for llm: openai:gpt-test (turn 1, best-of 3)" {
+		t.Fatalf("unexpected wait note: %q", notes[0])
+	}
+	if notes[1] != "self-consistency: sample 2 won 2/3" {
+		t.Fatalf("unexpected self-consistency note: %q", notes[1])
 	}
 }
 

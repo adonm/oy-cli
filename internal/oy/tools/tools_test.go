@@ -64,14 +64,14 @@ func TestInvokeToolApprovalAndValidation(t *testing.T) {
 	defer func() { ApprovalPromptFunc = oldApproval }()
 
 	denied := &State{Interactive: true}
-	ApprovalPromptFunc = func(_ string, _ []string) string { return "deny" }
+	ApprovalPromptFunc = func(_ *State, _ string, _ []string) (string, error) { return "deny", nil }
 	result := InvokeTool(registry, denied, "mutating", map[string]any{"text": "nope"})
 	if result.OK || result.Content.(map[string]any)["error_type"] != "PermissionError" || len(calls) != 0 {
 		t.Fatalf("unexpected denied result: %#v %#v", result, calls)
 	}
 
 	approved := &State{Interactive: true}
-	ApprovalPromptFunc = func(_ string, _ []string) string { return "all" }
+	ApprovalPromptFunc = func(_ *State, _ string, _ []string) (string, error) { return "all", nil }
 	first := InvokeTool(registry, approved, "mutating", map[string]any{"text": "first"})
 	second := InvokeTool(registry, approved, "mutating", map[string]any{"text": "second"})
 	if !first.OK || !second.OK || !approved.ApproveAllMutatingTools || strings.Join(calls, ",") != "first,second" {
@@ -86,12 +86,16 @@ func TestInvokeToolApprovalAndValidation(t *testing.T) {
 
 func TestAskAndTodoUpdateState(t *testing.T) {
 	state := State{Root: t.TempDir(), Interactive: true}
-	oldAsk, oldSelect := AskInputFunc, SelectInputFunc
+	oldAsk := AskFunc
 	defer func() {
-		AskInputFunc, SelectInputFunc = oldAsk, oldSelect
+		AskFunc = oldAsk
 	}()
-	AskInputFunc = func(_ string) string { return " free " }
-	SelectInputFunc = func(_ string, _ []string) string { return "beta" }
+	AskFunc = func(_ *State, question string, choices []string) (string, error) {
+		if len(choices) == 0 {
+			return " free ", nil
+		}
+		return "beta", nil
+	}
 	if answer, err := ToolAsk(&state, "Question?", nil); err != nil || answer != "free" {
 		t.Fatalf("unexpected free-form ask result: %q %v", answer, err)
 	}

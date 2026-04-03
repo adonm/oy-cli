@@ -14,6 +14,7 @@ import (
 	"github.com/wagov-dtt/oy-cli/internal/oy/agent"
 	"github.com/wagov-dtt/oy-cli/internal/oy/providers"
 	"github.com/wagov-dtt/oy-cli/internal/oy/runtime"
+	"github.com/wagov-dtt/oy-cli/internal/oy/ui"
 	"github.com/wagov-dtt/oy-cli/internal/oy/version"
 )
 
@@ -440,8 +441,8 @@ func TestAgentNoteFuncWritesToStderrWriter(t *testing.T) {
 	defer func() { stderrWriter = oldStderr }()
 	var errOut strings.Builder
 	stderrWriter = &errOut
-	agent.NoteFunc("turn 1: 1 tool call")
-	if errOut.String() != "[note] turn 1: 1 tool call\n" {
+	agent.NoteFunc("waiting for llm: openai:gpt-test (turn 1)")
+	if errOut.String() != "[note] waiting for llm: openai:gpt-test (turn 1)\n" {
 		t.Fatalf("unexpected stderr: %q", errOut.String())
 	}
 }
@@ -510,11 +511,12 @@ func TestRalphRunsPromptUntilDeadline(t *testing.T) {
 	t.Setenv("OY_MODEL", "openai:gpt-test")
 	t.Setenv("OY_BEST_OF", "3")
 	oldRunAgent, oldUnattended, oldLimit := runAgentFunc, unattendedLimitFunc, ralphLimitFunc
-	oldNow, oldSleep, oldErr := nowFunc, sleepFunc, stderrWriter
+	oldNow, oldSleep, oldErr, oldPrompt := nowFunc, sleepFunc, stderrWriter, newPromptIOFunc
 	defer func() {
 		runAgentFunc, unattendedLimitFunc, ralphLimitFunc = oldRunAgent, oldUnattended, oldLimit
 		nowFunc, sleepFunc = oldNow, oldSleep
 		stderrWriter = oldErr
+		newPromptIOFunc = oldPrompt
 	}()
 	calls := []map[string]any{}
 	sleeps := []time.Duration{}
@@ -675,6 +677,7 @@ func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
 	}
 	var out strings.Builder
 	stdoutWriter = &out
+	t.Setenv("OY_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("OY_MODEL", "openai:gpt-5")
 	t.Setenv("OY_SHIM", "")
 	if code := Model(""); code != 0 {
@@ -701,16 +704,18 @@ func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
 
 func TestModelInteractivePickerSavesSelection(t *testing.T) {
 	oldList, oldStdout, oldStderr := listAllModelIDsFunc, stdoutWriter, stderrWriter
-	oldCanPrompt, oldInput := canPromptFunc, modelInputReaderFunc
+	oldCanPrompt, oldInput, oldPrompt := canPromptFunc, modelInputReaderFunc, newPromptIOFunc
 	defer func() {
 		listAllModelIDsFunc = oldList
 		stdoutWriter = oldStdout
 		stderrWriter = oldStderr
 		canPromptFunc = oldCanPrompt
 		modelInputReaderFunc = oldInput
+		newPromptIOFunc = oldPrompt
 	}()
 	canPromptFunc = func() bool { return true }
 	modelInputReaderFunc = func() io.Reader { return strings.NewReader("y\n2\n") }
+	newPromptIOFunc = func(input io.Reader, output io.Writer) promptIO { return ui.NewPromptIO(input, output, false) }
 	listAllModelIDsFunc = func(string) ([]string, []string, error) {
 		return []string{"openai:gpt-5", "openai:gpt-4.1", "copilot:gpt-5"}, nil, nil
 	}
@@ -728,7 +733,7 @@ func TestModelInteractivePickerSavesSelection(t *testing.T) {
 	if !strings.Contains(out.String(), "Default Model Updated") || !strings.Contains(out.String(), "openai:gpt-4.1") {
 		t.Fatalf("unexpected model output: %q", out.String())
 	}
-	if !strings.Contains(errOut.String(), "Pick a new model?") || !strings.Contains(errOut.String(), "## Available Models") {
+	if !strings.Contains(errOut.String(), "Pick a new model?") || !strings.Contains(errOut.String(), "## Choose a Model") {
 		t.Fatalf("unexpected interactive output: %q", errOut.String())
 	}
 	if got := runtime.LoadModelConfig(); got.Model != "gpt-4.1" || got.Shim != "openai" {
@@ -900,24 +905,26 @@ func TestHandleDebugToggleTogglesDebugLog(t *testing.T) {
 }
 
 func TestChatShowsGitDiffSummaryBeforePrompt(t *testing.T) {
-	oldResolve, oldReader, oldStderr, oldGitDiff := resolveSessionFunc, chatInputReaderFunc, stderrWriter, gitDiffShortstatFunc
+	oldResolve, oldReader, oldStderr, oldGitDiff, oldPrompt := resolveSessionFunc, chatInputReaderFunc, stderrWriter, gitDiffShortstatFunc, newPromptIOFunc
 	defer func() {
 		resolveSessionFunc = oldResolve
 		chatInputReaderFunc = oldReader
 		stderrWriter = oldStderr
 		gitDiffShortstatFunc = oldGitDiff
+		newPromptIOFunc = oldPrompt
 	}()
 	resolveSessionFunc = func(interactive *bool, systemPrompt string, includeSystemFile bool, bestOf *int) (runtime.SessionContext, error) {
 		return runtime.Session(t.TempDir(), "openai:gpt-test", true, "sys", "", false, 1), nil
 	}
 	chatInputReaderFunc = func() io.Reader { return strings.NewReader("/quit\n") }
+	newPromptIOFunc = func(input io.Reader, output io.Writer) promptIO { return ui.NewPromptIO(input, output, false) }
 	gitDiffShortstatFunc = func(string) string { return "git diff: clean" }
 	var errOut strings.Builder
 	stderrWriter = &errOut
 	if code := Chat(); code != 0 {
 		t.Fatalf("unexpected code: %d", code)
 	}
-	if !strings.Contains(errOut.String(), "git diff: clean\noy > ") {
+	if !strings.Contains(errOut.String(), "git diff: clean") || !strings.Contains(errOut.String(), "oy >") {
 		t.Fatalf("missing git diff prompt summary: %q", errOut.String())
 	}
 }
@@ -937,16 +944,18 @@ func TestChatListsSavedSessionsWhenLoadHasNoArg(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(SessionsDir, "saved.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	oldResolve, oldReader, oldStderr := resolveSessionFunc, chatInputReaderFunc, stderrWriter
+	oldResolve, oldReader, oldStderr, oldPrompt := resolveSessionFunc, chatInputReaderFunc, stderrWriter, newPromptIOFunc
 	defer func() {
 		resolveSessionFunc = oldResolve
 		chatInputReaderFunc = oldReader
 		stderrWriter = oldStderr
+		newPromptIOFunc = oldPrompt
 	}()
 	resolveSessionFunc = func(interactive *bool, systemPrompt string, includeSystemFile bool, bestOf *int) (runtime.SessionContext, error) {
 		return runtime.Session(t.TempDir(), "openai:gpt-test", true, "sys", "", false, 1), nil
 	}
 	chatInputReaderFunc = func() io.Reader { return strings.NewReader("/load\n/quit\n") }
+	newPromptIOFunc = func(input io.Reader, output io.Writer) promptIO { return ui.NewPromptIO(input, output, false) }
 	var errOut strings.Builder
 	stderrWriter = &errOut
 	if code := Chat(); code != 0 {
@@ -958,17 +967,19 @@ func TestChatListsSavedSessionsWhenLoadHasNoArg(t *testing.T) {
 }
 
 func TestChatRollsBackOnAgentError(t *testing.T) {
-	oldResolve, oldReader, oldRun, oldErr := resolveSessionFunc, chatInputReaderFunc, runAgentFunc, stderrWriter
+	oldResolve, oldReader, oldRun, oldErr, oldPrompt := resolveSessionFunc, chatInputReaderFunc, runAgentFunc, stderrWriter, newPromptIOFunc
 	defer func() {
 		resolveSessionFunc = oldResolve
 		chatInputReaderFunc = oldReader
 		runAgentFunc = oldRun
 		stderrWriter = oldErr
+		newPromptIOFunc = oldPrompt
 	}()
 	resolveSessionFunc = func(interactive *bool, systemPrompt string, includeSystemFile bool, bestOf *int) (runtime.SessionContext, error) {
 		return runtime.Session(t.TempDir(), "openai:gpt-test", true, "sys", "", false, 1), nil
 	}
 	chatInputReaderFunc = func() io.Reader { return strings.NewReader("hello\nquit\n") }
+	newPromptIOFunc = func(input io.Reader, output io.Writer) promptIO { return ui.NewPromptIO(input, output, false) }
 	runAgentFunc = func(prompt, model, workspace, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
 		return 1, "", fmt.Errorf("boom")
 	}
@@ -979,5 +990,42 @@ func TestChatRollsBackOnAgentError(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "Agent error: boom") {
 		t.Fatalf("missing agent error: %q", errOut.String())
+	}
+}
+
+type closeTrackingPrompt struct {
+	ui.PromptIO
+	closeCount *int
+}
+
+func (p closeTrackingPrompt) Close() error {
+	if p.closeCount != nil {
+		*p.closeCount = *p.closeCount + 1
+	}
+	return nil
+}
+
+func TestChatClosesPromptIOOnExit(t *testing.T) {
+	oldResolve, oldReader, oldErr, oldPrompt := resolveSessionFunc, chatInputReaderFunc, stderrWriter, newPromptIOFunc
+	defer func() {
+		resolveSessionFunc = oldResolve
+		chatInputReaderFunc = oldReader
+		stderrWriter = oldErr
+		newPromptIOFunc = oldPrompt
+	}()
+	resolveSessionFunc = func(interactive *bool, systemPrompt string, includeSystemFile bool, bestOf *int) (runtime.SessionContext, error) {
+		return runtime.Session(t.TempDir(), "openai:gpt-test", true, "sys", "", false, 1), nil
+	}
+	chatInputReaderFunc = func() io.Reader { return strings.NewReader("quit\n") }
+	closed := 0
+	newPromptIOFunc = func(input io.Reader, output io.Writer) promptIO {
+		return closeTrackingPrompt{PromptIO: ui.NewPromptIO(input, output, false), closeCount: &closed}
+	}
+	stderrWriter = io.Discard
+	if code := Chat(); code != 0 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if closed != 1 {
+		t.Fatalf("expected prompt close once, got %d", closed)
 	}
 }

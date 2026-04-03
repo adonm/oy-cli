@@ -9,10 +9,11 @@ func ToolAsk(state *State, question string, choices []string) (string, error) {
 	if state == nil || !state.Interactive {
 		return "", fmt.Errorf("ask is only available in interactive mode")
 	}
-	if len(choices) == 0 {
-		return strings.TrimSpace(AskInputFunc(question)), nil
+	answer, err := AskFunc(state, question, choices)
+	if err != nil {
+		return "", err
 	}
-	return strings.TrimSpace(SelectInputFunc(question, choices)), nil
+	return strings.TrimSpace(answer), nil
 }
 
 func ToolTodo(state *State, todos []map[string]string) (map[string]any, error) {

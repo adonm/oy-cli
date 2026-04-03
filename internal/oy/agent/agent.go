@@ -229,6 +229,7 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 			return 1, "", err
 		}
 		prepared := PreparedMessages(*transcript, state.Todos)
+		NoteFunc(formatLLMWaitNote(modelSpec, step+1, bestOf))
 		runtime.DebugLog("request", map[string]any{
 			"model":      modelSpec,
 			"step":       step,
@@ -256,11 +257,11 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 			NoteFunc(fmt.Sprintf("self-consistency: sample %d won %d/%d", chosenIndex+1, voteCount, bestOf))
 		}
 		if len(message.ToolCalls) > 0 {
-			NoteFunc(fmt.Sprintf("turn %d: %s", step+1, tools.CountText(len(message.ToolCalls), "tool call", "")))
+			NoteFunc(fmt.Sprintf("llm requested %s", tools.CountText(len(message.ToolCalls), "tool call", "")))
 			AddAssistant(transcript, message)
 			results := make([]map[string]any, 0, len(message.ToolCalls))
 			for _, call := range message.ToolCalls {
-				NoteFunc("tool " + formatToolCallPreview(call))
+				NoteFunc("calling tool: " + formatToolCallPreview(call))
 				toolState := &tools.State{
 					Root:                    state.Root,
 					Interactive:             state.Interactive,
@@ -269,7 +270,7 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 					Todos:                   cloneTodos(state.Todos),
 				}
 				result := tools.InvokeTool(state.ToolRegistry, toolState, call.Name, call.Arguments)
-				NoteFunc(fmt.Sprintf("tool %s: %s", call.Name, formatToolResultPreview(result)))
+				NoteFunc(fmt.Sprintf("tool %s done: %s", call.Name, formatToolResultPreview(result)))
 				state.ApproveAllMutatingTools = toolState.ApproveAllMutatingTools
 				state.Todos = cloneTodos(toolState.Todos)
 				results = append(results, map[string]any{"call_id": call.ID, "name": call.Name, "result": result})
@@ -365,6 +366,14 @@ func debugToolResults(results []map[string]any) []map[string]any {
 		out = append(out, entry)
 	}
 	return out
+}
+
+func formatLLMWaitNote(modelSpec string, turn, bestOf int) string {
+	details := []string{fmt.Sprintf("turn %d", turn)}
+	if bestOf > 1 {
+		details = append(details, fmt.Sprintf("best-of %d", bestOf))
+	}
+	return fmt.Sprintf("waiting for llm: %s (%s)", modelSpec, strings.Join(details, ", "))
 }
 
 func formatToolCallPreview(call providers.ToolCall) string {
