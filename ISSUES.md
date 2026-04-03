@@ -1,16 +1,16 @@
 # Audit Findings
 
-> **Last audit**: 2026-04-03 · base commit `503bac6` (`Port search fuzzy args and generic sloc output`) · refreshed for the Go-only tree · cross-checked against [OWASP ASVS 5.0](https://github.com/OWASP/ASVS/tree/master/5.0) and [grugbrain.dev](https://grugbrain.dev/)
+> **Last audit**: 2026-04-03 · base commit `30d3a9e` (`Split tools package hotspot`) · refreshed after the provider split · cross-checked against [OWASP ASVS 5.0](https://github.com/OWASP/ASVS/tree/master/5.0) and [grugbrain.dev](https://grugbrain.dev/)
 >
 > **Codebase**: `oy-cli` — Go local coding CLI with workspace-bound file tools, shell execution, outbound fetch, transcript/debug logging, session save/load, and 6 provider shims.
 >
 > | Metric | Value |
 > |---|---|
-> | Repo files counted by `git ls-files` text scan | 28 |
-> | Go files | 16 |
-> | Go LoC | 5,637 non-comment, non-empty lines |
-> | Total repo lines | 6,951 |
-> | Largest modules (total lines) | `internal/oy/providers/shims.go` 1,298; `internal/oy/cli/cli.go` 1,221; `internal/oy/cli/cli_test.go` 592; `internal/oy/runtime/runtime.go` 552 |
+> | Repo files counted by `git ls-files` text scan | 34 |
+> | Go files | 22 |
+> | Go LoC | 5,767 non-comment, non-empty lines |
+> | Total repo lines | 7,090 |
+> | Largest modules (total lines) | `internal/oy/cli/cli.go` 1,221; `internal/oy/cli/cli_test.go` 592; `internal/oy/runtime/runtime.go` 552; `internal/oy/tools/fs.go` 492 |
 > | Agent tools | 9 (`ask`, `bash`, `list`, `read`, `replace`, `search`, `sloc`, `todo`, `webfetch`) |
 > | Provider shims | 6 (`openai`, `codex`, `bedrock-mantle`, `copilot`, `opencode`, `opencode-go`) |
 >
@@ -72,17 +72,17 @@ Evidence: file permissions are hardened, but `runtime.DebugLog()` still serializ
 
 ---
 
-## M1 · `shims.go` remains the dominant complexity hotspot
+## M1 · Provider shim hotspot split; `protocol.go` is now the main provider complexity center
 
 | | |
 |---|---|
-| **Location** | `internal/oy/providers/shims.go` (1,298 total lines; 874 code) |
+| **Location** | `internal/oy/providers/protocol.go` (431 total lines; 295 code), `internal/oy/providers/codex.go` (243 total lines; 164 code), `internal/oy/providers/registry.go` (236 total lines; 153 code) |
 | **Category** | Complexity |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Split shim registry/auth loading, OpenAI transport helpers, and per-provider adapters before adding more provider behaviour. |
-| **Status** | Open |
+| **Recommendation** | Keep the provider package API flat, but continue trimming `protocol.go` if more request/response conversion or reasoning-fallback behavior lands there. |
+| **Status** | Improved |
 
-Evidence: one file still owns shim registration, credential/session loading, Codex/Copilot/OpenCode/OpenAI/Bedrock adapters, model fallback, error translation, and request/response conversion.
+Evidence: the old `internal/oy/providers/shims.go` monolith is gone; provider code is now split across focused files (`registry.go`, `openai.go`, `codex.go`, `copilot.go`, `bedrock.go`, `protocol.go`, plus the existing `files.go`, `http.go`, and `types.go`). The remaining provider complexity is concentrated in shared request/response conversion and reasoning-fallback helpers inside `protocol.go` instead of one catch-all file.
 
 ---
 
@@ -160,7 +160,7 @@ Evidence: `ToolRead()` calls `os.ReadFile(target)` and `splitLines()` before the
 
 | | |
 |---|---|
-| **Location** | `internal/oy/providers/shims.go:163-169`, `internal/oy/providers/shims.go:232-249`, `internal/oy/providers/shims.go:1134-1147` |
+| **Location** | `internal/oy/providers/registry.go:147-153`, `internal/oy/providers/registry.go:216-233`, `internal/oy/providers/protocol.go:313-326` |
 | **Category** | Complexity |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
 | **Recommendation** | Memoize shim availability for the process lifetime, parallelize model discovery, and surface degraded fallback paths more explicitly. |
@@ -195,6 +195,10 @@ Evidence: the workflow still pins `actions/checkout@v4`, `actions/setup-go@v5`, 
 
 ## Short audit log
 
+- 2026-04-03: refreshed after splitting the former `internal/oy/providers/shims.go` hotspot into focused provider files.
+  - Header updated from a tracked-file text scan: 22 Go files, 5,767 non-comment/non-empty Go lines, 7,090 total repo lines, 34 tracked text files.
+  - M1 moved from Open to Improved because the provider monolith is gone; remaining follow-up is concentrated in `protocol.go` plus a few smaller provider helpers.
+  - Repointed stale `shims.go` evidence to `registry.go`, `openai.go`, `codex.go`, `copilot.go`, `bedrock.go`, and `protocol.go`.
 - 2026-04-03: refreshed for the Go-only tree after retiring the in-tree Python baseline.
   - Header updated from a tracked-file text scan: 16 Go files, 5,637 non-comment/non-empty Go lines, 6,951 total repo lines, 28 tracked text files.
   - Repointed finding locations and evidence from the retired Python baseline to the current Go implementation.
