@@ -4,11 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"html"
 	"io/fs"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -25,6 +27,12 @@ type Spec struct {
 	Mutating    bool           `json:"mutating,omitempty"`
 }
 
+type RegisteredTool struct {
+	Spec
+	Required []string
+	Handler  func(state *State, args map[string]any) (any, error)
+}
+
 type State struct {
 	Root                    string
 	Interactive             bool
@@ -33,8 +41,180 @@ type State struct {
 	Todos                   []map[string]string
 }
 
+type HTTPRequester interface {
+	Request(method, url string, headers map[string]string, body []byte) (providers.ResponseAdapter, error)
+}
+
+type ValidationError struct{ Message string }
+
+func (e *ValidationError) Error() string { return e.Message }
+
+type PermissionError struct{ Message string }
+
+func (e *PermissionError) Error() string { return e.Message }
+
+var (
+	AskInputFunc    = func(_ string) string { return "" }
+	SelectInputFunc = func(_ string, choices []string) string {
+		if len(choices) == 0 {
+			return ""
+		}
+		return choices[0]
+	}
+	ApprovalPromptFunc = func(_ string, _ []string) string { return "deny" }
+	ToolSessionFactory = func(timeout time.Duration, followRedirects bool) HTTPRequester {
+		return providers.ToolSession(timeout, followRedirects)
+	}
+)
+
+var ToolRegistry = map[string]RegisteredTool{
+	"ask": {
+		Spec:     Spec{Name: "ask", Description: runtime.ToolDescription("ask"), Parameters: askSchema()},
+		Required: []string{"question"},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			return ToolAsk(state, mustString(args, "question"), optionalStringSlice(args, "choices"))
+		},
+	},
+	"todo": {
+		Spec:     Spec{Name: "todo", Description: runtime.ToolDescription("todo"), Parameters: todoSchema()},
+		Required: []string{"todos"},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			return ToolTodo(state, mustTodos(args["todos"]))
+		},
+	},
+	"bash": {
+		Spec:     Spec{Name: "bash", Description: runtime.ToolDescription("bash"), Parameters: bashSchema(), Mutating: true},
+		Required: []string{"command"},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			payload, _, err := ToolBash(*state, mustString(args, "command"), optionalInt(args, "timeout_seconds", 120))
+			return payload, err
+		},
+	},
+	"webfetch": {
+		Spec:     Spec{Name: "webfetch", Description: runtime.ToolDescription("webfetch"), Parameters: webfetchSchema()},
+		Required: []string{"url"},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			return ToolWebfetch(
+				*state,
+				mustString(args, "url"),
+				optionalString(args, "method", "GET"),
+				optionalStringMap(args, "headers"),
+				optionalBool(args, "follow_redirects", false),
+				optionalInt(args, "timeout_seconds", int(providers.DefaultWebfetchTimeoutSeconds/time.Second)),
+			)
+		},
+	},
+	"list": {
+		Spec: Spec{Name: "list", Description: runtime.ToolDescription("list"), Parameters: listSchema()},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			return ToolList(*state, optionalString(args, "path", "*"), optionalStringSlice(args, "exclude"), optionalInt(args, "limit", DefaultListLimit()))
+		},
+	},
+	"read": {
+		Spec:     Spec{Name: "read", Description: runtime.ToolDescription("read"), Parameters: readSchema()},
+		Required: []string{"path"},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			payload, _, err := ToolRead(*state, mustString(args, "path"), optionalInt(args, "offset", 1), optionalInt(args, "limit", DefaultListLimit()))
+			return payload, err
+		},
+	},
+	"search": {
+		Spec:     Spec{Name: "search", Description: runtime.ToolDescription("search"), Parameters: searchSchema()},
+		Required: []string{"pattern"},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			return ToolSearch(*state, mustString(args, "pattern"), optionalString(args, "path", "."), optionalStringSlice(args, "exclude"), optionalInt(args, "limit", 200))
+		},
+	},
+	"replace": {
+		Spec:     Spec{Name: "replace", Description: runtime.ToolDescription("replace"), Parameters: replaceSchema(), Mutating: true},
+		Required: []string{"pattern", "replacement"},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			return ToolReplace(*state, mustString(args, "pattern"), mustString(args, "replacement"), optionalString(args, "path", "."), optionalStringSlice(args, "exclude"), optionalInt(args, "limit", 200))
+		},
+	},
+	"sloc": {
+		Spec: Spec{Name: "sloc", Description: runtime.ToolDescription("sloc"), Parameters: slocSchema()},
+		Handler: func(state *State, args map[string]any) (any, error) {
+			return ToolSloc(*state, optionalString(args, "path", "."), optionalStringSlice(args, "exclude"), optionalInt(args, "limit", 200))
+		},
+	},
+}
+
 func DefaultListLimit() int {
 	return runtime.DefaultBudgets().DefaultLineLimit
+}
+
+func ToolSpecs(registry map[string]RegisteredTool) []map[string]any {
+	if registry == nil {
+		registry = ToolRegistry
+	}
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	items := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		tool := registry[name]
+		items = append(items, map[string]any{
+			"name":        tool.Name,
+			"description": tool.Description,
+			"parameters":  tool.Parameters,
+		})
+	}
+	return items
+}
+
+func SelectTools(include, exclude map[string]struct{}) map[string]RegisteredTool {
+	selected := map[string]RegisteredTool{}
+	for name, tool := range ToolRegistry {
+		if include != nil {
+			if _, ok := include[name]; !ok {
+				continue
+			}
+		}
+		if exclude != nil {
+			if _, ok := exclude[name]; ok {
+				continue
+			}
+		}
+		selected[name] = tool
+	}
+	return selected
+}
+
+func ActiveToolRegistry(interactive bool) map[string]RegisteredTool {
+	if interactive {
+		return SelectTools(nil, nil)
+	}
+	return SelectTools(nil, map[string]struct{}{"ask": {}})
+}
+
+func ReadOnlyToolRegistry() map[string]RegisteredTool {
+	return SelectTools(runtime.ReadOnlyTools, nil)
+}
+
+func InvokeTool(registry map[string]RegisteredTool, state *State, name string, args map[string]any) providers.ToolResult {
+	if args == nil {
+		args = map[string]any{}
+	}
+	tool, ok := registry[name]
+	if !ok {
+		return providers.NewToolResult(false, fmt.Sprintf("Tool '%s' unavailable", name))
+	}
+	for _, key := range tool.Required {
+		if value, ok := args[key]; !ok || isMissing(value) {
+			return providers.NewToolResult(false, errorPayload(&ValidationError{Message: fmt.Sprintf("missing required argument: %s", key)}))
+		}
+	}
+	if tool.Mutating && !approveMutatingTool(state, name, args) {
+		return providers.NewToolResult(false, errorPayload(&PermissionError{Message: fmt.Sprintf("tool %s denied", name)}))
+	}
+	payload, err := tool.Handler(state, args)
+	if err != nil {
+		return providers.NewToolResult(false, errorPayload(err))
+	}
+	return providers.NewToolResult(true, payload)
 }
 
 func CountText(count int, singular, plural string) string {
@@ -66,6 +246,16 @@ func ExistingToolTarget(root, path, tool string) (string, error) {
 	return target, nil
 }
 
+func ToolAsk(state *State, question string, choices []string) (string, error) {
+	if state == nil || !state.Interactive {
+		return "", fmt.Errorf("ask is only available in interactive mode")
+	}
+	if len(choices) == 0 {
+		return strings.TrimSpace(AskInputFunc(question)), nil
+	}
+	return strings.TrimSpace(SelectInputFunc(question, choices)), nil
+}
+
 func ToolTodo(state *State, todos []map[string]string) (map[string]any, error) {
 	for _, item := range todos {
 		status := item["status"]
@@ -74,10 +264,10 @@ func ToolTodo(state *State, todos []map[string]string) (map[string]any, error) {
 			item["status"] = status
 		}
 		if item["id"] == "" || item["task"] == "" {
-			return nil, fmt.Errorf("todo items require id and task")
+			return nil, &ValidationError{Message: "todo items require id and task"}
 		}
 		if status != "pending" && status != "in_progress" && status != "done" {
-			return nil, fmt.Errorf("invalid todo status: %s", status)
+			return nil, &ValidationError{Message: fmt.Sprintf("invalid todo status: %s", status)}
 		}
 	}
 	state.Todos = cloneTodos(todos)
@@ -159,6 +349,44 @@ func ValidateURLSafe(raw string) error {
 		}
 	}
 	return nil
+}
+
+func ToolWebfetch(state State, rawURL, method string, headers map[string]string, followRedirects bool, timeoutSeconds int) (map[string]any, error) {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		method = "GET"
+	}
+	if _, ok := map[string]struct{}{"GET": {}, "HEAD": {}, "OPTIONS": {}}[method]; !ok {
+		return nil, fmt.Errorf("Only GET, HEAD, OPTIONS methods are allowed, got: %q", method)
+	}
+	if err := ValidateURLSafe(rawURL); err != nil {
+		return nil, err
+	}
+	cleanHeaders, err := sanitizeRequestHeaders(headers)
+	if err != nil {
+		return nil, err
+	}
+	response, err := ToolSessionFactory(timeDurationSeconds(timeoutSeconds), followRedirects).Request(method, rawURL, cleanHeaders, nil)
+	if err != nil {
+		return map[string]any{
+			"method":     method,
+			"url":        rawURL,
+			"ok":         false,
+			"error_type": errorTypeName(err),
+			"message":    err.Error(),
+		}, nil
+	}
+	if !textResponse(response) {
+		return WebfetchPayload(response, method, nil, false, "binary"), nil
+	}
+	text := response.Text
+	format := "text"
+	if htmlResponse(response, text) {
+		text = htmlToMarkdown(text)
+		format = "markdown"
+	}
+	summarized, truncated := summarizeText(text, runtime.DefaultBudgets().ToolOutputTokens*8)
+	return WebfetchPayload(response, method, &summarized, truncated, format), nil
 }
 
 func WebfetchPayload(response providers.ResponseAdapter, method string, text *string, truncated bool, format string) map[string]any {
@@ -371,6 +599,9 @@ func ToolSloc(state State, path string, exclude []string, limit int) (map[string
 		}
 		return nil
 	})
+	sort.Slice(pythonFiles, func(i, j int) bool {
+		return pythonFiles[i]["code_count"].(int) > pythonFiles[j]["code_count"].(int)
+	})
 	topFiles := pythonFiles
 	truncated := false
 	if len(topFiles) > 20 {
@@ -395,6 +626,266 @@ func ToolSloc(state State, path string, exclude []string, limit int) (map[string
 		payload["exclude"] = exclude
 	}
 	return payload, nil
+}
+
+func askSchema() map[string]any {
+	return closedObject(
+		map[string]any{
+			"question": map[string]any{"type": "string"},
+			"choices":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+		[]string{"question"},
+	)
+}
+
+func todoSchema() map[string]any {
+	return closedObject(
+		map[string]any{
+			"todos": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]any{
+						"id":     map[string]any{"type": "string"},
+						"task":   map[string]any{"type": "string"},
+						"status": map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "done"}},
+					},
+					"required": []string{"id", "task"},
+				},
+			},
+		},
+		[]string{"todos"},
+	)
+}
+
+func bashSchema() map[string]any {
+	return closedObject(map[string]any{
+		"command":         map[string]any{"type": "string"},
+		"timeout_seconds": map[string]any{"type": "integer"},
+	}, []string{"command"})
+}
+
+func webfetchSchema() map[string]any {
+	return closedObject(map[string]any{
+		"url":              map[string]any{"type": "string"},
+		"method":           map[string]any{"type": "string"},
+		"headers":          map[string]any{"type": "object"},
+		"follow_redirects": map[string]any{"type": "boolean"},
+		"timeout_seconds":  map[string]any{"type": "integer"},
+	}, []string{"url"})
+}
+
+func listSchema() map[string]any {
+	return closedObject(map[string]any{
+		"path":    map[string]any{"type": "string"},
+		"exclude": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"limit":   map[string]any{"type": "integer"},
+	}, nil)
+}
+
+func readSchema() map[string]any {
+	return closedObject(map[string]any{
+		"path":   map[string]any{"type": "string"},
+		"offset": map[string]any{"type": "integer"},
+		"limit":  map[string]any{"type": "integer"},
+	}, []string{"path"})
+}
+
+func searchSchema() map[string]any {
+	return closedObject(map[string]any{
+		"pattern": map[string]any{"type": "string"},
+		"path":    map[string]any{"type": "string"},
+		"exclude": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"limit":   map[string]any{"type": "integer"},
+	}, []string{"pattern"})
+}
+
+func replaceSchema() map[string]any {
+	return closedObject(map[string]any{
+		"pattern":     map[string]any{"type": "string"},
+		"replacement": map[string]any{"type": "string"},
+		"path":        map[string]any{"type": "string"},
+		"exclude":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"limit":       map[string]any{"type": "integer"},
+	}, []string{"pattern", "replacement"})
+}
+
+func slocSchema() map[string]any {
+	return closedObject(map[string]any{
+		"path":    map[string]any{"type": "string"},
+		"exclude": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"limit":   map[string]any{"type": "integer"},
+	}, nil)
+}
+
+func closedObject(properties map[string]any, required []string) map[string]any {
+	payload := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           properties,
+	}
+	if len(required) > 0 {
+		payload["required"] = required
+	}
+	return payload
+}
+
+func approveMutatingTool(state *State, name string, args map[string]any) bool {
+	if state == nil || state.Yolo || !state.Interactive || state.ApproveAllMutatingTools {
+		return true
+	}
+	choice := strings.TrimSpace(ApprovalPromptFunc(toolApprovalPrompt(name, args), []string{"once", "all", "deny"}))
+	switch choice {
+	case "all":
+		state.ApproveAllMutatingTools = true
+		return true
+	case "once":
+		return true
+	default:
+		return false
+	}
+}
+
+func toolApprovalPrompt(name string, args map[string]any) string {
+	details := []string{}
+	for key, value := range args {
+		if isMissing(value) {
+			continue
+		}
+		details = append(details, fmt.Sprintf("%s: %s", strings.ReplaceAll(key, "_", "-"), runtime.Preview(value, 80)))
+	}
+	sort.Strings(details)
+	if len(details) == 0 {
+		return fmt.Sprintf("Approve `%s`?", name)
+	}
+	return fmt.Sprintf("Approve `%s` — %s?", name, strings.Join(details, ", "))
+}
+
+func errorPayload(err error) map[string]any {
+	return map[string]any{"error_type": errorTypeName(err), "message": err.Error()}
+}
+
+func errorTypeName(err error) string {
+	if err == nil {
+		return ""
+	}
+	name := reflect.TypeOf(err).String()
+	name = strings.TrimPrefix(name, "*")
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		name = name[idx+1:]
+	}
+	return name
+}
+
+func isMissing(value any) bool {
+	if value == nil {
+		return true
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text) == ""
+	}
+	return false
+}
+
+func mustString(args map[string]any, key string) string {
+	if value, ok := args[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func optionalString(args map[string]any, key, fallback string) string {
+	if value, ok := args[key].(string); ok && value != "" {
+		return value
+	}
+	return fallback
+}
+
+func optionalInt(args map[string]any, key string, fallback int) int {
+	switch value := args[key].(type) {
+	case int:
+		return value
+	case float64:
+		return int(value)
+	default:
+		return fallback
+	}
+}
+
+func optionalBool(args map[string]any, key string, fallback bool) bool {
+	if value, ok := args[key].(bool); ok {
+		return value
+	}
+	return fallback
+}
+
+func optionalStringSlice(args map[string]any, key string) []string {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return nil
+	}
+	switch items := value.(type) {
+	case []string:
+		return append([]string(nil), items...)
+	case []any:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func optionalStringMap(args map[string]any, key string) map[string]string {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return nil
+	}
+	out := map[string]string{}
+	switch items := value.(type) {
+	case map[string]string:
+		for k, v := range items {
+			out[k] = v
+		}
+	case map[string]any:
+		for k, v := range items {
+			if text, ok := v.(string); ok {
+				out[k] = text
+			}
+		}
+	}
+	return out
+}
+
+func mustTodos(value any) []map[string]string {
+	items, _ := value.([]map[string]string)
+	if items != nil {
+		return cloneTodos(items)
+	}
+	rows, _ := value.([]any)
+	out := make([]map[string]string, 0, len(rows))
+	for _, row := range rows {
+		entry := map[string]string{}
+		switch item := row.(type) {
+		case map[string]string:
+			for k, v := range item {
+				entry[k] = v
+			}
+		case map[string]any:
+			for k, v := range item {
+				if text, ok := v.(string); ok {
+					entry[k] = text
+				}
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func cloneTodos(todos []map[string]string) []map[string]string {
@@ -461,6 +952,79 @@ func walkFiles(root string, fn func(rel, full string, d fs.DirEntry) error) erro
 	})
 }
 
+func sanitizeRequestHeaders(headers map[string]string) (map[string]string, error) {
+	if len(headers) == 0 {
+		return map[string]string{}, nil
+	}
+	blocked := map[string]struct{}{
+		"authorization": {}, "cookie": {}, "host": {}, "proxy-authorization": {}, "x-forwarded-for": {}, "x-real-ip": {},
+	}
+	clean := map[string]string{}
+	for key, value := range headers {
+		if _, ok := blocked[strings.ToLower(key)]; ok {
+			return nil, fmt.Errorf("Header %q is not allowed in webfetch requests", key)
+		}
+		if strings.Contains(value, "\n") || strings.Contains(value, "\r") {
+			return nil, fmt.Errorf("Header value for %q contains invalid CRLF characters", key)
+		}
+		clean[key] = value
+	}
+	return clean, nil
+}
+
+func textResponse(response providers.ResponseAdapter) bool {
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Headers["content-type"], ";")[0]))
+	if contentType == "" || strings.HasPrefix(contentType, "text/") {
+		return true
+	}
+	if strings.HasSuffix(contentType, "+json") || strings.HasSuffix(contentType, "+xml") {
+		return true
+	}
+	switch contentType {
+	case "application/json", "application/xml", "application/javascript", "application/x-javascript", "application/x-www-form-urlencoded", "image/svg+xml", "text/html", "application/xhtml+xml":
+		return true
+	default:
+		return false
+	}
+}
+
+func htmlResponse(response providers.ResponseAdapter, text string) bool {
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Headers["content-type"], ";")[0]))
+	if contentType == "text/html" || contentType == "application/xhtml+xml" {
+		return true
+	}
+	trimmed := strings.ToLower(strings.TrimSpace(text))
+	return strings.HasPrefix(trimmed, "<!doctype html") || strings.HasPrefix(trimmed, "<html")
+}
+
+func htmlToMarkdown(text string) string {
+	replacements := []struct{ pattern, replacement string }{
+		{`(?is)<h1[^>]*>(.*?)</h1>`, "$1\n=====\n\n"},
+		{`(?is)<h2[^>]*>(.*?)</h2>`, "$1\n-----\n\n"},
+		{`(?is)<a[^>]*href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>`, `[$2]($1)`},
+		{`(?is)<p[^>]*>(.*?)</p>`, "$1\n\n"},
+		{`(?is)<br\s*/?>`, "\n"},
+	}
+	out := text
+	for _, item := range replacements {
+		out = regexp.MustCompile(item.pattern).ReplaceAllString(out, item.replacement)
+	}
+	out = regexp.MustCompile(`(?is)<[^>]+>`).ReplaceAllString(out, "")
+	out = html.UnescapeString(out)
+	out = regexp.MustCompile(`\n{3,}`).ReplaceAllString(out, "\n\n")
+	return strings.TrimSpace(out)
+}
+
+func summarizeText(text string, limit int) (string, bool) {
+	if limit <= 0 || len(text) <= limit {
+		return text, false
+	}
+	if limit <= 3 {
+		return text[:limit], true
+	}
+	return text[:limit-3] + "...", true
+}
+
 func webfetchHeaders(headers map[string]string) map[string]string {
 	out := map[string]string{}
 	for key, value := range headers {
@@ -498,6 +1062,7 @@ func min(a, b int) int {
 	}
 	return b
 }
+
 func max(a, b int) int {
 	if a > b {
 		return a

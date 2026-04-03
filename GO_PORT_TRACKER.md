@@ -98,3 +98,4 @@ Approved candidates:
 - 2026-04-03: Ported embedded prompt loading, model config helpers, shim registry plumbing, JSON/file helpers, HTTP response utilities, and added Go parity tests for runtime/providers.
 - 2026-04-03: Ported Go transcript primitives and local tool foundations (`todo`, `bash`, `list`, `read`, `search`, `replace`, `sloc`, web payload helpers) with focused Go tests.
 - 2026-04-03: Ported Go CLI/session foundations for command normalization, session resolution, Renovate config bootstrap, session save/load, and chat command handling with focused Go CLI tests.
+- 2026-04-03: Added Go tool registry/spec selection, mutating approval flow, `ask`/`todo` invocation plumbing, and real `webfetch` request handling with focused parity tests.
