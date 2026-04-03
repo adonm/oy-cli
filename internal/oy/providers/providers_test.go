@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -317,6 +318,99 @@ func TestListModelsErrorHandling(t *testing.T) {
 	}
 	if _, err := ListModelsForShim("gamma", "/tmp/work", false); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestLoadCodexModelListPrefersCacheAndDedupes(t *testing.T) {
+	tmp := t.TempDir()
+	oldAuth, oldCache := CodexAuthPath, CodexModelsCachePath
+	defer func() { CodexAuthPath, CodexModelsCachePath = oldAuth, oldCache }()
+	CodexAuthPath = filepath.Join(tmp, "auth.json")
+	CodexModelsCachePath = filepath.Join(tmp, "models_cache.json")
+	if err := os.WriteFile(CodexAuthPath, []byte(`{"model":"fallback"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(CodexModelsCachePath, []byte(`{"models":[{"id":"zeta"},{"name":"alpha"},{"slug":"alpha"},{"model_id":"beta"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadCodexModelList(); !reflect.DeepEqual(got, []string{"alpha", "beta", "zeta"}) {
+		t.Fatalf("unexpected model cache list: %#v", got)
+	}
+}
+
+func TestGetCodexChatGPTSessionRefreshesExpiredAccessToken(t *testing.T) {
+	tmp := t.TempDir()
+	oldAuth, oldClientID, oldTokenURL := CodexAuthPath, codexOAuthClientIDDefault, CodexOAuthTokenURL
+	defer func() {
+		CodexAuthPath, codexOAuthClientIDDefault, CodexOAuthTokenURL = oldAuth, oldClientID, oldTokenURL
+	}()
+	CodexAuthPath = filepath.Join(tmp, "auth.json")
+	codexOAuthClientIDDefault = "client-test"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct := r.Header.Get("Content-Type"); !strings.Contains(ct, "application/x-www-form-urlencoded") {
+			t.Fatalf("unexpected content type: %q", ct)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "refresh-1" || r.Form.Get("client_id") != "client-test" {
+			t.Fatalf("unexpected refresh form: %#v", r.Form)
+		}
+		_, _ = w.Write([]byte(`{"access_token":"header.` + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":4102444800}`)) + `.sig","refresh_token":"refresh-2","id_token":"id-2"}`))
+	}))
+	defer server.Close()
+	CodexOAuthTokenURL = server.URL
+	if err := os.WriteFile(CodexAuthPath, []byte(`{"tokens":{"access_token":"header.`+base64.RawURLEncoding.EncodeToString([]byte(`{"exp":1}`))+`.sig","refresh_token":"refresh-1","account_id":"acct-1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := GetCodexChatGPTSession(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session["refresh_token"] != "refresh-2" || session["account_id"] != "acct-1" || !strings.Contains(session["access_token"], ".") {
+		t.Fatalf("unexpected refreshed session: %#v", session)
+	}
+	stored := LoadCodexAuth()
+	tokens, _ := stored["tokens"].(map[string]any)
+	if tokens["refresh_token"] != "refresh-2" || stored["last_refresh"] == nil {
+		t.Fatalf("expected saved refresh, got %#v", stored)
+	}
+}
+
+func TestCopilotCompletionClientRoutesResponsesAndChat(t *testing.T) {
+	requests := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		switch r.URL.Path {
+		case "/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"chat-only","capabilities":{"type":"chat"},"supported_endpoints":["/chat/completions"]},{"id":"resp-capable","capabilities":{"type":"chat"},"supported_endpoints":["/chat/completions","/responses"]}]}`))
+		case "/chat/completions":
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"chat-done"}}]}`))
+		case "/responses":
+			_, _ = w.Write([]byte(`{"output":[{"type":"message","role":"assistant","content":[{"text":"resp-done"}]}]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	oldBase := copilotBaseURL
+	defer func() { copilotBaseURL = oldBase }()
+	copilotBaseURL = server.URL
+	client := CopilotCompletionClient("token")
+	models, err := client.ListModels()
+	if err != nil || !reflect.DeepEqual(models, []string{"chat-only", "resp-capable"}) {
+		t.Fatalf("unexpected copilot models: %#v %v", models, err)
+	}
+	message, err := client.ChatCompletion("resp-capable", nil, nil, "auto")
+	if err != nil || message.Content != "resp-done" {
+		t.Fatalf("unexpected responses-routed result: %#v %v", message, err)
+	}
+	message, err = client.ChatCompletion("chat-only", nil, nil, "auto")
+	if err != nil || message.Content != "chat-done" {
+		t.Fatalf("unexpected chat-routed result: %#v %v", message, err)
+	}
+	if !reflect.DeepEqual(requests, []string{"/models", "/models", "/responses", "/chat/completions"}) {
+		t.Fatalf("unexpected request sequence: %#v", requests)
 	}
 }
 

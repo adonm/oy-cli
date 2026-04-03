@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	CodexAuthPath    = filepath.Join(userHomeDir(), ".codex", "auth.json")
-	OpencodeAuthPath = filepath.Join(userHomeDir(), ".local", "share", "opencode", "auth.json")
+	CodexAuthPath        = filepath.Join(userHomeDir(), ".codex", "auth.json")
+	CodexModelsCachePath = filepath.Join(userHomeDir(), ".codex", "models_cache.json")
+	OpencodeAuthPath     = filepath.Join(userHomeDir(), ".local", "share", "opencode", "auth.json")
 )
 
 type CommandResult struct {

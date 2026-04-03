@@ -51,14 +51,14 @@ Approved candidates:
 
 ### Providers and auth
 
-- [ ] OpenAI-compatible Responses API
-- [ ] OpenAI-compatible Chat Completions API
-- [ ] Codex auth and model handling
-- [ ] Bedrock Mantle SigV4 and model loading
-- [ ] Copilot auth/model detection
-- [ ] OpenCode Zen
-- [ ] OpenCode Go
-- [ ] retry and reasoning fallback behavior
+- [x] OpenAI-compatible Responses API
+- [x] OpenAI-compatible Chat Completions API
+- [x] Codex auth and model handling
+- [x] Bedrock Mantle SigV4 and model loading
+- [x] Copilot auth/model detection
+- [x] OpenCode Zen
+- [x] OpenCode Go
+- [x] retry and reasoning fallback behavior
 
 ### Tools
 
@@ -104,3 +104,4 @@ Approved candidates:
 - 2026-04-03: Ported working Go provider clients for OpenAI Responses, Chat Completions, and Bedrock Mantle model/chat flows, including reasoning fallback and provider parity tests.
 - 2026-04-03: Ported real Go one-shot CLI execution for `run`, `ralph`, and `audit`, wired through the Go agent/providers stack with focused CLI parity tests.
 - 2026-04-03: Ported the Go interactive chat/session loop with `/tokens`, `/model`, `/ask`, `/audit`, `/save`, `/load`, `/undo`, `/clear`, and `/quit` handling, plus model/session listing helpers and focused CLI parity tests.
+- 2026-04-03: Ported the remaining Go provider/auth parity slice: Codex model-cache/session refresh handling, Codex ChatGPT fallback client, Copilot model classification/routing, OpenCode endpoint alignment, and focused provider parity tests.

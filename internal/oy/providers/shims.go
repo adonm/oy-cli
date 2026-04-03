@@ -28,6 +28,18 @@ type ReasoningCache struct {
 
 var reasoningSupport = ReasoningCache{items: map[string]bool{}}
 
+var (
+	CodexDefaultModel         = "gpt-5-codex"
+	CodexChatGPTBaseURL       = "https://chatgpt.com/backend-api/codex"
+	CodexOAuthTokenURL        = "https://auth.openai.com/oauth/token"
+	OpencodeZenURL            = "https://opencode.ai/zen/v1"
+	OpencodeGoURL             = "https://opencode.ai/zen/go/v1"
+	copilotBaseURL            = "https://api.githubcopilot.com"
+	copilotIntegrationID      = "copilot-developer-cli"
+	copilotEditorVersion      = "copilot-developer-cli/1.0.6"
+	codexOAuthClientIDDefault = "app_EMoamEEZ73f0CkXaXp7hrann"
+)
+
 var ShimSpecs = map[string]ShimSpec{
 	ShimOpenAI: {
 		EnsureEnv: func(string) error {
@@ -41,18 +53,18 @@ var ShimSpecs = map[string]ShimSpec{
 	},
 	ShimCodex: {
 		EnsureEnv: func(string) error { _, err := LoadCodexSession(); return err },
-		BuildClient: func(cwd string) (CompletionClient, error) {
+		BuildClient: func(string) (CompletionClient, error) {
 			auth := LoadCodexAuth()
 			apiKey, _ := auth["OPENAI_API_KEY"].(string)
-			if strings.TrimSpace(apiKey) == "" {
-				return nil, fmt.Errorf("Codex ChatGPT session client not implemented yet")
+			if strings.TrimSpace(apiKey) != "" {
+				return OpenAIResponsesClient(apiKey, strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), loadCodexModelList, []string{CodexDefaultModel}, 3), nil
 			}
-			return OpenAIResponsesClient(apiKey, strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), loadCodexModelList, []string{"gpt-5"}, 3), nil
+			return CodexChatGPTClient(), nil
 		},
 		ListModels: func(string) ([]string, error) {
 			items := loadCodexModelList()
 			if len(items) == 0 {
-				return []string{"gpt-5"}, nil
+				return []string{CodexDefaultModel}, nil
 			}
 			return items, nil
 		},
@@ -77,9 +89,17 @@ var ShimSpecs = map[string]ShimSpec{
 			return nil
 		},
 		BuildClient: func(string) (CompletionClient, error) {
-			return nil, fmt.Errorf("copilot client not implemented yet")
+			if token := GetGitHubToken(); token != "" {
+				return CopilotCompletionClient(token), nil
+			}
+			return nil, fmt.Errorf("No GitHub token found")
 		},
-		ListModels: func(string) ([]string, error) { return nil, nil },
+		ListModels: func(string) ([]string, error) {
+			if token := GetGitHubToken(); token != "" {
+				return CopilotCompletionClient(token).ListModels()
+			}
+			return nil, fmt.Errorf("No GitHub token found")
+		},
 	},
 	ShimOpenCode: {
 		EnsureEnv: func(string) error {
@@ -89,9 +109,11 @@ var ShimSpecs = map[string]ShimSpec{
 			return nil
 		},
 		BuildClient: func(string) (CompletionClient, error) {
-			return ChatCompletionsClient(OpencodeAPIKey("opencode"), "https://api.opencode.ai/v1", nil, 3), nil
+			return ChatCompletionsClient(OpencodeAPIKey("opencode"), OpencodeZenURL, nil, 3), nil
 		},
-		ListModels: func(string) ([]string, error) { return nil, nil },
+		ListModels: func(string) ([]string, error) {
+			return ChatCompletionsClient(OpencodeAPIKey("opencode"), OpencodeZenURL, nil, 3).ListModels()
+		},
 	},
 	ShimOpenCodeGo: {
 		EnsureEnv: func(string) error {
@@ -101,9 +123,11 @@ var ShimSpecs = map[string]ShimSpec{
 			return nil
 		},
 		BuildClient: func(string) (CompletionClient, error) {
-			return ChatCompletionsClient(OpencodeAPIKey("opencode-go"), "https://api.go.opencode.ai/v1", nil, 3), nil
+			return ChatCompletionsClient(OpencodeAPIKey("opencode-go"), OpencodeGoURL, nil, 3), nil
 		},
-		ListModels: func(string) ([]string, error) { return nil, nil },
+		ListModels: func(string) ([]string, error) {
+			return ChatCompletionsClient(OpencodeAPIKey("opencode-go"), OpencodeGoURL, nil, 3).ListModels()
+		},
 	},
 }
 
@@ -235,13 +259,26 @@ func OpenAIClientFromEnv(maxRetries int) (CompletionClient, error) {
 	return OpenAIResponsesClient(apiKey, strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), nil, nil, maxRetries), nil
 }
 
+func openAIListModelsFromEnv() ([]string, error) {
+	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if apiKey == "" {
+		return nil, fmt.Errorf("No OpenAI credentials found")
+	}
+	client := NewOpenAIHTTPClient(apiKey, strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), nil, ShortHTTPTimeout)
+	return client.ListModelIDs()
+}
+
 func loadCodexModelList() []string {
-	auth := LoadCodexAuth()
-	models := extractModelIDs(auth["models"], "id", "slug", "name")
+	data := loadJSONObject(CodexModelsCachePath)
+	models := extractModelIDs(data["models"], "id", "name", "slug", "model", "model_id")
 	if len(models) == 0 {
-		for _, key := range []string{"model", "default_model"} {
-			if value, ok := auth[key].(string); ok && strings.TrimSpace(value) != "" {
-				models = append(models, value)
+		auth := LoadCodexAuth()
+		models = extractModelIDs(auth["models"], "id", "slug", "name")
+		if len(models) == 0 {
+			for _, key := range []string{"model", "default_model"} {
+				if value, ok := auth[key].(string); ok && strings.TrimSpace(value) != "" {
+					models = append(models, value)
+				}
 			}
 		}
 	}
@@ -249,7 +286,7 @@ func loadCodexModelList() []string {
 		return nil
 	}
 	seen := map[string]struct{}{}
-	out := []string{}
+	out := make([]string, 0, len(models))
 	for _, item := range models {
 		if _, ok := seen[item]; ok {
 			continue
@@ -261,13 +298,317 @@ func loadCodexModelList() []string {
 	return out
 }
 
-func openAIListModelsFromEnv() ([]string, error) {
-	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
-	if apiKey == "" {
-		return nil, fmt.Errorf("No OpenAI credentials found")
+func codexOAuthClientID() string {
+	if value := strings.TrimSpace(os.Getenv("CODEX_OAUTH_CLIENT_ID")); value != "" {
+		return value
 	}
-	client := NewOpenAIHTTPClient(apiKey, strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), nil, ShortHTTPTimeout)
-	return client.ListModelIDs()
+	return codexOAuthClientIDDefault
+}
+
+func postFormJSON(rawURL string, data map[string]string, errorPrefix string) (map[string]any, error) {
+	form := url.Values{}
+	for key, value := range data {
+		form.Set(key, value)
+	}
+	body := []byte(form.Encode())
+	response, err := ToolSession(ShortHTTPTimeout, false).Request(http.MethodPost, rawURL, map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, body)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", errorPrefix, err)
+	}
+	if err := ResponseRaiseForStatus(response); err != nil {
+		return nil, fmt.Errorf("%s: %v", errorPrefix, err)
+	}
+	return responseJSONObject(response, errorPrefix+": invalid JSON response")
+}
+
+func codexTokens(auth map[string]any) (map[string]string, error) {
+	tokens, _ := auth["tokens"].(map[string]any)
+	if tokens == nil {
+		return nil, fmt.Errorf("Codex CLI auth file does not contain session tokens")
+	}
+	result := map[string]string{}
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "account_id"} {
+		if value, ok := tokens[key].(string); ok && strings.TrimSpace(value) != "" {
+			result[key] = value
+		}
+	}
+	return result, nil
+}
+
+func refreshCodexChatGPTSession(refreshToken string) (map[string]any, error) {
+	data, err := postFormJSON(CodexOAuthTokenURL, map[string]string{
+		"grant_type":    "refresh_token",
+		"refresh_token": refreshToken,
+		"client_id":     codexOAuthClientID(),
+	}, "Codex token refresh failed")
+	if err != nil {
+		return nil, err
+	}
+	accessToken, _ := data["access_token"].(string)
+	if strings.TrimSpace(accessToken) == "" {
+		return nil, fmt.Errorf("Codex token refresh did not return an access_token")
+	}
+	auth := LoadCodexAuth()
+	tokens, _ := auth["tokens"].(map[string]any)
+	if tokens == nil {
+		tokens = map[string]any{}
+	}
+	tokens["access_token"] = accessToken
+	for _, key := range []string{"refresh_token", "id_token"} {
+		if value, ok := data[key].(string); ok && strings.TrimSpace(value) != "" {
+			tokens[key] = value
+		}
+	}
+	auth["tokens"] = tokens
+	auth["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+	SaveJSON(CodexAuthPath, auth)
+	return auth, nil
+}
+
+func GetCodexChatGPTSession(forceRefresh bool) (map[string]string, error) {
+	auth, err := LoadCodexSession()
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := codexTokens(auth)
+	if err != nil {
+		return nil, err
+	}
+	accessToken := tokens["access_token"]
+	refreshToken := tokens["refresh_token"]
+	accountID := tokens["account_id"]
+	if refreshToken == "" || accountID == "" {
+		return nil, fmt.Errorf("Codex CLI auth file does not contain a usable ChatGPT session.")
+	}
+	expiry := DecodeJWTExpiryEpoch(accessToken)
+	if forceRefresh || accessToken == "" || (expiry != nil && *expiry <= float64(time.Now().UTC().Unix()+60)) {
+		refreshed, err := refreshCodexChatGPTSession(refreshToken)
+		if err != nil {
+			return nil, err
+		}
+		tokens, err = codexTokens(refreshed)
+		if err != nil {
+			return nil, err
+		}
+		accessToken = tokens["access_token"]
+		accountID = tokens["account_id"]
+		if value := tokens["refresh_token"]; value != "" {
+			refreshToken = value
+		}
+	}
+	if accessToken == "" || accountID == "" {
+		return nil, fmt.Errorf("Codex ChatGPT session is missing access token or account ID")
+	}
+	return map[string]string{"access_token": accessToken, "refresh_token": refreshToken, "account_id": accountID}, nil
+}
+
+func httpErrorMessage(prefix string, response ResponseAdapter) string {
+	payload, err := ResponseJSON(response)
+	if err != nil {
+		body := strings.TrimSpace(response.Text)
+		if len(body) > 200 {
+			body = body[:200]
+		}
+		if body == "" {
+			body = response.ReasonPhrase
+		}
+		return fmt.Sprintf("%s error %d: %s", prefix, response.StatusCode, body)
+	}
+	detail := any(payload)
+	if data, ok := payload.(map[string]any); ok {
+		if value := data["error"]; value != nil {
+			detail = value
+		} else if value := data["detail"]; value != nil {
+			detail = value
+		}
+	}
+	switch value := detail.(type) {
+	case map[string]any:
+		if message, ok := value["message"].(string); ok && message != "" {
+			return fmt.Sprintf("%s error %d: %s", prefix, response.StatusCode, message)
+		}
+		if code, ok := value["code"].(string); ok && code != "" {
+			return fmt.Sprintf("%s error %d: %s", prefix, response.StatusCode, code)
+		}
+		encoded, _ := json.Marshal(value)
+		return fmt.Sprintf("%s error %d: %s", prefix, response.StatusCode, string(encoded))
+	case string:
+		return fmt.Sprintf("%s error %d: %s", prefix, response.StatusCode, value)
+	default:
+		encoded, _ := json.Marshal(value)
+		return fmt.Sprintf("%s error %d: %s", prefix, response.StatusCode, string(encoded))
+	}
+}
+
+func hasMeaningfulAssistantOutput(message ChatMessage) bool {
+	return len(message.ToolCalls) > 0 || !isBlankChatValue(message.Content)
+}
+
+func CopilotDefaultHeaders() map[string]string {
+	return map[string]string{
+		"Copilot-Integration-Id": copilotIntegrationID,
+		"Editor-Version":         copilotEditorVersion,
+	}
+}
+
+func FetchCopilotModelsRaw(token string) ([]map[string]any, error) {
+	client := NewOpenAIHTTPClient(token, copilotBaseURL, CopilotDefaultHeaders(), ShortHTTPTimeout)
+	response, err := client.request("GET", "/models", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	data, err := responseJSONObject(response, "Copilot models: invalid JSON response")
+	if err != nil {
+		return nil, err
+	}
+	rows, _ := data["data"].([]any)
+	out := make([]map[string]any, 0, len(rows))
+	for _, item := range rows {
+		if row, ok := item.(map[string]any); ok {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func ClassifyCopilotModels(token string) ([]string, map[string]struct{}, error) {
+	raw, err := FetchCopilotModelsRaw(token)
+	if err != nil {
+		return nil, nil, err
+	}
+	chatIDs := []string{}
+	responsesIDs := map[string]struct{}{}
+	for _, model := range raw {
+		modelID, _ := model["id"].(string)
+		if strings.TrimSpace(modelID) == "" {
+			continue
+		}
+		if caps, _ := model["capabilities"].(map[string]any); caps != nil {
+			if kind, _ := caps["type"].(string); kind == "chat" {
+				chatIDs = append(chatIDs, modelID)
+			}
+		}
+		for _, endpoint := range asSlice(model["supported_endpoints"]) {
+			if value, _ := endpoint.(string); value == "/responses" {
+				responsesIDs[modelID] = struct{}{}
+			}
+		}
+	}
+	sort.Strings(chatIDs)
+	return chatIDs, responsesIDs, nil
+}
+
+type funcClient struct {
+	chatCompletion func(model string, messages []ChatMessage, tools []map[string]any, toolChoice string) (ChatMessage, error)
+	listModels     func() ([]string, error)
+}
+
+func (c *funcClient) ChatCompletion(model string, messages []ChatMessage, tools []map[string]any, toolChoice string) (ChatMessage, error) {
+	return c.chatCompletion(model, messages, tools, toolChoice)
+}
+
+func (c *funcClient) ListModels() ([]string, error) {
+	return c.listModels()
+}
+
+func CopilotCompletionClient(token string) CompletionClient {
+	client := NewOpenAIHTTPClient(token, copilotBaseURL, CopilotDefaultHeaders(), DefaultHTTPTimeout)
+	client.MaxRetries = 0
+	responsesModels := map[string]struct{}{}
+	if _, supported, err := ClassifyCopilotModels(token); err == nil {
+		responsesModels = supported
+	}
+	responsesInner := &responsesClient{
+		create: func(payload map[string]any) (map[string]any, error) {
+			return client.requestJSON("POST", "/responses", payload, nil)
+		},
+		list:     client.ListModelIDs,
+		fallback: nil,
+		defaults: nil,
+	}
+	chatInner := &chatClient{
+		create: func(payload map[string]any) (map[string]any, error) {
+			return client.requestJSON("POST", "/chat/completions", payload, nil)
+		},
+		list: client.ListModelIDs,
+	}
+	return &funcClient{
+		chatCompletion: func(model string, messages []ChatMessage, tools []map[string]any, toolChoice string) (ChatMessage, error) {
+			if _, ok := responsesModels[model]; ok {
+				return responsesInner.ChatCompletion(model, messages, tools, toolChoice)
+			}
+			return chatInner.ChatCompletion(model, messages, tools, toolChoice)
+		},
+		listModels: func() ([]string, error) {
+			if chatIDs, _, err := ClassifyCopilotModels(token); err == nil {
+				return chatIDs, nil
+			}
+			return listModels(client.ListModelIDs, nil, []string{})
+		},
+	}
+}
+
+func CodexChatGPTClient() CompletionClient {
+	client := NewOpenAIHTTPClient("", CodexChatGPTBaseURL, nil, DefaultHTTPTimeout)
+	return &funcClient{
+		chatCompletion: func(model string, messages []ChatMessage, tools []map[string]any, toolChoice string) (ChatMessage, error) {
+			payload := responsesPayload(model, messages, tools, toolChoice)
+			var lastDecodeErr error
+			for attempt := 0; attempt < 2; attempt++ {
+				session, err := GetCodexChatGPTSession(attempt > 0)
+				if err != nil {
+					return ChatMessage{}, err
+				}
+				response, err := client.request("POST", "/responses", mustJSONBody(payload), map[string]string{
+					"Authorization":      "Bearer " + session["access_token"],
+					"ChatGPT-Account-Id": session["account_id"],
+				})
+				if err != nil {
+					if _, ok := err.(*AuthenticationError); ok && attempt == 0 {
+						continue
+					}
+					statusErr := &APIStatusError{}
+					if AsAPIStatusError(err, &statusErr) {
+						return ChatMessage{}, fmt.Errorf("%s", httpErrorMessage("Codex ChatGPT", statusErr.Response))
+					}
+					return ChatMessage{}, fmt.Errorf("Codex ChatGPT request failed: %v", err)
+				}
+				data, err := responseJSONObject(response, "Codex ChatGPT: invalid JSON response")
+				if err != nil {
+					lastDecodeErr = err
+					continue
+				}
+				message, err := decodeResponsesOutput(data)
+				if err != nil {
+					lastDecodeErr = err
+					continue
+				}
+				if hasMeaningfulAssistantOutput(message) {
+					return message, nil
+				}
+				lastDecodeErr = fmt.Errorf("malformed model output: empty assistant message with no tool calls")
+			}
+			if lastDecodeErr != nil {
+				return ChatMessage{}, lastDecodeErr
+			}
+			return ChatMessage{}, fmt.Errorf("Codex ChatGPT authentication failed after token refresh")
+		},
+		listModels: func() ([]string, error) {
+			items := loadCodexModelList()
+			if len(items) == 0 {
+				return []string{CodexDefaultModel}, nil
+			}
+			return items, nil
+		},
+	}
+}
+
+func mustJSONBody(value any) []byte {
+	data, err := encodeJSONBody(value)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 type OpenAIHTTPClient struct {
