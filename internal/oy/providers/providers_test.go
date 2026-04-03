@@ -1,10 +1,15 @@
 package providers
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 type stubClient struct {
@@ -60,6 +65,188 @@ func TestResponseRaiseForStatus(t *testing.T) {
 	}
 	if err.Error() != "bad token" {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestBedrockMantleRequestHeaders(t *testing.T) {
+	headers, err := BedrockRequestHeaders(
+		map[string]string{"access_key": "AKIDEXAMPLE", "secret_key": "wJalrXUtnFEMI/I/K7MDENG+bPxRfiCYEXAMPLEKEY", "session_token": "TOKEN"},
+		"ap-southeast-2",
+		"POST",
+		"https://bedrock-mantle.ap-southeast-2.api.aws/v1/chat/completions",
+		[]byte(`{"model":"zai.glm-4.6"}`),
+		map[string]string{"Content-Type": "application/json"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headers["Content-Type"] != "application/json" || headers["Host"] != "bedrock-mantle.ap-southeast-2.api.aws" || headers["X-Amz-Security-Token"] != "TOKEN" || !strings.Contains(headers["Authorization"], "Credential=AKIDEXAMPLE/") || !strings.Contains(headers["Authorization"], "/ap-southeast-2/bedrock-mantle/aws4_request") {
+		t.Fatalf("unexpected headers: %#v", headers)
+	}
+}
+
+func TestDecodeToolCallArgumentsAndOutputs(t *testing.T) {
+	encoded, err := json.MarshalIndent(map[string]any{"count": 2}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeToolCallArguments(encoded)
+	if err == nil || decoded != nil {
+		t.Fatalf("expected non-string decode failure, got %#v %v", decoded, err)
+	}
+	parsed, err := decodeToolCallArguments(`"{\"count\":2}"`)
+	if err != nil || !reflect.DeepEqual(parsed, map[string]any{"count": float64(2)}) {
+		t.Fatalf("unexpected parsed args: %#v %v", parsed, err)
+	}
+	parsed, err = decodeToolCallArguments(`{"ok":true}{"ok":true}`)
+	if err != nil || !reflect.DeepEqual(parsed, map[string]any{"ok": true}) {
+		t.Fatalf("unexpected duplicated parsed args: %#v %v", parsed, err)
+	}
+	result := NewToolResult(false, map[string]any{"tool": "read", "error_type": "ValueError", "message": "read path does not exist: missing.txt"})
+	value := toolOutputValue(result)
+	if !reflect.DeepEqual(value, map[string]any{"ok": false, "tool": "read", "error_type": "ValueError", "message": "read path does not exist: missing.txt"}) {
+		t.Fatalf("unexpected tool output value: %#v", value)
+	}
+	openAITool := openAIChatMessage(ToolMessage("call_1", "read", result))
+	if !strings.Contains(openAITool["content"].(string), "ok: false") || !strings.Contains(openAITool["content"].(string), "read path does not exist: missing.txt") {
+		t.Fatalf("unexpected tool message payload: %#v", openAITool)
+	}
+	responsesInput := responsesInputFromMessages([]ChatMessage{ToolMessage("call_1", "read", result)})
+	if len(responsesInput) != 1 || responsesInput[0]["type"].(string) != "function_call_output" || !strings.Contains(responsesInput[0]["output"].(string), "ok: false") {
+		t.Fatalf("unexpected responses input: %#v", responsesInput)
+	}
+}
+
+func TestResponsesAndChatDecoding(t *testing.T) {
+	decoded, err := decodeResponsesOutput(map[string]any{
+		"output": []any{
+			map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"text": "hello"}, map[string]any{"refusal": "nope"}, map[string]any{"text": "   "}}},
+			map[string]any{"type": "function_call", "call_id": "call_1", "name": "echo", "arguments": `{"value":"x"}`},
+		},
+	})
+	if err != nil || !reflect.DeepEqual(decoded, AssistantMessage("hello\n\nnope", []ToolCall{ToolCallMessage("call_1", "echo", map[string]any{"value": "x"})})) {
+		t.Fatalf("unexpected responses decoding: %#v %v", decoded, err)
+	}
+	chatMessage, err := chatCompletionToAssistantMessage(map[string]any{"choices": []any{
+		map[string]any{"message": map[string]any{"content": "hello", "tool_calls": nil}},
+		map[string]any{"message": map[string]any{"content": "hello", "tool_calls": []any{map[string]any{"id": "call_2", "function": map[string]any{"name": "echo", "arguments": `{"count":2}`}}}}},
+	}})
+	if err != nil || !reflect.DeepEqual(chatMessage, AssistantMessage("hello", []ToolCall{ToolCallMessage("call_2", "echo", map[string]any{"count": float64(2)})})) {
+		t.Fatalf("unexpected chat decoding: %#v %v", chatMessage, err)
+	}
+	reasoningOnly, err := chatCompletionToAssistantMessage(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": "", "reasoning": "thoughts"}}}})
+	if err != nil || !reflect.DeepEqual(reasoningOnly, AssistantMessage("thoughts", nil)) {
+		t.Fatalf("unexpected reasoning-only decode: %#v %v", reasoningOnly, err)
+	}
+}
+
+func TestReasoningFallback(t *testing.T) {
+	reasoningSupport = ReasoningCache{items: map[string]bool{}}
+	calls := []map[string]any{}
+	_, err := callWithReasoningFallback("responses", "gpt-test", map[string]any{"reasoning": map[string]any{"effort": "high"}}, func(payload map[string]any) (map[string]any, error) {
+		calls = append(calls, payload)
+		if len(calls) == 1 {
+			return nil, &BadRequestError{APIStatusError: APIStatusError{Message: "Unsupported parameter: reasoning", Response: ResponseAdapter{StatusCode: 400, Text: `{"error":{"message":"Unsupported parameter: reasoning"}}`}}}
+		}
+		return map[string]any{"output": []any{}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[0]["reasoning"].(map[string]any)["effort"].(string) != "high" {
+		t.Fatalf("expected reasoning on first call: %#v", calls)
+	}
+	if _, ok := calls[1]["reasoning"]; ok {
+		t.Fatalf("expected reasoning to be dropped on retry: %#v", calls)
+	}
+	cachedCalls := []map[string]any{}
+	_, err = callWithReasoningFallback("responses", "gpt-test", map[string]any{"reasoning": map[string]any{"effort": "high"}}, func(payload map[string]any) (map[string]any, error) {
+		cachedCalls = append(cachedCalls, payload)
+		return map[string]any{"output": []any{}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cachedCalls[0]["reasoning"]; ok {
+		t.Fatalf("expected cached reasoning drop: %#v", cachedCalls)
+	}
+}
+
+func TestMantleAndOpenAIClients(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-test"}]}`))
+		case "/v1/responses":
+			_, _ = w.Write([]byte(`{"output":[{"type":"message","role":"assistant","content":[{"text":"done"}]}]}`))
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"}}]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	responses := OpenAIResponsesClient("key", server.URL+"/v1", nil, nil, 3)
+	message, err := responses.ChatCompletion("gpt-test", nil, nil, "auto")
+	if err != nil || message.Content != "done" {
+		t.Fatalf("unexpected responses client result: %#v %v", message, err)
+	}
+	models, err := responses.ListModels()
+	if err != nil || !reflect.DeepEqual(models, []string{"gpt-test"}) {
+		t.Fatalf("unexpected responses models: %#v %v", models, err)
+	}
+	chat := ChatCompletionsClient("key", server.URL+"/v1", nil, 3)
+	message, err = chat.ChatCompletion("gpt-test", nil, nil, "auto")
+	if err != nil || message.Content != "done" {
+		t.Fatalf("unexpected chat client result: %#v %v", message, err)
+	}
+}
+
+func TestLoadBedrockModelListUsesMantleEndpoint(t *testing.T) {
+	requested := map[string]any{}
+	oldHeaders, oldSession, oldAWS := bedrockRequestHeadersFunc, llmSessionFactory, awsCLIFunc
+	defer func() { bedrockRequestHeadersFunc, llmSessionFactory, awsCLIFunc = oldHeaders, oldSession, oldAWS }()
+	awsCLIFunc = func(parts []string, cwd string, timeout time.Duration) (CommandResult, error) {
+		_ = parts
+		_ = cwd
+		_ = timeout
+		return CommandResult{Stdout: `{"AccessKeyId":"AKIDEXAMPLE","SecretAccessKey":"SECRET","SessionToken":"TOKEN"}`}, nil
+	}
+	bedrockRequestHeadersFunc = func(credentials map[string]string, region, method, url string, body []byte, headers map[string]string) (map[string]string, error) {
+		_ = credentials
+		_ = region
+		_ = method
+		_ = url
+		_ = body
+		return map[string]string{"Authorization": "AWS4-HMAC-SHA256 test", "X-Amz-Date": "20260327T062009Z", "X-Amz-Security-Token": "TOKEN"}, nil
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested["method"] = r.Method
+		requested["url"] = r.URL.String()
+		requested["authorization"] = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"zai.glm-4.6"},{"id":"moonshotai.kimi-k2-thinking"}]}`))
+	}))
+	defer server.Close()
+	baseURL := server.URL
+	oldBedrockBaseURL := BedrockBaseURLFunc
+	defer func() { BedrockBaseURLFunc = oldBedrockBaseURL }()
+	BedrockBaseURLFunc = func(region string) string {
+		_ = region
+		return baseURL
+	}
+	llmSessionFactory = func(timeout time.Duration, followRedirects bool) *HTTPClient {
+		_ = timeout
+		_ = followRedirects
+		client := NewHTTPClient(ShortHTTPTimeout, false)
+		client.client = server.Client()
+		return &HTTPClient{Timeout: client.Timeout, FollowRedirects: client.FollowRedirects, client: client.client}
+	}
+	models, err := LoadBedrockModelList(t.TempDir(), "ap-southeast-2")
+	if err != nil || !reflect.DeepEqual(models, []string{"zai.glm-4.6", "moonshotai.kimi-k2-thinking"}) {
+		t.Fatalf("unexpected bedrock model list: %#v %v", models, err)
+	}
+	if requested["method"] != "GET" || requested["authorization"] != "AWS4-HMAC-SHA256 test" || !strings.Contains(requested["url"].(string), "/models") {
+		t.Fatalf("unexpected request capture: %#v", requested)
 	}
 }
 

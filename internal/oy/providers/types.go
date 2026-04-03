@@ -64,6 +64,8 @@ func NormalizeJSONLike(value any) JSONLike {
 			out = append(out, item)
 		}
 		return out
+	case ToolResult:
+		return map[string]any{"ok": v.OK, "content": NormalizeJSONLike(v.Content)}
 	default:
 		return fmt.Sprint(v)
 	}
