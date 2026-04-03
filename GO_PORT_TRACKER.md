@@ -42,12 +42,12 @@ Approved candidates:
 ### Commands
 
 - [ ] `oy "prompt"`
-- [ ] `oy run`
-- [ ] `oy chat`
-- [ ] `oy ralph`
-- [ ] `oy audit`
-- [ ] `oy model`
-- [ ] chat commands: `/help`, `/tokens`, `/model`, `/debug`, `/yolo`, `/ask`, `/audit`, `/save`, `/load`, `/undo`, `/clear`, `/quit`
+- [x] `oy run`
+- [x] `oy chat`
+- [x] `oy ralph`
+- [x] `oy audit`
+- [x] `oy model`
+- [x] chat commands: `/help`, `/tokens`, `/model`, `/debug`, `/yolo`, `/ask`, `/audit`, `/save`, `/load`, `/undo`, `/clear`, `/quit`
 
 ### Providers and auth
 
@@ -77,18 +77,18 @@ Approved candidates:
 ### Runtime and UX
 
 - [ ] embedded system prompt + tool descriptions
-- [ ] config persistence
-- [ ] model discovery/selection
-- [ ] best-of defaults
-- [ ] context budgeting and truncation
-- [ ] saved sessions
+- [x] config persistence
+- [x] model discovery/selection
+- [x] best-of defaults
+- [x] context budgeting and truncation
+- [x] saved sessions
 - [ ] debug logging
 - [ ] workspace path confinement
 
 ### Verification
 
-- [ ] `go test ./...`
-- [ ] `go build ./cmd/oy`
+- [x] `go test ./...`
+- [x] `go build ./cmd/oy`
 - [ ] compare major CLI flows against Python behavior
 
 ## Progress log
@@ -103,3 +103,4 @@ Approved candidates:
 - 2026-04-03: Ported the Go agent execution loop, tool-call handling, and self-consistency message selection with focused Go agent parity tests.
 - 2026-04-03: Ported working Go provider clients for OpenAI Responses, Chat Completions, and Bedrock Mantle model/chat flows, including reasoning fallback and provider parity tests.
 - 2026-04-03: Ported real Go one-shot CLI execution for `run`, `ralph`, and `audit`, wired through the Go agent/providers stack with focused CLI parity tests.
+- 2026-04-03: Ported the Go interactive chat/session loop with `/tokens`, `/model`, `/ask`, `/audit`, `/save`, `/load`, `/undo`, `/clear`, and `/quit` handling, plus model/session listing helpers and focused CLI parity tests.

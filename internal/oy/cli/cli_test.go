@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -244,5 +246,140 @@ func TestAuditCreatesDefaultRenovateConfigAndRunsAgent(t *testing.T) {
 	}
 	if seen["prompt"] != "Conduct a security and complexity audit of this repository. Additional focus: deps" || seen["model"] != "openai:gpt-test" || seen["workspace"] != root || seen["system_prompt"] != runtime.AuditSystemPrompt() || seen["unattended"] != 60 || seen["interactive"] != false || seen["yolo"] != false || seen["best_of"] != 3 {
 		t.Fatalf("unexpected audit args: %#v", seen)
+	}
+}
+
+func TestChatCommandTokensReportsPreparedBudget(t *testing.T) {
+	tx := agent.TranscriptWithSystemPrompt("sys")
+	agent.AddUser(&tx, "hello")
+	var out strings.Builder
+	oldStdout := stdoutWriter
+	stdoutWriter = &out
+	defer func() { stdoutWriter = oldStdout }()
+	if result := ChatCommand("/tokens", &tx, "sys", "openai:gpt-test"); result != true {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	text := out.String()
+	if !strings.Contains(text, "prepared tokens") || !strings.Contains(text, "context budget") || !strings.Contains(text, "remaining") {
+		t.Fatalf("unexpected tokens output: %q", text)
+	}
+}
+
+func TestHandleLoadSupportsNumericSelectionByNewestFirst(t *testing.T) {
+	SessionsDir = t.TempDir()
+	defer func() { SessionsDir = "" }()
+	writeSession := func(name, model string, delay time.Duration) {
+		path := filepath.Join(SessionsDir, name+".json")
+		payload := map[string]any{
+			"model":      model,
+			"transcript": TranscriptData(agent.TranscriptWithSystemPrompt("old")),
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(delay)
+	}
+	writeSession("older", "openai:gpt-old", 10*time.Millisecond)
+	writeSession("newer", "openai:gpt-new", 0)
+	loaded, model, err := HandleLoad("1", agent.TranscriptWithSystemPrompt("sys"), "openai:gpt-test", "sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "openai:gpt-new" {
+		t.Fatalf("unexpected model: %q", model)
+	}
+	if len(loaded.Messages) != 1 || loaded.Messages[0].Content != "sys" {
+		t.Fatalf("unexpected transcript: %#v", loaded.Messages)
+	}
+}
+
+func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
+	oldList, oldStdout := listAllModelIDsFunc, stdoutWriter
+	defer func() {
+		listAllModelIDsFunc = oldList
+		stdoutWriter = oldStdout
+	}()
+	listAllModelIDsFunc = func(string) ([]string, []string, error) {
+		return []string{"openai:gpt-5", "openai:gpt-4.1", "copilot:gpt-5"}, nil, nil
+	}
+	var out strings.Builder
+	stdoutWriter = &out
+	t.Setenv("OY_MODEL", "openai:gpt-5")
+	if code := Model(""); code != 0 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(out.String(), "- shim: `openai`") {
+		t.Fatalf("missing shim in model output: %q", out.String())
+	}
+	out.Reset()
+	if code := Model("gpt-4.1"); code != 0 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(out.String(), "Default Model Updated") || !strings.Contains(out.String(), "openai:gpt-4.1") {
+		t.Fatalf("unexpected switch output: %q", out.String())
+	}
+}
+
+func TestChatListsSavedSessionsWhenLoadHasNoArg(t *testing.T) {
+	SessionsDir = t.TempDir()
+	defer func() { SessionsDir = "" }()
+	payload := map[string]any{
+		"model":      "openai:gpt-test",
+		"saved_at":   "2026-03-25T12:34:56",
+		"transcript": TranscriptData(agent.TranscriptWithSystemPrompt("sys")),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(SessionsDir, "saved.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve, oldReader, oldStderr := resolveSessionFunc, chatInputReaderFunc, stderrWriter
+	defer func() {
+		resolveSessionFunc = oldResolve
+		chatInputReaderFunc = oldReader
+		stderrWriter = oldStderr
+	}()
+	resolveSessionFunc = func(interactive *bool, systemPrompt string, includeSystemFile bool, bestOf *int) (runtime.SessionContext, error) {
+		return runtime.Session(t.TempDir(), "openai:gpt-test", true, "sys", "", false, 1), nil
+	}
+	chatInputReaderFunc = func() io.Reader { return strings.NewReader("/load\n/quit\n") }
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Chat(); code != 0 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "## Saved Sessions") || !strings.Contains(errOut.String(), "Usage: `/load <name>` or `/load <number>`") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestChatRollsBackOnAgentError(t *testing.T) {
+	oldResolve, oldReader, oldRun, oldErr := resolveSessionFunc, chatInputReaderFunc, runAgentFunc, stderrWriter
+	defer func() {
+		resolveSessionFunc = oldResolve
+		chatInputReaderFunc = oldReader
+		runAgentFunc = oldRun
+		stderrWriter = oldErr
+	}()
+	resolveSessionFunc = func(interactive *bool, systemPrompt string, includeSystemFile bool, bestOf *int) (runtime.SessionContext, error) {
+		return runtime.Session(t.TempDir(), "openai:gpt-test", true, "sys", "", false, 1), nil
+	}
+	chatInputReaderFunc = func() io.Reader { return strings.NewReader("hello\nquit\n") }
+	runAgentFunc = func(prompt, model, workspace, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
+		return 1, "", fmt.Errorf("boom")
+	}
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Chat(); code != 0 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "Agent error: boom") {
+		t.Fatalf("missing agent error: %q", errOut.String())
 	}
 }

@@ -1,18 +1,21 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wagov-dtt/oy-cli/internal/oy/agent"
 	"github.com/wagov-dtt/oy-cli/internal/oy/providers"
 	"github.com/wagov-dtt/oy-cli/internal/oy/runtime"
+	"github.com/wagov-dtt/oy-cli/internal/oy/tools"
 	"github.com/wagov-dtt/oy-cli/internal/oy/version"
 )
 
@@ -31,10 +34,16 @@ var (
 		data, _ := io.ReadAll(os.Stdin)
 		return strings.TrimSpace(string(data))
 	}
-	unattendedLimitFunc = runtime.UnattendedLimitSeconds
-	ralphLimitFunc      = runtime.RalphLimitSeconds
-	nowFunc             = time.Now
-	sleepFunc           = time.Sleep
+	unattendedLimitFunc           = runtime.UnattendedLimitSeconds
+	ralphLimitFunc                = runtime.RalphLimitSeconds
+	requireAPIEnvFunc             = providers.RequireAPIEnv
+	getClientFunc                 = providers.GetClient
+	listAllModelIDsFunc           = runtime.ListAllModelIDs
+	chatInputReaderFunc           = func() io.Reader { return os.Stdin }
+	stdoutWriter        io.Writer = os.Stdout
+	stderrWriter        io.Writer = os.Stderr
+	nowFunc                       = time.Now
+	sleepFunc                     = time.Sleep
 )
 
 const (
@@ -82,7 +91,7 @@ func Main(argv []string) int {
 		}
 		args = []string{"run"}
 	} else if args[0] == "-v" || args[0] == "--version" {
-		fmt.Printf("oy %s\n", version.Version)
+		fmt.Fprintf(stdoutWriter, "oy %s\n", version.Version)
 		return 0
 	} else if args[0] == "--yolo" {
 		panic("top-level --yolo is not allowed; put it after a subcommand")
@@ -124,10 +133,10 @@ func Main(argv []string) int {
 }
 
 func PrintHelp() {
-	_, _ = fmt.Fprintln(os.Stdout, "oy")
-	_, _ = fmt.Fprintln(os.Stdout, "")
-	_, _ = fmt.Fprintln(os.Stdout, "Commands: run, chat, ralph, model, audit")
-	_, _ = fmt.Fprintln(os.Stdout, "Progress is tracked in GO_PORT_TRACKER.md")
+	fmt.Fprintln(stdoutWriter, "oy")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Commands: run, chat, ralph, model, audit")
+	fmt.Fprintln(stdoutWriter, "Progress is tracked in GO_PORT_TRACKER.md")
 }
 
 func WorkspaceRoot() (string, error) {
@@ -304,13 +313,24 @@ func ChatCommand(cmd string, tx *agent.Transcript, systemPrompt, modelSpec strin
 		for _, item := range ChatCommandHelp[:len(ChatCommandHelp)-2] {
 			lines = append(lines, fmt.Sprintf("- `%s` -- %s", item[0], item[1]))
 		}
-		lines = append(lines, "- `/quit` or `/exit` -- end session")
-		_, _ = fmt.Fprintln(os.Stdout, strings.Join(lines, "\n"))
+		lines = append(lines,
+			"- `/quit` or `/exit` -- end session",
+			"",
+			"Older conversation history may be packed into TOON before model requests.",
+		)
+		fmt.Fprintln(stdoutWriter, strings.Join(lines, "\n"))
 		return true
 	case "/tokens":
-		_, model := providers.SplitModelSpec(modelSpec)
-		_ = model
-		_, _ = fmt.Fprintf(os.Stdout, "## Context\n\n- messages: %d\n- session tokens: %s\n", len(tx.Messages), runtime.FormatTokens(agent.SessionTokens(*tx)))
+		prepared := agent.PreparedTokens(*tx, nil)
+		fmt.Fprintf(
+			stdoutWriter,
+			"## Context\n\n- messages: %d\n- session tokens: %s\n- prepared tokens: %s\n- context budget: %s\n- remaining: ~%s\n",
+			len(tx.Messages),
+			runtime.FormatTokens(agent.SessionTokens(*tx)),
+			runtime.FormatTokens(prepared),
+			runtime.FormatTokens(tx.MaxContextTokens),
+			runtime.FormatTokens(maxInt(tx.MaxContextTokens-prepared, 0)),
+		)
 		return true
 	case "/model":
 		return []string{"model", arg}
@@ -358,35 +378,17 @@ func HandleSave(name string, tx agent.Transcript, currentModel string) (string, 
 }
 
 func HandleLoad(name string, tx agent.Transcript, currentModel, systemPrompt string) (agent.Transcript, string, error) {
-	if err := providers.EnsurePrivateDir(SessionsPath()); err != nil {
-		return tx, currentModel, err
-	}
-	entries, err := os.ReadDir(SessionsPath())
+	sessions, err := savedSessions()
 	if err != nil {
 		return tx, currentModel, err
 	}
-	sessions := []string{}
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".json") {
-			sessions = append(sessions, filepath.Join(SessionsPath(), entry.Name()))
-		}
-	}
-	sort.Strings(sessions)
 	if len(sessions) == 0 {
 		return tx, currentModel, fmt.Errorf("no saved sessions found")
 	}
-	target := ""
-	candidate := SessionFile(name)
-	if _, err := os.Stat(candidate); err == nil {
-		target = candidate
-	} else {
-		for _, session := range sessions {
-			if strings.Contains(strings.ToLower(filepath.Base(session)), strings.ToLower(name)) {
-				target = session
-				break
-			}
-		}
+	if strings.TrimSpace(name) == "" {
+		return tx, currentModel, fmt.Errorf("load requires a session name or index")
 	}
+	target := resolveSavedSession(name, sessions)
 	if target == "" {
 		return tx, currentModel, fmt.Errorf("no session found matching %s", name)
 	}
@@ -415,11 +417,11 @@ func readTaskText(task []string) string {
 }
 
 func defaultRunAgent(prompt, model, root, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
-	shim, err := providers.RequireAPIEnv(model, "", root)
+	shim, err := requireAPIEnvFunc(model, "", root)
 	if err != nil {
 		return 1, "", err
 	}
-	client, err := providers.GetClient(shim, root)
+	client, err := getClientFunc(shim, root)
 	if err != nil {
 		return 1, "", err
 	}
@@ -439,7 +441,7 @@ func Run(task ...string) int {
 	if err != nil {
 		return 1
 	}
-	code, _, err := runAgentFunc(taskText, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, session.Yolo, nil, session.BestOf)
+	code, _, err := runAgentFunc(taskText, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, true, nil, session.BestOf)
 	if err != nil {
 		return 1
 	}
@@ -447,6 +449,115 @@ func Run(task ...string) int {
 }
 
 func Chat() int {
+	session, err := resolveSessionFunc(boolPtr(true), "", true, nil)
+	if err != nil {
+		return 1
+	}
+	fmt.Fprintf(stderrWriter, "## Chat\n\n- workspace: `%s`\n- model: `%s`\n- mode: `interactive`\n- best-of: `%d`\n", session.Workspace, session.Model, session.BestOf)
+	if session.SystemFile != "" {
+		fmt.Fprintf(stderrWriter, "- system file: `%s`\n", session.SystemFile)
+	}
+	fmt.Fprintf(stderrWriter, "[note] chat mode; /help for commands%s\n", map[bool]string{true: "; yolo on", false: ""}[session.Yolo])
+
+	transcript := agent.TranscriptWithSystemPrompt(session.SystemPrompt)
+	currentModel := session.Model
+	scanner := bufio.NewScanner(chatInputReaderFunc())
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for {
+		fmt.Fprint(stderrWriter, "oy > ")
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				fmt.Fprintf(stderrWriter, "[error] input error: %v\n", err)
+			}
+			fmt.Fprintln(stderrWriter, "[note] session ended")
+			break
+		}
+		prompt := strings.TrimSpace(scanner.Text())
+		if prompt == "" {
+			continue
+		}
+		if strings.HasPrefix(prompt, "/") {
+			name := strings.ToLower(strings.Fields(prompt)[0])
+			result := ChatCommand(prompt, &transcript, session.SystemPrompt, currentModel)
+			if result == nil {
+				break
+			}
+			if action, ok := result.([]string); ok {
+				switch action[0] {
+				case "model":
+					currentModel = handleModelSwitch(strings.TrimSpace(strings.Join(action[1:], " ")), currentModel, session.Workspace, stderrWriter)
+				case "debug":
+					fmt.Fprintln(stderrWriter, "[note] debug logging not implemented in Go yet")
+				case "yolo":
+					if session.Yolo {
+						fmt.Fprintln(stderrWriter, "[note] yolo already enabled for this session")
+					} else {
+						session.Yolo = true
+						fmt.Fprintln(stderrWriter, "[note] yolo enabled; all tools allowed for this session")
+					}
+				case "ask":
+					handleAsk(strings.TrimSpace(strings.Join(action[1:], " ")), currentModel, session, transcript)
+				case "audit":
+					handleAudit(strings.TrimSpace(strings.Join(action[1:], " ")), currentModel, session)
+				case "save":
+					path, err := HandleSave(strings.TrimSpace(strings.Join(action[1:], " ")), transcript, currentModel)
+					if err != nil {
+						fmt.Fprintf(stderrWriter, "[error] Failed to save session: %v\n", err)
+						continue
+					}
+					fmt.Fprintf(stderrWriter, "[note] saved session: %s\n", filepath.Base(path))
+				case "load":
+					arg := strings.TrimSpace(strings.Join(action[1:], " "))
+					if arg == "" {
+						printSavedSessions()
+						continue
+					}
+					loaded, model, err := HandleLoad(arg, transcript, currentModel, session.SystemPrompt)
+					if err != nil {
+						fmt.Fprintf(stderrWriter, "[error] Failed to load session: %v\n", err)
+						continue
+					}
+					transcript = loaded
+					currentModel = model
+					fmt.Fprintf(stderrWriter, "[note] loaded session (%d messages, model: %s)\n", len(transcript.Messages), currentModel)
+				}
+				continue
+			}
+			if handled, ok := result.(bool); ok {
+				if !handled {
+					fmt.Fprintf(stderrWriter, "[warn] Unknown command: %s\n", name)
+					continue
+				}
+				switch name {
+				case "/undo":
+					fmt.Fprintln(stderrWriter, map[bool]string{true: "[note] undid last turn", false: "[warn] Nothing to undo."}[result.(bool)])
+				case "/clear":
+					fmt.Fprintln(stderrWriter, "[note] cleared conversation")
+				}
+				continue
+			}
+			continue
+		}
+		if strings.EqualFold(prompt, "exit") || strings.EqualFold(prompt, "quit") {
+			break
+		}
+		unattendedLimitSeconds, err := unattendedLimitFunc()
+		if err != nil {
+			fmt.Fprintf(stderrWriter, "[error] Agent error: %v\n", err)
+			return 1
+		}
+		checkpoint := agent.Checkpoint(transcript)
+		code, _, err := runAgentFunc(prompt, currentModel, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, session.Yolo, &transcript, session.BestOf)
+		if err != nil {
+			agent.Rollback(&transcript, checkpoint)
+			fmt.Fprintf(stderrWriter, "[error] Agent error: %v\n", err)
+			continue
+		}
+		_ = code
+		used := agent.PreparedTokens(transcript, nil)
+		remaining := maxInt(transcript.MaxContextTokens-used, 0)
+		fmt.Fprintf(stderrWriter, "[note] context: %s used, ~%s remaining\n", runtime.FormatTokens(used), runtime.FormatTokens(remaining))
+	}
 	return 0
 }
 
@@ -530,17 +641,262 @@ func Audit(focus string) int {
 
 func Model(selection string) int {
 	current, err := runtime.CurrentModel("")
-	if err != nil && selection == "" {
+	if err != nil && strings.TrimSpace(selection) == "" {
 		return 1
 	}
-	if selection == "" {
-		_, _ = fmt.Fprintf(os.Stdout, "## Current Model\n\n- model: `%s`\n", current)
+	if strings.TrimSpace(selection) == "" {
+		fmt.Fprintln(stdoutWriter, currentModelText(current))
 		return 0
 	}
-	if _, err := runtime.SaveModelConfig(selection); err != nil {
+	workspace, _ := WorkspaceRoot()
+	selected := handleModelSwitch(selection, current, workspace, stdoutWriter)
+	if strings.TrimSpace(selected) == "" {
 		return 1
 	}
+	if selected == current {
+		return 0
+	}
+	config, err := runtime.SaveModelConfig(selected)
+	if err != nil {
+		return 1
+	}
+	fmt.Fprintf(stdoutWriter, "## Default Model Updated\n\n- selected: `%s`\n", selected)
+	if config.Shim != "" {
+		fmt.Fprintf(stdoutWriter, "- shim: `%s`\n", config.Shim)
+	}
 	return 0
+}
+
+func savedSessions() ([]string, error) {
+	if err := providers.EnsurePrivateDir(SessionsPath()); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(SessionsPath())
+	if err != nil {
+		return nil, err
+	}
+	sessions := []string{}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			sessions = append(sessions, filepath.Join(SessionsPath(), entry.Name()))
+		}
+	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		left, leftErr := os.Stat(sessions[i])
+		right, rightErr := os.Stat(sessions[j])
+		if leftErr != nil || rightErr != nil || left.ModTime().Equal(right.ModTime()) {
+			return sessions[i] > sessions[j]
+		}
+		return left.ModTime().After(right.ModTime())
+	})
+	return sessions, nil
+}
+
+func resolveSavedSession(name string, sessions []string) string {
+	if index, ok := parseIndex(name); ok && index >= 0 && index < len(sessions) {
+		return sessions[index]
+	}
+	candidate := SessionFile(name)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	matches := []string{}
+	needle := strings.ToLower(strings.TrimSpace(name))
+	for _, session := range sessions {
+		stem := strings.TrimSuffix(filepath.Base(session), ".json")
+		if strings.Contains(strings.ToLower(stem), needle) {
+			matches = append(matches, session)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	return ""
+}
+
+func printSavedSessions() {
+	sessions, err := savedSessions()
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Failed to list sessions: %v\n", err)
+		return
+	}
+	if len(sessions) == 0 {
+		fmt.Fprintln(stderrWriter, "[warn] No saved sessions found.")
+		return
+	}
+	lines := []string{"## Saved Sessions", ""}
+	for index, session := range sessions {
+		if index >= 20 {
+			break
+		}
+		model := "?"
+		savedAt := "?"
+		msgCount := 0
+		if meta, ok := providers.LoadJSON(session, map[string]any{}).(map[string]any); ok {
+			if value, ok := meta["model"].(string); ok && value != "" {
+				model = value
+			}
+			if value, ok := meta["saved_at"].(string); ok && value != "" {
+				savedAt = value
+			}
+			if transcript, ok := meta["transcript"].(map[string]any); ok {
+				if messages, ok := transcript["messages"].([]any); ok {
+					msgCount = len(messages)
+				}
+			}
+		}
+		lines = append(lines, fmt.Sprintf("%d. `%s` — %s, %d msgs, %s", index+1, strings.TrimSuffix(filepath.Base(session), ".json"), model, msgCount, savedAt))
+	}
+	lines = append(lines, "", "Usage: `/load <name>` or `/load <number>`")
+	fmt.Fprintln(stderrWriter, strings.Join(lines, "\n"))
+}
+
+func handleModelSwitch(arg, currentModel, cwd string, output io.Writer) string {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		fmt.Fprintln(output, currentModelText(currentModel))
+		fmt.Fprintln(output, "[note] use /model <name> to switch")
+		return currentModel
+	}
+	allModels, warnings, err := listAllModelIDsFunc(cwd)
+	if err != nil {
+		fmt.Fprintf(output, "[warn] Could not load model list: %v\n", err)
+		return currentModel
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(output, "[warn] %s\n", warning)
+	}
+	if strings.EqualFold(arg, "list") {
+		printModelList(output, "## Available Models", allModels)
+		return currentModel
+	}
+	for _, model := range allModels {
+		if model == arg {
+			fmt.Fprintf(output, "[note] switched model: %s\n", model)
+			return model
+		}
+	}
+	matches := []string{}
+	needle := strings.ToLower(arg)
+	for _, model := range allModels {
+		if strings.Contains(strings.ToLower(model), needle) {
+			matches = append(matches, model)
+		}
+	}
+	if len(matches) == 1 {
+		fmt.Fprintf(output, "[note] switched model: %s\n", matches[0])
+		return matches[0]
+	}
+	if len(matches) > 1 {
+		printModelList(output, "## Matching Models", matches)
+		fmt.Fprintln(output, "Be more specific.")
+		return currentModel
+	}
+	fmt.Fprintf(output, "[warn] No models matching `%s`.\n", arg)
+	return currentModel
+}
+
+func handleAsk(question, currentModel string, session runtime.SessionContext, tx agent.Transcript) {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		fmt.Fprintln(stderrWriter, AskUsage)
+		return
+	}
+	unattendedLimitSeconds, err := unattendedLimitFunc()
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
+		return
+	}
+	askTranscript := agent.TranscriptWithSystemPrompt(runtime.AskSystemPrompt(session.SystemPrompt))
+	start := maxInt(len(tx.Messages)-6, 0)
+	for _, message := range tx.Messages[start:] {
+		if message.Role != "system" {
+			askTranscript.Messages = append(askTranscript.Messages, message)
+		}
+	}
+	agent.AddUser(&askTranscript, question)
+	registry := tools.ReadOnlyToolRegistry()
+	state := agent.NewAgentState(session.Workspace, registry, unattendedLimitSeconds, session.Interactive, false)
+	shim, err := requireAPIEnvFunc(currentModel, "", session.Workspace)
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
+		return
+	}
+	client, err := getClientFunc(shim, session.Workspace)
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
+		return
+	}
+	fmt.Fprintf(stderrWriter, "[note] %s\n", AskModeNote)
+	if _, _, err := agent.RunTurn(client, &askTranscript, &state, currentModel, tools.ToolSpecs(registry), session.BestOf); err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
+	}
+}
+
+func handleAudit(focus, currentModel string, session runtime.SessionContext) {
+	if _, _, err := EnsureRenovateConfig(session.Workspace); err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Audit error: %v\n", err)
+		return
+	}
+	auditPrompt, err := runtime.SessionText(nil, "audit", "repo_user_prompt")
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Audit error: %v\n", err)
+		return
+	}
+	if strings.TrimSpace(focus) != "" {
+		suffix, err := runtime.SessionText(map[string]string{"focus": focus}, "audit", "focus_suffix")
+		if err != nil {
+			fmt.Fprintf(stderrWriter, "[error] Audit error: %v\n", err)
+			return
+		}
+		auditPrompt += suffix
+	}
+	unattendedLimitSeconds, err := unattendedLimitFunc()
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Audit error: %v\n", err)
+		return
+	}
+	fmt.Fprintln(stderrWriter, "[note] audit mode")
+	if _, _, err := runAgentFunc(auditPrompt, currentModel, session.Workspace, runtime.AuditSystemPrompt(), unattendedLimitSeconds, false, false, nil, session.BestOf); err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Audit error: %v\n", err)
+	}
+}
+
+func currentModelText(modelSpec string) string {
+	shim := providers.ResolveShim(modelSpec, runtime.LoadModelConfig().Shim)
+	_, bare := providers.SplitModelSpec(modelSpec)
+	return fmt.Sprintf("## Current Model\n\n- model: `%s`\n- shim: `%s`", bare, shim)
+}
+
+func printModelList(output io.Writer, title string, models []string) {
+	lines := []string{title, ""}
+	if len(models) == 0 {
+		lines = append(lines, "(no matches)")
+	} else {
+		for _, model := range models {
+			lines = append(lines, fmt.Sprintf("- `%s`", model))
+		}
+	}
+	fmt.Fprintln(output, strings.Join(lines, "\n"))
+}
+
+func parseIndex(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	index, err := strconv.Atoi(value)
+	if err != nil || index <= 0 {
+		return 0, false
+	}
+	return index - 1, true
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func boolPtr(value bool) *bool { return &value }
