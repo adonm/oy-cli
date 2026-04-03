@@ -55,6 +55,22 @@ var (
 	loadSessionTextErr  error
 )
 
+func HasTTYStdin() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func StdinIsInteractive() bool {
+	return HasTTYStdin() && !flag("OY_NON_INTERACTIVE", false)
+}
+
+func CanPrompt() bool {
+	return StdinIsInteractive()
+}
+
 func MaxContextTokens() int {
 	return envInt("OY_MAX_CONTEXT_TOKENS", DefaultMaxContextTokens)
 }
@@ -306,6 +322,16 @@ func FormatTokens(count int) string {
 	return fmt.Sprintf("%.1fk tokens", float64(count)/1000.0)
 }
 
+func FormatDuration(seconds int) string {
+	if seconds%3600 == 0 {
+		return fmt.Sprintf("%dh", seconds/3600)
+	}
+	if seconds%60 == 0 {
+		return fmt.Sprintf("%dm", seconds/60)
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
+
 func ParseDurationSeconds(value string, name string) (int, error) {
 	text := strings.TrimSpace(strings.ToLower(value))
 	if text == "" {
@@ -414,6 +440,21 @@ func digitsOnly(value string) bool {
 		}
 	}
 	return value != ""
+}
+
+func flag(name string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func userHomeDir() string {

@@ -32,8 +32,8 @@ Approved candidates:
 - [x] M4: port runtime/config/model selection helpers
 - [x] M5: port tool registry and local file/web/search helpers
 - [x] M6: port transcript management and agent loop
-- [ ] M7: port CLI commands: `run`, `chat`, `ralph`, `model`, `audit`
-- [ ] M8: add Go tests for provider/runtime/tool/agent/cli parity
+- [x] M7: port CLI commands: `run`, `chat`, `ralph`, `model`, `audit`
+- [x] M8: add Go tests for provider/runtime/tool/agent/cli parity
 - [ ] M9: switch docs/build workflow to Go-first
 - [ ] M10: retire Python implementation after parity verification
 
@@ -97,3 +97,4 @@ Approved candidates:
 - 2026-04-03: Added initial Go module scaffold, shared types, runtime helpers, SigV4 signing, and first Go parity tests.
 - 2026-04-03: Ported embedded prompt loading, model config helpers, shim registry plumbing, JSON/file helpers, HTTP response utilities, and added Go parity tests for runtime/providers.
 - 2026-04-03: Ported Go transcript primitives and local tool foundations (`todo`, `bash`, `list`, `read`, `search`, `replace`, `sloc`, web payload helpers) with focused Go tests.
+- 2026-04-03: Ported Go CLI/session foundations for command normalization, session resolution, Renovate config bootstrap, session save/load, and chat command handling with focused Go CLI tests.
