@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/wagov-dtt/oy-cli/internal/oy/providers"
 	"github.com/wagov-dtt/oy-cli/internal/oy/runtime"
 )
@@ -410,31 +412,21 @@ func WebfetchPayload(response providers.ResponseAdapter, method string, text *st
 }
 
 func ToolList(state State, pattern string, exclude []string, limit int) (map[string]any, error) {
-	if pattern == "" {
+	if strings.TrimSpace(pattern) == "" {
 		pattern = "*"
 	}
-	items := []string{}
-	entries, err := os.ReadDir(state.Root)
+	matches, err := globPaths(state.Root, pattern, exclude)
 	if err != nil {
 		return nil, err
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if pattern != "*" {
-			matched, err := filepath.Match(pattern, name)
-			if err != nil || !matched {
-				continue
-			}
-		}
-		if excluded(name, exclude) {
-			continue
-		}
-		if entry.IsDir() {
+	items := make([]string, 0, len(matches))
+	for _, match := range matches {
+		name := RelPath(state.Root, match)
+		if info, err := os.Stat(match); err == nil && info.IsDir() {
 			name += "/"
 		}
 		items = append(items, name)
 	}
-	sort.Strings(items)
 	shown := items
 	truncated := false
 	if limit > 0 && len(shown) > limit {
@@ -446,6 +438,66 @@ func ToolList(state State, pattern string, exclude []string, limit int) (map[str
 		payload["exclude"] = exclude
 	}
 	return payload, nil
+}
+
+func globPaths(root, pattern string, exclude []string) ([]string, error) {
+	cleanPattern := strings.TrimSpace(pattern)
+	if cleanPattern == "." || cleanPattern == "./" {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return nil, err
+		}
+		matches := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			candidate := filepath.Join(root, entry.Name())
+			rel := RelPath(root, candidate)
+			if excluded(rel, exclude) {
+				continue
+			}
+			matches = append(matches, candidate)
+		}
+		sort.Strings(matches)
+		return matches, nil
+	}
+	if filepath.IsAbs(cleanPattern) || hasTraversal(cleanPattern) {
+		return nil, fmt.Errorf("Path traversal denied: '%s'", pattern)
+	}
+	patternPath := filepath.Join(root, filepath.FromSlash(cleanPattern))
+	matches, err := doublestar.FilepathGlob(patternPath)
+	if err != nil {
+		return nil, err
+	}
+	unique := map[string]struct{}{}
+	filtered := make([]string, 0, len(matches))
+	for _, match := range matches {
+		resolved, err := filepath.Abs(match)
+		if err != nil {
+			continue
+		}
+		if resolved != root && !strings.HasPrefix(resolved, root+string(os.PathSeparator)) {
+			continue
+		}
+		rel := RelPath(root, resolved)
+		if excluded(rel, exclude) {
+			continue
+		}
+		if _, ok := unique[resolved]; ok {
+			continue
+		}
+		unique[resolved] = struct{}{}
+		filtered = append(filtered, resolved)
+	}
+	sort.Strings(filtered)
+	return filtered, nil
+}
+
+func hasTraversal(pattern string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(pattern), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func ToolRead(state State, path string, offset, limit int) (map[string]any, string, error) {
@@ -900,13 +952,21 @@ func cloneTodos(todos []map[string]string) []map[string]string {
 	return out
 }
 
-func excluded(path string, patterns []string) bool {
+func excluded(pathname string, patterns []string) bool {
+	normalizedPath := strings.TrimPrefix(filepath.ToSlash(pathname), "./")
 	for _, pattern := range patterns {
-		if ok, _ := filepath.Match(pattern, path); ok {
+		normalizedPattern := strings.TrimSpace(filepath.ToSlash(pattern))
+		if normalizedPattern == "" {
+			continue
+		}
+		if ok, _ := path.Match(normalizedPattern, normalizedPath); ok {
 			return true
 		}
-		if strings.HasSuffix(pattern, "/**") && strings.HasPrefix(path, strings.TrimSuffix(pattern, "/**")) {
-			return true
+		if strings.HasSuffix(normalizedPattern, "/**") {
+			prefix := strings.TrimSuffix(normalizedPattern, "/**")
+			if normalizedPath == prefix || strings.HasPrefix(normalizedPath, prefix+"/") {
+				return true
+			}
 		}
 	}
 	return false

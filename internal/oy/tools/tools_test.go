@@ -137,8 +137,35 @@ func TestListReadSearchReplaceSloc(t *testing.T) {
 		t.Fatal(err)
 	}
 	items := listPayload["items"].([]string)
-	if len(items) < 2 {
+	if len(items) < 2 || !containsString(items, "a.txt") || !containsString(items, "dir/") {
 		t.Fatalf("unexpected list payload: %#v", listPayload)
+	}
+
+	listDotPayload, err := ToolList(state, ".", nil, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(listDotPayload["items"].([]string), "a.txt") || !containsString(listDotPayload["items"].([]string), "dir/") {
+		t.Fatalf("unexpected dot list payload: %#v", listDotPayload)
+	}
+
+	listNestedPayload, err := ToolList(state, "**/*.py", nil, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := listNestedPayload["items"].([]string); len(got) != 1 || got[0] != "dir/b.py" {
+		t.Fatalf("unexpected nested list payload: %#v", listNestedPayload)
+	}
+
+	listExcludedPayload, err := ToolList(state, "*", []string{"dir/**"}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsString(listExcludedPayload["items"].([]string), "dir/") {
+		t.Fatalf("expected dir exclusion: %#v", listExcludedPayload)
+	}
+	if _, err := ToolList(state, "../*", nil, 20); err == nil {
+		t.Fatal("expected traversal error for list")
 	}
 
 	readPayload, preview, err := ToolRead(state, "a.txt", 2, 1)
@@ -238,6 +265,15 @@ func TestRegistryHelpers(t *testing.T) {
 	if result := InvokeTool(map[string]RegisteredTool{}, &State{}, "missing", nil); result.OK || result.Content.(string) != "Tool 'missing' unavailable" {
 		t.Fatalf("unexpected missing-tool result: %#v", result)
 	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 var _ = errors.New

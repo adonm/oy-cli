@@ -62,17 +62,17 @@ Approved candidates:
 
 ### Tools
 
-- [ ] `list`
-- [ ] `read`
-- [ ] `search`
-- [ ] `replace`
-- [ ] `sloc`
-- [ ] `bash`
-- [ ] `webfetch`
-- [ ] `ask`
-- [ ] `todo`
-- [ ] mutating tool approval flow
-- [ ] read-only tool mode for `/ask`
+- [x] `list`
+- [x] `read`
+- [x] `search`
+- [x] `replace`
+- [x] `sloc`
+- [x] `bash`
+- [x] `webfetch`
+- [x] `ask`
+- [x] `todo`
+- [x] mutating tool approval flow
+- [x] read-only tool mode for `/ask`
 
 ### Runtime and UX
 
@@ -106,3 +106,4 @@ Approved candidates:
 - 2026-04-03: Ported the Go interactive chat/session loop with `/tokens`, `/model`, `/ask`, `/audit`, `/save`, `/load`, `/undo`, `/clear`, and `/quit` handling, plus model/session listing helpers and focused CLI parity tests.
 - 2026-04-03: Ported the remaining Go provider/auth parity slice: Codex model-cache/session refresh handling, Codex ChatGPT fallback client, Copilot model classification/routing, OpenCode endpoint alignment, and focused provider parity tests.
 - 2026-04-03: Added Go debug logging parity (`OY_DEBUG`, `/debug`, JSONL request/response/tool-result events), and fixed agent tool-state propagation so todo/approval state persists across turns.
+- 2026-04-03: Closed Go `list` parity gap for `.` and nested glob patterns, traversal denial, and exclude handling; also aligned the tracker tool checklist with already-ported/tested tool slices.
