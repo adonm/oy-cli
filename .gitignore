@@ -31,3 +31,7 @@ htmlcov/
 
 # Local audit artifacts
 renovate-report.json
+# Go build artifacts
+/bin/
+*.test
+coverage.out
