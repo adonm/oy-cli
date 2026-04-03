@@ -166,23 +166,48 @@ class TestMessageDecoding:
 class TestReasoningFallback:
     def test_drops_unsupported_reasoning_after_first_rejection(self):
         responses_create = Mock(
-            side_effect=[api_error("Unsupported parameter: reasoning"), {"output": []}]
+            side_effect=[
+                api_error("Unsupported parameter: reasoning"),
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"text": "done"}],
+                        }
+                    ]
+                },
+            ]
         )
         responses_client = providers._responses_client(
             responses_create, lambda: ["gpt-test"]
         )
-        assert responses_client["chat_completion"]("gpt-test", [])["content"] == ""
+        assert responses_client["chat_completion"]("gpt-test", []) == AssistantMessage(
+            "done"
+        )
         assert responses_create.call_args_list[0].args[0]["reasoning"] == {
             "effort": "high"
         }
         assert "reasoning" not in responses_create.call_args_list[1].args[0]
 
         # Cached call should not include reasoning
-        responses_cached = Mock(return_value={"output": []})
+        responses_cached = Mock(
+            return_value={
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "cached"}],
+                    }
+                ]
+            }
+        )
         responses_client = providers._responses_client(
             responses_cached, lambda: ["gpt-test"]
         )
-        responses_client["chat_completion"]("gpt-test", [])
+        assert responses_client["chat_completion"]("gpt-test", []) == AssistantMessage(
+            "cached"
+        )
         assert "reasoning" not in responses_cached.call_args.args[0]
 
     def test_drops_reasoning_effort_for_chat_completions(self):
@@ -204,6 +229,146 @@ class TestReasoningFallback:
         )
         assert chat_create.call_args_list[0].args[0]["reasoning_effort"] == "high"
         assert "reasoning_effort" not in chat_create.call_args_list[1].args[0]
+
+
+class TestMalformedOutputRetry:
+    @staticmethod
+    def _fake_retry(monkeypatch):
+        def fake_call_with_retry(call, *, max_attempts=1, on_retry=None):
+            last_exc = None
+            for attempt in range(1, max_attempts + 1):
+                if on_retry and attempt > 1:
+                    on_retry(
+                        attempt,
+                        max_attempts,
+                        providers._retry_error_context(last_exc),
+                    )
+                try:
+                    return call()
+                except providers.RetryableDecodeError as exc:
+                    last_exc = exc
+                    if attempt >= max_attempts:
+                        raise
+            raise AssertionError("retry loop should have returned or raised")
+
+        monkeypatch.setattr(providers, "_call_with_retry", fake_call_with_retry)
+
+    def test_responses_client_retries_empty_assistant_message(
+        self, monkeypatch
+    ):
+        self._fake_retry(monkeypatch)
+        retry_notes = []
+        responses = iter(
+            [
+                {"output": []},
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"text": "done"}],
+                        }
+                    ]
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            providers,
+            "_call_with_reasoning_fallback",
+            lambda *args, **kwargs: next(responses),
+        )
+
+        client = providers._responses_client(Mock(), lambda: ["gpt-test"])
+        assert client["chat_completion"](
+            "gpt-test",
+            [],
+            on_retry=lambda *args: retry_notes.append(args),
+        ) == AssistantMessage("done")
+        assert retry_notes == [
+            (
+                2,
+                providers.MALFORMED_OUTPUT_RETRY_ATTEMPTS,
+                "malformed model output: empty assistant message with no tool calls",
+            )
+        ]
+
+    def test_chat_client_retries_malformed_tool_arguments(self, monkeypatch):
+        self._fake_retry(monkeypatch)
+        retry_notes = []
+        responses = iter(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content="",
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="call_1",
+                                        function=SimpleNamespace(
+                                            name="echo", arguments='{"count":'
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ]
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content="",
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="call_1",
+                                        function=SimpleNamespace(
+                                            name="echo", arguments='{"count":2}'
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ]
+                ),
+            ]
+        )
+        monkeypatch.setattr(
+            providers,
+            "_call_with_reasoning_fallback",
+            lambda *args, **kwargs: next(responses),
+        )
+
+        client = providers._chat_client(Mock(), lambda: ["gpt-test"], tools_map=lambda _: [])
+        assert client["chat_completion"](
+            "gpt-test",
+            [],
+            on_retry=lambda *args: retry_notes.append(args),
+        ) == AssistantMessage(
+            "",
+            tool_calls=[ToolCall(id="call_1", name="echo", arguments={"count": 2})],
+        )
+        assert retry_notes and retry_notes[0][0:2] == (
+            2,
+            providers.MALFORMED_OUTPUT_RETRY_ATTEMPTS,
+        )
+        assert "Could not parse tool arguments JSON" in retry_notes[0][2]
+
+    def test_responses_client_raises_after_retry_budget_exhausted(
+        self, monkeypatch
+    ):
+        self._fake_retry(monkeypatch)
+        attempts = []
+        monkeypatch.setattr(
+            providers,
+            "_call_with_reasoning_fallback",
+            lambda *args, **kwargs: attempts.append("call") or {"output": []},
+        )
+
+        client = providers._responses_client(Mock(), lambda: ["gpt-test"])
+        with pytest.raises(providers.RetryableDecodeError):
+            client["chat_completion"]("gpt-test", [])
+        assert len(attempts) == providers.MALFORMED_OUTPUT_RETRY_ATTEMPTS
 
 
 class TestClientFactories:
