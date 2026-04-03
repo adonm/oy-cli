@@ -156,19 +156,6 @@ Evidence: `_streams()` opens `zip`, `tar`, `gz`, `bz2`, `xz`, and `zst` inputs, 
 
 ---
 
-## P5 · `best_of` fan-out is unbounded and can explode cost, latency, and provider load
-
-| | |
-|---|---|
-| **Location** | `oy_cli/runtime.py:1243-1256`, `oy_cli/agent.py:507-524` |
-| **Category** | Performance / Complexity |
-| **Reference** | OWASP ASVS 5.0 `V13.1.3`, `V15.1.3`, `V15.2.2` |
-| **Recommendation** | Clamp `best_of` to a small safe maximum per model/provider and surface the effective cap in the UI. |
-| **Status** | Open |
-
-Evidence: `OY_BEST_OF` accepts any positive integer, and `run_turn()` creates `ThreadPoolExecutor(max_workers=best_of)` parallel completions.
-
----
 
 ## P6 · Model discovery is serial, subprocess-heavy, and still hides failures behind broad `except Exception`
 
@@ -216,7 +203,6 @@ Evidence: `.github/workflows/release.yml` still uses `actions/checkout@v4`, `act
   - Header updated from current `sloc`: 6,339 Python code lines, 9,503 total repo lines.
   - Revalidated findings against OWASP ASVS 5.0 and grugbrain.dev.
   - Ran local Renovate lookup: 0 `pep621` updates surfaced; 4 GitHub Actions major updates surfaced; no vulnerability metadata was present in the report.
-  - Added explicit finding for unbounded `best_of` parallel fan-out.
   - Previous findings remain open or partially resolved; no new path-boundary regressions found.
 
 - 2026-03-28: refreshed for commit `25a4e2e` (`Reorganise tests into logical modules`).

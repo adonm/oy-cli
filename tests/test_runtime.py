@@ -14,7 +14,8 @@ class TestSessionText:
     def test_guidance_mentions_exclude_and_todo_requirements(self):
         rt.load_session_text.cache_clear()
         assert "Never guess" in rt.base_system_prompt()
-        assert "`webfetch` freely" in rt.base_system_prompt()
+        assert "Follow the user's output constraints exactly" in rt.base_system_prompt()
+        assert "Use `webfetch` freely" in rt.base_system_prompt()
         assert rt.active_system_prompt(True).startswith(rt.BASE_SYSTEM_PROMPT)
         assert rt.active_system_prompt(False).startswith(rt.BASE_SYSTEM_PROMPT)
         assert "no-write rather than no-network" in rt.ask_system_prompt("sys")
@@ -29,9 +30,9 @@ class TestSessionText:
         assert "`jq` when available or Python otherwise" in audit_prompt
         for name in ("list", "search", "replace", "sloc"):
             assert "exclude" in rt.tool_description(name)
-        assert "broad browsing" in rt.tool_description("webfetch")
+        assert "public web research" in rt.tool_description("webfetch")
         assert (
-            "Every item must include string `id` and string `task`"
+            "Every item must include string `id`, string `task`, and a valid `status`"
             in rt.tool_description("todo")
         )
 
@@ -54,33 +55,16 @@ class TestModelConfig:
         monkeypatch.setenv("OY_SHIM", "copilot")
         monkeypatch.setenv("OY_MODEL", "gpt-live")
         monkeypatch.setenv("OY_YOLO", "yes")
-        monkeypatch.setenv("OY_BEST_OF", "5")
         assert rt._model(None) == "copilot:gpt-live"
         assert rt.yolo_enabled() is True
-        assert rt.self_consistency_best_of(model_spec="copilot:gpt-live") == 5
         assert "ask" not in rt.active_tool_registry(False)
         assert set(rt.read_only_tool_registry()) == rt._READ_ONLY_TOOLS
-
-
-class TestBestOfHelpers:
-    def test_model_defaults_enable_self_consistency_for_glm_and_kimi(self, monkeypatch):
-        monkeypatch.delenv("OY_BEST_OF", raising=False)
-        for model in ("openai:glm-5", "bedrock-mantle:moonshotai.kimi-k2.5"):
-            assert (
-                rt.default_best_of_for_model(model)
-                == rt.DEFAULT_SELF_CONSISTENCY_BEST_OF
-            )
-        assert rt.default_best_of_for_model("openai:gpt-5") == 1
 
 
 class TestDurationEnvHelpers:
     @pytest.mark.parametrize(
         ("name", "call"),
         [
-            (
-                "OY_BEST_OF",
-                lambda: rt.self_consistency_best_of(model_spec="openai:glm-5"),
-            ),
             ("OY_UNATTENDED_LIMIT", rt.unattended_limit_seconds),
             ("OY_RALPH_LIMIT", rt.ralph_limit_seconds),
         ],

@@ -19,7 +19,6 @@ def _session_state(tmp_path, **overrides):
         "system_prompt": "sys",
         "system_file": None,
         "yolo": False,
-        "best_of": 3,
     }
     session.update(overrides)
     return session
@@ -89,7 +88,6 @@ class TestRalph:
         assert cli.ralph("fix", "tests") == 0
         assert len(calls) == 2
         assert all(call[1].get("yolo") is True for call in calls)
-        assert all(call[1].get("best_of") == 3 for call in calls)
         assert all(call[0][0] == "fix tests" for call in calls)
         assert sleeps == [60]
         assert intro["schedule"] == "until 2m deadline, 1m delay"
@@ -116,7 +114,6 @@ class TestRalph:
 
         assert cli.ralph() == 0
         assert len(calls) == 1
-        assert calls[0][1].get("best_of") == 3
         assert calls[0][0][0] == "from stdin"
 
     def test_ralph_limit_seconds_parses_env(self, monkeypatch):
@@ -148,7 +145,6 @@ class TestAudit:
         assert (tmp_path / "renovate.json").read_text(encoding="utf-8") == cli._DEFAULT_RENOVATE_CONFIG
         assert notes == ["created default Renovate config: renovate.json"]
         assert seen["args"][0] == "Conduct a security and complexity audit. Additional focus: deps"
-        assert seen["kwargs"]["best_of"] == 3
 
     def test_audit_keeps_existing_supported_renovate_config(self, tmp_path, monkeypatch):
         notes = []
@@ -218,7 +214,7 @@ class TestChatCommands:
         monkeypatch.setattr(
             cli, "run_turn", lambda *args, **kwargs: seen.update({"called": True})
         )
-        session = _session_state(tmp_path, interactive=True, best_of=1)
+        session = _session_state(tmp_path, interactive=True)
 
         cli._handle_ask("", "openai:gpt-test", session, {"messages": []})
         assert printed[-1] == cli._ASK_USAGE

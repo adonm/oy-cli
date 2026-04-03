@@ -19,7 +19,6 @@ oy audit "focus on authentication"
 oy "inspect the main module and suggest improvements"
 OY_ROOT=./my-project oy "fix the failing tests"
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy
-OY_BEST_OF=5 oy "fix the flaky test"
 oy chat
 oy audit [focus]
 oy ralph "prompt"
@@ -50,7 +49,6 @@ Prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/se
 | `OY_NON_INTERACTIVE` | Set to `1` to disable approval and prompt pauses |
 | `OY_UNATTENDED_LIMIT` | Agent deadline window, such as `1h`, `30m`, or `3600s` |
 | `OY_RALPH_LIMIT` | Ralph deadline window, such as `3h`, `90m`, or `3600s` |
-| `OY_BEST_OF` | Override self-consistency sample count |
 | `OY_ROOT` | Run against a different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
@@ -67,7 +65,7 @@ Prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/se
 
 Only `model` and `shim` are persisted. Selection order is `OY_MODEL`, then saved config, then the first-run picker. `OY_SHIM` only changes backend choice when the model name is bare or no model has been saved yet.
 
-From local testing, `glm-5` and `kimi-k2.5` are good defaults. `oy` uses best-of `3` for those models by default; override with `--best-of` or `OY_BEST_OF`.
+From local testing, `glm-5` and `kimi-k2.5` are good defaults.
 
 ## Installation
 
