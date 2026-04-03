@@ -6,11 +6,11 @@
 >
 > | Metric | Value |
 > |---|---|
-> | Repo files counted by `sloc` | 26 |
-> | Go files | 17 |
-> | Go LoC | 4,994 code lines |
-> | Total repo lines | 8,109 |
-> | Largest modules (total lines) | `internal/oy/tools/tools.go` 1,382; `internal/oy/providers/shims.go` 1,298; `internal/oy/cli/cli.go` 1,221; `internal/oy/cli/cli_test.go` 592 |
+> | Repo files counted by `git ls-files` text scan | 28 |
+> | Go files | 16 |
+> | Go LoC | 5,637 non-comment, non-empty lines |
+> | Total repo lines | 6,951 |
+> | Largest modules (total lines) | `internal/oy/providers/shims.go` 1,298; `internal/oy/cli/cli.go` 1,221; `internal/oy/cli/cli_test.go` 592; `internal/oy/runtime/runtime.go` 552 |
 > | Agent tools | 9 (`ask`, `bash`, `list`, `read`, `replace`, `search`, `sloc`, `todo`, `webfetch`) |
 > | Provider shims | 6 (`openai`, `codex`, `bedrock-mantle`, `copilot`, `opencode`, `opencode-go`) |
 >
@@ -20,7 +20,7 @@
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/tools.go:320-333`, `internal/oy/providers/files.go:81-128` |
+| **Location** | `internal/oy/tools/exec.go:25-38`, `internal/oy/providers/files.go:81-128` |
 | **Category** | Security |
 | **Reference** | OWASP ASVS 5.0 (configuration / verification) |
 | **Recommendation** | Keep this as an explicit trusted-local-user feature only. Add a `--safe` / env-stripped mode and stronger checkpoints for destructive commands. |
@@ -48,7 +48,7 @@ Evidence: `ReadOnlyTools` still includes `webfetch`, and both CLI help and promp
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/tools.go:337-381`, `internal/oy/providers/http.go:129-159` |
+| **Location** | `internal/oy/tools/web.go:13-75`, `internal/oy/providers/http.go:128-159` |
 | **Category** | Security |
 | **Reference** | OWASP ASVS 5.0 (API / web service) |
 | **Recommendation** | Re-validate every redirect target and pin requests to the checked IP, or keep redirects permanently disabled for `webfetch`. |
@@ -86,17 +86,17 @@ Evidence: one file still owns shim registration, credential/session loading, Cod
 
 ---
 
-## M2 · `tools.go` is still a large mixed-responsibility module
+## M2 · Tool package still has a smaller filesystem/search hotspot
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/tools.go` (1,382 total lines; 928 code) |
+| **Location** | `internal/oy/tools/fs.go` (492 total lines; 357 code), `internal/oy/tools/helpers.go` (354 total lines; 210 code) |
 | **Category** | Complexity |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Split schema/approval flow, filesystem tools, network tools, and shared glob/exclude helpers into smaller files while keeping the public tool surface flat. |
-| **Status** | Open |
+| **Recommendation** | Keep the public tool surface flat, but continue trimming `fs.go` by separating search/replace/sloc internals if more behaviour lands there. |
+| **Status** | Improved |
 
-Evidence: one file still owns tool schema/approval flow, `bash`, `webfetch`, list/read/search/replace/sloc, fuzzy matching, glob walking, and HTML-to-markdown conversion.
+Evidence: the old `tools.go` hotspot is gone; the package is now split across focused files (`registry.go`, `prompt.go`, `exec.go`, `web.go`, `fs.go`, `schema.go`, `helpers.go`). `fs.go` still carries most filesystem/search logic, so there is more room to split if future behavior grows there.
 
 ---
 
@@ -104,7 +104,7 @@ Evidence: one file still owns tool schema/approval flow, `bash`, `webfetch`, lis
 
 | | |
 |---|---|
-| **Location** | `internal/oy/providers/http.go:138-159`, `internal/oy/tools/tools.go:392-403` |
+| **Location** | `internal/oy/providers/http.go:148-159`, `internal/oy/tools/web.go:64-75` |
 | **Category** | Performance |
 | **Reference** | OWASP ASVS 5.0 (API / web service) |
 | **Recommendation** | Stream into a bounded buffer and reject oversized bodies early instead of after full download. |
@@ -132,7 +132,7 @@ Evidence: `NewHTTPClient()` builds a bare `&http.Client{Timeout: timeout}` and d
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/tools.go:548-590` |
+| **Location** | `internal/oy/tools/fs.go:140-178` |
 | **Category** | Performance |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
 | **Recommendation** | Add a global match budget and stop walking once enough results have been collected for display. |
@@ -146,7 +146,7 @@ Evidence: `ToolSearch()` appends every match into `matches` while walking the tr
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/tools.go:514-537` |
+| **Location** | `internal/oy/tools/fs.go:105-132` |
 | **Category** | Performance |
 | **Reference** | OWASP ASVS 5.0 (availability); grugbrain.dev |
 | **Recommendation** | Stream or scan line-by-line until the requested slice is satisfied instead of `os.ReadFile()` on every target. |
@@ -196,7 +196,11 @@ Evidence: the workflow still pins `actions/checkout@v4`, `actions/setup-go@v5`, 
 ## Short audit log
 
 - 2026-04-03: refreshed for the Go-only tree after retiring the in-tree Python baseline.
-  - Header updated from current `sloc`: 4,994 Go code lines, 8,109 total repo lines, 26 countable files.
+  - Header updated from a tracked-file text scan: 16 Go files, 5,637 non-comment/non-empty Go lines, 6,951 total repo lines, 28 tracked text files.
   - Repointed finding locations and evidence from the retired Python baseline to the current Go implementation.
   - Revalidated open items against OWASP ASVS 5.0 and grugbrain.dev.
   - Release workflow action-version drift remains open; no new workspace-boundary regressions were found.
+- 2026-04-03: split the former `internal/oy/tools/tools.go` hotspot into focused tool package files and refreshed issue locations/status.
+  - M2 moved from Open to Improved because the monolith is gone; remaining follow-up is concentrated in `fs.go`.
+  - Repointed `bash`, `webfetch`, `read`, `search`, and related evidence to `exec.go`, `web.go`, `fs.go`, and `helpers.go`.
+  - Header module list now reflects the new post-split layout.
