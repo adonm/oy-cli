@@ -34,7 +34,7 @@ Approved candidates:
 - [x] M6: port transcript management and agent loop
 - [x] M7: port CLI commands: `run`, `chat`, `ralph`, `model`, `audit`
 - [x] M8: add Go tests for provider/runtime/tool/agent/cli parity
-- [ ] M9: switch docs/build workflow to Go-first
+- [x] M9: switch docs/build workflow to Go-first
 - [ ] M10: retire Python implementation after parity verification
 
 ## Parity checklist
@@ -99,3 +99,4 @@ Approved candidates:
 - 2026-04-03: Ported Go transcript primitives and local tool foundations (`todo`, `bash`, `list`, `read`, `search`, `replace`, `sloc`, web payload helpers) with focused Go tests.
 - 2026-04-03: Ported Go CLI/session foundations for command normalization, session resolution, Renovate config bootstrap, session save/load, and chat command handling with focused Go CLI tests.
 - 2026-04-03: Added Go tool registry/spec selection, mutating approval flow, `ask`/`todo` invocation plumbing, and real `webfetch` request handling with focused parity tests.
+- 2026-04-03: Switched README, contributor workflow, and release automation to Go-first while keeping Python pytest checks as parity verification during migration.

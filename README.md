@@ -1,16 +1,18 @@
 # oy-cli
 
-[![PyPI](https://img.shields.io/pypi/v/oy-cli)](https://pypi.org/project/oy-cli/)
-
 Small local AI coding CLI for your shell. It can inspect files, search content, fetch public docs, and run commands in the current workspace.
+
+## Status
+
+The project is being ported from Python to Go on the `golang` branch. Progress is tracked in [`GO_PORT_TRACKER.md`](GO_PORT_TRACKER.md).
 
 ## Quick start
 
 ```bash
-uv tool install oy-cli
-oy "add docstrings to public functions"
-oy chat
-oy audit "focus on authentication"
+go build -o oy ./cmd/oy
+./oy "add docstrings to public functions"
+./oy chat
+./oy audit "focus on authentication"
 ```
 
 ## Common tasks
@@ -36,7 +38,7 @@ In chat, `/ask <question>` is research-only: no `bash`, no file changes, but pub
 - start fresh by default for one-shot runs
 - make approvals and checkpoints explicit when they matter
 
-Prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/session_text.toml). Core modules are [`oy_cli/runtime.py`](oy_cli/runtime.py), [`oy_cli/agent.py`](oy_cli/agent.py), [`oy_cli/cli.py`](oy_cli/cli.py), [`oy_cli/tools.py`](oy_cli/tools.py), and [`oy_cli/providers.py`](oy_cli/providers.py). Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Prompt text and tool descriptions live in [`internal/oy/runtime/session_text.toml`](internal/oy/runtime/session_text.toml). Current Go modules are under [`cmd/oy`](cmd/oy) and [`internal/oy/`](internal/oy/). The legacy Python baseline remains in [`oy_cli/`](oy_cli/) until final retirement. Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Configuration
 
@@ -67,31 +69,27 @@ Only `model` and `shim` are persisted. Selection order is `OY_MODEL`, then saved
 
 From local testing, `glm-5` and `kimi-k2.5` are good defaults.
 
-## Installation
+## Build and development
+
+The Go port is now the primary development target.
 
 ```bash
-uv tool install oy-cli  # preferred
-pip install oy-cli      # alternative
+go test ./...
+go build ./cmd/oy
+./oy --help
+```
+
+The Python baseline is still kept for parity checks during the migration:
+
+```bash
+uv run pytest -q
 ```
 
 ## Requirements
 
-- Python 3.13+
+- Go 1.25+
 - `bash`
 - OpenAI-compatible credentials, Codex auth, Copilot auth, OpenCode auth, or AWS credentials for Bedrock Mantle
-
-## Development
-
-Use `uv` for local development. Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-```bash
-uv sync
-uv run ruff check .
-uv run pytest -q
-uv run pytest tests/test_providers.py -q
-uv run oy --help
-uv build
-```
 
 ## Authentication
 

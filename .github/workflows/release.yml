@@ -1,9 +1,9 @@
-name: Release to PyPI
+name: Release Go binary
 
 on:
   release:
     types: [published]
-  workflow_dispatch: # allow manual triggers
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,27 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.14"
-      - name: Install build
-        run: pip install build
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
       - name: Build
-        run: python -m build
+        run: go build -o dist/oy ./cmd/oy
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write # for trusted publishing
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          name: oy-linux-amd64
+          path: dist/oy
