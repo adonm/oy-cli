@@ -146,6 +146,7 @@ DEFAULT_RETRY_MAX_ATTEMPTS = 10
 DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 5.0
 DEFAULT_RETRY_MAX_DELAY_SECONDS = 30.0
 TRANSPORT_ERROR_RETRY_DELAY = 3.0
+MALFORMED_OUTPUT_RETRY_ATTEMPTS = 3
 
 
 def _tool_output_value(result: dict[str, Any]) -> JSONLike:
@@ -1024,6 +1025,10 @@ class RetryableHttpError(RuntimeError):
         super().__init__(f"retryable HTTP {response['status_code']}")
 
 
+class RetryableDecodeError(RuntimeError):
+    pass
+
+
 def _parse_retry_after_seconds(value: str | None) -> float | None:
     if not value:
         return None
@@ -1071,6 +1076,8 @@ def _retry_error_context(exc: BaseException | None) -> str | None:
     if isinstance(exc, RetryableHttpError | APIStatusError):
         msg = _response_error_message(exc.response)
         return msg or f"HTTP {exc.response['status_code']}"
+    if isinstance(exc, RetryableDecodeError):
+        return str(exc)
     if isinstance(exc, TimeoutException):
         return f"timeout ({type(exc).__name__})"
     if isinstance(exc, TransportError):
@@ -1088,7 +1095,12 @@ def _call_with_retry(
         stop=stop_after_attempt(max_attempts),
         wait=WaitForRetryableResponse(maximum=DEFAULT_RETRY_MAX_DELAY_SECONDS),
         retry=retry_if_exception_type(
-            (APIConnectionError, APITimeoutError, RetryableHttpError)
+            (
+                APIConnectionError,
+                APITimeoutError,
+                RetryableHttpError,
+                RetryableDecodeError,
+            )
         ),
         reraise=True,
     ):
@@ -1224,6 +1236,33 @@ def _drop_reasoning_arg(payload: dict[str, Any]) -> dict[str, Any]:
         for key, value in payload.items()
         if key not in {"reasoning", "reasoning_effort"}
     }
+
+
+def _has_meaningful_assistant_output(message: AssistantMessage) -> bool:
+    return bool(message["tool_calls"]) or not _is_blank_chat_value(message["content"])
+
+
+def _retryable_decode_error(exc: Exception) -> RetryableDecodeError:
+    return RetryableDecodeError(f"malformed model output: {exc}")
+
+
+def _decode_with_retry(call, decode, *, on_retry=None) -> AssistantMessage:
+    def run() -> AssistantMessage:
+        try:
+            message = decode(call())
+        except (json.JSONDecodeError, RuntimeError, TypeError, ValueError) as exc:
+            raise _retryable_decode_error(exc) from exc
+        if not _has_meaningful_assistant_output(message):
+            raise RetryableDecodeError(
+                "malformed model output: empty assistant message with no tool calls"
+            )
+        return message
+
+    return _call_with_retry(
+        run,
+        max_attempts=MALFORMED_OUTPUT_RETRY_ATTEMPTS,
+        on_retry=on_retry,
+    )
 
 
 # Thread-safe cache for reasoning support per (api_kind, model).
@@ -1402,10 +1441,13 @@ def _responses_client(
         on_retry=None,
     ) -> AssistantMessage:
         payload = _responses_payload(model, messages, tools, tool_choice)
-        response = _call_with_reasoning_fallback(
-            "responses", model, payload, create, on_retry=on_retry
+        return _decode_with_retry(
+            lambda: _call_with_reasoning_fallback(
+                "responses", model, payload, create, on_retry=on_retry
+            ),
+            _decode_responses_output,
+            on_retry=on_retry,
         )
-        return _decode_responses_output(response)
 
     return {
         "chat_completion": chat_completion,
@@ -1516,8 +1558,12 @@ def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
         else {}
     )
     content = message.get("content") if isinstance(message.get("content"), str) else ""
+    if not content and isinstance(message.get("refusal"), str):
+        content = message["refusal"]
     if not content and isinstance(message.get("reasoning"), str):
         content = message["reasoning"]
+    if not content and isinstance(message.get("reasoning_text"), str):
+        content = message["reasoning_text"]
     return AssistantMessage(
         content=content,
         tool_calls=[
@@ -1549,10 +1595,13 @@ def _chat_client(
         if tools:
             payload["tools"] = tools_map(tools)
             payload["tool_choice"] = tool_choice
-        response = _call_with_reasoning_fallback(
-            "chat_completions", model, payload, create, on_retry=on_retry
+        return _decode_with_retry(
+            lambda: _call_with_reasoning_fallback(
+                "chat_completions", model, payload, create, on_retry=on_retry
+            ),
+            _chat_completion_to_assistant_message,
+            on_retry=on_retry,
         )
-        return _chat_completion_to_assistant_message(response)
 
     return {
         "chat_completion": chat_completion,
@@ -1622,7 +1671,19 @@ def _codex_chatgpt_client() -> CompletionClient:
                 ) from exc
             except HTTPError as exc:
                 raise RuntimeError(f"Codex ChatGPT request failed: {exc}") from exc
-            return _decode_responses_output(data)
+            try:
+                message = _decode_responses_output(data)
+            except (json.JSONDecodeError, RuntimeError, TypeError, ValueError) as exc:
+                if attempt == 0:
+                    continue
+                raise _retryable_decode_error(exc) from exc
+            if _has_meaningful_assistant_output(message):
+                return message
+            if attempt == 0:
+                continue
+            raise RetryableDecodeError(
+                "malformed model output: empty assistant message with no tool calls"
+            )
         raise RuntimeError("Codex ChatGPT authentication failed after token refresh")
 
     return {

@@ -137,3 +137,44 @@ class TestRunTurn:
             "call_1", "echo", ToolResult(content=f"{tmp_path.name}:hi")
         )
 
+    def test_logs_malformed_output_retry_progress(self, monkeypatch, tmp_path):
+        waits = []
+        updates = []
+        notes = []
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, **k: None,
+            _debug_log=None,
+            _note=None,
+        )
+        monkeypatch.setattr(agent, "wait", lambda message: {"message": message})
+        monkeypatch.setattr(agent, "start_wait", lambda spinner: waits.append(spinner["message"]))
+        monkeypatch.setattr(agent, "stop_wait", lambda spinner: None)
+        monkeypatch.setattr(agent, "log_wait", lambda spinner, message: notes.append(message))
+        monkeypatch.setattr(agent, "update_wait", lambda spinner, message: updates.append(message))
+
+        def fake_chat_completion(**kwargs):
+            kwargs["on_retry"](
+                2,
+                3,
+                "malformed model output: empty assistant message with no tool calls",
+            )
+            return AssistantMessage("done")
+
+        code, content = agent.run_turn(
+            {"chat_completion": fake_chat_completion},
+            _transcript(),
+            make_state(tmp_path, registry=tool_handler("echo", lambda state, text: text)),
+            "openai:gpt-test",
+            tools.tool_specs({}),
+        )
+
+        assert (code, content) == (0, "done")
+        assert waits and waits[0].startswith("Waiting for openai:gpt-test | ")
+        assert notes == [
+            "retry 2/3: malformed model output: empty assistant message with no tool calls"
+        ]
+        assert updates == [
+            "Retrying openai:gpt-test (attempt 2/3) | " + waits[0].split(" | ", 1)[1]
+        ]
+
