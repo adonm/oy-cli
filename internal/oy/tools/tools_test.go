@@ -2,6 +2,7 @@ package tools
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,9 @@ func TestListReadSearchReplaceSloc(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "dir", "b.py"), []byte("print('hello')\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	state := makeState(root)
 
 	listPayload, err := ToolList(state, "*", nil, 20)
@@ -176,12 +180,21 @@ func TestListReadSearchReplaceSloc(t *testing.T) {
 		t.Fatalf("unexpected read payload/preview: %#v %q", readPayload, preview)
 	}
 
-	searchPayload, err := ToolSearch(state, "alpha|hello", ".", nil, 20)
+	searchPayload, err := ToolSearch(state, "alpha|hello", ".", "", false, false, nil, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if searchPayload["match_count"].(int) != 2 {
 		t.Fatalf("unexpected search payload: %#v", searchPayload)
+	}
+
+	fuzzyPayload, err := ToolSearch(state, "hello", ".", "s<=1", true, false, nil, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fuzzyMatches := fuzzyPayload["matches"].([]map[string]any)
+	if len(fuzzyMatches) == 0 || fuzzyMatches[0]["path"].(string) != "dir/b.py" || fuzzyMatches[0]["column"].(int) != 8 || fuzzyPayload["fuzzy"].(string) != "s<=1" || fuzzyPayload["best_match"].(bool) != true {
+		t.Fatalf("unexpected fuzzy search payload: %#v", fuzzyPayload)
 	}
 
 	replacePayload, err := ToolReplace(state, "alpha", "ALPHA", ".", nil, 20)
@@ -198,6 +211,33 @@ func TestListReadSearchReplaceSloc(t *testing.T) {
 	}
 	if slocPayload["total_code_count"].(int) <= 0 {
 		t.Fatalf("unexpected sloc payload: %#v", slocPayload)
+	}
+	if slocPayload["language_count"].(int) < 3 {
+		t.Fatalf("expected multiple languages in sloc payload: %#v", slocPayload)
+	}
+	languages := slocPayload["languages"].([]map[string]any)
+	if !containsLanguage(languages, "Python") || !containsLanguage(languages, "Go") || !containsLanguage(languages, "Text") {
+		t.Fatalf("unexpected sloc languages: %#v", languages)
+	}
+}
+
+func TestSlocTopFilesTruncateAtTwenty(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 25; i++ {
+		lines := make([]string, 0, i+1)
+		for line := 0; line <= i; line++ {
+			lines = append(lines, "v = 1")
+		}
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("file_%02d.py", i)), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, err := ToolSloc(makeState(root), ".", nil, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["top_file_count"].(int) != 25 || len(payload["top_files"].([]map[string]any)) != 20 || payload["truncated"].(bool) != true {
+		t.Fatalf("unexpected truncated sloc payload: %#v", payload)
 	}
 }
 
@@ -265,6 +305,15 @@ func TestRegistryHelpers(t *testing.T) {
 	if result := InvokeTool(map[string]RegisteredTool{}, &State{}, "missing", nil); result.OK || result.Content.(string) != "Tool 'missing' unavailable" {
 		t.Fatalf("unexpected missing-tool result: %#v", result)
 	}
+}
+
+func containsLanguage(items []map[string]any, want string) bool {
+	for _, item := range items {
+		if item["language"] == want {
+			return true
+		}
+	}
+	return false
 }
 
 func containsString(items []string, want string) bool {

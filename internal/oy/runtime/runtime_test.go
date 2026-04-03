@@ -23,7 +23,7 @@ func TestSessionTextGuidance(t *testing.T) {
 		t.Fatalf("unexpected ask system prompt: %q", got)
 	}
 	auditPrompt := AuditSystemPrompt()
-	for _, needle := range []string{"Renovate lookup report command", "pnpm dlx --allow-build=re2 renovate", "npm exec --yes --package renovate -- renovate", "--dry-run=lookup", "--report-path=renovate-report.json", "throwaway local artifact", "delete it or leave it untracked", "`jq` when available or Python otherwise"} {
+	for _, needle := range []string{"Renovate lookup report command", "pnpm dlx --allow-build=re2 renovate", "npm exec --yes --package renovate -- renovate", "--dry-run=lookup", "--report-path=renovate-report.json", "throwaway local artifact", "delete it or leave it untracked", "`jq` when available or another local parser otherwise"} {
 		if !contains(auditPrompt, needle) {
 			t.Fatalf("audit prompt missing %q", needle)
 		}

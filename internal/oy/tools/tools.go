@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,7 +125,16 @@ var ToolRegistry = map[string]RegisteredTool{
 		Spec:     Spec{Name: "search", Description: runtime.ToolDescription("search"), Parameters: searchSchema()},
 		Required: []string{"pattern"},
 		Handler: func(state *State, args map[string]any) (any, error) {
-			return ToolSearch(*state, mustString(args, "pattern"), optionalString(args, "path", "."), optionalStringSlice(args, "exclude"), optionalInt(args, "limit", 200))
+			return ToolSearch(
+				*state,
+				mustString(args, "pattern"),
+				optionalString(args, "path", "."),
+				optionalString(args, "fuzzy", ""),
+				optionalBool(args, "best_match", false),
+				optionalBool(args, "enhance_match", false),
+				optionalStringSlice(args, "exclude"),
+				optionalInt(args, "limit", 200),
+			)
 		},
 	},
 	"replace": {
@@ -535,12 +545,12 @@ func ToolRead(state State, path string, offset, limit int) (map[string]any, stri
 	return payload, preview, nil
 }
 
-func ToolSearch(state State, pattern, path string, exclude []string, limit int) (map[string]any, error) {
+func ToolSearch(state State, pattern, path, fuzzy string, bestMatch, enhanceMatch bool, exclude []string, limit int) (map[string]any, error) {
 	target, err := ExistingToolTarget(state.Root, path, "search")
 	if err != nil {
 		return nil, err
 	}
-	re, err := regexp.Compile(pattern)
+	matcher, err := newSearchMatcher(pattern, fuzzy, bestMatch, enhanceMatch)
 	if err != nil {
 		return nil, err
 	}
@@ -554,11 +564,11 @@ func ToolSearch(state State, pattern, path string, exclude []string, limit int) 
 			return nil
 		}
 		for i, line := range splitLines(string(data)) {
-			loc := re.FindStringIndex(line)
-			if loc == nil {
+			column, ok := matcher.lineMatch(line)
+			if !ok {
 				continue
 			}
-			matches = append(matches, map[string]any{"path": filepath.ToSlash(rel), "line_number": i + 1, "column": loc[0] + 1, "text": line})
+			matches = append(matches, map[string]any{"path": filepath.ToSlash(rel), "line_number": i + 1, "column": column, "text": line})
 		}
 		return nil
 	})
@@ -569,10 +579,154 @@ func ToolSearch(state State, pattern, path string, exclude []string, limit int) 
 		truncated = true
 	}
 	payload := map[string]any{"pattern": pattern, "path": path, "match_count": len(matches), "matches": shown, "truncated": truncated}
+	if strings.TrimSpace(fuzzy) != "" {
+		payload["fuzzy"] = fuzzy
+	}
+	if bestMatch {
+		payload["best_match"] = true
+	}
+	if enhanceMatch {
+		payload["enhance_match"] = true
+	}
 	if exclude != nil {
 		payload["exclude"] = exclude
 	}
 	return payload, nil
+}
+
+type searchMatcher struct {
+	re           *regexp.Regexp
+	fuzzyText    string
+	fuzzyMax     int
+	preferBest   bool
+	fuzzyEnabled bool
+}
+
+func newSearchMatcher(pattern, fuzzy string, bestMatch, enhanceMatch bool) (searchMatcher, error) {
+	matcher := searchMatcher{preferBest: bestMatch || enhanceMatch}
+	if strings.TrimSpace(fuzzy) == "" {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return searchMatcher{}, err
+		}
+		matcher.re = re
+		return matcher, nil
+	}
+	maxDistance, err := parseFuzzyConstraint(fuzzy)
+	if err != nil {
+		return searchMatcher{}, err
+	}
+	matcher.fuzzyEnabled = true
+	matcher.fuzzyText = pattern
+	matcher.fuzzyMax = maxDistance
+	return matcher, nil
+}
+
+func (m searchMatcher) lineMatch(line string) (int, bool) {
+	if !m.fuzzyEnabled {
+		loc := m.re.FindStringIndex(line)
+		if loc == nil {
+			return 0, false
+		}
+		return loc[0] + 1, true
+	}
+	return fuzzyLineMatch(line, m.fuzzyText, m.fuzzyMax, m.preferBest)
+}
+
+func parseFuzzyConstraint(raw string) (int, error) {
+	constraint := strings.TrimSpace(raw)
+	constraint = strings.TrimPrefix(constraint, "{")
+	constraint = strings.TrimSuffix(constraint, "}")
+	constraint = strings.TrimSpace(constraint)
+	if constraint == "" {
+		return 0, fmt.Errorf("fuzzy must not be empty")
+	}
+	for _, prefix := range []string{"s<=", "e<="} {
+		if strings.HasPrefix(constraint, prefix) {
+			value, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(constraint, prefix)))
+			if err != nil || value < 0 {
+				return 0, fmt.Errorf("unsupported fuzzy constraint: %q", raw)
+			}
+			return value, nil
+		}
+	}
+	return 0, fmt.Errorf("unsupported fuzzy constraint: %q", raw)
+}
+
+func fuzzyLineMatch(line, pattern string, maxDistance int, preferBest bool) (int, bool) {
+	patternRunes := []rune(pattern)
+	lineRunes := []rune(line)
+	if len(patternRunes) == 0 {
+		return 1, true
+	}
+	bestColumn := 0
+	bestDistance := maxDistance + 1
+	minLen := max(len(patternRunes)-maxDistance, 1)
+	maxLen := len(patternRunes) + maxDistance
+	for start := 0; start < len(lineRunes); start++ {
+		endLimit := min(len(lineRunes), start+maxLen)
+		for end := start + minLen; end <= endLimit; end++ {
+			distance := levenshteinDistance(patternRunes, lineRunes[start:end], bestDistance-1)
+			if distance > maxDistance {
+				continue
+			}
+			column := start + 1
+			if !preferBest {
+				return column, true
+			}
+			if distance < bestDistance || (distance == bestDistance && (bestColumn == 0 || column < bestColumn)) {
+				bestDistance = distance
+				bestColumn = column
+			}
+		}
+	}
+	if bestColumn == 0 {
+		return 0, false
+	}
+	return bestColumn, true
+}
+
+func levenshteinDistance(a, b []rune, maxDistance int) int {
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+	if maxDistance >= 0 && absInt(len(a)-len(b)) > maxDistance {
+		return maxDistance + 1
+	}
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i, ra := range a {
+		current[0] = i + 1
+		rowMin := current[0]
+		for j, rb := range b {
+			cost := 0
+			if ra != rb {
+				cost = 1
+			}
+			current[j+1] = min(min(previous[j+1]+1, current[j]+1), previous[j]+cost)
+			if current[j+1] < rowMin {
+				rowMin = current[j+1]
+			}
+		}
+		if maxDistance >= 0 && rowMin > maxDistance {
+			return maxDistance + 1
+		}
+		previous, current = current, previous
+	}
+	return previous[len(b)]
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func ToolReplace(state State, pattern, replacement, path string, exclude []string, limit int) (map[string]any, error) {
@@ -626,9 +780,22 @@ func ToolSloc(state State, path string, exclude []string, limit int) (map[string
 	if err != nil {
 		return nil, err
 	}
+	type languageSummary struct {
+		Language           string
+		FileCount          int
+		CodeCount          int
+		DocumentationCount int
+		EmptyCount         int
+		StringCount        int
+	}
 	totalFiles := 0
 	totalCode := 0
-	pythonFiles := []map[string]any{}
+	totalDocs := 0
+	totalEmpty := 0
+	totalStrings := 0
+	totalLines := 0
+	languageTotals := map[string]*languageSummary{}
+	fileSummaries := []map[string]any{}
 	_ = walkFiles(target, func(rel, full string, d fs.DirEntry) error {
 		if d.IsDir() || excluded(rel, exclude) {
 			return nil
@@ -638,40 +805,92 @@ func ToolSloc(state State, path string, exclude []string, limit int) (map[string
 			return nil
 		}
 		lines := splitLines(string(data))
-		code := 0
+		total := len(lines)
+		empty := 0
 		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				code++
+			if strings.TrimSpace(line) == "" {
+				empty++
 			}
 		}
+		code := max(total-empty, 0)
+		language := guessLanguage(rel)
 		totalFiles++
 		totalCode += code
-		if strings.HasSuffix(rel, ".py") {
-			pythonFiles = append(pythonFiles, map[string]any{"path": filepath.ToSlash(rel), "language": "Python", "code_count": code, "documentation_count": 0, "empty_count": max(len(lines)-code, 0), "string_count": 0, "line_count": len(lines)})
+		totalEmpty += empty
+		totalLines += total
+		summary := languageTotals[language]
+		if summary == nil {
+			summary = &languageSummary{Language: language}
+			languageTotals[language] = summary
 		}
+		summary.FileCount++
+		summary.CodeCount += code
+		summary.EmptyCount += empty
+		fileSummaries = append(fileSummaries, map[string]any{
+			"path":                filepath.ToSlash(rel),
+			"language":            language,
+			"code_count":          code,
+			"documentation_count": 0,
+			"empty_count":         empty,
+			"string_count":        0,
+			"line_count":          total,
+		})
 		return nil
 	})
-	sort.Slice(pythonFiles, func(i, j int) bool {
-		return pythonFiles[i]["code_count"].(int) > pythonFiles[j]["code_count"].(int)
+	languages := make([]map[string]any, 0, len(languageTotals))
+	for _, summary := range languageTotals {
+		languages = append(languages, map[string]any{
+			"language":            summary.Language,
+			"file_count":          summary.FileCount,
+			"code_count":          summary.CodeCount,
+			"documentation_count": summary.DocumentationCount,
+			"empty_count":         summary.EmptyCount,
+			"string_count":        summary.StringCount,
+		})
+	}
+	sort.Slice(languages, func(i, j int) bool {
+		if languages[i]["code_count"].(int) != languages[j]["code_count"].(int) {
+			return languages[i]["code_count"].(int) > languages[j]["code_count"].(int)
+		}
+		if languages[i]["file_count"].(int) != languages[j]["file_count"].(int) {
+			return languages[i]["file_count"].(int) > languages[j]["file_count"].(int)
+		}
+		return strings.ToLower(languages[i]["language"].(string)) < strings.ToLower(languages[j]["language"].(string))
 	})
-	topFiles := pythonFiles
+	sort.Slice(fileSummaries, func(i, j int) bool {
+		if fileSummaries[i]["code_count"].(int) != fileSummaries[j]["code_count"].(int) {
+			return fileSummaries[i]["code_count"].(int) > fileSummaries[j]["code_count"].(int)
+		}
+		if fileSummaries[i]["line_count"].(int) != fileSummaries[j]["line_count"].(int) {
+			return fileSummaries[i]["line_count"].(int) > fileSummaries[j]["line_count"].(int)
+		}
+		return fileSummaries[i]["path"].(string) < fileSummaries[j]["path"].(string)
+	})
+	shownLanguages := languages
+	if limit > 0 && len(shownLanguages) > limit {
+		shownLanguages = shownLanguages[:limit]
+	}
+	shownTopFiles := fileSummaries
 	truncated := false
-	if len(topFiles) > 20 {
-		topFiles = topFiles[:20]
+	if len(shownTopFiles) > 20 {
+		shownTopFiles = shownTopFiles[:20]
+		truncated = true
+	}
+	if len(languages) > len(shownLanguages) {
 		truncated = true
 	}
 	payload := map[string]any{
 		"path":                      path,
 		"total_file_count":          totalFiles,
 		"total_code_count":          totalCode,
-		"total_documentation_count": 0,
-		"total_empty_count":         0,
-		"total_string_count":        0,
-		"total_line_count":          totalCode,
-		"language_count":            1,
-		"languages":                 []map[string]any{{"language": "Python", "file_count": len(pythonFiles), "code_count": totalCode, "documentation_count": 0, "empty_count": 0, "string_count": 0}},
-		"top_file_count":            len(pythonFiles),
-		"top_files":                 topFiles,
+		"total_documentation_count": totalDocs,
+		"total_empty_count":         totalEmpty,
+		"total_string_count":        totalStrings,
+		"total_line_count":          totalLines,
+		"language_count":            len(languages),
+		"languages":                 shownLanguages,
+		"top_file_count":            len(fileSummaries),
+		"top_files":                 shownTopFiles,
 		"truncated":                 truncated,
 	}
 	if exclude != nil {
@@ -746,10 +965,13 @@ func readSchema() map[string]any {
 
 func searchSchema() map[string]any {
 	return closedObject(map[string]any{
-		"pattern": map[string]any{"type": "string"},
-		"path":    map[string]any{"type": "string"},
-		"exclude": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		"limit":   map[string]any{"type": "integer"},
+		"pattern":       map[string]any{"type": "string"},
+		"path":          map[string]any{"type": "string"},
+		"fuzzy":         map[string]any{"type": "string"},
+		"best_match":    map[string]any{"type": "boolean"},
+		"enhance_match": map[string]any{"type": "boolean"},
+		"exclude":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"limit":         map[string]any{"type": "integer"},
 	}, []string{"pattern"})
 }
 
@@ -1010,6 +1232,32 @@ func walkFiles(root string, fn func(rel, full string, d fs.DirEntry) error) erro
 		}
 		return fn(filepath.ToSlash(rel), path, d)
 	})
+}
+
+func guessLanguage(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	if name, ok := map[string]string{
+		".go":   "Go",
+		".py":   "Python",
+		".md":   "Markdown",
+		".txt":  "Text",
+		".toml": "TOML",
+		".yaml": "YAML",
+		".yml":  "YAML",
+		".json": "JSON",
+		".sh":   "Shell",
+		".js":   "JavaScript",
+		".ts":   "TypeScript",
+		".html": "HTML",
+		".css":  "CSS",
+		".xml":  "XML",
+	}[ext]; ok {
+		return name
+	}
+	if ext == "" {
+		return "Text"
+	}
+	return strings.ToUpper(strings.TrimPrefix(ext, "."))
 }
 
 func sanitizeRequestHeaders(headers map[string]string) (map[string]string, error) {

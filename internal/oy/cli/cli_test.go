@@ -70,7 +70,7 @@ func TestMainSupportsChatYoloFlag(t *testing.T) {
 	}
 }
 
-func TestMainHelpMatchesPythonStyleOutput(t *testing.T) {
+func TestMainHelpMatchesBaselineStyleOutput(t *testing.T) {
 	oldStdout := stdoutWriter
 	defer func() { stdoutWriter = oldStdout }()
 	var out strings.Builder
@@ -113,7 +113,7 @@ func TestMainVersionUsesInjectedVersion(t *testing.T) {
 	}
 }
 
-func TestChatHelpMatchesPythonStyleOutput(t *testing.T) {
+func TestChatHelpMatchesBaselineStyleOutput(t *testing.T) {
 	oldStdout := stdoutWriter
 	defer func() { stdoutWriter = oldStdout }()
 	var out strings.Builder
