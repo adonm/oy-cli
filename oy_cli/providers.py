@@ -1911,7 +1911,7 @@ def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
     return sorted(chat_ids), responses_ids
 
 
-def _copilot_completion_client(_cwd: Path | None = None) -> CompletionClient:
+def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
     token = _require_string(_get_github_token(), "No GitHub token found")
     client = _openai(
         token,
@@ -2001,11 +2001,11 @@ def _opencode_client(name: str, label: str, base_url: str) -> CompletionClient:
     )
 
 
-def _opencode_zen_client(_cwd: Path | None = None) -> CompletionClient:
+def _opencode_zen_client(cwd: Path | None = None) -> CompletionClient:
     return _opencode_client("opencode", "Zen", OPENCODE_ZEN_URL)
 
 
-def _opencode_go_client(_cwd: Path | None = None) -> CompletionClient:
+def _opencode_go_client(cwd: Path | None = None) -> CompletionClient:
     return _opencode_client("opencode-go", "Go", OPENCODE_GO_URL)
 
 

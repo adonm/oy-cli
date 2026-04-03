@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import sys
+from tempfile import TemporaryDirectory
 import time
 from pathlib import Path
 
@@ -104,6 +106,36 @@ def _apply_session_title(workspace: Path, model_spec: str) -> None:
 
 def _task_text(task: tuple[str, ...]) -> str:
     return " ".join(task) or (sys.stdin.read().strip() if not rt.has_tty_stdin() else "")
+
+
+@contextmanager
+def _ralph_run_env(current_model: str):
+    saved_env = {
+        "OY_MODEL": os.environ.get("OY_MODEL"),
+        "OY_SHIM": os.environ.get("OY_SHIM"),
+        "OY_CONFIG": os.environ.get("OY_CONFIG"),
+        "OY_LOCK_MODEL": os.environ.get("OY_LOCK_MODEL"),
+    }
+    rt.command_env.cache_clear()
+    try:
+        shim, model = rt.split_model_spec(current_model)
+        os.environ["OY_MODEL"] = model
+        if shim:
+            os.environ["OY_SHIM"] = shim
+        else:
+            os.environ.pop("OY_SHIM", None)
+        os.environ["OY_LOCK_MODEL"] = "1"
+        with TemporaryDirectory(prefix="oy-ralph-") as tmpdir:
+            os.environ["OY_CONFIG"] = str(Path(tmpdir) / "config.json")
+            rt.command_env.cache_clear()
+            yield
+    finally:
+        for name, value in saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        rt.command_env.cache_clear()
 
 
 def _transcript_data(transcript: Transcript) -> dict[str, object]:
@@ -369,6 +401,9 @@ def _chat_command(cmd, transcript, system_prompt, model_spec):
 
 
 def _handle_model_switch(arg, current_model):
+    if rt._flag("OY_LOCK_MODEL", default=False):
+        rt._warn("Model changes are disabled for this run.")
+        return current_model
     if not arg:
         rt._print(value=_current_model_text(current_model), err=True)
         rt._note("use /model <name> to switch, or /model list to browse", tag="note")
@@ -730,15 +765,16 @@ def ralph(*task: str):
             f"ralph run {run_number} (~{rt._format_duration(remaining)} remaining)",
             tag="note",
         )
-        code, _ = run_agent(
-            task_text,
-            session["model"],
-            session["workspace"],
-            session["system_prompt"],
-            rt.unattended_limit_seconds(),
-            session["interactive"],
-            yolo=True,
-        )
+        with _ralph_run_env(session["model"]):
+            code, _ = run_agent(
+                task_text,
+                session["model"],
+                session["workspace"],
+                session["system_prompt"],
+                rt.unattended_limit_seconds(),
+                session["interactive"],
+                yolo=True,
+            )
         if code != 0:
             exit_code = code
         sleep_seconds = deadline - time.monotonic()

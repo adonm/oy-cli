@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -119,6 +121,34 @@ class TestRalph:
     def test_ralph_limit_seconds_parses_env(self, monkeypatch):
         monkeypatch.setenv("OY_RALPH_LIMIT", "90m")
         assert rt.ralph_limit_seconds() == 5400
+
+    def test_ralph_sandboxes_model_config_and_locks_model(self, tmp_path, monkeypatch):
+        saved_config = tmp_path / "saved-config.json"
+        monkeypatch.setenv("OY_CONFIG", str(saved_config))
+        monkeypatch.setenv("OY_MODEL", "other-model")
+        monkeypatch.setenv("OY_SHIM", "other-shim")
+        rt.command_env.cache_clear()
+
+        with cli._ralph_run_env("openai:gpt-test"):
+            assert os.environ["OY_MODEL"] == "gpt-test"
+            assert os.environ["OY_SHIM"] == "openai"
+            assert os.environ["OY_LOCK_MODEL"] == "1"
+            assert os.environ["OY_CONFIG"] != str(saved_config)
+            assert rt._model(None) == "openai:gpt-test"
+            assert cli._handle_model_switch("copilot:gpt-next", "openai:gpt-test") == "openai:gpt-test"
+            assert not saved_config.exists()
+            assert rt.save_model_config("copilot:gpt-next") == {
+                "model": "gpt-next",
+                "shim": "copilot",
+            }
+            assert not saved_config.exists()
+            assert Path(os.environ["OY_CONFIG"]).exists()
+
+        assert os.environ["OY_CONFIG"] == str(saved_config)
+        assert os.environ["OY_MODEL"] == "other-model"
+        assert os.environ["OY_SHIM"] == "other-shim"
+        assert "OY_LOCK_MODEL" not in os.environ
+        assert not saved_config.exists()
 
 
 class TestAudit:
