@@ -49,22 +49,22 @@ repo_user_prompt = "Conduct a security and complexity audit of this repository."
 focus_suffix = " Additional focus: {focus}"
 
 [tools.list]
-description = "List workspace paths with `pathlib.Path.glob()`. Use this first for discovery. `path` is a glob relative to workspace and defaults to `\"*\"`. Optional `exclude` globs/pathspec-style patterns can hide noisy matches. Returns `items`, `count`, and `truncated`; directories end with `/`."
+description = "List workspace paths with glob patterns. Use this first for discovery. `path` is a workspace-relative glob and defaults to `\"*\"`. Optional `exclude` globs can hide noisy matches. Returns `items`, `count`, and `truncated`; directories end with `/`."
 
 [tools.read]
-description = "Read one UTF-8 text file with `pathlib`. Use after `list` when you know the path. Returns verbatim `text` plus `path`, `offset`, `limit`, `line_count`, and `truncated`. Use `offset` and `limit` for slices or large files."
+description = "Read one UTF-8 text file. Use after `list` when you know the path. Returns verbatim `text` plus `path`, `offset`, `limit`, `line_count`, and `truncated`. Use `offset` and `limit` for slices or large files."
 
 [tools.bash]
 description = "Run a system subprocess in the workspace. Use only when file tools are insufficient or when you must run/check something. Returns `returncode`, summarized `stdout`/`stderr`, and truncation flags."
 
 [tools.search]
-description = "Search text with regex patterns. Best for finding symbols, strings, TODOs, or candidate edit locations before reading files. Respects `.gitignore` via `pathspec`, scans common archives/compressed files, supports optional `exclude` globs/pathspec-style patterns to skip noisy paths, and returns `match_count`, `matches`, and optional `errors`. Supports regex fuzzy matching via `fuzzy` plus `best_match`/`enhance_match`."
+description = "Search text with regex patterns. Best for finding symbols, strings, TODOs, or candidate edit locations before reading files. Supports optional `exclude` globs to skip noisy paths and returns `match_count`, `matches`, and `truncated`. Supports fuzzy string matching via `fuzzy` plus `best_match`/`enhance_match`."
 
 [tools.replace]
-description = "Replace text with regex patterns for surgical edits. Prefer after narrowing targets with `read` or `search`. Respects `.gitignore` via `pathspec`, skips archives/binaries, supports optional `exclude` globs/pathspec-style patterns, and only rewrites changed files. Returns changed files, replacement counts, and skips/errors."
+description = "Replace text with regex patterns for surgical edits. Prefer after narrowing targets with `read` or `search`. Supports optional `exclude` globs and only rewrites changed files. Returns changed files, replacement counts, and `truncated`."
 
 [tools.sloc]
-description = "Count source lines to size up a repo or subtree. Respects `.gitignore`, supports optional `exclude` globs/pathspec-style patterns, and returns totals, per-language counts, top filenames, and non-countable files/errors."
+description = "Count source lines to size up a repo or subtree. Supports optional `exclude` globs and returns totals, per-language counts, top filenames, and `truncated`."
 
 [tools.ask]
 description = "Ask the user in interactive runs. Use only for genuine ambiguity or irreversible user-facing choices; provide choices when useful. Do not use in non-interactive mode."

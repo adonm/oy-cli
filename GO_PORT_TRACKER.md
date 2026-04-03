@@ -2,7 +2,7 @@
 
 ## Goals
 
-- [ ] Full feature parity with the current Python CLI
+- [x] Full feature parity with the former Python CLI
 - [ ] Smaller single-binary distribution
 - [ ] Modern, low-bloat dependency set
 - [ ] Preserve security boundaries and workspace confinement
@@ -10,8 +10,9 @@
 
 ## Baseline
 
-- Source baseline: Python implementation in `oy_cli/`
-- Test baseline: `67` passing pytest tests via `uv run pytest -q`
+- Historical source baseline: retired Python implementation formerly in `oy_cli/`
+- Historical test baseline: `67` passing pytest tests via `uv run pytest -q` before retirement
+- Current implementation: Go CLI in `cmd/oy/` and `internal/oy/`
 - Branch: `golang`
 - Go toolchain: `go1.25.5`
 
@@ -35,7 +36,7 @@ Approved candidates:
 - [x] M7: port CLI commands: `run`, `chat`, `ralph`, `model`, `audit`
 - [x] M8: add Go tests for provider/runtime/tool/agent/cli parity
 - [x] M9: switch docs/build workflow to Go-first
-- [ ] M10: retire Python implementation after parity verification
+- [x] M10: retire Python implementation after parity verification
 
 ## Parity checklist
 
@@ -90,6 +91,8 @@ Approved candidates:
 - [x] `go test ./...`
 - [x] `go build ./cmd/oy`
 - [x] compare major CLI flows against Python behavior
+- [x] remove in-tree Python package/tests and packaging metadata
+- [x] reconcile docs and trackers to the Go-only tree
 
 ## Progress log
 
@@ -111,3 +114,4 @@ Approved candidates:
 - 2026-04-03: Closed a major remaining Go CLI UX parity slice: shared session intro/title rendering, chat git-diff prompt summary, Ralph schedule/progress notes, audit Renovate/focus notes, and focused CLI test coverage; also hardened shim-dependent Go tests against ambient `OY_SHIM` leakage.
 - 2026-04-03: Matched Go top-level `--help`, `chat --help`, and `--version` behavior to the in-repo Python baseline, added focused CLI parity tests, and updated the release workflow to embed/verify the binary version via Go ldflags.
 - 2026-04-03: Closed another Go parity/documentation slice: added `search` fuzzy-argument plumbing with focused approximate-match coverage, made `sloc` language output generic instead of Python-only, and removed stale Python-specific runtime wording from embedded tool docs.
+- 2026-04-03: Retired the in-tree Python baseline (`oy_cli/`, `tests/`, `pyproject.toml`, `uv.lock`, and packaging metadata), rewrote repo docs/trackers for a Go-only tree, and tightened embedded tool descriptions to match the current Go implementation. Marked M10 complete.

@@ -1,4 +1,4 @@
-# Python bytecode
+# Python bytecode and local interpreter caches
 __pycache__/
 *.py[cod]
 
@@ -26,12 +26,14 @@ venv/
 .coverage.*
 htmlcov/
 
+# Go build artifacts
+/bin/
+/oy
+*.test
+coverage.out
+
 # Logs
 *.log
 
 # Local audit artifacts
 renovate-report.json
-# Go build artifacts
-/bin/
-*.test
-coverage.out

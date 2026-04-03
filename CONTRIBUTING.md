@@ -4,13 +4,12 @@ Thanks for contributing to `oy-cli`.
 
 ## Development loop
 
-The Go port is the primary target. Keep the Python baseline green until final retirement.
+The repo is now Go-only.
 
 ```bash
 go test ./...
 go build ./cmd/oy
 ./oy --help
-uv run pytest -q
 ```
 
 ## Repo layout
@@ -22,21 +21,19 @@ uv run pytest -q
 - `internal/oy/tools/` — model-exposed tools plus local file/search/web helpers
 - `internal/oy/providers/` — provider shims, auth, HTTP helpers, and model discovery
 - `internal/oy/aws/` — Bedrock SigV4 signing support
-- `oy_cli/` — legacy Python baseline kept temporarily for parity checks
-- `tests/` — pytest coverage for the Python baseline during migration
-- `GO_PORT_TRACKER.md` — migration checklist and progress log
+- `GO_PORT_TRACKER.md` — migration checklist and completion log
+- `ISSUES.md` — current audit findings and short audit log
 
 ## Working rules
 
 - package / command: `oy-cli` / `oy`
-- prefer the Go implementation for new behavior
 - keep the implementation small, direct, and easy to audit
 - prefer env-first configuration so common usage stays close to `oy "prompt"`
 - keep prompt text and tool descriptions in `internal/oy/runtime/session_text.toml`
 - when docs, tests, and behavior disagree, fix them together
 - prefer simple changes over abstraction-heavy rewrites
 - keep security guidance OWASP-minded and performance guidance measurement-first
-- update `GO_PORT_TRACKER.md` as milestones move
+- update `GO_PORT_TRACKER.md` when milestone-worthy work lands
 - commit after significant pieces of work
 
 ## Style
@@ -45,7 +42,7 @@ uv run pytest -q
 - prefer short obvious names in local context
 - keep the same concept named the same way across nearby modules
 - prefer nouns for data, verbs for functions, and predicate names for booleans
-- prefer typed data plus procedural functions over wrappers unless a class is clearly simpler
+- prefer typed data plus procedural functions over wrappers unless a type clearly simplifies the call site
 - prefer early returns and flat control flow
 - avoid clever tricks, hidden mutation, and framework-style indirection
 
@@ -55,8 +52,8 @@ uv run pytest -q
 - keep contributor workflow here in `CONTRIBUTING.md`
 - keep `/ask` wording explicit: no-write, but public `webfetch` is still allowed
 - add or extend focused Go tests next to changed behavior
-- keep `uv run pytest -q` passing while Python remains in-tree
 - run targeted tests before broader checks when iterating
+- update markdown trackers when a meaningful slice lands
 
 ## Release process
 
@@ -65,11 +62,10 @@ uv run pytest -q
    ```bash
    go test ./...
    go build ./cmd/oy
-   uv run pytest -q
    ```
 
 2. Update release metadata as needed.
 3. Commit, tag, push, and create the GitHub release.
 4. Verify the produced binary with `./oy --help`.
 
-The `release.yml` workflow now builds and uploads a Go binary artifact.
+The `release.yml` workflow builds and uploads a Go binary artifact.

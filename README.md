@@ -4,7 +4,7 @@ Small local AI coding CLI for your shell. It can inspect files, search content, 
 
 ## Status
 
-The project is being ported from Python to Go on the `golang` branch. Progress is tracked in [`GO_PORT_TRACKER.md`](GO_PORT_TRACKER.md).
+The Go port is complete on the `golang` branch. Migration history, parity milestones, and Python retirement are tracked in [`GO_PORT_TRACKER.md`](GO_PORT_TRACKER.md).
 
 ## Quick start
 
@@ -38,7 +38,7 @@ In chat, `/ask <question>` is research-only: no `bash`, no file changes, but pub
 - start fresh by default for one-shot runs
 - make approvals and checkpoints explicit when they matter
 
-Prompt text and tool descriptions live in [`internal/oy/runtime/session_text.toml`](internal/oy/runtime/session_text.toml). Current Go modules are under [`cmd/oy`](cmd/oy) and [`internal/oy/`](internal/oy/). The legacy Python baseline remains in [`oy_cli/`](oy_cli/) until final retirement. Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Prompt text and tool descriptions live in [`internal/oy/runtime/session_text.toml`](internal/oy/runtime/session_text.toml). The Go CLI entrypoint is [`cmd/oy`](cmd/oy), core packages live under [`internal/oy/`](internal/oy/), contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md), and migration history lives in [`GO_PORT_TRACKER.md`](GO_PORT_TRACKER.md).
 
 ## Configuration
 
@@ -71,18 +71,12 @@ From local testing, `glm-5` and `kimi-k2.5` are good defaults.
 
 ## Build and development
 
-The Go port is now the primary development target.
+This repo is now Go-only.
 
 ```bash
 go test ./...
 go build ./cmd/oy
 ./oy --help
-```
-
-The Python baseline is still kept for parity checks during the migration:
-
-```bash
-uv run pytest -q
 ```
 
 ## Requirements
