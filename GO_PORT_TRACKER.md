@@ -100,3 +100,4 @@ Approved candidates:
 - 2026-04-03: Ported Go CLI/session foundations for command normalization, session resolution, Renovate config bootstrap, session save/load, and chat command handling with focused Go CLI tests.
 - 2026-04-03: Added Go tool registry/spec selection, mutating approval flow, `ask`/`todo` invocation plumbing, and real `webfetch` request handling with focused parity tests.
 - 2026-04-03: Switched README, contributor workflow, and release automation to Go-first while keeping Python pytest checks as parity verification during migration.
+- 2026-04-03: Ported the Go agent execution loop, tool-call handling, and self-consistency message selection with focused Go agent parity tests.
