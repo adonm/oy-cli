@@ -82,7 +82,7 @@ Approved candidates:
 - [x] best-of defaults
 - [x] context budgeting and truncation
 - [x] saved sessions
-- [ ] debug logging
+- [x] debug logging
 - [ ] workspace path confinement
 
 ### Verification
@@ -105,3 +105,4 @@ Approved candidates:
 - 2026-04-03: Ported real Go one-shot CLI execution for `run`, `ralph`, and `audit`, wired through the Go agent/providers stack with focused CLI parity tests.
 - 2026-04-03: Ported the Go interactive chat/session loop with `/tokens`, `/model`, `/ask`, `/audit`, `/save`, `/load`, `/undo`, `/clear`, and `/quit` handling, plus model/session listing helpers and focused CLI parity tests.
 - 2026-04-03: Ported the remaining Go provider/auth parity slice: Codex model-cache/session refresh handling, Codex ChatGPT fallback client, Copilot model classification/routing, OpenCode endpoint alignment, and focused provider parity tests.
+- 2026-04-03: Added Go debug logging parity (`OY_DEBUG`, `/debug`, JSONL request/response/tool-result events), and fixed agent tool-state propagation so todo/approval state persists across turns.

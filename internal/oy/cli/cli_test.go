@@ -324,6 +324,32 @@ func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
 	}
 }
 
+func TestHandleDebugToggleTogglesDebugLog(t *testing.T) {
+	t.Setenv("OY_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	oldStderr := stderrWriter
+	defer func() {
+		stderrWriter = oldStderr
+		os.Unsetenv("OY_DEBUG")
+		_ = runtime.DisableDebugLog()
+	}()
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	os.Unsetenv("OY_DEBUG")
+	if err := runtime.DisableDebugLog(); err != nil {
+		t.Fatal(err)
+	}
+	handleDebugToggle()
+	first := errOut.String()
+	if !strings.Contains(first, "debug logging enabled:") || runtime.DebugLogPath() == "" {
+		t.Fatalf("unexpected enable output/path: %q %q", first, runtime.DebugLogPath())
+	}
+	errOut.Reset()
+	handleDebugToggle()
+	if !strings.Contains(errOut.String(), "debug logging disabled") || runtime.DebugLogPath() != "" {
+		t.Fatalf("unexpected disable output/path: %q %q", errOut.String(), runtime.DebugLogPath())
+	}
+}
+
 func TestChatListsSavedSessionsWhenLoadHasNoArg(t *testing.T) {
 	SessionsDir = t.TempDir()
 	defer func() { SessionsDir = "" }()

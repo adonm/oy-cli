@@ -12,13 +12,14 @@ import (
 type stubCompletionClient struct {
 	responses []providers.ChatMessage
 	index     int
+	requests  [][]providers.ChatMessage
 }
 
 func (s *stubCompletionClient) ChatCompletion(model string, messages []providers.ChatMessage, specs []map[string]any, toolChoice string) (providers.ChatMessage, error) {
 	_ = model
-	_ = messages
 	_ = specs
 	_ = toolChoice
+	s.requests = append(s.requests, append([]providers.ChatMessage(nil), messages...))
 	message := s.responses[s.index]
 	s.index++
 	return message, nil
@@ -117,6 +118,77 @@ func TestRunTurnExecutesToolCallsUntilFinalAnswer(t *testing.T) {
 	}
 	if !strings.Contains(transcript.Messages[3].Content, filepathBase(root)+":hi") {
 		t.Fatalf("unexpected tool message: %#v", transcript.Messages[3])
+	}
+}
+
+func TestRunTurnPropagatesTodoStateToNextRequest(t *testing.T) {
+	client := &stubCompletionClient{responses: []providers.ChatMessage{
+		providers.AssistantMessage("", []providers.ToolCall{providers.ToolCallMessage("call_1", "todo", map[string]any{"todos": []any{map[string]any{"id": "t1", "task": "ship it", "status": "in_progress"}}})}),
+		providers.AssistantMessage("done", nil),
+	}}
+	oldPrint := PrintFunc
+	defer func() { PrintFunc = oldPrint }()
+	PrintFunc = func(string) {}
+	transcript := TranscriptWithSystemPrompt("sys")
+	AddUser(&transcript, "hello")
+	state := AgentState(t.TempDir(), tools.ToolRegistry, 3600, time.Now().Add(time.Hour), false, false, false, nil)
+	code, content, err := RunTurn(client, &transcript, &state, "openai:gpt-test", tools.ToolSpecs(tools.ToolRegistry), 1)
+	if err != nil || code != 0 || content != "done" {
+		t.Fatalf("unexpected result: %d %q %v", code, content, err)
+	}
+	if len(state.Todos) != 1 || state.Todos[0]["id"] != "t1" {
+		t.Fatalf("unexpected propagated todos: %#v", state.Todos)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("unexpected request count: %d", len(client.requests))
+	}
+	found := false
+	for _, message := range client.requests[1] {
+		if message.Role == "system" && strings.Contains(message.Content, "t1: ship it") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected todo state in next request: %#v", client.requests[1])
+	}
+}
+
+func TestRunTurnPropagatesApprovalStateAcrossTurns(t *testing.T) {
+	registry := map[string]tools.RegisteredTool{
+		"mutating": {
+			Spec:     tools.Spec{Name: "mutating", Mutating: true},
+			Required: []string{"text"},
+			Handler: func(state *tools.State, args map[string]any) (any, error) {
+				return args["text"].(string), nil
+			},
+		},
+	}
+	client := &stubCompletionClient{responses: []providers.ChatMessage{
+		providers.AssistantMessage("", []providers.ToolCall{providers.ToolCallMessage("call_1", "mutating", map[string]any{"text": "first"})}),
+		providers.AssistantMessage("", []providers.ToolCall{providers.ToolCallMessage("call_2", "mutating", map[string]any{"text": "second"})}),
+		providers.AssistantMessage("done", nil),
+	}}
+	prompts := 0
+	oldApproval, oldPrint := tools.ApprovalPromptFunc, PrintFunc
+	defer func() {
+		tools.ApprovalPromptFunc = oldApproval
+		PrintFunc = oldPrint
+	}()
+	tools.ApprovalPromptFunc = func(_ string, _ []string) string {
+		prompts++
+		return "all"
+	}
+	PrintFunc = func(string) {}
+	transcript := TranscriptWithSystemPrompt("sys")
+	AddUser(&transcript, "hello")
+	state := AgentState(t.TempDir(), registry, 3600, time.Now().Add(time.Hour), true, false, false, nil)
+	code, content, err := RunTurn(client, &transcript, &state, "openai:gpt-test", tools.ToolSpecs(registry), 1)
+	if err != nil || code != 0 || content != "done" {
+		t.Fatalf("unexpected result: %d %q %v", code, content, err)
+	}
+	if !state.ApproveAllMutatingTools || prompts != 1 {
+		t.Fatalf("expected approval state to persist, got prompts=%d state=%#v", prompts, state)
 	}
 }
 

@@ -2,12 +2,14 @@ package runtime
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/wagov-dtt/oy-cli/internal/oy/providers"
@@ -53,6 +55,9 @@ var (
 	loadSessionTextOnce sync.Once
 	loadSessionTextData map[string]any
 	loadSessionTextErr  error
+	debugLogMu          sync.Mutex
+	debugLogFile        *os.File
+	debugLogPath        string
 )
 
 func HasTTYStdin() bool {
@@ -84,6 +89,77 @@ func ConfigPath() string {
 		return expandUser(value)
 	}
 	return filepath.Join(userHomeDir(), ".config", "oy", "config.json")
+}
+
+func DebugLogPath() string {
+	if _, err := InitDebugLog(); err != nil {
+		return ""
+	}
+	debugLogMu.Lock()
+	defer debugLogMu.Unlock()
+	return debugLogPath
+}
+
+func InitDebugLog() (string, error) {
+	debugLogMu.Lock()
+	defer debugLogMu.Unlock()
+	if debugLogFile != nil {
+		return debugLogPath, nil
+	}
+	if !flag("OY_DEBUG", false) {
+		return "", nil
+	}
+	path := filepath.Join(filepath.Dir(ConfigPath()), "debug.jsonl")
+	if err := providers.EnsurePrivateDir(filepath.Dir(path)); err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	debugLogFile = file
+	debugLogPath = path
+	return debugLogPath, nil
+}
+
+func DisableDebugLog() error {
+	debugLogMu.Lock()
+	defer debugLogMu.Unlock()
+	if debugLogFile != nil {
+		err := debugLogFile.Close()
+		debugLogFile = nil
+		debugLogPath = ""
+		return err
+	}
+	debugLogPath = ""
+	return nil
+}
+
+func DebugLog(event string, data map[string]any) {
+	if event = strings.TrimSpace(event); event == "" {
+		return
+	}
+	if _, err := InitDebugLog(); err != nil {
+		return
+	}
+	debugLogMu.Lock()
+	defer debugLogMu.Unlock()
+	if debugLogFile == nil {
+		return
+	}
+	payload := map[string]any{"ts": float64(time.Now().UnixNano()) / float64(time.Second), "event": event}
+	for key, value := range data {
+		payload[key] = value
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	_, _ = debugLogFile.Write(append(encoded, '\n'))
 }
 
 func DefaultBudgets() Budgets {

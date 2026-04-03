@@ -222,11 +222,18 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 	if bestOf <= 0 {
 		return 1, "", fmt.Errorf("best_of must be a positive integer")
 	}
+	step := 0
 	for {
 		if err := NoteProgress(*state); err != nil {
 			return 1, "", err
 		}
 		prepared := PreparedMessages(*transcript, state.Todos)
+		runtime.DebugLog("request", map[string]any{
+			"model":      modelSpec,
+			"step":       step,
+			"messages":   debugMessages(prepared),
+			"tool_count": len(toolDefinitions),
+		})
 		responses := make([]providers.ChatMessage, 0, bestOf)
 		for i := 0; i < bestOf; i++ {
 			message, err := client.ChatCompletion(model, prepared, toolDefinitions, "auto")
@@ -239,6 +246,11 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 		if err != nil {
 			return 1, "", err
 		}
+		runtime.DebugLog("response", map[string]any{
+			"model":     modelSpec,
+			"step":      step,
+			"assistant": debugMessage(message),
+		})
 		if bestOf > 1 && voteCount < bestOf {
 			NoteFunc(fmt.Sprintf("self-consistency: sample %d won %d/%d", chosenIndex+1, voteCount, bestOf))
 		}
@@ -246,16 +258,25 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 			AddAssistant(transcript, message)
 			results := make([]map[string]any, 0, len(message.ToolCalls))
 			for _, call := range message.ToolCalls {
-				result := tools.InvokeTool(state.ToolRegistry, &tools.State{
+				toolState := &tools.State{
 					Root:                    state.Root,
 					Interactive:             state.Interactive,
 					Yolo:                    state.Yolo,
 					ApproveAllMutatingTools: state.ApproveAllMutatingTools,
-					Todos:                   state.Todos,
-				}, call.Name, call.Arguments)
+					Todos:                   cloneTodos(state.Todos),
+				}
+				result := tools.InvokeTool(state.ToolRegistry, toolState, call.Name, call.Arguments)
+				state.ApproveAllMutatingTools = toolState.ApproveAllMutatingTools
+				state.Todos = cloneTodos(toolState.Todos)
 				results = append(results, map[string]any{"call_id": call.ID, "name": call.Name, "result": result})
 			}
+			runtime.DebugLog("tool_results", map[string]any{
+				"model":   modelSpec,
+				"step":    step,
+				"results": debugToolResults(results),
+			})
 			AddToolResults(transcript, results)
+			step++
 			continue
 		}
 		PrintFunc(message.Content)
@@ -280,6 +301,66 @@ func RunAgent(client CompletionRunner, prompt, model, root, systemPrompt string,
 	}
 	AddUser(transcript, prompt)
 	return RunTurn(client, transcript, &state, model, tools.ToolSpecs(toolRegistry), bestOf)
+}
+
+func cloneTodos(todos []map[string]string) []map[string]string {
+	out := make([]map[string]string, 0, len(todos))
+	for _, item := range todos {
+		copied := map[string]string{}
+		for key, value := range item {
+			copied[key] = value
+		}
+		out = append(out, copied)
+	}
+	return out
+}
+
+func debugMessage(message providers.ChatMessage) map[string]any {
+	payload := map[string]any{"role": message.Role}
+	if message.Content != "" {
+		payload["content"] = message.Content
+	}
+	if len(message.ToolCalls) > 0 {
+		calls := make([]map[string]any, 0, len(message.ToolCalls))
+		for _, call := range message.ToolCalls {
+			entry := map[string]any{"id": call.ID, "name": call.Name}
+			if len(call.Arguments) > 0 {
+				entry["arguments"] = call.Arguments
+			}
+			calls = append(calls, entry)
+		}
+		payload["tool_calls"] = calls
+	}
+	if len(message.ThoughtSignatures) > 0 {
+		payload["thought_signatures"] = message.ThoughtSignatures
+	}
+	if message.ToolCallID != "" {
+		payload["tool_call_id"] = message.ToolCallID
+	}
+	if message.Name != "" {
+		payload["name"] = message.Name
+	}
+	return payload
+}
+
+func debugMessages(messages []providers.ChatMessage) []map[string]any {
+	out := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, debugMessage(message))
+	}
+	return out
+}
+
+func debugToolResults(results []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(results))
+	for _, result := range results {
+		entry := map[string]any{"call_id": result["call_id"], "name": result["name"]}
+		if toolResult, ok := result["result"].(providers.ToolResult); ok {
+			entry["ok"] = toolResult.OK
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func normalizedVoteText(text string) string {

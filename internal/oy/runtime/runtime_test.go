@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -103,6 +104,41 @@ func TestBestOfHelpersAndDurations(t *testing.T) {
 	}
 }
 
+func TestDebugLogLifecycle(t *testing.T) {
+	t.Setenv("OY_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("OY_DEBUG", "1")
+	if err := DisableDebugLog(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = DisableDebugLog() })
+	path, err := InitDebugLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(path, "debug.jsonl") {
+		t.Fatalf("unexpected debug path: %q", path)
+	}
+	DebugLog("request", map[string]any{"model": "openai:gpt-test", "step": 1})
+	if err := DisableDebugLog(); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(mustReadFile(t, path))), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("unexpected debug log lines: %#v", lines)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["event"] != "request" || payload["model"] != "openai:gpt-test" || int(payload["step"].(float64)) != 1 {
+		t.Fatalf("unexpected debug payload: %#v", payload)
+	}
+	os.Unsetenv("OY_DEBUG")
+	if got := DebugLogPath(); got != "" {
+		t.Fatalf("expected empty debug path after disable, got %q", got)
+	}
+}
+
 func TestResolvePathDeniesTraversal(t *testing.T) {
 	root := "/tmp/work"
 	if _, err := ResolvePath(root, "ok/file.txt"); err != nil {
@@ -111,6 +147,15 @@ func TestResolvePathDeniesTraversal(t *testing.T) {
 	if _, err := ResolvePath(root, "../etc/passwd"); err == nil {
 		t.Fatal("expected traversal error")
 	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func contains(text, needle string) bool { return strings.Contains(text, needle) }

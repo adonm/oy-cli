@@ -457,6 +457,9 @@ func Chat() int {
 	if session.SystemFile != "" {
 		fmt.Fprintf(stderrWriter, "- system file: `%s`\n", session.SystemFile)
 	}
+	if debugPath := runtime.DebugLogPath(); debugPath != "" {
+		fmt.Fprintf(stderrWriter, "- debug log: `%s`\n", debugPath)
+	}
 	fmt.Fprintf(stderrWriter, "[note] chat mode; /help for commands%s\n", map[bool]string{true: "; yolo on", false: ""}[session.Yolo])
 
 	transcript := agent.TranscriptWithSystemPrompt(session.SystemPrompt)
@@ -487,7 +490,7 @@ func Chat() int {
 				case "model":
 					currentModel = handleModelSwitch(strings.TrimSpace(strings.Join(action[1:], " ")), currentModel, session.Workspace, stderrWriter)
 				case "debug":
-					fmt.Fprintln(stderrWriter, "[note] debug logging not implemented in Go yet")
+					handleDebugToggle()
 				case "yolo":
 					if session.Yolo {
 						fmt.Fprintln(stderrWriter, "[note] yolo already enabled for this session")
@@ -794,6 +797,25 @@ func handleModelSwitch(arg, currentModel, cwd string, output io.Writer) string {
 	}
 	fmt.Fprintf(output, "[warn] No models matching `%s`.\n", arg)
 	return currentModel
+}
+
+func handleDebugToggle() {
+	if runtime.DebugLogPath() != "" {
+		os.Unsetenv("OY_DEBUG")
+		if err := runtime.DisableDebugLog(); err != nil {
+			fmt.Fprintf(stderrWriter, "[error] Failed to disable debug logging: %v\n", err)
+			return
+		}
+		fmt.Fprintln(stderrWriter, "[note] debug logging disabled")
+		return
+	}
+	os.Setenv("OY_DEBUG", "1")
+	path, err := runtime.InitDebugLog()
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Failed to enable debug logging: %v\n", err)
+		return
+	}
+	fmt.Fprintf(stderrWriter, "[note] debug logging enabled: %s\n", path)
 }
 
 func handleAsk(question, currentModel string, session runtime.SessionContext, tx agent.Transcript) {
