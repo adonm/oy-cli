@@ -102,3 +102,4 @@ Approved candidates:
 - 2026-04-03: Switched README, contributor workflow, and release automation to Go-first while keeping Python pytest checks as parity verification during migration.
 - 2026-04-03: Ported the Go agent execution loop, tool-call handling, and self-consistency message selection with focused Go agent parity tests.
 - 2026-04-03: Ported working Go provider clients for OpenAI Responses, Chat Completions, and Bedrock Mantle model/chat flows, including reasoning fallback and provider parity tests.
+- 2026-04-03: Ported real Go one-shot CLI execution for `run`, `ralph`, and `audit`, wired through the Go agent/providers stack with focused CLI parity tests.

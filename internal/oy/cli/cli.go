@@ -18,6 +18,25 @@ import (
 
 var SessionsDir string
 
+var (
+	runCommand         = Run
+	chatCommand        = Chat
+	ralphCommand       = Ralph
+	auditCommand       = Audit
+	modelCommand       = Model
+	resolveSessionFunc = ResolveSession
+	runAgentFunc       = defaultRunAgent
+	hasTTYStdinFunc    = runtime.HasTTYStdin
+	readStdinFunc      = func() string {
+		data, _ := io.ReadAll(os.Stdin)
+		return strings.TrimSpace(string(data))
+	}
+	unattendedLimitFunc = runtime.UnattendedLimitSeconds
+	ralphLimitFunc      = runtime.RalphLimitSeconds
+	nowFunc             = time.Now
+	sleepFunc           = time.Sleep
+)
+
 const (
 	AskRules              = "no bash or file changes; public webfetch still allowed"
 	AskUsage              = "Usage: `/ask <question>` — research the codebase with " + AskRules + "."
@@ -78,23 +97,23 @@ func Main(argv []string) int {
 	}
 	switch args[0] {
 	case "run":
-		return Run(args[1:]...)
+		return runCommand(args[1:]...)
 	case "chat":
-		return Chat()
+		return chatCommand()
 	case "ralph":
-		return Ralph(args[1:]...)
+		return ralphCommand(args[1:]...)
 	case "audit":
 		focus := ""
 		if len(args) > 1 {
 			focus = strings.Join(args[1:], " ")
 		}
-		return Audit(focus)
+		return auditCommand(focus)
 	case "model":
 		selection := ""
 		if len(args) > 1 {
 			selection = strings.Join(args[1:], " ")
 		}
-		return Model(selection)
+		return modelCommand(selection)
 	case "-h", "--help":
 		PrintHelp()
 		return 0
@@ -387,17 +406,44 @@ func HandleLoad(name string, tx agent.Transcript, currentModel, systemPrompt str
 	return loaded, loadedModel, nil
 }
 
+func readTaskText(task []string) string {
+	text := strings.TrimSpace(strings.Join(task, " "))
+	if text == "" && !hasTTYStdinFunc() {
+		text = strings.TrimSpace(readStdinFunc())
+	}
+	return text
+}
+
+func defaultRunAgent(prompt, model, root, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
+	shim, err := providers.RequireAPIEnv(model, "", root)
+	if err != nil {
+		return 1, "", err
+	}
+	client, err := providers.GetClient(shim, root)
+	if err != nil {
+		return 1, "", err
+	}
+	return agent.RunAgent(client, prompt, model, root, systemPrompt, unattendedLimitSeconds, interactive, yolo, transcript, bestOf)
+}
+
 func Run(task ...string) int {
-	taskText := strings.TrimSpace(strings.Join(task, " "))
-	if taskText == "" && !runtime.HasTTYStdin() {
-		data, _ := io.ReadAll(os.Stdin)
-		taskText = strings.TrimSpace(string(data))
-	}
+	taskText := readTaskText(task)
 	if taskText == "" {
-		return Chat()
+		return chatCommand()
 	}
-	_, _ = ResolveSession(boolPtr(false), "", true, nil)
-	return 0
+	session, err := resolveSessionFunc(boolPtr(false), "", true, nil)
+	if err != nil {
+		return 1
+	}
+	unattendedLimitSeconds, err := unattendedLimitFunc()
+	if err != nil {
+		return 1
+	}
+	code, _, err := runAgentFunc(taskText, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, session.Yolo, nil, session.BestOf)
+	if err != nil {
+		return 1
+	}
+	return code
 }
 
 func Chat() int {
@@ -405,34 +451,81 @@ func Chat() int {
 }
 
 func Ralph(task ...string) int {
-	taskText := strings.TrimSpace(strings.Join(task, " "))
-	if taskText == "" && !runtime.HasTTYStdin() {
-		data, _ := io.ReadAll(os.Stdin)
-		taskText = strings.TrimSpace(string(data))
-	}
+	taskText := readTaskText(task)
 	if taskText == "" {
 		return 1
 	}
-	_, err := runtime.RalphLimitSeconds()
+	session, err := resolveSessionFunc(boolPtr(false), "", true, nil)
 	if err != nil {
 		return 1
 	}
-	return 0
+	session.Yolo = true
+	limitSeconds, err := ralphLimitFunc()
+	if err != nil {
+		return 1
+	}
+	unattendedLimitSeconds, err := unattendedLimitFunc()
+	if err != nil {
+		return 1
+	}
+	deadline := nowFunc().Add(time.Duration(limitSeconds) * time.Second)
+	delay := time.Minute
+	exitCode := 0
+	runNumber := 0
+	for {
+		now := nowFunc()
+		if runNumber > 0 && !now.Before(deadline) {
+			break
+		}
+		runNumber++
+		code, _, err := runAgentFunc(taskText, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, true, nil, session.BestOf)
+		if err != nil {
+			return 1
+		}
+		if code != 0 {
+			exitCode = code
+		}
+		sleepFor := deadline.Sub(nowFunc())
+		if sleepFor <= 0 {
+			break
+		}
+		if sleepFor > delay {
+			sleepFor = delay
+		}
+		sleepFunc(sleepFor)
+	}
+	return exitCode
 }
 
 func Audit(focus string) int {
-	session, err := ResolveSession(boolPtr(false), runtime.AuditSystemPrompt(), false, nil)
+	session, err := resolveSessionFunc(boolPtr(false), runtime.AuditSystemPrompt(), false, nil)
 	if err != nil {
 		return 1
 	}
-	_, created, err := EnsureRenovateConfig(session.Workspace)
+	_, _, err = EnsureRenovateConfig(session.Workspace)
 	if err != nil {
 		return 1
 	}
-	_ = created
-	_, _ = runtime.SessionText(nil, "audit", "default_user_prompt")
-	_ = focus
-	return 0
+	auditPrompt, err := runtime.SessionText(nil, "audit", "repo_user_prompt")
+	if err != nil {
+		return 1
+	}
+	if strings.TrimSpace(focus) != "" {
+		suffix, err := runtime.SessionText(map[string]string{"focus": focus}, "audit", "focus_suffix")
+		if err != nil {
+			return 1
+		}
+		auditPrompt += suffix
+	}
+	unattendedLimitSeconds, err := unattendedLimitFunc()
+	if err != nil {
+		return 1
+	}
+	code, _, err := runAgentFunc(auditPrompt, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, false, false, nil, session.BestOf)
+	if err != nil {
+		return 1
+	}
+	return code
 }
 
 func Model(selection string) int {
