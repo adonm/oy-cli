@@ -1,16 +1,16 @@
 # Audit Findings
 
-> **Last audit**: 2026-04-03 · base commit `30d3a9e` (`Split tools package hotspot`) · refreshed after the provider split · cross-checked against [OWASP ASVS 5.0](https://github.com/OWASP/ASVS/tree/master/5.0) and [grugbrain.dev](https://grugbrain.dev/)
+> **Last audit**: 2026-04-03 · base commit `8f2e67e` (`Split provider shim hotspot`) · refreshed after the tool fs split · cross-checked against [OWASP ASVS 5.0](https://github.com/OWASP/ASVS/tree/master/5.0) and [grugbrain.dev](https://grugbrain.dev/)
 >
 > **Codebase**: `oy-cli` — Go local coding CLI with workspace-bound file tools, shell execution, outbound fetch, transcript/debug logging, session save/load, and 6 provider shims.
 >
 > | Metric | Value |
 > |---|---|
-> | Repo files counted by `git ls-files` text scan | 34 |
-> | Go files | 22 |
-> | Go LoC | 5,767 non-comment, non-empty lines |
-> | Total repo lines | 7,090 |
-> | Largest modules (total lines) | `internal/oy/cli/cli.go` 1,221; `internal/oy/cli/cli_test.go` 592; `internal/oy/runtime/runtime.go` 552; `internal/oy/tools/fs.go` 492 |
+> | Repo files counted by `git ls-files` text scan | 39 |
+> | Go files | 27 |
+> | Go LoC | 5,017 non-comment, non-empty lines |
+> | Total repo lines | 7,933 |
+> | Largest modules (total lines) | `internal/oy/cli/cli.go` 1,221; `internal/oy/cli/cli_test.go` 592; `internal/oy/runtime/runtime.go` 552; `internal/oy/agent/agent.go` 464 |
 > | Agent tools | 9 (`ask`, `bash`, `list`, `read`, `replace`, `search`, `sloc`, `todo`, `webfetch`) |
 > | Provider shims | 6 (`openai`, `codex`, `bedrock-mantle`, `copilot`, `opencode`, `opencode-go`) |
 >
@@ -86,17 +86,17 @@ Evidence: the old `internal/oy/providers/shims.go` monolith is gone; provider co
 
 ---
 
-## M2 · Tool package still has a smaller filesystem/search hotspot
+## M2 · Tool package filesystem/search hotspot split is complete
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/fs.go` (492 total lines; 357 code), `internal/oy/tools/helpers.go` (354 total lines; 210 code) |
+| **Location** | `internal/oy/tools/helpers.go` (354 total lines; 210 code), `internal/oy/tools/search.go` (195 total lines; 132 code), `internal/oy/tools/list_read.go` (135 total lines; 93 code) |
 | **Category** | Complexity |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Keep the public tool surface flat, but continue trimming `fs.go` by separating search/replace/sloc internals if more behaviour lands there. |
-| **Status** | Improved |
+| **Recommendation** | Keep the public tool surface flat, but continue trimming shared helpers if more filesystem/search behaviour lands there. |
+| **Status** | Resolved |
 
-Evidence: the old `tools.go` hotspot is gone; the package is now split across focused files (`registry.go`, `prompt.go`, `exec.go`, `web.go`, `fs.go`, `schema.go`, `helpers.go`). `fs.go` still carries most filesystem/search logic, so there is more room to split if future behavior grows there.
+Evidence: the old `tools.go` and later `fs.go` hotspots are gone; the package now keeps `list`/`read` in `list_read.go`, `search` in `search.go`, `replace` in `replace.go`, and `sloc` in `sloc.go` while preserving the same public tool surface. The remaining shared complexity is smaller and concentrated in reusable helpers rather than one catch-all filesystem file.
 
 ---
 
@@ -132,7 +132,7 @@ Evidence: `NewHTTPClient()` builds a bare `&http.Client{Timeout: timeout}` and d
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/fs.go:140-178` |
+| **Location** | `internal/oy/tools/search.go:13-54` |
 | **Category** | Performance |
 | **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
 | **Recommendation** | Add a global match budget and stop walking once enough results have been collected for display. |
@@ -146,7 +146,7 @@ Evidence: `ToolSearch()` appends every match into `matches` while walking the tr
 
 | | |
 |---|---|
-| **Location** | `internal/oy/tools/fs.go:105-132` |
+| **Location** | `internal/oy/tools/list_read.go:102-133` |
 | **Category** | Performance |
 | **Reference** | OWASP ASVS 5.0 (availability); grugbrain.dev |
 | **Recommendation** | Stream or scan line-by-line until the requested slice is satisfied instead of `os.ReadFile()` on every target. |
@@ -195,6 +195,10 @@ Evidence: the workflow still pins `actions/checkout@v4`, `actions/setup-go@v5`, 
 
 ## Short audit log
 
+- 2026-04-03: refreshed after splitting the remaining `internal/oy/tools/fs.go` hotspot into focused filesystem/search files.
+  - Header updated from a tracked-file text scan: 27 Go files, 5,017 non-comment/non-empty Go lines, 7,933 total repo lines, 39 tracked text files.
+  - M2 moved from Improved to Resolved because `fs.go` is gone; `list_read.go`, `search.go`, `replace.go`, and `sloc.go` now carry the split behavior directly.
+  - Repointed `read` and `search` findings to `list_read.go` and `search.go`, and updated the largest-module list for the post-split layout.
 - 2026-04-03: refreshed after splitting the former `internal/oy/providers/shims.go` hotspot into focused provider files.
   - Header updated from a tracked-file text scan: 22 Go files, 5,767 non-comment/non-empty Go lines, 7,090 total repo lines, 34 tracked text files.
   - M1 moved from Open to Improved because the provider monolith is gone; remaining follow-up is concentrated in `protocol.go` plus a few smaller provider helpers.
@@ -205,6 +209,6 @@ Evidence: the workflow still pins `actions/checkout@v4`, `actions/setup-go@v5`, 
   - Revalidated open items against OWASP ASVS 5.0 and grugbrain.dev.
   - Release workflow action-version drift remains open; no new workspace-boundary regressions were found.
 - 2026-04-03: split the former `internal/oy/tools/tools.go` hotspot into focused tool package files and refreshed issue locations/status.
-  - M2 moved from Open to Improved because the monolith is gone; remaining follow-up is concentrated in `fs.go`.
+  - M2 moved from Open to Improved because the monolith was gone; remaining follow-up at that point was concentrated in `fs.go`.
   - Repointed `bash`, `webfetch`, `read`, `search`, and related evidence to `exec.go`, `web.go`, `fs.go`, and `helpers.go`.
-  - Header module list now reflects the new post-split layout.
+  - Header module list reflected the first post-split layout.
