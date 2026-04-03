@@ -17,10 +17,27 @@ import (
 	"github.com/wagov-dtt/oy-cli/internal/oy/version"
 )
 
+type askStubClient struct{ t *testing.T }
+
+func (s askStubClient) ChatCompletion(model string, _ []providers.ChatMessage, specs []map[string]any, _ string) (providers.ChatMessage, error) {
+	if model != "gpt-test" {
+		s.t.Fatalf("unexpected model: %q", model)
+	}
+	for _, spec := range specs {
+		name, _ := spec["name"].(string)
+		if name == "bash" || name == "replace" {
+			s.t.Fatalf("unexpected write-capable tool in ask mode: %q", name)
+		}
+	}
+	return providers.AssistantMessage("read-only answer", nil), nil
+}
+
+func (s askStubClient) ListModels() ([]string, error) { return nil, nil }
+
 func TestMainNormalizesCommands(t *testing.T) {
-	oldRun, oldRalph := runCommand, ralphCommand
-	defer func() { runCommand, ralphCommand = oldRun, oldRalph }()
-	var runArgs, ralphArgs []string
+	oldRun, oldRalph, oldAsk := runCommand, ralphCommand, askCommand
+	defer func() { runCommand, ralphCommand, askCommand = oldRun, oldRalph, oldAsk }()
+	var runArgs, ralphArgs, askArgs []string
 	runCommand = func(args ...string) int {
 		runArgs = append([]string(nil), args...)
 		return 0
@@ -29,10 +46,17 @@ func TestMainNormalizesCommands(t *testing.T) {
 		ralphArgs = append([]string(nil), args...)
 		return 0
 	}
+	askCommand = func(args ...string) int {
+		askArgs = append([]string(nil), args...)
+		return 0
+	}
 	if code := Main([]string{"fix", "tests"}); code != 0 {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	if code := Main([]string{"ralph", "fix", "tests"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if code := Main([]string{"ask", "what", "changed"}); code != 0 {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	if !reflect.DeepEqual(runArgs, []string{"fix", "tests"}) {
@@ -41,15 +65,22 @@ func TestMainNormalizesCommands(t *testing.T) {
 	if !reflect.DeepEqual(ralphArgs, []string{"fix", "tests"}) {
 		t.Fatalf("unexpected ralph args: %#v", ralphArgs)
 	}
+	if !reflect.DeepEqual(askArgs, []string{"what", "changed"}) {
+		t.Fatalf("unexpected ask args: %#v", askArgs)
+	}
 }
 
 func TestMainRejectsTopLevelYolo(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic for top-level --yolo")
-		}
-	}()
-	_ = Main([]string{"--yolo", "fix", "tests"})
+	oldStderr := stderrWriter
+	defer func() { stderrWriter = oldStderr }()
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Main([]string{"--yolo", "fix", "tests"}); code != 1 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "top-level --yolo is not allowed") || !strings.Contains(errOut.String(), "oy chat --yolo") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
 }
 
 func TestMainSupportsChatYoloFlag(t *testing.T) {
@@ -80,15 +111,26 @@ func TestMainHelpMatchesBaselineStyleOutput(t *testing.T) {
 	}
 	text := out.String()
 	for _, needle := range []string{
-		"usage: oy [-h] [--version] {run,chat,ralph,model,audit} ...",
+		"usage: oy [-h] [--version] [--model MODEL] [--root DIR] [--system-file FILE] [--best-of N] [--non-interactive] {run,chat,ralph,ask,model,audit,help} ...",
 		"AI coding assistant for your shell.",
 		"positional arguments:",
 		"run                  Run a one-shot task.",
 		"chat                 Start an interactive multi-turn chat session.",
+		"ask                  Run a one-shot research-only query.",
+		"help                 Show top-level or command-specific help.",
 		"options:",
 		"--version             show program's version number and exit",
+		"--model MODEL         override model for this command",
+		"--root DIR            run against a different workspace",
+		"--system-file FILE    append extra system instructions",
+		"--best-of N           override self-consistency count",
+		"--non-interactive     disable prompt/approval pauses",
 		"Examples:",
+		"oy --model openai:gpt-5 --best-of 1 \"fix the flaky test\"",
+		"oy --root ../service audit auth",
+		"oy --system-file .oy/system.md chat",
 		"oy chat --yolo",
+		"oy model list",
 	} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("missing help text %q in %q", needle, text)
@@ -128,10 +170,133 @@ func TestChatHelpMatchesBaselineStyleOutput(t *testing.T) {
 		"options:",
 		"-h, --help  show this help message and exit",
 		"--yolo      Allow all tools without per-action approval prompts.",
+		"In chat, use /help to see slash commands.",
 	} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("missing chat help text %q in %q", needle, text)
 		}
+	}
+}
+
+func TestMainHelpTopicPrintsCommandHelp(t *testing.T) {
+	oldStdout := stdoutWriter
+	defer func() { stdoutWriter = oldStdout }()
+	var out strings.Builder
+	stdoutWriter = &out
+	if code := Main([]string{"help", "model"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	text := out.String()
+	for _, needle := range []string{
+		"usage: oy model [selection|list]",
+		"Show, list, or change the default model.",
+		"oy model list",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("missing model help text %q in %q", needle, text)
+		}
+	}
+}
+
+func TestMainAskHelpTopicPrintsCommandHelp(t *testing.T) {
+	oldStdout := stdoutWriter
+	defer func() { stdoutWriter = oldStdout }()
+	var out strings.Builder
+	stdoutWriter = &out
+	if code := Main([]string{"help", "ask"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	text := out.String()
+	for _, needle := range []string{
+		"usage: oy ask <question>",
+		"Run a one-shot research-only query.",
+		"No bash or file changes; public webfetch is still allowed.",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("missing ask help text %q in %q", needle, text)
+		}
+	}
+}
+
+func TestMainAppliesGlobalFlagsBeforeImplicitRun(t *testing.T) {
+	oldRun := runCommand
+	defer func() { runCommand = oldRun }()
+	var seen map[string]string
+	runCommand = func(args ...string) int {
+		seen = map[string]string{
+			"arg0":            args[0],
+			"arg1":            args[1],
+			"model":           os.Getenv("OY_MODEL"),
+			"root":            os.Getenv("OY_ROOT"),
+			"system_file":     os.Getenv("OY_SYSTEM_FILE"),
+			"best_of":         os.Getenv("OY_BEST_OF"),
+			"non_interactive": os.Getenv("OY_NON_INTERACTIVE"),
+		}
+		return 0
+	}
+	os.Unsetenv("OY_MODEL")
+	os.Unsetenv("OY_ROOT")
+	os.Unsetenv("OY_SYSTEM_FILE")
+	os.Unsetenv("OY_BEST_OF")
+	os.Unsetenv("OY_NON_INTERACTIVE")
+	if code := Main([]string{"--model", "openai:gpt-test", "--root", "/tmp/work", "--system-file", "extra.md", "--best-of", "5", "--non-interactive", "fix", "tests"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if seen == nil {
+		t.Fatal("expected run command to be called")
+	}
+	if seen["arg0"] != "fix" || seen["arg1"] != "tests" || seen["model"] != "openai:gpt-test" || seen["root"] != "/tmp/work" || seen["system_file"] != "extra.md" || seen["best_of"] != "5" || seen["non_interactive"] != "1" {
+		t.Fatalf("unexpected global flag state: %#v", seen)
+	}
+	if os.Getenv("OY_MODEL") != "" || os.Getenv("OY_ROOT") != "" || os.Getenv("OY_SYSTEM_FILE") != "" || os.Getenv("OY_BEST_OF") != "" || os.Getenv("OY_NON_INTERACTIVE") != "" {
+		t.Fatalf("expected global flags to restore environment")
+	}
+}
+
+func TestMainRestoresExistingEnvAfterGlobalFlags(t *testing.T) {
+	oldRun := runCommand
+	defer func() { runCommand = oldRun }()
+	runCommand = func(args ...string) int {
+		if os.Getenv("OY_MODEL") != "openai:gpt-override" || os.Getenv("OY_ROOT") != "/tmp/override" {
+			t.Fatalf("expected overrides during command, got model=%q root=%q", os.Getenv("OY_MODEL"), os.Getenv("OY_ROOT"))
+		}
+		return 0
+	}
+	os.Setenv("OY_MODEL", "openai:gpt-saved")
+	os.Setenv("OY_ROOT", "/tmp/original")
+	defer os.Unsetenv("OY_MODEL")
+	defer os.Unsetenv("OY_ROOT")
+	if code := Main([]string{"--model=openai:gpt-override", "--root=/tmp/override", "run", "fix tests"}); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if os.Getenv("OY_MODEL") != "openai:gpt-saved" || os.Getenv("OY_ROOT") != "/tmp/original" {
+		t.Fatalf("expected original env restored, got model=%q root=%q", os.Getenv("OY_MODEL"), os.Getenv("OY_ROOT"))
+	}
+}
+
+func TestMainRejectsUnknownTopLevelOption(t *testing.T) {
+	oldStderr := stderrWriter
+	defer func() { stderrWriter = oldStderr }()
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Main([]string{"--wat"}); code != 1 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "unknown top-level option: --wat") || !strings.Contains(errOut.String(), "oy --help") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestMainRejectsMissingGlobalOptionValue(t *testing.T) {
+	oldStderr := stderrWriter
+	defer func() { stderrWriter = oldStderr }()
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Main([]string{"--model"}); code != 1 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "missing value for --model") || !strings.Contains(errOut.String(), "oy --help") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
 	}
 }
 
@@ -188,6 +353,22 @@ func TestHelpListsChatCommands(t *testing.T) {
 	result := ChatCommand("/help", &tx, "sys", "openai:gpt-test")
 	if result != true {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestHandleModelSwitchAcceptsLsAlias(t *testing.T) {
+	oldList := listAllModelIDsFunc
+	defer func() { listAllModelIDsFunc = oldList }()
+	listAllModelIDsFunc = func(string) ([]string, []string, error) {
+		return []string{"openai:gpt-5", "openai:gpt-4.1"}, nil, nil
+	}
+	var out strings.Builder
+	current := handleModelSwitch("ls", "openai:gpt-5", ".", &out)
+	if current != "openai:gpt-5" {
+		t.Fatalf("unexpected current model: %q", current)
+	}
+	if !strings.Contains(out.String(), "## Available Models") || !strings.Contains(out.String(), "openai:gpt-4.1") {
+		t.Fatalf("unexpected output: %q", out.String())
 	}
 }
 
@@ -251,6 +432,75 @@ func TestRunUsesAgentWithResolvedSession(t *testing.T) {
 	}
 	if seen["prompt"] != "fix tests" || seen["model"] != "openai:gpt-test" || seen["workspace"] != root || seen["unattended"] != 60 || seen["interactive"] != false || seen["yolo"] != true || seen["transcript_nil"] != true || seen["best_of"] != 3 {
 		t.Fatalf("unexpected run agent args: %#v", seen)
+	}
+}
+
+func TestAgentNoteFuncWritesToStderrWriter(t *testing.T) {
+	oldStderr := stderrWriter
+	defer func() { stderrWriter = oldStderr }()
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	agent.NoteFunc("turn 1: 1 tool call")
+	if errOut.String() != "[note] turn 1: 1 tool call\n" {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestRunPrintsAgentError(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OY_ROOT", root)
+	t.Setenv("OY_MODEL", "openai:gpt-test")
+	oldRunAgent, oldUnattended, oldStderr := runAgentFunc, unattendedLimitFunc, stderrWriter
+	defer func() { runAgentFunc, unattendedLimitFunc, stderrWriter = oldRunAgent, oldUnattended, oldStderr }()
+	unattendedLimitFunc = func() (int, error) { return 60, nil }
+	runAgentFunc = func(prompt, model, workspace, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
+		return 1, "", fmt.Errorf("boom")
+	}
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Run("fix", "tests"); code != 1 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "Agent error: boom") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestAskRunsReadOnlyResearch(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OY_ROOT", root)
+	t.Setenv("OY_MODEL", "openai:gpt-test")
+	t.Setenv("OY_BEST_OF", "3")
+	oldReq, oldClient, oldUnattended, oldStdout, oldStderr, oldPrint := requireAPIEnvFunc, getClientFunc, unattendedLimitFunc, stdoutWriter, stderrWriter, agent.PrintFunc
+	defer func() {
+		requireAPIEnvFunc, getClientFunc, unattendedLimitFunc = oldReq, oldClient, oldUnattended
+		stdoutWriter, stderrWriter, agent.PrintFunc = oldStdout, oldStderr, oldPrint
+	}()
+	unattendedLimitFunc = func() (int, error) { return 60, nil }
+	requireAPIEnvFunc = func(model, _, workspace string) (string, error) {
+		if model != "openai:gpt-test" || workspace != root {
+			t.Fatalf("unexpected require args: model=%q workspace=%q", model, workspace)
+		}
+		return "openai", nil
+	}
+	getClientFunc = func(shim, workspace string) (providers.CompletionClient, error) {
+		if shim != "openai" || workspace != root {
+			t.Fatalf("unexpected client args: shim=%q workspace=%q", shim, workspace)
+		}
+		return askStubClient{t: t}, nil
+	}
+	var out, errOut strings.Builder
+	stdoutWriter = &out
+	stderrWriter = &errOut
+	agent.PrintFunc = func(value string) { fmt.Fprintln(stdoutWriter, value) }
+	if code := Ask("summarize", "auth"); code != 0 {
+		t.Fatalf("unexpected code: %d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "## Ask") || !strings.Contains(errOut.String(), AskModeNote) {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "read-only answer") {
+		t.Fatalf("unexpected stdout: %q", out.String())
 	}
 }
 
@@ -344,6 +594,26 @@ func TestAuditCreatesDefaultRenovateConfigAndRunsAgent(t *testing.T) {
 	}
 }
 
+func TestAuditPrintsAgentError(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OY_ROOT", root)
+	t.Setenv("OY_MODEL", "openai:gpt-test")
+	oldRunAgent, oldUnattended, oldStderr := runAgentFunc, unattendedLimitFunc, stderrWriter
+	defer func() { runAgentFunc, unattendedLimitFunc, stderrWriter = oldRunAgent, oldUnattended, oldStderr }()
+	unattendedLimitFunc = func() (int, error) { return 60, nil }
+	runAgentFunc = func(prompt, model, workspace, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
+		return 1, "", fmt.Errorf("boom")
+	}
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Audit("deps"); code != 1 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(errOut.String(), "Audit error: boom") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
 func TestChatCommandTokensReportsPreparedBudget(t *testing.T) {
 	tx := agent.TranscriptWithSystemPrompt("sys")
 	agent.AddUser(&tx, "hello")
@@ -410,8 +680,15 @@ func TestModelShowsShimAndCanFilterSwitch(t *testing.T) {
 	if code := Model(""); code != 0 {
 		t.Fatalf("unexpected code: %d", code)
 	}
-	if !strings.Contains(out.String(), "- shim: `openai`") {
-		t.Fatalf("missing shim in model output: %q", out.String())
+	if !strings.Contains(out.String(), "- shim: `openai`") || !strings.Contains(out.String(), "oy model list") {
+		t.Fatalf("missing current-model hints in output: %q", out.String())
+	}
+	out.Reset()
+	if code := Model("list"); code != 0 {
+		t.Fatalf("unexpected code: %d", code)
+	}
+	if !strings.Contains(out.String(), "## Available Models") || !strings.Contains(out.String(), "openai:gpt-4.1") || !strings.Contains(out.String(), "copilot:gpt-5") {
+		t.Fatalf("unexpected list output: %q", out.String())
 	}
 	out.Reset()
 	if code := Model("openai:gpt-4.1"); code != 0 {
@@ -474,10 +751,124 @@ func TestModelNonInteractiveRequiresExactMatch(t *testing.T) {
 	t.Setenv("OY_SHIM", "")
 	var errOut strings.Builder
 	stderrWriter = &errOut
-	if code := Model("gpt-4"); code != 1 {
+	if code := Model("gpt-5"); code != 1 {
 		t.Fatalf("unexpected code: %d stderr=%q", code, errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "## Matching Models") || !strings.Contains(errOut.String(), "No exact model match") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestModelNonInteractiveAcceptsUniqueSubstringMatch(t *testing.T) {
+	oldList, oldStdout, oldStderr, oldCanPrompt := listAllModelIDsFunc, stdoutWriter, stderrWriter, canPromptFunc
+	defer func() {
+		listAllModelIDsFunc = oldList
+		stdoutWriter = oldStdout
+		stderrWriter = oldStderr
+		canPromptFunc = oldCanPrompt
+	}()
+	canPromptFunc = func() bool { return false }
+	listAllModelIDsFunc = func(string) ([]string, []string, error) {
+		return []string{"openai:gpt-5", "openai:gpt-4.1", "copilot:gpt-5"}, nil, nil
+	}
+	t.Setenv("OY_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	var out, errOut strings.Builder
+	stdoutWriter = &out
+	stderrWriter = &errOut
+	if code := Model("4.1"); code != 0 {
+		t.Fatalf("unexpected code: %d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "openai:gpt-4.1") {
+		t.Fatalf("unexpected stdout: %q", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestModelListAcceptsLsAlias(t *testing.T) {
+	oldList, oldStdout, oldCanPrompt := listAllModelIDsFunc, stdoutWriter, canPromptFunc
+	defer func() {
+		listAllModelIDsFunc = oldList
+		stdoutWriter = oldStdout
+		canPromptFunc = oldCanPrompt
+	}()
+	canPromptFunc = func() bool { return false }
+	listAllModelIDsFunc = func(string) ([]string, []string, error) {
+		return []string{"openai:gpt-5", "openai:gpt-4.1"}, nil, nil
+	}
+	var out strings.Builder
+	stdoutWriter = &out
+	if code := Model("ls"); code != 0 {
+		t.Fatalf("unexpected code: %d stdout=%q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "## Available Models") || !strings.Contains(out.String(), "openai:gpt-4.1") {
+		t.Fatalf("unexpected stdout: %q", out.String())
+	}
+}
+
+func TestModelWithoutConfigShowsActionableHint(t *testing.T) {
+	oldStderr, oldCanPrompt := stderrWriter, canPromptFunc
+	defer func() {
+		stderrWriter = oldStderr
+		canPromptFunc = oldCanPrompt
+	}()
+	canPromptFunc = func() bool { return false }
+	t.Setenv("OY_MODEL", "")
+	t.Setenv("OY_SHIM", "")
+	t.Setenv("OY_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Model(""); code != 1 {
+		t.Fatalf("unexpected code: %d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "no model configured") || !strings.Contains(errOut.String(), "oy model list") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestRunWithoutPromptPrintsHelpInsteadOfEnteringChat(t *testing.T) {
+	oldStdout, oldStderr, oldHasTTY, oldReadStdin, oldChat := stdoutWriter, stderrWriter, hasTTYStdinFunc, readStdinFunc, chatCommand
+	defer func() {
+		stdoutWriter = oldStdout
+		stderrWriter = oldStderr
+		hasTTYStdinFunc = oldHasTTY
+		readStdinFunc = oldReadStdin
+		chatCommand = oldChat
+	}()
+	hasTTYStdinFunc = func() bool { return true }
+	readStdinFunc = func() string { return "" }
+	chatCalled := false
+	chatCommand = func() int {
+		chatCalled = true
+		return 0
+	}
+	var out, errOut strings.Builder
+	stdoutWriter = &out
+	stderrWriter = &errOut
+	if code := Run(); code != 1 {
+		t.Fatalf("unexpected code: %d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if chatCalled {
+		t.Fatal("expected chat command not to be called")
+	}
+	if !strings.Contains(out.String(), "usage: oy run [prompt]") || !strings.Contains(out.String(), "oy chat") {
+		t.Fatalf("unexpected stdout: %q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "use `oy chat` for interactive multi-turn mode") {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestRunChatUnknownOptionSuggestsHelp(t *testing.T) {
+	oldStderr := stderrWriter
+	defer func() { stderrWriter = oldStderr }()
+	var errOut strings.Builder
+	stderrWriter = &errOut
+	if code := Main([]string{"chat", "--wat"}); code != 1 {
+		t.Fatalf("unexpected code: %d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "unknown chat option") || !strings.Contains(errOut.String(), "oy chat --help") {
 		t.Fatalf("unexpected stderr: %q", errOut.String())
 	}
 }

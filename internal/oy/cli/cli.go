@@ -25,6 +25,7 @@ var (
 	runCommand         = Run
 	chatCommand        = Chat
 	ralphCommand       = Ralph
+	askCommand         = Ask
 	auditCommand       = Audit
 	modelCommand       = Model
 	resolveSessionFunc = ResolveSession
@@ -59,6 +60,16 @@ var (
 	nowFunc                        = time.Now
 	sleepFunc                      = time.Sleep
 )
+
+func init() {
+	agent.PrintFunc = func(value string) { fmt.Fprintln(stdoutWriter, value) }
+	agent.NoteFunc = func(value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		fmt.Fprintf(stderrWriter, "[note] %s\n", value)
+	}
+}
 
 const (
 	AskRules              = "no bash or file changes; public webfetch still allowed"
@@ -99,8 +110,10 @@ var TopLevelCommandHelp = [][2]string{
 	{"run", "Run a one-shot task."},
 	{"chat", "Start an interactive multi-turn chat session."},
 	{"ralph", "Run a task in yolo mode every minute until the configured deadline."},
-	{"model", "Show or change the default model."},
+	{"ask", "Run a one-shot research-only query."},
+	{"model", "Show, list, or change the default model."},
 	{"audit", "Run a one-shot security and complexity audit."},
+	{"help", "Show top-level or command-specific help."},
 }
 
 type sessionField struct {
@@ -108,9 +121,21 @@ type sessionField struct {
 	Value string
 }
 
+type scopedEnv struct {
+	Key      string
+	Value    string
+	HadValue bool
+}
+
 func Main(argv []string) int {
 	args := append([]string(nil), argv...)
-	commands := map[string]struct{}{"run": {}, "chat": {}, "ralph": {}, "model": {}, "audit": {}, "-h": {}, "--help": {}}
+	args, restores, err := applyGlobalOptions(args)
+	defer restoreEnv(restores)
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
+		fmt.Fprintln(stderrWriter, "[note] see `oy --help`")
+		return 1
+	}
 	if len(args) == 0 {
 		if runtime.StdinIsInteractive() {
 			PrintHelp()
@@ -121,9 +146,10 @@ func Main(argv []string) int {
 		fmt.Fprintf(stdoutWriter, "oy %s\n", version.Version)
 		return 0
 	} else if args[0] == "--yolo" {
-		panic("top-level --yolo is not allowed; put it after a subcommand")
+		fmt.Fprintln(stderrWriter, "[error] top-level --yolo is not allowed; use `oy chat --yolo` or `OY_YOLO=1 oy <command>`")
+		return 1
 	} else if !strings.HasPrefix(args[0], "-") {
-		if _, ok := commands[args[0]]; !ok {
+		if !isTopLevelCommand(args[0]) {
 			args = append([]string{"run"}, args...)
 		}
 	}
@@ -133,39 +159,207 @@ func Main(argv []string) int {
 	}
 	switch args[0] {
 	case "run":
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printRunHelp()
+			return 0
+		}
 		return runCommand(args[1:]...)
 	case "chat":
 		return runChatCommand(args[1:])
 	case "ralph":
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printRalphHelp()
+			return 0
+		}
 		return ralphCommand(args[1:]...)
+	case "ask":
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printAskHelp()
+			return 0
+		}
+		return askCommand(args[1:]...)
 	case "audit":
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printAuditHelp()
+			return 0
+		}
 		focus := ""
 		if len(args) > 1 {
 			focus = strings.Join(args[1:], " ")
 		}
 		return auditCommand(focus)
 	case "model":
+		if len(args) > 1 && isHelpArg(args[1]) {
+			printModelHelp()
+			return 0
+		}
 		selection := ""
 		if len(args) > 1 {
 			selection = strings.Join(args[1:], " ")
 		}
 		return modelCommand(selection)
+	case "help":
+		if len(args) == 1 {
+			PrintHelp()
+			return 0
+		}
+		switch strings.ToLower(strings.TrimSpace(args[1])) {
+		case "run":
+			printRunHelp()
+		case "chat":
+			printChatHelp()
+		case "ralph":
+			printRalphHelp()
+		case "ask":
+			printAskHelp()
+		case "audit":
+			printAuditHelp()
+		case "model":
+			printModelHelp()
+		default:
+			fmt.Fprintf(stderrWriter, "[error] unknown help topic: %s\n", args[1])
+			fmt.Fprintln(stderrWriter, "[note] available help topics: run, chat, ralph, ask, audit, model")
+			return 1
+		}
+		return 0
 	case "-h", "--help":
 		PrintHelp()
 		return 0
 	default:
-		PrintHelp()
-		return 0
+		fmt.Fprintf(stderrWriter, "[error] unknown top-level option: %s\n", args[0])
+		fmt.Fprintln(stderrWriter, "[note] see `oy --help`")
+		return 1
 	}
 }
 
+func applyGlobalOptions(args []string) ([]string, []scopedEnv, error) {
+	restores := []scopedEnv{}
+	for i := 0; i < len(args); {
+		arg := strings.TrimSpace(args[i])
+		switch {
+		case arg == "":
+			i++
+		case arg == "--":
+			return args[i+1:], restores, nil
+		case arg == "-h" || arg == "--help" || arg == "-v" || arg == "--version" || arg == "--yolo":
+			return args[i:], restores, nil
+		case isTopLevelCommand(arg) || !strings.HasPrefix(arg, "-"):
+			return args[i:], restores, nil
+		case arg == "--non-interactive":
+			setScopedEnv("OY_NON_INTERACTIVE", "1", &restores)
+			i++
+		case strings.HasPrefix(arg, "--model="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
+			if value == "" {
+				return nil, restores, fmt.Errorf("missing value for --model")
+			}
+			setScopedEnv("OY_MODEL", value, &restores)
+			i++
+		case arg == "--model":
+			value, next, err := optionValue(args, i, "--model")
+			if err != nil {
+				return nil, restores, err
+			}
+			setScopedEnv("OY_MODEL", value, &restores)
+			i = next
+		case strings.HasPrefix(arg, "--root="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--root="))
+			if value == "" {
+				return nil, restores, fmt.Errorf("missing value for --root")
+			}
+			setScopedEnv("OY_ROOT", value, &restores)
+			i++
+		case arg == "--root":
+			value, next, err := optionValue(args, i, "--root")
+			if err != nil {
+				return nil, restores, err
+			}
+			setScopedEnv("OY_ROOT", value, &restores)
+			i = next
+		case strings.HasPrefix(arg, "--system-file="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--system-file="))
+			if value == "" {
+				return nil, restores, fmt.Errorf("missing value for --system-file")
+			}
+			setScopedEnv("OY_SYSTEM_FILE", value, &restores)
+			i++
+		case arg == "--system-file":
+			value, next, err := optionValue(args, i, "--system-file")
+			if err != nil {
+				return nil, restores, err
+			}
+			setScopedEnv("OY_SYSTEM_FILE", value, &restores)
+			i = next
+		case strings.HasPrefix(arg, "--best-of="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--best-of="))
+			if value == "" {
+				return nil, restores, fmt.Errorf("missing value for --best-of")
+			}
+			setScopedEnv("OY_BEST_OF", value, &restores)
+			i++
+		case arg == "--best-of":
+			value, next, err := optionValue(args, i, "--best-of")
+			if err != nil {
+				return nil, restores, err
+			}
+			setScopedEnv("OY_BEST_OF", value, &restores)
+			i = next
+		default:
+			return nil, restores, fmt.Errorf("unknown top-level option: %s", arg)
+		}
+	}
+	return nil, restores, nil
+}
+
+func optionValue(args []string, index int, name string) (string, int, error) {
+	if index+1 >= len(args) {
+		return "", index, fmt.Errorf("missing value for %s", name)
+	}
+	value := strings.TrimSpace(args[index+1])
+	if value == "" || value == "--" || strings.HasPrefix(value, "-") {
+		return "", index, fmt.Errorf("missing value for %s", name)
+	}
+	return value, index + 2, nil
+}
+
+func setScopedEnv(key, value string, restores *[]scopedEnv) {
+	previous, hadPrevious := os.LookupEnv(key)
+	*restores = append(*restores, scopedEnv{Key: key, Value: previous, HadValue: hadPrevious})
+	_ = os.Setenv(key, value)
+}
+
+func restoreEnv(restores []scopedEnv) {
+	for i := len(restores) - 1; i >= 0; i-- {
+		item := restores[i]
+		if item.HadValue {
+			_ = os.Setenv(item.Key, item.Value)
+			continue
+		}
+		_ = os.Unsetenv(item.Key)
+	}
+}
+
+func isTopLevelCommand(arg string) bool {
+	switch strings.TrimSpace(arg) {
+	case "run", "chat", "ralph", "ask", "model", "audit", "help":
+		return true
+	default:
+		return false
+	}
+}
+
+func isHelpArg(arg string) bool {
+	arg = strings.TrimSpace(arg)
+	return arg == "-h" || arg == "--help" || strings.EqualFold(arg, "help")
+}
+
 func PrintHelp() {
-	fmt.Fprintln(stdoutWriter, "usage: oy [-h] [--version] {run,chat,ralph,model,audit} ...")
+	fmt.Fprintln(stdoutWriter, "usage: oy [-h] [--version] [--model MODEL] [--root DIR] [--system-file FILE] [--best-of N] [--non-interactive] {run,chat,ralph,ask,model,audit,help} ...")
 	fmt.Fprintln(stdoutWriter)
 	fmt.Fprintln(stdoutWriter, "AI coding assistant for your shell.")
 	fmt.Fprintln(stdoutWriter)
 	fmt.Fprintln(stdoutWriter, "positional arguments:")
-	fmt.Fprintln(stdoutWriter, "  {run,chat,ralph,model,audit}")
+	fmt.Fprintln(stdoutWriter, "  {run,chat,ralph,ask,model,audit,help}")
 	for _, item := range TopLevelCommandHelp {
 		fmt.Fprintf(stdoutWriter, "    %-20s %s\n", item[0], item[1])
 	}
@@ -173,15 +367,97 @@ func PrintHelp() {
 	fmt.Fprintln(stdoutWriter, "options:")
 	fmt.Fprintln(stdoutWriter, "  -h, --help            show this help message and exit")
 	fmt.Fprintln(stdoutWriter, "  --version             show program's version number and exit")
+	fmt.Fprintln(stdoutWriter, "  --model MODEL         override model for this command")
+	fmt.Fprintln(stdoutWriter, "  --root DIR            run against a different workspace")
+	fmt.Fprintln(stdoutWriter, "  --system-file FILE    append extra system instructions")
+	fmt.Fprintln(stdoutWriter, "  --best-of N           override self-consistency count")
+	fmt.Fprintln(stdoutWriter, "  --non-interactive     disable prompt/approval pauses")
 	fmt.Fprintln(stdoutWriter)
 	fmt.Fprintln(stdoutWriter, "Examples:")
 	fmt.Fprintln(stdoutWriter, "  oy \"fix the failing tests\"")
-	fmt.Fprintln(stdoutWriter, "  oy run \"fix the flaky test\"")
-	fmt.Fprintln(stdoutWriter, "  oy chat")
+	fmt.Fprintln(stdoutWriter, "  oy --model openai:gpt-5 --best-of 1 \"fix the flaky test\"")
+	fmt.Fprintln(stdoutWriter, "  oy --root ../service audit auth")
+	fmt.Fprintln(stdoutWriter, "  oy --system-file .oy/system.md chat")
+	fmt.Fprintln(stdoutWriter, "  oy help model")
 	fmt.Fprintln(stdoutWriter, "  oy chat --yolo")
+	fmt.Fprintln(stdoutWriter, "  oy ask \"summarize auth-related code paths\"")
 	fmt.Fprintln(stdoutWriter, "  oy ralph \"fix the flaky test\"")
+	fmt.Fprintln(stdoutWriter, "  oy model list")
+}
+
+func printRunHelp() {
+	fmt.Fprintln(stdoutWriter, "usage: oy run [prompt]")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Run a one-shot task.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "If no prompt is provided and stdin is not a TTY, oy reads the prompt from stdin.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "For interactive multi-turn mode, use `oy chat`.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Examples:")
+	fmt.Fprintln(stdoutWriter, "  oy run \"fix the flaky test\"")
+	fmt.Fprintln(stdoutWriter, "  echo \"update the changelog\" | OY_NON_INTERACTIVE=1 oy run")
+}
+
+func printChatHelp() {
+	fmt.Fprintln(stdoutWriter, "usage: oy chat [-h] [--yolo]")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Start an interactive multi-turn chat session.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "options:")
+	fmt.Fprintln(stdoutWriter, "  -h, --help  show this help message and exit")
+	fmt.Fprintln(stdoutWriter, "  --yolo      Allow all tools without per-action approval prompts.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "In chat, use /help to see slash commands.")
+}
+
+func printRalphHelp() {
+	fmt.Fprintln(stdoutWriter, "usage: oy ralph <prompt>")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Run a task in yolo mode every minute until the configured deadline.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "You can also pipe prompt text on stdin.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Examples:")
+	fmt.Fprintln(stdoutWriter, "  oy ralph \"fix the flaky test\"")
+	fmt.Fprintln(stdoutWriter, "  echo \"review open TODOs\" | OY_NON_INTERACTIVE=1 oy ralph")
+}
+
+func printAskHelp() {
+	fmt.Fprintln(stdoutWriter, "usage: oy ask <question>")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Run a one-shot research-only query.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintf(stdoutWriter, "No bash or file changes; public webfetch is still allowed.\n\n")
+	fmt.Fprintln(stdoutWriter, "You can also pipe question text on stdin.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Examples:")
+	fmt.Fprintln(stdoutWriter, "  oy ask \"summarize auth-related code paths\"")
+	fmt.Fprintln(stdoutWriter, "  echo \"find likely SQL injection risks\" | OY_NON_INTERACTIVE=1 oy ask")
+}
+
+func printAuditHelp() {
+	fmt.Fprintln(stdoutWriter, "usage: oy audit [focus]")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Run a one-shot security and complexity audit.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Examples:")
+	fmt.Fprintln(stdoutWriter, "  oy audit")
 	fmt.Fprintln(stdoutWriter, "  oy audit auth")
-	fmt.Fprintln(stdoutWriter, "  oy model gpt-5")
+}
+
+func printModelHelp() {
+	fmt.Fprintln(stdoutWriter, "usage: oy model [selection|list]")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Show, list, or change the default model.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Without arguments, shows the current model or opens the interactive picker when available.")
+	fmt.Fprintln(stdoutWriter)
+	fmt.Fprintln(stdoutWriter, "Examples:")
+	fmt.Fprintln(stdoutWriter, "  oy model")
+	fmt.Fprintln(stdoutWriter, "  oy model list")
+	fmt.Fprintln(stdoutWriter, "  oy model openai:gpt-5")
+	fmt.Fprintln(stdoutWriter, "  oy help model")
 }
 
 func runChatCommand(args []string) int {
@@ -193,16 +469,11 @@ func runChatCommand(args []string) int {
 		case "--yolo":
 			yolo = true
 		case "-h", "--help":
-			fmt.Fprintln(stdoutWriter, "usage: oy chat [-h] [--yolo]")
-			fmt.Fprintln(stdoutWriter)
-			fmt.Fprintln(stdoutWriter, "Start an interactive multi-turn chat session.")
-			fmt.Fprintln(stdoutWriter)
-			fmt.Fprintln(stdoutWriter, "options:")
-			fmt.Fprintln(stdoutWriter, "  -h, --help  show this help message and exit")
-			fmt.Fprintln(stdoutWriter, "  --yolo      Allow all tools without per-action approval prompts.")
+			printChatHelp()
 			return 0
 		default:
 			fmt.Fprintf(stderrWriter, "[error] unknown chat option: %s\n", arg)
+			fmt.Fprintln(stderrWriter, "[note] see `oy chat --help`")
 			return 1
 		}
 	}
@@ -555,6 +826,35 @@ func readTaskText(task []string) string {
 	return text
 }
 
+func runReadOnlyResearch(question, currentModel string, session runtime.SessionContext, tx agent.Transcript) error {
+	unattendedLimitSeconds, err := unattendedLimitFunc()
+	if err != nil {
+		return err
+	}
+	askTranscript := agent.TranscriptWithSystemPrompt(runtime.AskSystemPrompt(session.SystemPrompt))
+	start := maxInt(len(tx.Messages)-6, 0)
+	for _, message := range tx.Messages[start:] {
+		if message.Role != "system" {
+			askTranscript.Messages = append(askTranscript.Messages, message)
+		}
+	}
+	agent.AddUser(&askTranscript, question)
+	registry := tools.ReadOnlyToolRegistry()
+	state := agent.NewAgentState(session.Workspace, registry, unattendedLimitSeconds, session.Interactive, false)
+	shim, err := requireAPIEnvFunc(currentModel, "", session.Workspace)
+	if err != nil {
+		return err
+	}
+	client, err := getClientFunc(shim, session.Workspace)
+	if err != nil {
+		return err
+	}
+	if _, _, err := agent.RunTurn(client, &askTranscript, &state, currentModel, tools.ToolSpecs(registry), session.BestOf); err != nil {
+		return err
+	}
+	return nil
+}
+
 func defaultRunAgent(prompt, model, root, systemPrompt string, unattendedLimitSeconds int, interactive, yolo bool, transcript *agent.Transcript, bestOf int) (int, string, error) {
 	shim, err := requireAPIEnvFunc(model, "", root)
 	if err != nil {
@@ -570,18 +870,23 @@ func defaultRunAgent(prompt, model, root, systemPrompt string, unattendedLimitSe
 func Run(task ...string) int {
 	taskText := readTaskText(task)
 	if taskText == "" {
-		return chatCommand()
+		printRunHelp()
+		fmt.Fprintln(stderrWriter, "[note] use `oy chat` for interactive multi-turn mode")
+		return 1
 	}
 	session, err := resolveSessionFunc(boolPtr(false), "", true, nil)
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	unattendedLimitSeconds, err := unattendedLimitFunc()
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	code, _, err := runAgentFunc(taskText, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, true, nil, session.BestOf)
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Agent error: %v\n", err)
 		return 1
 	}
 	return code
@@ -664,7 +969,8 @@ func Chat() int {
 			}
 			if handled, ok := result.(bool); ok {
 				if !handled {
-					fmt.Fprintf(stderrWriter, "[warn] Unknown command: %s\n", name)
+					fmt.Fprintf(stderrWriter, "[warn] unknown command: %s\n", name)
+					fmt.Fprintln(stderrWriter, "[note] try `/help`")
 					continue
 				}
 				switch name {
@@ -704,20 +1010,23 @@ func Chat() int {
 func Ralph(task ...string) int {
 	taskText := readTaskText(task)
 	if taskText == "" {
-		fmt.Fprintln(stderrWriter, "Usage: `oy ralph <prompt>` — or pipe prompt text on stdin.")
+		fmt.Fprintln(stderrWriter, "Usage: `oy ralph <prompt>` — or pipe prompt text on stdin. See `oy help ralph`.")
 		return 1
 	}
 	session, err := resolveSessionFunc(boolPtr(false), "", true, nil)
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	session.Yolo = true
 	limitSeconds, err := ralphLimitFunc()
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	unattendedLimitSeconds, err := unattendedLimitFunc()
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	delay := time.Minute
@@ -740,6 +1049,7 @@ func Ralph(task ...string) int {
 		fmt.Fprintf(stderrWriter, "[note] ralph run %d (~%s remaining)\n", runNumber, runtime.FormatDuration(remaining))
 		code, _, err := runAgentFunc(taskText, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, session.Interactive, true, nil, session.BestOf)
 		if err != nil {
+			fmt.Fprintf(stderrWriter, "[error] Agent error: %v\n", err)
 			return 1
 		}
 		if code != 0 {
@@ -757,13 +1067,35 @@ func Ralph(task ...string) int {
 	return exitCode
 }
 
+func Ask(task ...string) int {
+	question := readTaskText(task)
+	if question == "" {
+		printAskHelp()
+		return 1
+	}
+	session, err := resolveSessionFunc(boolPtr(false), "", true, nil)
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
+		return 1
+	}
+	printSessionIntro("Ask", session, sessionField{Key: "mode", Value: AskModeNote}, sessionField{Key: "question", Value: runtime.Preview(question, 100)})
+	fmt.Fprintf(stderrWriter, "[note] %s\n", AskModeNote)
+	if err := runReadOnlyResearch(question, session.Model, session, agent.Transcript{}); err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func Audit(focus string) int {
 	session, err := resolveSessionFunc(boolPtr(false), runtime.AuditSystemPrompt(), false, nil)
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	path, created, err := EnsureRenovateConfig(session.Workspace)
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	if created {
@@ -771,12 +1103,14 @@ func Audit(focus string) int {
 	}
 	auditPrompt, err := runtime.SessionText(nil, "audit", "repo_user_prompt")
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	focus = strings.TrimSpace(focus)
 	if focus != "" {
 		suffix, err := runtime.SessionText(map[string]string{"focus": focus}, "audit", "focus_suffix")
 		if err != nil {
+			fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 			return 1
 		}
 		auditPrompt += suffix
@@ -788,26 +1122,50 @@ func Audit(focus string) int {
 	printSessionIntro("Audit", session, extras...)
 	unattendedLimitSeconds, err := unattendedLimitFunc()
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stderrWriter, "[note] audit mode")
 	code, _, err := runAgentFunc(auditPrompt, session.Model, session.Workspace, session.SystemPrompt, unattendedLimitSeconds, false, false, nil, session.BestOf)
 	if err != nil {
+		fmt.Fprintf(stderrWriter, "[error] Audit error: %v\n", err)
 		return 1
 	}
 	return code
 }
 
 func Model(selection string) int {
+	selection = strings.TrimSpace(selection)
+	if isHelpArg(selection) {
+		printModelHelp()
+		return 0
+	}
 	current, err := runtime.CurrentModel("")
 	if err != nil && strings.TrimSpace(selection) == "" && !canPromptFunc() {
+		fmt.Fprintf(stderrWriter, "[error] %v\n", err)
+		fmt.Fprintln(stderrWriter, "[note] set `OY_MODEL`, run `oy model <id>`, or use `oy model list` to browse available models")
 		return 1
 	}
 	if err != nil {
 		current = ""
 	}
-	if strings.TrimSpace(selection) == "" && !canPromptFunc() {
+	if isModelListSelection(selection) {
+		workspace, _ := WorkspaceRoot()
+		allModels, warnings, err := listAllModelIDsFunc(workspace)
+		if err != nil {
+			fmt.Fprintf(stderrWriter, "[error] %v\n", err)
+			return 1
+		}
+		for _, warning := range warnings {
+			fmt.Fprintf(stderrWriter, "[warn] %s\n", warning)
+		}
+		printModelList(stdoutWriter, "## Available Models", allModels)
+		return 0
+	}
+	if selection == "" && !canPromptFunc() {
 		fmt.Fprintln(stdoutWriter, currentModelText(current))
+		fmt.Fprintln(stdoutWriter)
+		fmt.Fprintln(stdoutWriter, "[note] use `oy model list` to browse available models")
 		return 0
 	}
 	input := bufio.NewReader(modelInputReaderFunc())
@@ -944,7 +1302,7 @@ func handleModelSwitch(arg, currentModel, cwd string, output io.Writer) string {
 	for _, warning := range warnings {
 		fmt.Fprintf(output, "[warn] %s\n", warning)
 	}
-	if strings.EqualFold(arg, "list") {
+	if isModelListSelection(arg) {
 		printModelList(output, "## Available Models", allModels)
 		return currentModel
 	}
@@ -965,6 +1323,7 @@ func handleModelSwitch(arg, currentModel, cwd string, output io.Writer) string {
 		return currentModel
 	}
 	fmt.Fprintf(output, "[warn] No models matching `%s`.\n", arg)
+	fmt.Fprintln(output, "[note] use `/model list` to browse available models")
 	return currentModel
 }
 
@@ -993,33 +1352,8 @@ func handleAsk(question, currentModel string, session runtime.SessionContext, tx
 		fmt.Fprintln(stderrWriter, AskUsage)
 		return
 	}
-	unattendedLimitSeconds, err := unattendedLimitFunc()
-	if err != nil {
-		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
-		return
-	}
-	askTranscript := agent.TranscriptWithSystemPrompt(runtime.AskSystemPrompt(session.SystemPrompt))
-	start := maxInt(len(tx.Messages)-6, 0)
-	for _, message := range tx.Messages[start:] {
-		if message.Role != "system" {
-			askTranscript.Messages = append(askTranscript.Messages, message)
-		}
-	}
-	agent.AddUser(&askTranscript, question)
-	registry := tools.ReadOnlyToolRegistry()
-	state := agent.NewAgentState(session.Workspace, registry, unattendedLimitSeconds, session.Interactive, false)
-	shim, err := requireAPIEnvFunc(currentModel, "", session.Workspace)
-	if err != nil {
-		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
-		return
-	}
-	client, err := getClientFunc(shim, session.Workspace)
-	if err != nil {
-		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
-		return
-	}
 	fmt.Fprintf(stderrWriter, "[note] %s\n", AskModeNote)
-	if _, _, err := agent.RunTurn(client, &askTranscript, &state, currentModel, tools.ToolSpecs(registry), session.BestOf); err != nil {
+	if err := runReadOnlyResearch(question, currentModel, session, tx); err != nil {
 		fmt.Fprintf(stderrWriter, "[error] Research error: %v\n", err)
 	}
 }
@@ -1076,11 +1410,14 @@ func resolveModelChoice(selection, currentModel, cwd string, input io.Reader, ou
 			return model, nil
 		}
 	}
+	matches := filterModels(allModels, selection)
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
 	if !canPromptFunc() {
 		if selection == "" {
 			return "", nil
 		}
-		matches := filterModels(allModels, selection)
 		if len(matches) > 0 {
 			printModelList(output, "## Matching Models", matches)
 		}
@@ -1183,6 +1520,11 @@ func promptYesNo(input io.Reader, output io.Writer, label string, defaultYes boo
 	default:
 		return false, nil
 	}
+}
+
+func isModelListSelection(selection string) bool {
+	selection = strings.TrimSpace(selection)
+	return strings.EqualFold(selection, "list") || strings.EqualFold(selection, "ls")
 }
 
 func filterModels(models []string, query string) []string {

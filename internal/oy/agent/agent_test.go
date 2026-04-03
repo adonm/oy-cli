@@ -121,6 +121,48 @@ func TestRunTurnExecutesToolCallsUntilFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestRunTurnNotesToolCallsAndResultPreviews(t *testing.T) {
+	registry := map[string]tools.RegisteredTool{
+		"echo": {
+			Spec:     tools.Spec{Name: "echo"},
+			Required: []string{"text"},
+			Handler: func(state *tools.State, args map[string]any) (any, error) {
+				return filepathBase(state.Root) + ":" + args["text"].(string), nil
+			},
+		},
+	}
+	client := &stubCompletionClient{responses: []providers.ChatMessage{
+		providers.AssistantMessage("", []providers.ToolCall{providers.ToolCallMessage("call_1", "echo", map[string]any{"text": "hi"})}),
+		providers.AssistantMessage("done", nil),
+	}}
+	notes := []string{}
+	oldPrint, oldNote := PrintFunc, NoteFunc
+	defer func() { PrintFunc, NoteFunc = oldPrint, oldNote }()
+	PrintFunc = func(string) {}
+	NoteFunc = func(message string) { notes = append(notes, message) }
+
+	root := t.TempDir()
+	transcript := TranscriptWithSystemPrompt("sys")
+	AddUser(&transcript, "hello")
+	state := AgentState(root, registry, 3600, time.Now().Add(time.Hour), false, false, false, nil)
+	code, content, err := RunTurn(client, &transcript, &state, "openai:gpt-test", tools.ToolSpecs(registry), 1)
+	if err != nil || code != 0 || content != "done" {
+		t.Fatalf("unexpected result: %d %q %v", code, content, err)
+	}
+	if len(notes) != 3 {
+		t.Fatalf("unexpected notes: %#v", notes)
+	}
+	if notes[0] != "turn 1: 1 tool call" {
+		t.Fatalf("unexpected turn note: %q", notes[0])
+	}
+	if notes[1] != "tool echo(text=hi)" {
+		t.Fatalf("unexpected tool call note: %q", notes[1])
+	}
+	if !strings.HasPrefix(notes[2], "tool echo: ok ") || !strings.Contains(notes[2], ":hi") {
+		t.Fatalf("unexpected tool result note: %q", notes[2])
+	}
+}
+
 func TestRunTurnPropagatesTodoStateToNextRequest(t *testing.T) {
 	client := &stubCompletionClient{responses: []providers.ChatMessage{
 		providers.AssistantMessage("", []providers.ToolCall{providers.ToolCallMessage("call_1", "todo", map[string]any{"todos": []any{map[string]any{"id": "t1", "task": "ship it", "status": "in_progress"}}})}),

@@ -24,7 +24,8 @@ echo "update the changelog" | OY_NON_INTERACTIVE=1 oy
 oy chat
 oy audit [focus]
 oy ralph "prompt"
-oy model [filter]
+oy model [selection|list]
+oy help model
 oy --help
 ```
 

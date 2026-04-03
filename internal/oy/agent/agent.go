@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -255,9 +256,11 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 			NoteFunc(fmt.Sprintf("self-consistency: sample %d won %d/%d", chosenIndex+1, voteCount, bestOf))
 		}
 		if len(message.ToolCalls) > 0 {
+			NoteFunc(fmt.Sprintf("turn %d: %s", step+1, tools.CountText(len(message.ToolCalls), "tool call", "")))
 			AddAssistant(transcript, message)
 			results := make([]map[string]any, 0, len(message.ToolCalls))
 			for _, call := range message.ToolCalls {
+				NoteFunc("tool " + formatToolCallPreview(call))
 				toolState := &tools.State{
 					Root:                    state.Root,
 					Interactive:             state.Interactive,
@@ -266,6 +269,7 @@ func RunTurn(client CompletionRunner, transcript *Transcript, state *State, mode
 					Todos:                   cloneTodos(state.Todos),
 				}
 				result := tools.InvokeTool(state.ToolRegistry, toolState, call.Name, call.Arguments)
+				NoteFunc(fmt.Sprintf("tool %s: %s", call.Name, formatToolResultPreview(result)))
 				state.ApproveAllMutatingTools = toolState.ApproveAllMutatingTools
 				state.Todos = cloneTodos(toolState.Todos)
 				results = append(results, map[string]any{"call_id": call.ID, "name": call.Name, "result": result})
@@ -361,6 +365,34 @@ func debugToolResults(results []map[string]any) []map[string]any {
 		out = append(out, entry)
 	}
 	return out
+}
+
+func formatToolCallPreview(call providers.ToolCall) string {
+	if len(call.Arguments) == 0 {
+		return call.Name
+	}
+	keys := make([]string, 0, len(call.Arguments))
+	for key := range call.Arguments {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	details := make([]string, 0, len(keys))
+	for _, key := range keys {
+		details = append(details, fmt.Sprintf("%s=%s", key, runtime.Preview(call.Arguments[key], 80)))
+	}
+	return fmt.Sprintf("%s(%s)", call.Name, strings.Join(details, ", "))
+}
+
+func formatToolResultPreview(result providers.ToolResult) string {
+	status := "error"
+	if result.OK {
+		status = "ok"
+	}
+	preview := strings.TrimSpace(runtime.Preview(result.Content, 120))
+	if preview == "" {
+		return status
+	}
+	return fmt.Sprintf("%s %s", status, preview)
 }
 
 func normalizedVoteText(text string) string {
