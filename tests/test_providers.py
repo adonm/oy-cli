@@ -27,7 +27,6 @@ class TestJSONHelpers:
         monkeypatch.setattr(providers, "OPENCODE_AUTH_PATH", opencode)
         assert providers.load_codex_auth() == {}
         assert providers._opencode_api_key("opencode") is None
-        assert providers._opencode_api_key("opencode-go") is None
 
 
 class TestHTTPClient:
@@ -62,6 +61,13 @@ class TestHTTPClient:
             llm.close()
             tool.close()
 
+    def test_http_sessions_treat_none_timeout_as_default(self):
+        llm = providers.llm_session(timeout=None)
+        try:
+            assert llm.timeout == providers.DEFAULT_HTTP_TIMEOUT
+        finally:
+            llm.close()
+
 
 class TestSigV4Signing:
     def test_bedrock_mantle_request_headers(self):
@@ -73,7 +79,7 @@ class TestSigV4Signing:
             },
             "ap-southeast-2",
             "POST",
-            "https://bedrock-mantle.ap-southeast-2.api.aws/v1/chat/completions",
+            "https://bedrock-mantle.ap-southeast-2.api.aws/v1/responses",
             body=b'{"model":"zai.glm-4.6"}',
             headers={"Content-Type": "application/json"},
         )
@@ -119,49 +125,6 @@ class TestMessageDecoding:
             "hello\n\nnope",
             tool_calls=[ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
         )
-
-    def test_chat_completion_to_assistant_message(self):
-        chat_message = providers._chat_completion_to_assistant_message(
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(content="hello", tool_calls=None)
-                    ),
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content="hello",
-                            tool_calls=[
-                                SimpleNamespace(
-                                    id="call_2",
-                                    function=SimpleNamespace(
-                                        name="echo", arguments='{"count":2}'
-                                    ),
-                                )
-                            ],
-                        )
-                    ),
-                ]
-            )
-        )
-        assert chat_message == AssistantMessage(
-            "hello",
-            tool_calls=[ToolCall(id="call_2", name="echo", arguments={"count": 2})],
-        )
-
-    def test_reasoning_only_message(self):
-        reasoning_only = providers._chat_completion_to_assistant_message(
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content="", reasoning="thoughts", tool_calls=None
-                        )
-                    )
-                ]
-            )
-        )
-        assert reasoning_only == AssistantMessage("thoughts")
-
 
 class TestReasoningFallback:
     def test_drops_unsupported_reasoning_after_first_rejection(self):
@@ -210,25 +173,11 @@ class TestReasoningFallback:
         )
         assert "reasoning" not in responses_cached.call_args.args[0]
 
-    def test_drops_reasoning_effort_for_chat_completions(self):
-        final = SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="done", tool_calls=None)
-                )
-            ]
-        )
-        chat_create = Mock(
-            side_effect=[api_error("Unknown parameter: reasoning_effort"), final]
-        )
-        chat_client = providers._chat_client(
-            chat_create, lambda: ["gpt-test"], tools_map=lambda _: []
-        )
-        assert chat_client["chat_completion"]("gpt-test", []) == AssistantMessage(
-            "done"
-        )
-        assert chat_create.call_args_list[0].args[0]["reasoning_effort"] == "high"
-        assert "reasoning_effort" not in chat_create.call_args_list[1].args[0]
+    def test_raises_clear_error_when_responses_api_is_not_supported(self):
+        responses_create = Mock(side_effect=[api_error("Unknown path: /responses")])
+        client = providers._responses_client(responses_create, lambda: ["gpt-test"])
+        with pytest.raises(RuntimeError, match="does not support the Open Responses / Responses API required by oy"):
+            client["chat_completion"]("gpt-test", [])
 
 
 class TestMalformedOutputRetry:
@@ -274,7 +223,7 @@ class TestMalformedOutputRetry:
         )
         monkeypatch.setattr(
             providers,
-            "_call_with_reasoning_fallback",
+            "_call_responses",
             lambda *args, **kwargs: next(responses),
         )
 
@@ -292,54 +241,40 @@ class TestMalformedOutputRetry:
             )
         ]
 
-    def test_chat_client_retries_malformed_tool_arguments(self, monkeypatch):
+    def test_responses_client_retries_malformed_tool_arguments(self, monkeypatch):
         self._fake_retry(monkeypatch)
         retry_notes = []
         responses = iter(
             [
-                SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(
-                                content="",
-                                tool_calls=[
-                                    SimpleNamespace(
-                                        id="call_1",
-                                        function=SimpleNamespace(
-                                            name="echo", arguments='{"count":'
-                                        ),
-                                    )
-                                ],
-                            )
-                        )
+                {
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "echo",
+                            "arguments": '{"count":',
+                        }
                     ]
-                ),
-                SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(
-                                content="",
-                                tool_calls=[
-                                    SimpleNamespace(
-                                        id="call_1",
-                                        function=SimpleNamespace(
-                                            name="echo", arguments='{"count":2}'
-                                        ),
-                                    )
-                                ],
-                            )
-                        )
+                },
+                {
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "echo",
+                            "arguments": '{"count":2}',
+                        }
                     ]
-                ),
+                },
             ]
         )
         monkeypatch.setattr(
             providers,
-            "_call_with_reasoning_fallback",
+            "_call_responses",
             lambda *args, **kwargs: next(responses),
         )
 
-        client = providers._chat_client(Mock(), lambda: ["gpt-test"], tools_map=lambda _: [])
+        client = providers._responses_client(Mock(), lambda: ["gpt-test"])
         assert client["chat_completion"](
             "gpt-test",
             [],
@@ -361,7 +296,7 @@ class TestMalformedOutputRetry:
         attempts = []
         monkeypatch.setattr(
             providers,
-            "_call_with_reasoning_fallback",
+            "_call_responses",
             lambda *args, **kwargs: attempts.append("call") or {"output": []},
         )
 
@@ -372,7 +307,7 @@ class TestMalformedOutputRetry:
 
 
 class TestClientFactories:
-    def test_responses_and_chat_clients_share_openai_helpers(self, monkeypatch):
+    def test_responses_from_key_uses_openai_helpers(self, monkeypatch):
         created = []
 
         def fake_openai(*args, **kwargs):
@@ -397,67 +332,73 @@ class TestClientFactories:
                 **kwargs,
             },
         )
-        monkeypatch.setattr(
-            providers,
-            "_chat_client",
-            lambda create, list_models, **kwargs: {
-                "kind": "chat",
-                "create": create,
-                "list_models": list_models,
-                **kwargs,
-            },
-        )
 
-        responses = providers._responses_from_key(
-            "key", fallback=list, default=["demo"]
-        )
-        chat = providers._chat_from_key("key")
+        responses = providers._responses_from_key("key")
 
         assert responses == {
             "kind": "responses",
             "create": "create:/responses",
             "list_models": "models:0",
-            "fallback": list,
-            "default": ["demo"],
         }
-        assert chat["kind"] == "chat"
-        assert chat["create"] == "create:/chat/completions"
-        assert chat["list_models"] == "models:1"
         assert created == [
             ({"api": 0}, "/responses", "Responses API"),
-            ({"api": 1}, "/chat/completions", "Chat Completions API"),
         ]
 
-    def test_opencode_clients_share_lookup_and_builder(self, monkeypatch):
+    def test_opencode_client_uses_zen_lookup_and_builder(self, monkeypatch):
+        monkeypatch.delenv(providers.OPENCODE_SHARED_ENV_VAR, raising=False)
         monkeypatch.setattr(
             providers,
             "_load_opencode_auth",
-            lambda: {"opencode": {"key": "zen-key"}, "opencode-go": {"key": "go-key"}},
+            lambda: {"opencode": {"key": "zen-key"}},
         )
         seen = []
         monkeypatch.setattr(
             providers,
-            "_chat_from_key",
+            "_responses_from_key",
             lambda api_key, *, base_url=None, **kwargs: (
                 seen.append((api_key, base_url, kwargs))
-                or {"api_key": api_key, "base_url": base_url}
+                or {"api_key": api_key, "base_url": base_url, **kwargs}
             ),
+        )
+        monkeypatch.setattr(
+            providers,
+            "_opencode_list_models",
+            lambda name, provider_id, base_url: [f"{provider_id}-model"],
         )
 
         assert providers._opencode_api_key("opencode") == "zen-key"
-        assert providers._opencode_api_key("opencode-go") == "go-key"
-        assert providers._opencode_zen_client() == {
-            "api_key": "zen-key",
-            "base_url": providers.OPENCODE_ZEN_URL,
-        }
-        assert providers._opencode_go_client() == {
-            "api_key": "go-key",
-            "base_url": providers.OPENCODE_GO_URL,
-        }
-        assert seen == [
-            ("zen-key", providers.OPENCODE_ZEN_URL, {}),
-            ("go-key", providers.OPENCODE_GO_URL, {}),
-        ]
+        zen = providers._opencode_zen_client()
+        assert zen["list_models"]() == ["opencode-model"]
+        assert seen == [("zen-key", providers.OPENCODE_ZEN_URL, {})]
+
+    def test_opencode_api_key_prefers_shared_env(self, monkeypatch):
+        monkeypatch.setenv(providers.OPENCODE_SHARED_ENV_VAR, "shared-key")
+        monkeypatch.setattr(
+            providers,
+            "_load_opencode_auth",
+            lambda: {"opencode": {"key": "zen-key"}},
+        )
+        assert providers._opencode_api_key("opencode") == "shared-key"
+
+        monkeypatch.delenv(providers.OPENCODE_SHARED_ENV_VAR, raising=False)
+        monkeypatch.setattr(
+            providers,
+            "_load_opencode_auth",
+            lambda: {"opencode": {"key": "zen-only"}},
+        )
+        assert providers._opencode_api_key("opencode") == "zen-only"
+
+    def test_opencode_list_models_uses_remote_models_endpoint(self, monkeypatch):
+        monkeypatch.setattr(providers, "_opencode_api_key", lambda name: "key")
+        monkeypatch.setattr(providers, "_openai", lambda *args, **kwargs: {"api": "ok"})
+        monkeypatch.setattr(
+            providers,
+            "_model_ids",
+            lambda api: ["chat-a", "responses-b"],
+        )
+        assert providers._opencode_list_models(
+            "opencode", "opencode", providers.OPENCODE_ZEN_URL
+        ) == ["chat-a", "responses-b"]
 
 
 class TestMantleClient:
@@ -487,6 +428,46 @@ class TestMantleClient:
         client = providers._mantle_completion_client(tmp_path)
         assert client["list_models"]() == ["alpha", "beta"]
         assert client["chat_completion"] is sentinel["chat_completion"]
+
+    def test_bedrock_mantle_client_posts_to_responses_api(self, monkeypatch):
+        requested = {}
+        monkeypatch.setattr(
+            providers,
+            "_bedrock_request_headers",
+            lambda credentials, region, method, url, body=b"", headers=None: {
+                "Authorization": "AWS4-HMAC-SHA256 test",
+                "X-Amz-Date": "20260327T062009Z",
+                **(headers or {}),
+            },
+        )
+
+        class FakeSession:
+            def request(self, method, url, **req):
+                requested.update({"method": method, "url": url, **req})
+                return providers.response_adapter(
+                    status_code=200,
+                    headers={"Content-Type": "application/json"},
+                    text='{"output":[{"type":"message","role":"assistant","content":[{"text":"done"}]}]}',
+                    content=b'{"output":[{"type":"message","role":"assistant","content":[{"text":"done"}]}]}',
+                    url=url,
+                    reason_phrase="OK",
+                )
+
+        monkeypatch.setattr(providers, "llm_session", lambda **kwargs: FakeSession())
+        client = providers._bedrock_mantle_client(
+            {"access_key": "AKIA", "secret_key": "SECRET"},
+            "ap-southeast-2",
+        )
+        assert client["chat_completion"]("zai.glm-4.6", []) == AssistantMessage("done")
+        assert requested["method"] == "POST"
+        assert (
+            requested["url"]
+            == "https://bedrock-mantle.ap-southeast-2.api.aws/v1/responses"
+        )
+        assert requested["headers"]["Authorization"] == "AWS4-HMAC-SHA256 test"
+        assert requested["headers"]["Content-Type"] == "application/json"
+        assert b'"model":"zai.glm-4.6"' in requested["data"]
+        assert b'"reasoning":{"effort":"high"}' in requested["data"]
 
     def test_load_bedrock_model_list_uses_mantle_endpoint(self, monkeypatch, tmp_path):
         requested = {}
@@ -581,7 +562,7 @@ class TestShimRegistry:
             "gamma": {
                 "ensure_env": ok("gamma"),
                 "build_client": lambda cwd: None,
-                "list_models": lambda cwd: [],
+                "list_models": lambda cwd: ["demo"],
             },
         }
         monkeypatch.setattr(
@@ -600,7 +581,7 @@ class TestShimRegistry:
         assert providers.ensure_api_env("alpha:model", None, tmp_path) == (True, None)
         assert providers.get_client("alpha", cwd=tmp_path) is sentinel
         assert providers.list_models_for_shim("alpha", cwd=tmp_path) == ["alpha:demo"]
-        assert providers.list_models_for_shim("gamma", cwd=tmp_path) == []
+        assert providers.list_models_for_shim("gamma", cwd=tmp_path) == ["gamma:demo"]
 
     def test_list_models_error_handling(self, monkeypatch, tmp_path):
         calls = []
@@ -617,9 +598,8 @@ class TestShimRegistry:
         monkeypatch.setattr(providers, "SHIM_SPECS", specs, raising=False)
         monkeypatch.setattr(providers, "_shim_available", lambda shim: True)
 
-        assert providers.list_models_for_shim("gamma", cwd=tmp_path) == []
         with pytest.raises(RuntimeError, match="boom"):
-            providers.list_models_for_shim("gamma", cwd=tmp_path, ignore_errors=False)
+            providers.list_models_for_shim("gamma", cwd=tmp_path)
 
 
 class TestToolOutputRoundTrip:
@@ -639,11 +619,9 @@ class TestToolOutputRoundTrip:
             "message": "read path does not exist: missing.txt",
         }
 
-        openai_tool = providers._openai_chat_message(
-            ToolMessage("call_1", "read", result)
-        )
-        assert "ok: false" in openai_tool["content"]
-        assert "read path does not exist: missing.txt" in openai_tool["content"]
+        output_text = providers._tool_output_text(result)
+        assert "ok: false" in output_text
+        assert "read path does not exist: missing.txt" in output_text
 
         responses_input = providers._responses_input_from_messages(
             [ToolMessage("call_1", "read", result)]

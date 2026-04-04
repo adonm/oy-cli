@@ -1358,16 +1358,16 @@ def list_all_model_ids() -> list[str]:
     for shim in shims:
         _print("status", f"Loading models from {_fmt('inline', shim)}.", err=True)
         try:
-            all_models.extend(
-                list_models_for_shim(shim, cwd=Path.cwd(), ignore_errors=False)
-            )
+            all_models.extend(list_models_for_shim(shim, cwd=Path.cwd()))
         except Exception as exc:
             message = (
                 str(exc).strip().splitlines()[0]
                 if str(exc).strip()
                 else type(exc).__name__
             )
-            _warn(f"Could not load models from {_fmt('inline', shim)}: {message}")
+            raise RuntimeError(
+                f"Could not load models from {_fmt('inline', shim)}: {message}"
+            ) from exc
     return all_models
 
 

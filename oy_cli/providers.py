@@ -111,14 +111,12 @@ SHIM_CODEX = "codex"
 SHIM_MANTLE = "bedrock-mantle"
 SHIM_COPILOT = "copilot"
 SHIM_OPENCODE = "opencode"
-SHIM_OPENCODE_GO = "opencode-go"
 SHIM_ORDER = (
     SHIM_OPENAI,
     SHIM_CODEX,
     SHIM_MANTLE,
     SHIM_COPILOT,
     SHIM_OPENCODE,
-    SHIM_OPENCODE_GO,
 )
 
 SSO_MARKERS = (
@@ -131,8 +129,7 @@ CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 CODEX_MODELS_CACHE_PATH = Path.home() / ".codex" / "models_cache.json"
 OPENCODE_AUTH_PATH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
 OPENCODE_ZEN_URL = "https://opencode.ai/zen/v1"
-OPENCODE_GO_URL = "https://opencode.ai/zen/go/v1"
-CODEX_DEFAULT_MODEL = "gpt-5-codex"
+OPENCODE_SHARED_ENV_VAR = "OPENCODE_API_KEY"
 CODEX_CHATGPT_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 # --- Public OAuth2 "installed app" credentials ---
@@ -142,6 +139,9 @@ CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_OAUTH_CLIENT_ID = (
     os.environ.get("CODEX_OAUTH_CLIENT_ID") or "app_EMoamEEZ73f0CkXaXp7hrann"
 )
+DEFAULT_HTTP_TIMEOUT = 120.0
+DEFAULT_WEBFETCH_TIMEOUT_SECONDS = 30.0
+SHORT_HTTP_TIMEOUT = 15.0
 DEFAULT_RETRY_MAX_ATTEMPTS = 10
 DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 5.0
 DEFAULT_RETRY_MAX_DELAY_SECONDS = 30.0
@@ -160,45 +160,6 @@ def _tool_output_value(result: dict[str, Any]) -> JSONLike:
 
 def _tool_output_text(result: dict[str, Any]) -> str:
     return serialize_toon(_tool_output_value(result))
-
-
-def _openai_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": tool_call["id"],
-        "type": "function",
-        "function": {
-            "name": tool_call["name"],
-            "arguments": serialize_json(tool_call["arguments"]),
-        },
-    }
-
-
-def _openai_chat_message(message: ChatMessage) -> dict[str, Any]:
-    role = message.get("role")
-    if role in {"system", "user"}:
-        return _message(role, message["content"])
-    if role == "assistant":
-        payload = _message("assistant", message["content"])
-        if message["tool_calls"]:
-            payload["tool_calls"] = [
-                _openai_tool_call(tool_call) for tool_call in message["tool_calls"]
-            ]
-        if message["thought_signatures"]:
-            payload["thought_signatures"] = message["thought_signatures"]
-        return payload
-    if role == "tool":
-        return _message(
-            "tool",
-            _tool_output_text(message["content"]),
-            tool_call_id=message["tool_call_id"],
-            name=message["name"],
-        )
-    raise TypeError(f"Unsupported message role: {role!r}")
-
-
-# ---------------------------------------------------------------------------
-# Local persistence and shell/runtime helpers
-# ---------------------------------------------------------------------------
 
 
 def load_json(path, default):
@@ -352,6 +313,9 @@ class RateLimitError(APIStatusError): ...
 class BadRequestError(APIStatusError): ...
 
 
+class UnsupportedResponsesAPIError(RuntimeError): ...
+
+
 ResponseAdapter: TypeAlias = dict[str, Any]
 
 
@@ -407,10 +371,6 @@ def response_adapter(
         "reason_phrase": reason_phrase,
         "http_version": http_version,
     }
-
-
-def response_is_success(response: ResponseAdapter) -> bool:
-    return 200 <= response["status_code"] < 300
 
 
 def response_json(response: ResponseAdapter) -> Any:
@@ -768,7 +728,8 @@ def _status_error_from_response(response: ResponseAdapter) -> APIStatusError:
 
 
 def http_client(**kw):
-    timeout = float(kw.pop("timeout", DEFAULT_HTTP_TIMEOUT))
+    timeout = kw.pop("timeout", DEFAULT_HTTP_TIMEOUT)
+    timeout = DEFAULT_HTTP_TIMEOUT if timeout is None else float(timeout)
     follow_redirects = bool(
         kw.pop("follow_redirects", kw.pop("allow_redirects", False))
     )
@@ -1231,11 +1192,7 @@ def _decode_tool_call_arguments(arguments: Any) -> dict[str, Any]:
 
 
 def _drop_reasoning_arg(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in payload.items()
-        if key not in {"reasoning", "reasoning_effort"}
-    }
+    return {key: value for key, value in payload.items() if key != "reasoning"}
 
 
 def _has_meaningful_assistant_output(message: AssistantMessage) -> bool:
@@ -1246,10 +1203,22 @@ def _retryable_decode_error(exc: Exception) -> RetryableDecodeError:
     return RetryableDecodeError(f"malformed model output: {exc}")
 
 
+def _is_blank_chat_value(value: Any) -> bool:
+    return (
+        value is None
+        or value == ""
+        or value == []
+        or value == {}
+        or (isinstance(value, str) and not value.strip())
+    )
+
+
 def _decode_with_retry(call, decode, *, on_retry=None) -> AssistantMessage:
     def run() -> AssistantMessage:
         try:
             message = decode(call())
+        except UnsupportedResponsesAPIError:
+            raise
         except (json.JSONDecodeError, RuntimeError, TypeError, ValueError) as exc:
             raise _retryable_decode_error(exc) from exc
         if not _has_meaningful_assistant_output(message):
@@ -1265,20 +1234,18 @@ def _decode_with_retry(call, decode, *, on_retry=None) -> AssistantMessage:
     )
 
 
-# Thread-safe cache for reasoning support per (api_kind, model).
-# Background threads (/ask, /audit) may probe this concurrently.
-_REASONING_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
+_REASONING_SUPPORT_CACHE: dict[str, bool] = {}
 _REASONING_CACHE_LOCK = _threading.Lock()
 
 
-def _should_send_reasoning(api_kind: str, model: str) -> bool:
+def _should_send_reasoning(model: str) -> bool:
     with _REASONING_CACHE_LOCK:
-        return _REASONING_SUPPORT_CACHE.get((api_kind, model), True)
+        return _REASONING_SUPPORT_CACHE.get(model, True)
 
 
-def _mark_reasoning_unsupported(api_kind: str, model: str) -> None:
+def _mark_reasoning_unsupported(model: str) -> None:
     with _REASONING_CACHE_LOCK:
-        _REASONING_SUPPORT_CACHE[(api_kind, model)] = False
+        _REASONING_SUPPORT_CACHE[model] = False
 
 
 def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
@@ -1298,26 +1265,55 @@ def _is_reasoning_unsupported_error(exc: APIStatusError) -> bool:
     )
 
 
-def _call_with_reasoning_fallback(
-    api_kind: str,
+def _is_responses_unsupported_error(exc: APIStatusError) -> bool:
+    status = exc.response["status_code"]
+    if status not in {400, 404, 405, 415, 422, 501}:
+        return False
+    message = (_response_error_message(exc.response) or "").lower()
+    return any(
+        token in message
+        for token in (
+            "responses",
+            "/responses",
+            "unsupported api",
+            "unsupported endpoint",
+            "not found",
+            "unknown path",
+            "method not allowed",
+        )
+    )
+
+
+def _unsupported_responses_api_error(
+    model: str, exc: APIStatusError
+) -> UnsupportedResponsesAPIError:
+    message = _response_error_message(exc.response) or str(exc)
+    return UnsupportedResponsesAPIError(
+        f"Model {model!r} does not support the Open Responses / Responses API required by oy: {message}"
+    )
+
+
+def _call_responses(
     model: str,
     payload: dict[str, Any],
     create,
     *,
     on_retry=None,
 ):
-    if not _should_send_reasoning(api_kind, model):
+    if not _should_send_reasoning(model):
         payload = _drop_reasoning_arg(payload)
     try:
         return _call_with_retry(lambda: create(payload), on_retry=on_retry)
     except APIStatusError as exc:
-        if not _is_reasoning_unsupported_error(exc):
-            raise
-        _mark_reasoning_unsupported(api_kind, model)
-        return _call_with_retry(
-            lambda: create(_drop_reasoning_arg(payload)),
-            on_retry=on_retry,
-        )
+        if _is_reasoning_unsupported_error(exc):
+            _mark_reasoning_unsupported(model)
+            return _call_with_retry(
+                lambda: create(_drop_reasoning_arg(payload)),
+                on_retry=on_retry,
+            )
+        if _is_responses_unsupported_error(exc):
+            raise _unsupported_responses_api_error(model, exc) from exc
+        raise
 
 
 def _responses_payload(
@@ -1330,8 +1326,8 @@ def _responses_payload(
         "model": model,
         "input": _responses_input_from_messages(messages),
         "store": False,
+        "reasoning": {"effort": "high"},
     }
-    payload["reasoning"] = {"effort": "high"}
     instructions = _responses_instructions(messages)
     if instructions:
         payload["instructions"] = instructions
@@ -1408,30 +1404,9 @@ def _http_error_message(prefix: str, response: ResponseAdapter) -> str:
     return f"{prefix} error {response['status_code']}: {message}"
 
 
-def _list_models(
-    list_models: Callable[[], list[str]],
-    *,
-    fallback: Callable[[], list[str]] | None = None,
-    default: list[str] | None = None,
-) -> list[str]:
-    try:
-        return list_models()
-    except Exception:
-        if fallback:
-            cached = fallback()
-            if cached:
-                return cached
-        if default is not None:
-            return default
-        raise
-
-
 def _responses_client(
     create: Callable[[dict[str, Any]], dict[str, Any]],
     list_models: Callable[[], list[str]],
-    *,
-    fallback: Callable[[], list[str]] | None = load_codex_model_list,
-    default: list[str] | None = None,
 ) -> CompletionClient:
     def chat_completion(
         model: str,
@@ -1442,185 +1417,15 @@ def _responses_client(
     ) -> AssistantMessage:
         payload = _responses_payload(model, messages, tools, tool_choice)
         return _decode_with_retry(
-            lambda: _call_with_reasoning_fallback(
-                "responses", model, payload, create, on_retry=on_retry
-            ),
+            lambda: _call_responses(model, payload, create, on_retry=on_retry),
             _decode_responses_output,
             on_retry=on_retry,
         )
 
     return {
         "chat_completion": chat_completion,
-        "list_models": lambda: _list_models(
-            list_models, fallback=fallback, default=default
-        ),
+        "list_models": list_models,
     }
-
-
-def _message_like_dict(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return {key: item for key, item in value.items() if item is not None}
-    if hasattr(value, "model_dump"):
-        data = value.model_dump(exclude_none=True)
-        if isinstance(data, dict):
-            return data
-    return {}
-
-
-def _chat_completion_message_dict(message: Any) -> dict[str, Any]:
-    if data := _message_like_dict(message):
-        return data
-    result: dict[str, Any] = {}
-    for key in (
-        "role",
-        "content",
-        "tool_calls",
-        "refusal",
-        "reasoning",
-        "reasoning_text",
-        "reasoning_opaque",
-    ):
-        value = getattr(message, key, None)
-        if key == "tool_calls":
-            if isinstance(value, list):
-                result[key] = value
-        elif isinstance(value, str):
-            result[key] = value
-    return result
-
-
-def _chat_completion_tool_call(tool_call: Any) -> dict[str, Any] | None:
-    data = _message_like_dict(tool_call)
-    if data:
-        call_id = data.get("id")
-        function = data.get("function")
-    else:
-        call_id = getattr(tool_call, "id", None)
-        function = getattr(tool_call, "function", None)
-    if not isinstance(call_id, str) or not call_id:
-        return None
-    function_data = _message_like_dict(function)
-    if function_data:
-        name = function_data.get("name")
-        arguments = function_data.get("arguments")
-    else:
-        name = getattr(function, "name", None)
-        arguments = getattr(function, "arguments", None)
-    if not isinstance(name, str) or not name:
-        return None
-    return ToolCall(
-        id=call_id,
-        name=name,
-        arguments=_decode_tool_call_arguments(arguments),
-    )
-
-
-def _is_blank_chat_value(value: Any) -> bool:
-    return (
-        value is None
-        or value == ""
-        or value == []
-        or value == {}
-        or (isinstance(value, str) and not value.strip())
-    )
-
-
-def _merged_chat_completion_message(choices: list[Any]) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    for choice in choices:
-        message = _chat_completion_message_dict(getattr(choice, "message", None))
-        if not message:
-            continue
-        candidate = dict(merged)
-        for key, value in message.items():
-            if key not in candidate or _is_blank_chat_value(candidate[key]):
-                candidate[key] = value
-                continue
-            if _is_blank_chat_value(value) or candidate[key] == value:
-                continue
-            return merged or message
-        merged = candidate
-    return merged
-
-
-def _chat_completion_to_assistant_message(response: Any) -> AssistantMessage:
-    data = _message_like_dict(response)
-    choices = data.get("choices") if data else getattr(response, "choices", None)
-    message = (
-        _merged_chat_completion_message(choices)
-        if isinstance(choices, list) and len(choices) > 1
-        else _chat_completion_message_dict(
-            (choices[0] or {}).get("message")
-            if isinstance(choices[0], dict)
-            else getattr(choices[0], "message", None)
-        )
-        if isinstance(choices, list) and choices
-        else {}
-    )
-    content = message.get("content") if isinstance(message.get("content"), str) else ""
-    if not content and isinstance(message.get("refusal"), str):
-        content = message["refusal"]
-    if not content and isinstance(message.get("reasoning"), str):
-        content = message["reasoning"]
-    if not content and isinstance(message.get("reasoning_text"), str):
-        content = message["reasoning_text"]
-    return AssistantMessage(
-        content=content,
-        tool_calls=[
-            call
-            for tool_call in message.get("tool_calls") or []
-            if (call := _chat_completion_tool_call(tool_call)) is not None
-        ],
-    )
-
-
-def _chat_client(
-    create: Callable[[dict[str, Any]], dict[str, Any]],
-    list_models: Callable[[], list[str]],
-    *,
-    tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
-) -> CompletionClient:
-    def chat_completion(
-        model: str,
-        messages: list[ChatMessage],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str = "auto",
-        on_retry=None,
-    ) -> AssistantMessage:
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": [_openai_chat_message(message) for message in messages],
-            "reasoning_effort": "high",
-        }
-        if tools:
-            payload["tools"] = tools_map(tools)
-            payload["tool_choice"] = tool_choice
-        return _decode_with_retry(
-            lambda: _call_with_reasoning_fallback(
-                "chat_completions", model, payload, create, on_retry=on_retry
-            ),
-            _chat_completion_to_assistant_message,
-            on_retry=on_retry,
-        )
-
-    return {
-        "chat_completion": chat_completion,
-        "list_models": lambda: _list_models(list_models),
-    }
-
-
-def _tool_specs_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["parameters"],
-            },
-        }
-        for tool in tools
-    ]
 
 
 def _codex_chatgpt_client() -> CompletionClient:
@@ -1688,7 +1493,7 @@ def _codex_chatgpt_client() -> CompletionClient:
 
     return {
         "chat_completion": chat_completion,
-        "list_models": lambda: load_codex_model_list() or [CODEX_DEFAULT_MODEL],
+        "list_models": load_codex_model_list,
     }
 
 
@@ -1698,16 +1503,12 @@ _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_EDITOR_VERSION = "copilot-developer-cli/1.0.6"
 
 
-def _openai_completion_client(
+def _responses_from_key(
     api_key: str,
-    path: str,
     *,
-    source: str,
-    build_client: Callable[..., CompletionClient],
     base_url: str | None = None,
     max_retries: int = 3,
     timeout: Any = None,
-    **kwargs: Any,
 ) -> CompletionClient:
     api = _openai(
         api_key,
@@ -1715,53 +1516,9 @@ def _openai_completion_client(
         max_retries=max_retries,
         timeout=timeout,
     )
-    return build_client(
-        _openai_json_create(api, path, source=source),
+    return _responses_client(
+        _openai_json_create(api, "/responses", source="Responses API"),
         _openai_model_lister(api),
-        **kwargs,
-    )
-
-
-def _responses_from_key(
-    api_key: str,
-    *,
-    base_url: str | None = None,
-    max_retries: int = 3,
-    timeout: Any = None,
-    fallback: Callable[[], list[str]] | None = None,
-    default: list[str] | None = None,
-) -> CompletionClient:
-    return _openai_completion_client(
-        api_key,
-        "/responses",
-        source="Responses API",
-        build_client=_responses_client,
-        base_url=base_url,
-        max_retries=max_retries,
-        timeout=timeout,
-        fallback=fallback,
-        default=default,
-    )
-
-
-def _chat_from_key(
-    api_key: str,
-    *,
-    base_url: str | None = None,
-    max_retries: int = 3,
-    timeout: Any = None,
-    tools_map: Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
-    | None = _tool_specs_to_openai,
-) -> CompletionClient:
-    return _openai_completion_client(
-        api_key,
-        "/chat/completions",
-        source="Chat Completions API",
-        build_client=_chat_client,
-        base_url=base_url,
-        max_retries=max_retries,
-        timeout=timeout,
-        tools_map=tools_map,
     )
 
 
@@ -1790,11 +1547,7 @@ def _require_codex_env(_cwd: Path | None = None) -> None:
 def _codex_client(_cwd: Path | None = None) -> CompletionClient:
     api_key = load_codex_auth().get("OPENAI_API_KEY")
     if isinstance(api_key, str) and api_key:
-        return _responses_from_key(
-            api_key,
-            fallback=load_codex_model_list,
-            default=[CODEX_DEFAULT_MODEL],
-        )
+        return _responses_from_key(api_key)
     return _codex_chatgpt_client()
 
 
@@ -1817,7 +1570,7 @@ def _bedrock_mantle_client(
 
     def create(payload: dict[str, Any]) -> dict[str, Any]:
         body = _encode_json_body(payload)
-        url = f"{api['base_url'].rstrip('/')}/chat/completions"
+        url = f"{api['base_url'].rstrip('/')}/responses"
         response = api["http"].request(
             "POST",
             url,
@@ -1832,13 +1585,9 @@ def _bedrock_mantle_client(
             ),
         )
         response_raise_for_status(response)
-        return _response_json_object(response, "Chat Completions API: invalid JSON response")
+        return _response_json_object(response, "Responses API: invalid JSON response")
 
-    return _chat_client(
-        create,
-        lambda: load_bedrock_model_list(None, region),
-        tools_map=_tool_specs_to_openai,
-    )
+    return _responses_client(create, lambda: load_bedrock_model_list(None, region))
 
 
 def _mantle_completion_client(
@@ -1871,13 +1620,6 @@ def _get_github_token() -> str | None:
     return token if proc.returncode == 0 and token else None
 
 
-def _copilot_default_headers() -> dict[str, str]:
-    return {
-        "Copilot-Integration-Id": _COPILOT_INTEGRATION_ID,
-        "Editor-Version": _COPILOT_EDITOR_VERSION,
-    }
-
-
 def _require_copilot_env(_cwd: Path | None = None) -> None:
     _require_string(
         _get_github_token(),
@@ -1885,87 +1627,13 @@ def _require_copilot_env(_cwd: Path | None = None) -> None:
     )
 
 
-def _fetch_copilot_models_raw(token: str) -> list[dict[str, Any]]:
-    api = _openai(
-        token,
-        base_url=_COPILOT_BASE_URL,
-        timeout=SHORT_HTTP_TIMEOUT,
-        headers=_copilot_default_headers(),
-    )
-    data = _req_json(api, "GET", "/models", source="Copilot models")
-    return data.get("data", []) if isinstance(data, dict) else []
-
-
-def _classify_copilot_models(token: str) -> tuple[list[str], set[str]]:
-    raw = _fetch_copilot_models_raw(token)
-    chat_ids: list[str] = []
-    responses_ids: set[str] = set()
-    for model in raw:
-        model_id = model.get("id")
-        if not isinstance(model_id, str):
-            continue
-        if model.get("capabilities", {}).get("type") == "chat":
-            chat_ids.append(model_id)
-        if "/responses" in (model.get("supported_endpoints") or []):
-            responses_ids.add(model_id)
-    return sorted(chat_ids), responses_ids
-
-
 def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
     token = _require_string(_get_github_token(), "No GitHub token found")
-    client = _openai(
+    return _responses_from_key(
         token,
         base_url=_COPILOT_BASE_URL,
         max_retries=0,
-        headers=_copilot_default_headers(),
     )
-
-    try:
-        _, responses_models = _classify_copilot_models(token)
-    except Exception:
-        responses_models = set()
-
-    model_lister = _openai_model_lister(client)
-    responses_inner = _responses_client(
-        _openai_json_create(client, "/responses", source="Responses API"),
-        model_lister,
-        fallback=None,
-        default=None,
-    )
-    chat_inner = _chat_client(
-        _openai_json_create(
-            client,
-            "/chat/completions",
-            source="Chat Completions API",
-        ),
-        model_lister,
-        tools_map=_tool_specs_to_openai,
-    )
-
-    def chat_completion(
-        model: str,
-        messages: list[ChatMessage],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str = "auto",
-        on_retry=None,
-    ) -> AssistantMessage:
-        inner = responses_inner if model in responses_models else chat_inner
-        return inner["chat_completion"](
-            model,
-            messages,
-            tools,
-            tool_choice,
-            on_retry,
-        )
-
-    def list_models() -> list[str]:
-        try:
-            chat_ids, _ = _classify_copilot_models(token)
-            return chat_ids
-        except Exception:
-            return _list_models(model_lister, fallback=None, default=[])
-
-    return {"chat_completion": chat_completion, "list_models": list_models}
 
 
 def _load_opencode_auth() -> dict[str, Any]:
@@ -1973,14 +1641,21 @@ def _load_opencode_auth() -> dict[str, Any]:
 
 
 def _opencode_api_key(name: str) -> str | None:
-    entry = _load_opencode_auth().get(name)
-    return (entry.get("key") or None) if isinstance(entry, dict) else None
+    if env_key := _first_nonempty_string(os.environ, OPENCODE_SHARED_ENV_VAR):
+        return env_key
+    auth = _load_opencode_auth()
+    for candidate in dict.fromkeys((name, SHIM_OPENCODE)):
+        entry = auth.get(candidate)
+        if isinstance(entry, dict):
+            if api_key := _first_nonempty_string(entry, "key"):
+                return api_key
+    return None
 
 
 def _require_opencode_env(name: str, label: str) -> None:
     _require_string(
         _opencode_api_key(name),
-        f"No OpenCode {label} credentials found in {OPENCODE_AUTH_PATH} (run `opencode auth`)",
+        f"No OpenCode {label} credentials found in {OPENCODE_AUTH_PATH} or ${OPENCODE_SHARED_ENV_VAR}",
     )
 
 
@@ -1988,25 +1663,36 @@ def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
     _require_opencode_env("opencode", "Zen")
 
 
-def _require_opencode_go_env(_cwd: Path | None = None) -> None:
-    _require_opencode_env("opencode-go", "Go")
+def _opencode_list_models(name: str, provider_id: str, base_url: str) -> list[str]:
+    _ = provider_id, base_url
+    api = _openai(
+        _require_string(_opencode_api_key(name), "No OpenCode credentials found"),
+        base_url=OPENCODE_ZEN_URL,
+        max_retries=0,
+        timeout=SHORT_HTTP_TIMEOUT,
+    )
+    return _model_ids(api)
 
 
-def _opencode_client(name: str, label: str, base_url: str) -> CompletionClient:
-    return _chat_from_key(
+def _opencode_client(
+    name: str,
+    label: str,
+    provider_id: str,
+    base_url: str,
+) -> CompletionClient:
+    _ = provider_id
+    client = _responses_from_key(
         _require_string(
             _opencode_api_key(name), f"No OpenCode {label} credentials found"
         ),
         base_url=base_url,
     )
+    client["list_models"] = lambda: _opencode_list_models(name, provider_id, base_url)
+    return client
 
 
 def _opencode_zen_client(cwd: Path | None = None) -> CompletionClient:
-    return _opencode_client("opencode", "Zen", OPENCODE_ZEN_URL)
-
-
-def _opencode_go_client(cwd: Path | None = None) -> CompletionClient:
-    return _opencode_client("opencode-go", "Go", OPENCODE_GO_URL)
+    return _opencode_client("opencode", "Zen", SHIM_OPENCODE, OPENCODE_ZEN_URL)
 
 
 ShimSpec: TypeAlias = dict[str, Any]
@@ -2056,10 +1742,6 @@ SHIM_SPECS: dict[str, ShimSpec] = {
     SHIM_OPENCODE: _make_shim_spec(
         ensure_env=_require_opencode_zen_env,
         build_client=_opencode_zen_client,
-    ),
-    SHIM_OPENCODE_GO: _make_shim_spec(
-        ensure_env=_require_opencode_go_env,
-        build_client=_opencode_go_client,
     ),
 }
 
@@ -2118,7 +1800,7 @@ def ensure_api_env(
 
 
 _MISSING_API_CREDENTIALS_MESSAGE = (
-    "Missing API credentials.\n\n"
+    "Missing API credentials. oy targets providers that support the Open Responses / OpenAI Responses API.\n\n"
     "- set `OPENAI_API_KEY`, or\n"
     "- sign in with Codex CLI (`codex login`), or\n"
     "- authenticate GitHub CLI for Copilot (`gh auth login`), or\n"
@@ -2150,19 +1832,9 @@ def get_client(shim: str, cwd: Path | None = None) -> CompletionClient:
     return _shim_spec(shim)["build_client"](cwd)
 
 
-def list_models_for_shim(
-    shim: str,
-    cwd: Path | None = None,
-    *,
-    ignore_errors: bool = True,
-) -> list[str]:
-    try:
-        raw = _shim_spec(shim)["list_models"](cwd)
-        return [join_model_spec(shim, model) for model in raw]
-    except Exception:
-        if ignore_errors:
-            return []
-        raise
+def list_models_for_shim(shim: str, cwd: Path | None = None) -> list[str]:
+    raw = _shim_spec(shim)["list_models"](cwd)
+    return [join_model_spec(shim, model) for model in raw]
 
 
 __all__ = [

@@ -137,11 +137,9 @@ class TestDisplayHelpers:
 class TestListModels:
     def test_warns_and_keeps_other_shims(self, monkeypatch, tmp_path):
         printed: list[tuple[str, str, bool]] = []
-        warned: list[str] = []
-
         monkeypatch.setattr(rt, "detect_available_shims", lambda: ["alpha", "beta"])
 
-        def fake_list_models_for_shim(shim, cwd=None, *, ignore_errors=True):
+        def fake_list_models_for_shim(shim, cwd=None):
             assert cwd == tmp_path
             if shim == "alpha":
                 return ["alpha:demo"]
@@ -155,12 +153,11 @@ class TestListModels:
                 (kind, value, err)
             ),
         )
-        monkeypatch.setattr(rt, "_warn", warned.append)
         monkeypatch.setattr(rt, "Path", SimpleNamespace(cwd=lambda: tmp_path))
 
-        assert rt.list_all_model_ids() == ["alpha:demo"]
+        with pytest.raises(RuntimeError, match="Could not load models from `beta`: boom"):
+            rt.list_all_model_ids()
         assert printed == [
             ("status", "Loading models from `alpha`.", True),
             ("status", "Loading models from `beta`.", True),
         ]
-        assert warned == ["Could not load models from `beta`: boom"]

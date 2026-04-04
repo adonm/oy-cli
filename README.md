@@ -4,6 +4,8 @@
 
 Small local AI coding CLI for your shell. It can inspect files, search content, fetch public docs, and run commands in the current workspace.
 
+`oy-cli` is intentionally OpenResponses-first: provider integrations are expected to support the [Open Responses](https://www.openresponses.org/) / OpenAI Responses API shape, and `oy` is optimized around that interface rather than chat-completions compatibility layers.
+
 ## Quick start
 
 ```bash
@@ -33,6 +35,7 @@ In chat, `/ask <question>` is research-only: no `bash`, no file changes, but pub
 - keep the codebase small and auditable
 - expose a narrow built-in tool set
 - keep provider support behind thin shims
+- target providers that implement the Open Responses / OpenAI Responses API surface
 - start fresh by default for one-shot runs
 - make approvals and checkpoints explicit when they matter
 
@@ -78,7 +81,7 @@ pip install oy-cli      # alternative
 
 - Python 3.13+
 - `bash`
-- OpenAI-compatible credentials, Codex auth, Copilot auth, OpenCode auth, or AWS credentials for Bedrock Mantle
+- Provider credentials for a backend that supports the Open Responses / OpenAI Responses API shape (for example via OpenAI credentials, Codex auth, Copilot auth, OpenCode auth, or AWS credentials for Bedrock Mantle)
 
 ## Development
 
@@ -95,7 +98,7 @@ uv build
 
 ## Authentication
 
-OpenAI or compatible endpoint:
+OpenAI or other Open Responses-compatible endpoint:
 
 ```bash
 export OPENAI_API_KEY=...
@@ -112,7 +115,7 @@ export AWS_PROFILE=my-profile
 export AWS_REGION=ap-southeast-2
 ```
 
-`oy` loads models from `GET /models` and sends chat requests to `POST /chat/completions` on the Mantle endpoint.
+`oy` loads models from `GET /models` and targets the Open Responses / OpenAI Responses API at `POST /responses`. Provider support in `oy` is intentionally centered on that API shape. Providers that do not support `/responses` fail with a clear error instead of falling back to legacy chat-completions behavior.
 
 ## Troubleshooting
 
@@ -132,7 +135,7 @@ Recommended:
 - use `/ask` when you want no-write research mode
 - review generated changes before shipping
 
-Protections include workspace-bound file tools, public-only `webfetch`, and default credential flows for supported providers. `oy` still acts with your user permissions, so treat generated shell commands and file edits as local code execution.
+Protections include workspace-bound file tools, public-only `webfetch`, and default credential flows for supported providers. For provider authors, the intended compatibility target is Open Responses compliance rather than ad hoc OpenAI-compatible subsets. `oy` still acts with your user permissions, so treat generated shell commands and file edits as local code execution.
 
 ## License
 
