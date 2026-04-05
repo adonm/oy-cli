@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -98,6 +99,29 @@ class TestMessageDecoding:
         assert providers._decode_tool_call_arguments('{"ok":true}{"ok":true}') == {
             "ok": True
         }
+
+    def test_responses_output_decoding(self):
+        decoded = providers._decode_responses_output(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "hello"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "echo",
+                        "arguments": '{"value":"x"}',
+                    },
+                ]
+            }
+        )
+        assert decoded == AssistantMessage(
+            "hello",
+            tool_calls=[ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
+        )
 
     def test_responses_output_decoding(self):
         decoded = providers._decode_responses_output(
@@ -344,6 +368,19 @@ class TestClientFactories:
             ({"api": 0}, "/responses", "Responses API"),
         ]
 
+
+    def test_client_model_lister_passes_cwd_positionally(self, tmp_path):
+        calls = []
+
+        def build_client(cwd):
+            calls.append(cwd)
+            return {"list_models": lambda: ["demo"]}
+
+        list_models = providers._client_model_lister(build_client)
+
+        assert list_models(tmp_path) == ["demo"]
+        assert calls == [tmp_path]
+
     def test_opencode_client_uses_zen_lookup_and_builder(self, monkeypatch):
         monkeypatch.delenv(providers.OPENCODE_SHARED_ENV_VAR, raising=False)
         monkeypatch.setattr(
@@ -387,6 +424,59 @@ class TestClientFactories:
             lambda: {"opencode": {"key": "zen-only"}},
         )
         assert providers._opencode_api_key("opencode") == "zen-only"
+
+    def test_local_list_models_reads_models_endpoint(self, monkeypatch):
+        monkeypatch.setattr(
+            providers,
+            "_openai",
+            lambda *args, **kwargs: {"base_url": kwargs["base_url"]},
+        )
+        monkeypatch.setattr(
+            providers,
+            "_model_ids",
+            lambda api: ["hf://Qwen/Qwen3.5-9B", "ollama://qwen3.5"],
+        )
+        assert providers._local_list_models(shim="local-8080") == [
+            "hf://Qwen/Qwen3.5-9B",
+            "ollama://qwen3.5",
+        ]
+
+    def test_require_local_env_checks_models_endpoint(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            providers,
+            "_openai",
+            lambda *args, **kwargs: {"base_url": kwargs["base_url"]},
+        )
+        monkeypatch.setattr(providers, "_model_ids", lambda api: calls.append(api) or ["qwen"])
+        providers._require_local_env(shim="local-8080")
+        assert calls == [{"base_url": "http://127.0.0.1:8080/v1"}]
+
+    def test_local_base_url_prefers_explicit_env(self, monkeypatch):
+        monkeypatch.setenv("OY_LOCAL_9999_URL", "http://127.0.0.1:9999/v1/")
+        assert providers._local_base_url("local-9999") == "http://127.0.0.1:9999/v1"
+
+    def test_local_client_uses_external_server(self, monkeypatch):
+        monkeypatch.setenv("OY_MODEL", "local-8080:qwen3.5")
+        monkeypatch.setattr(providers, "_local_base_url", lambda shim, cwd=None: "http://127.0.0.1:8080/v1")
+        calls = []
+        monkeypatch.setattr(
+            providers,
+            "_req_json",
+            lambda api, method, path, *, source, json_body=None, data=None, headers=None: (
+                calls.append((api, method, path, source, json_body))
+                or {"output": [{"type": "message", "role": "assistant", "content": [{"text": "done"}]}]}
+            ),
+        )
+        client = providers._local_client(shim="local-8080")
+        assert client["chat_completion"]("qwen3.5", []) == AssistantMessage("done")
+        assert calls[0][0]["base_url"] == "http://127.0.0.1:8080/v1"
+        assert calls[0][1:] == (
+            "POST",
+            "/responses",
+            "local-8080 responses",
+            {"model": "qwen3.5", "input": [], "store": False, "reasoning": {"effort": "high"}},
+        )
 
     def test_opencode_list_models_uses_remote_models_endpoint(self, monkeypatch):
         monkeypatch.setattr(providers, "_opencode_api_key", lambda name: "key")
@@ -582,6 +672,38 @@ class TestShimRegistry:
         assert providers.get_client("alpha", cwd=tmp_path) is sentinel
         assert providers.list_models_for_shim("alpha", cwd=tmp_path) == ["alpha:demo"]
         assert providers.list_models_for_shim("gamma", cwd=tmp_path) == ["gamma:demo"]
+
+    def test_dynamic_local_shim_is_valid_and_builds(self, monkeypatch):
+        monkeypatch.setattr(providers, "_openai", lambda *args, **kwargs: {"base_url": kwargs["base_url"]})
+        monkeypatch.setattr(providers, "_model_ids", lambda api: ["demo"])
+        assert providers.validate_shim("local-8080") == "local-8080"
+        assert providers.list_models_for_shim("local-8080") == ["local-8080:demo"]
+
+    def test_local_current_model_accepts_bare_model_id_with_colon(self):
+        assert (
+            providers._local_current_model(
+                "local-8080", "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
+            )
+            == "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
+        )
+
+    def test_local_client_accepts_bare_model_id_with_colon(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(providers, "_local_base_url", lambda shim, cwd=None: "http://127.0.0.1:8080/v1")
+        monkeypatch.setattr(
+            providers,
+            "_req_json",
+            lambda api, method, path, *, source, json_body=None, data=None, headers=None: (
+                calls.append((api, method, path, source, json_body))
+                or {"output": [{"type": "message", "role": "assistant", "content": [{"text": "done"}]}]}
+            ),
+        )
+        client = providers._local_client(
+            shim="local-8080", model_spec="unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
+        )
+        assert client["chat_completion"]("", []) == AssistantMessage("done")
+        assert calls[0][3] == "local-8080 responses"
+        assert calls[0][4]["model"] == "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
 
     def test_list_models_error_handling(self, monkeypatch, tmp_path):
         calls = []

@@ -60,6 +60,29 @@ class TestModelConfig:
         assert "ask" not in rt.active_tool_registry(False)
         assert set(rt.read_only_tool_registry()) == rt._READ_ONLY_TOOLS
 
+    def test_unknown_saved_shim_falls_back_to_picker(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OY_CONFIG", str(tmp_path / "config.json"))
+        monkeypatch.delenv("OY_MODEL", raising=False)
+        monkeypatch.delenv("OY_SHIM", raising=False)
+        (tmp_path / "config.json").write_text(
+            '{"model":"gpt-stale","shim":"other-shim"}', encoding="utf-8"
+        )
+        monkeypatch.setattr(rt, "_pick_model", lambda: "local-8080:qwen3.5")
+        assert rt.load_model_config() == {"model": None, "shim": None}
+        assert rt._model(None) == "local-8080:qwen3.5"
+
+    def test_unknown_env_shim_falls_back_to_bare_env_model(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OY_CONFIG", str(tmp_path / "config.json"))
+        monkeypatch.setenv("OY_SHIM", "other-shim")
+        monkeypatch.setenv("OY_MODEL", "gpt-live")
+        assert rt._model(None) == "gpt-live"
+
+    def test_env_model_with_colon_keeps_configured_local_shim(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OY_CONFIG", str(tmp_path / "config.json"))
+        monkeypatch.setenv("OY_SHIM", "local-8080")
+        monkeypatch.setenv("OY_MODEL", "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL")
+        assert rt._model(None) == "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
+
 
 class TestDurationEnvHelpers:
     @pytest.mark.parametrize(
@@ -82,6 +105,17 @@ class TestDurationEnvHelpers:
         monkeypatch.delenv("OY_UNATTENDED_LIMIT", raising=False)
         assert rt.unattended_limit_seconds() == rt.DEFAULT_UNATTENDED_LIMIT_SECONDS
 
+
+class TestModelListRendering:
+    def test_render_model_list_mentions_local_defaults(self, monkeypatch):
+        printed = []
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, **k: printed.append(k.get("value", a[1] if len(a) > 1 else a[0] if a else "")),
+        )
+        rt.render_model_list(["openai:gpt-test"], title="## Available Models", err=True)
+        assert "local-8080" in printed[-1]
+        assert "http://127.0.0.1:11434/v1" in printed[-1]
 
 class TestDisplayHelpers:
     def test_render_search_preview_text_uses_text_color(self):
@@ -135,6 +169,16 @@ class TestDisplayHelpers:
 
 
 class TestListModels:
+    def test_dedupes_models_from_multiple_shims(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(rt, "detect_available_shims", lambda: ["alpha", "beta"])
+        monkeypatch.setattr(
+            rt,
+            "list_models_for_shim",
+            lambda shim, cwd=None: ["shared:model", f"{shim}:only"],
+        )
+        monkeypatch.setattr(rt, "Path", SimpleNamespace(cwd=lambda: tmp_path))
+        assert rt.list_all_model_ids() == ["shared:model", "alpha:only", "beta:only"]
+
     def test_warns_and_keeps_other_shims(self, monkeypatch, tmp_path):
         printed: list[tuple[str, str, bool]] = []
         monkeypatch.setattr(rt, "detect_available_shims", lambda: ["alpha", "beta"])

@@ -117,9 +117,28 @@ export AWS_REGION=ap-southeast-2
 
 `oy` loads models from `GET /models` and targets the Open Responses / OpenAI Responses API at `POST /responses`. Provider support in `oy` is intentionally centered on that API shape. Providers that do not support `/responses` fail with a clear error instead of falling back to legacy chat-completions behavior.
 
+
+## Local model workflow
+
+Run any OpenAI-compatible server on localhost. By default `oy` probes:
+
+- `local-8080` at `http://127.0.0.1:8080/v1` (typical `llama-server` port)
+- `local-11434` at `http://127.0.0.1:11434/v1` (typical Ollama port)
+
+Examples:
+
+```bash
+OY_MODEL=local-8080:qwen3.5 oy chat
+# or save it once:
+oy model local-11434:qwen3.5
+oy chat
+```
+
+You can also target any localhost port with the `local-<port>` shim form.
+
 ## Troubleshooting
 
-- **Missing credentials** — set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or configure AWS credentials / SSO for Bedrock Mantle.
+- **Missing credentials** — start a local OpenAI-compatible server on `127.0.0.1:8080` or `127.0.0.1:11434`, set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or configure AWS credentials / SSO for Bedrock Mantle.
 - **stdin is not a TTY** — piping input disables `ask`; set `OY_NON_INTERACTIVE=1` to make that explicit.
 - **AWS SSO session is stale** — run `aws sso login --use-device-code --no-browser`.
 

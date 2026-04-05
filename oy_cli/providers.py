@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -111,7 +112,10 @@ SHIM_CODEX = "codex"
 SHIM_MANTLE = "bedrock-mantle"
 SHIM_COPILOT = "copilot"
 SHIM_OPENCODE = "opencode"
+LOCAL_SHIM_PREFIX = "local-"
+LOCAL_SHIM_PORTS = (8080, 11434)
 SHIM_ORDER = (
+    *(f"{LOCAL_SHIM_PREFIX}{port}" for port in LOCAL_SHIM_PORTS),
     SHIM_OPENAI,
     SHIM_CODEX,
     SHIM_MANTLE,
@@ -147,6 +151,11 @@ DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 5.0
 DEFAULT_RETRY_MAX_DELAY_SECONDS = 30.0
 TRANSPORT_ERROR_RETRY_DELAY = 3.0
 MALFORMED_OUTPUT_RETRY_ATTEMPTS = 3
+LOCAL_DEFAULT_BASE_URLS = {
+    f"{LOCAL_SHIM_PREFIX}8080": "http://127.0.0.1:8080/v1",
+    f"{LOCAL_SHIM_PREFIX}11434": "http://127.0.0.1:11434/v1",
+}
+LOCAL_SHIM_RE = re.compile(rf"^{re.escape(LOCAL_SHIM_PREFIX)}(?P<port>[0-9]+)$")
 
 
 def _tool_output_value(result: dict[str, Any]) -> JSONLike:
@@ -268,7 +277,7 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
 # within a single oy run. If env vars change mid-process (e.g. in tests), the
 # cache will be stale.
 @lru_cache(maxsize=8)
-def command_env(_cwd=None):
+def command_env(cwd=None):
     return MappingProxyType(os.environ.copy())
 
 
@@ -314,6 +323,7 @@ class BadRequestError(APIStatusError): ...
 
 
 class UnsupportedResponsesAPIError(RuntimeError): ...
+
 
 
 ResponseAdapter: TypeAlias = dict[str, Any]
@@ -595,10 +605,11 @@ def _openai(
 
 def _headers(api: OpenAI, headers: dict[str, str] | None = None) -> dict[str, str]:
     merged = {
-        "Authorization": f"Bearer {api['api_key']}",
         "Content-Type": "application/json",
         **api["headers"],
     }
+    if api["api_key"]:
+        merged["Authorization"] = f"Bearer {api['api_key']}"
     if headers:
         merged.update(headers)
     return merged
@@ -962,7 +973,7 @@ def load_codex_model_list() -> list[str]:
 def split_model_spec(spec: str) -> tuple[str | None, str]:
     if ":" in spec:
         shim, _, model = spec.partition(":")
-        if shim in set(SHIM_ORDER):
+        if shim in set(SHIM_ORDER) or _is_local_shim(shim):
             return shim, model
     return None, spec
 
@@ -1404,6 +1415,58 @@ def _http_error_message(prefix: str, response: ResponseAdapter) -> str:
     return f"{prefix} error {response['status_code']}: {message}"
 
 
+def _chat_completions_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role in {"system", "user"}:
+            items.append({"role": role, "content": msg["content"]})
+            continue
+        if role == "assistant":
+            item: dict[str, Any] = {"role": "assistant", "content": msg["content"] or ""}
+            if msg["tool_calls"]:
+                item["tool_calls"] = [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": serialize_json(call["arguments"]),
+                        },
+                    }
+                    for call in msg["tool_calls"]
+                ]
+            items.append(item)
+            continue
+        if role == "tool":
+            items.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": msg["tool_call_id"],
+                    "content": _tool_output_text(msg["content"]),
+                    "name": msg.get("name") or "",
+                }
+            )
+    return items
+
+
+def _chat_completions_tools(
+    tools: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    result = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool.get("parameters") or {"type": "object"},
+            },
+        }
+        for tool in tools or []
+    ]
+    return result or None
+
+
 def _responses_client(
     create: Callable[[dict[str, Any]], dict[str, Any]],
     list_models: Callable[[], list[str]],
@@ -1522,12 +1585,12 @@ def _responses_from_key(
     )
 
 
-def _require_openai_env(_cwd: Path | None = None) -> None:
+def _require_openai_env(cwd: Path | None = None) -> None:
     _require_string(os.environ.get("OPENAI_API_KEY"), "OPENAI_API_KEY is not set")
 
 
 def _openai_client(
-    _cwd: Path | None = None,
+    cwd: Path | None = None,
     *,
     max_retries: int = 3,
 ) -> CompletionClient:
@@ -1540,11 +1603,11 @@ def _openai_client(
     )
 
 
-def _require_codex_env(_cwd: Path | None = None) -> None:
+def _require_codex_env(cwd: Path | None = None) -> None:
     load_codex_session()
 
 
-def _codex_client(_cwd: Path | None = None) -> CompletionClient:
+def _codex_client(cwd: Path | None = None) -> CompletionClient:
     api_key = load_codex_auth().get("OPENAI_API_KEY")
     if isinstance(api_key, str) and api_key:
         return _responses_from_key(api_key)
@@ -1620,7 +1683,7 @@ def _get_github_token() -> str | None:
     return token if proc.returncode == 0 and token else None
 
 
-def _require_copilot_env(_cwd: Path | None = None) -> None:
+def _require_copilot_env(cwd: Path | None = None) -> None:
     _require_string(
         _get_github_token(),
         "No GitHub token found (set GH_TOKEN, GITHUB_TOKEN, or run `gh auth login`)",
@@ -1659,7 +1722,7 @@ def _require_opencode_env(name: str, label: str) -> None:
     )
 
 
-def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
+def _require_opencode_zen_env(cwd: Path | None = None) -> None:
     _require_opencode_env("opencode", "Zen")
 
 
@@ -1695,6 +1758,93 @@ def _opencode_zen_client(cwd: Path | None = None) -> CompletionClient:
     return _opencode_client("opencode", "Zen", SHIM_OPENCODE, OPENCODE_ZEN_URL)
 
 
+def _local_shim_port(shim: str) -> int:
+    match = LOCAL_SHIM_RE.fullmatch(shim)
+    if not match:
+        raise RuntimeError(f"Unknown shim value: `{shim}`. Use one of: {', '.join(SHIM_ORDER)}")
+    return int(match.group("port"))
+
+
+def _is_local_shim(shim: str | None) -> bool:
+    return isinstance(shim, str) and LOCAL_SHIM_RE.fullmatch(shim) is not None
+
+
+def _local_base_url(shim: str, cwd: Path | None = None) -> str:
+    _ = cwd
+    port = _local_shim_port(shim)
+    env_name = f"OY_LOCAL_{port}_URL"
+    value = os.environ.get(env_name)
+    if isinstance(value, str) and value.strip():
+        return value.rstrip("/")
+    return LOCAL_DEFAULT_BASE_URLS.get(shim, f"http://127.0.0.1:{port}/v1")
+
+
+def _local_api(shim: str, cwd: Path | None = None) -> OpenAI:
+    return _openai(
+        os.environ.get("LOCAL_API_KEY") or os.environ.get("OPENAI_API_KEY") or "",
+        base_url=_local_base_url(shim, cwd),
+        max_retries=0,
+        timeout=DEFAULT_HTTP_TIMEOUT,
+    )
+
+
+def _require_local_env(cwd: Path | None = None, *, shim: str) -> None:
+    api = _openai(
+        os.environ.get("LOCAL_API_KEY") or os.environ.get("OPENAI_API_KEY") or "",
+        base_url=_local_base_url(shim, cwd),
+        max_retries=0,
+        timeout=SHORT_HTTP_TIMEOUT,
+    )
+    _model_ids(api)
+
+
+def _local_list_models(cwd: Path | None = None, *, shim: str) -> list[str]:
+    return _model_ids(
+        _openai(
+            os.environ.get("LOCAL_API_KEY") or os.environ.get("OPENAI_API_KEY") or "",
+            base_url=_local_base_url(shim, cwd),
+            max_retries=0,
+            timeout=SHORT_HTTP_TIMEOUT,
+        )
+    )
+
+
+def _local_current_model(
+    shim: str, model_spec: str | None = None, env: dict[str, str] | None = None
+) -> str:
+    data = env or os.environ
+    spec = model_spec or _first_nonempty_string(data, "OY_MODEL")
+    if not spec:
+        raise RuntimeError(f"{shim} model is not configured")
+    prefix, model = split_model_spec(spec)
+    if prefix == shim and model:
+        return model
+    if model_spec and prefix != shim:
+        return model_spec
+    raise RuntimeError(f"{shim} model is not configured")
+
+
+def _local_client(
+    cwd: Path | None = None, *, model_spec: str | None = None, shim: str
+) -> CompletionClient:
+    configured_model = _local_current_model(shim, model_spec) if model_spec else None
+
+    def create(payload: dict[str, Any]) -> dict[str, Any]:
+        model = str(payload.get("model") or configured_model or _local_current_model(shim))
+        api = _local_api(shim, cwd)
+        request_payload = dict(payload)
+        request_payload["model"] = model
+        return _req_json(
+            api,
+            "POST",
+            "/responses",
+            source=f"{shim} responses",
+            json_body=request_payload,
+        )
+
+    return _responses_client(create, lambda: _local_list_models(cwd, shim=shim))
+
+
 ShimSpec: TypeAlias = dict[str, Any]
 
 
@@ -1702,7 +1852,7 @@ def _client_model_lister(
     build_client: Callable[..., CompletionClient], /, **kwargs: Any
 ):
     def list_models(cwd: Path | None = None) -> list[str]:
-        return build_client(cwd=cwd, **kwargs)["list_models"]()
+        return build_client(cwd, **kwargs)["list_models"]()
 
     return list_models
 
@@ -1746,8 +1896,20 @@ SHIM_SPECS: dict[str, ShimSpec] = {
 }
 
 
+def _local_shim_spec(shim: str) -> ShimSpec:
+    validate_shim(shim)
+    return _make_shim_spec(
+        ensure_env=lambda cwd: _require_local_env(cwd, shim=shim),
+        build_client=lambda cwd, *, model_spec=None: _local_client(
+            cwd, model_spec=model_spec, shim=shim
+        ),
+        list_models=lambda cwd: _local_list_models(cwd, shim=shim),
+    )
+
+
 def _shim_spec(shim: str) -> ShimSpec:
-    return SHIM_SPECS[validate_shim(shim)]
+    value = validate_shim(shim)
+    return _local_shim_spec(value) if _is_local_shim(value) else SHIM_SPECS[value]
 
 
 def _shim_env_error(spec: ShimSpec, cwd: Path | None) -> str | None:
@@ -1770,23 +1932,33 @@ def resolve_shim(
     model_spec: str | None = None, configured_shim: str | None = None
 ) -> str:
     if env_shim := os.environ.get("OY_SHIM"):
-        return env_shim
+        if shim := _validated_or_none(env_shim):
+            return shim
     if model_spec:
         prefix, _ = split_model_spec(model_spec)
         if prefix:
             return prefix
-    if configured_shim:
-        return configured_shim
+    if shim := _validated_or_none(configured_shim):
+        return shim
     shims = detect_available_shims()
     return shims[0] if shims else SHIM_OPENAI
 
 
 def validate_shim(shim: str) -> str:
-    if shim not in KNOWN_SHIMS:
-        raise RuntimeError(
-            f"Unknown shim value: `{shim}`. Use one of: {', '.join(SHIM_ORDER)}"
-        )
-    return shim
+    if shim in KNOWN_SHIMS or _is_local_shim(shim):
+        return shim
+    raise RuntimeError(
+        f"Unknown shim value: `{shim}`. Use one of: {', '.join(SHIM_ORDER)} or {LOCAL_SHIM_PREFIX}<port>"
+    )
+
+
+def _validated_or_none(shim: str | None) -> str | None:
+    if not isinstance(shim, str) or not shim:
+        return None
+    try:
+        return validate_shim(shim)
+    except RuntimeError:
+        return None
 
 
 def ensure_api_env(
@@ -1801,6 +1973,7 @@ def ensure_api_env(
 
 _MISSING_API_CREDENTIALS_MESSAGE = (
     "Missing API credentials. oy targets providers that support the Open Responses / OpenAI Responses API.\n\n"
+    "- use a local OpenAI-compatible server on `127.0.0.1:8080` or `127.0.0.1:11434`, or\n"
     "- set `OPENAI_API_KEY`, or\n"
     "- sign in with Codex CLI (`codex login`), or\n"
     "- authenticate GitHub CLI for Copilot (`gh auth login`), or\n"
@@ -1824,12 +1997,17 @@ def require_api_env(
 ) -> str:
     shim = resolve_shim(model_spec, configured_shim)
     if error := _shim_env_error(_shim_spec(shim), cwd):
+        if _is_local_shim(shim):
+            raise RuntimeError(error)
         raise RuntimeError(_missing_api_credentials_message(error))
     return shim
 
 
-def get_client(shim: str, cwd: Path | None = None) -> CompletionClient:
-    return _shim_spec(shim)["build_client"](cwd)
+def get_client(
+    shim: str, cwd: Path | None = None, model_spec: str | None = None
+) -> CompletionClient:
+    build_client = _shim_spec(shim)["build_client"]
+    return build_client(cwd, model_spec=model_spec) if _is_local_shim(shim) else build_client(cwd)
 
 
 def list_models_for_shim(shim: str, cwd: Path | None = None) -> list[str]:

@@ -196,6 +196,23 @@ class TestAudit:
         assert notes == []
 
 
+class TestModelSelectionUI:
+    def test_resolve_model_choice_uses_shared_model_list_ui(self, monkeypatch):
+        printed = []
+        monkeypatch.setattr(rt, "list_all_model_ids", lambda: ["openai:gpt-test"])
+        monkeypatch.setattr(rt, "_model", lambda configured=None: "openai:gpt-test")
+        monkeypatch.setattr(rt, "can_prompt", lambda: True)
+        monkeypatch.setattr(rt, "ask", lambda *a, **k: "openai:gpt-test")
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, **k: printed.append(k.get("value", a[1] if len(a) > 1 else a[0] if a else "")),
+        )
+
+        assert cli.resolve_model_choice() == "openai:gpt-test"
+        assert printed and printed[0].startswith("## Choose a Model")
+        assert "Enter a number, exact model ID, or filter text." in printed[0]
+
+
 class TestChatCommands:
     def test_help_lists_chat_commands(self, monkeypatch):
         printed = []
@@ -311,3 +328,5 @@ class TestChatRollback:
         assert cli.chat() == 0
         assert rollback_calls == [7]
         assert errors == ["Agent error: boom"]
+
+

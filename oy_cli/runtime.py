@@ -69,6 +69,7 @@ _BASH_IMPORTANT_LINE_RE = re.compile(
 )
 
 _FENCE_RE = re.compile(r"^```([a-zA-Z0-9_+.-]*)\s*$")
+
 _INLINE_TOKEN_RE = re.compile(r"`[^`\n]+`|\*\*[^*\n]+?\*\*|\*[^*\n]+?\*")
 _CONTROL_TEXT_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _TOON_LINE_RE = re.compile(
@@ -1116,15 +1117,27 @@ def _save_cfg(data):
     save_json(_cfg_path(), data)
 
 
+def _validated_shim_or_none(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return validate_shim(value)
+    except RuntimeError:
+        return None
+
+
 def load_model_config() -> SavedModelConfig:
     data = _load_cfg()
     if not isinstance(data, dict):
         return model_config()
     model = data.get("model")
     shim = data.get("shim")
+    validated_shim = _validated_shim_or_none(shim if isinstance(shim, str) else None)
+    if isinstance(shim, str) and validated_shim is None:
+        return model_config()
     return model_config(
         model=model if isinstance(model, str) else None,
-        shim=shim if isinstance(shim, str) else None,
+        shim=validated_shim,
     )
 
 
@@ -1134,14 +1147,37 @@ def save_model_config(model_spec: str) -> SavedModelConfig:
     return config
 
 
-def render_model_list(items, *, title, query=None, current=None, err=False, limit=None):
+def _local_model_note() -> str:
+    return (
+        "- local model discovery checks "
+        f"{_fmt('inline', 'local-8080')} at {_fmt('inline', 'http://127.0.0.1:8080/v1')} "
+        "and "
+        f"{_fmt('inline', 'local-11434')} at {_fmt('inline', 'http://127.0.0.1:11434/v1')}"
+    )
+
+
+def render_model_list(
+    items,
+    *,
+    title,
+    query=None,
+    current=None,
+    err=False,
+    limit=None,
+    prompt_hint=None,
+    notes=None,
+):
     shown = list(items if limit is None else items[:limit])
     lines = [title]
     if current:
         lines += ["", f"- current model: {_fmt('inline', current)}"]
     if query:
         lines += ["", f"- filter: {_fmt('inline', query)}"]
-    lines += [""] + (
+    if prompt_hint:
+        lines += ["", f"- {prompt_hint}"]
+    if notes:
+        lines += ["", *[f"- {note}" for note in notes]]
+    lines += ["", _local_model_note(), ""] + (
         [f"{i}. {_fmt('inline', item)}" for i, item in enumerate(shown, 1)]
         or ["- no matching models"]
     )
@@ -1176,7 +1212,12 @@ def _pick_model():
         "Pick a default model to save (recommended: a `glm-5` or `kimi-k2.5` variant if available).\n",
         err=True,
     )
-    render_model_list(available, title="## Available Models", err=True)
+    render_model_list(
+        available,
+        title="## Available Models",
+        err=True,
+        prompt_hint="Enter a number, exact model ID, or filter text.",
+    )
     while True:
         response = ask("Model number or ID", console=STDERR).strip()
         if response.isdigit() and 1 <= int(response) <= len(available):
@@ -1191,7 +1232,11 @@ def _pick_model():
             break
         if matches:
             render_model_list(
-                matches, title="## Matching Models", query=response, err=True
+                matches,
+                title="## Matching Models",
+                query=response,
+                err=True,
+                prompt_hint="Enter a number, exact model ID, or filter text.",
             )
             continue
         _warn(f"No match for {_fmt('inline', response)}. Try again.")
@@ -1205,9 +1250,9 @@ def _pick_model():
 
 def _shim_name(configured=None):
     if configured:
-        return configured
+        return _validated_shim_or_none(configured)
     if value := os.environ.get("OY_SHIM"):
-        return value
+        return _validated_shim_or_none(value)
     return load_model_config()["shim"]
 
 
@@ -1274,9 +1319,11 @@ def require_command_env(cwd=None):
 
 
 def get_client(spec=None):
-    require_api_env(Path.cwd())
     model_spec = spec or _model()
-    return _shim_get_client(resolve_active_shim(model_spec), cwd=Path.cwd())
+    _wrap_runtime_error(_shim_require_api_env, model_spec, _shim_name(), Path.cwd())
+    return _shim_get_client(
+        resolve_active_shim(model_spec), cwd=Path.cwd(), model_spec=model_spec
+    )
 
 
 def resolve_path(root, path):
@@ -1352,7 +1399,7 @@ def list_all_model_ids() -> list[str]:
     shims = detect_available_shims()
     if not shims:
         abort(
-            "No shims are configured. Set OPENAI_API_KEY, sign in with Codex CLI, authenticate GitHub CLI, run `opencode auth`, or configure Bedrock Mantle via AWS CLI credentials / SSO and `AWS_REGION`."
+            "No shims are configured. Start a local OpenAI-compatible server on `127.0.0.1:8080` or `127.0.0.1:11434`, set `OPENAI_API_KEY`, sign in with Codex CLI, authenticate GitHub CLI, run `opencode auth`, or configure Bedrock Mantle via AWS CLI credentials / SSO and `AWS_REGION`."
         )
     all_models: list[str] = []
     for shim in shims:
@@ -1368,7 +1415,7 @@ def list_all_model_ids() -> list[str]:
             raise RuntimeError(
                 f"Could not load models from {_fmt('inline', shim)}: {message}"
             ) from exc
-    return all_models
+    return list(dict.fromkeys(all_models))
 
 
 _tokenizer: tiktoken.Encoding | None = None
@@ -1473,8 +1520,8 @@ __all__ = [
     "sys",
     "time",
     "tool_description",
-    "truncate_str_to_tokens",
     "which",
+    "truncate_str_to_tokens",
     "yes_no",
     "yolo_enabled",
     "Path",

@@ -422,7 +422,7 @@ def _handle_model_switch(arg, current_model):
     if arg in all_models:
         rt._note(f"switched model: {arg}", tag="note")
         return arg
-    matches = [model for model in all_models if arg.lower() in model.lower()]
+    matches, notes = rt.matching_model_ids(arg, all_models)
     if len(matches) == 1:
         rt._note(f"switched model: {matches[0]}", tag="note")
         return matches[0]
@@ -433,6 +433,7 @@ def _handle_model_switch(arg, current_model):
             query=arg,
             current=current_model,
             err=True,
+            notes=notes,
         )
         rt._print(
             value="Be more specific or use `/model list` to choose interactively.",
@@ -793,41 +794,42 @@ def _current_model_text(model_spec: str) -> str:
     )
 
 
+def _render_choose_model_list(items, *, title, current=None, query=None, notes=None):
+    rt.render_model_list(
+        items,
+        title=title,
+        current=current,
+        query=query,
+        err=True,
+        prompt_hint="Enter a number, exact model ID, or filter text.",
+        notes=notes,
+    )
+
+
 def resolve_model_choice(model_id=None):
     available, current = rt.list_all_model_ids(), rt._model(None)
     if model_id in available:
         return model_id
     if not rt.can_prompt():
         if model_id:
-            matches = [
-                model
-                for model in available
-                if model_id.strip().lower() in model.lower()
-            ]
+            matches, notes = [model for model in available if model_id.lower() in model.lower()], None
             if matches:
-                rt.render_model_list(
+                _render_choose_model_list(
                     matches,
                     title="## Matching Models",
                     query=model_id,
                     current=current,
-                    err=True,
+                    notes=notes,
                 )
             rt.abort(
                 f"No exact model match for {rt._fmt('inline', model_id)}. Re-run in a TTY to filter and choose interactively."
             )
         return None
-    rt._print(
-        value=(
-            "## Choose a Model\n\n"
-            "- Enter an exact model ID to save it.\n"
-            "- Enter text to filter the list.\n"
-            "- Enter a number to pick from the currently listed models."
-        ),
-        err=True,
-    )
     if model_id is None:
-        rt.render_model_list(
-            available, title="## Available Models", current=current, err=True
+        _render_choose_model_list(
+            available,
+            title="## Choose a Model",
+            current=current,
         )
     shown = available
     query = (
@@ -840,9 +842,13 @@ def resolve_model_choice(model_id=None):
             return query
         if query.isdigit() and 1 <= (index := int(query)) <= len(shown):
             return shown[index - 1]
-        shown = [model for model in available if query.lower() in model.lower()]
-        rt.render_model_list(
-            shown, title="## Matching Models", query=query, current=current, err=True
+        shown, notes = [model for model in available if query.lower() in model.lower()], None
+        _render_choose_model_list(
+            shown,
+            title="## Matching Models",
+            query=query,
+            current=current,
+            notes=notes,
         )
         query = rt.ask("Model or filter", console=rt.STDERR).strip()
 
@@ -913,7 +919,8 @@ def main(argv: list[str] | None = None):
   oy chat --yolo
   oy ralph "fix the flaky test"
   oy audit auth
-  oy model gpt-5""",
+  oy model gpt-5
+  OY_MODEL=local-8080:qwen3.5 oy chat""",
             "formatter_class": argparse.RawDescriptionHelpFormatter,
         },
     )
