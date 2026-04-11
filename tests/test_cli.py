@@ -62,6 +62,25 @@ class TestCLI:
         assert rt.yolo_enabled() is False
 
 
+    def test_main_prints_version_without_running_defopt(self, monkeypatch):
+        printed = []
+        monkeypatch.setattr(rt, "__version__", "0.4.6")
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *a, **k: printed.append(
+                k.get("value", a[1] if len(a) > 1 else a[0] if a else "")
+            ),
+        )
+        monkeypatch.setattr(
+            cli.defopt,
+            "run",
+            lambda *a, **k: pytest.fail("defopt.run should not be called"),
+        )
+
+        assert cli.main(["--version"]) == 0
+        assert printed == ["oy 0.4.6"]
+
+
 class TestRalph:
     def test_ralph_runs_prompt_until_deadline(self, tmp_path, monkeypatch):
         notes = []
