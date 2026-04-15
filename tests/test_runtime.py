@@ -263,7 +263,7 @@ class TestDisplayHelpers:
         rendered: list[str] = []
         patch_runtime(
             monkeypatch,
-            print_console=lambda console, *values, **kwargs: rendered.extend(
+            print_console=lambda _console, *values, **_kwargs: rendered.extend(
                 map(str, values)
             ),
         )
@@ -278,11 +278,11 @@ class TestDisplayHelpers:
 class TestListModels:
     def test_dedupes_models_from_multiple_shims(self, monkeypatch, tmp_path):
         monkeypatch.setattr(rt, "detect_available_shims", lambda: ["alpha", "beta"])
-        monkeypatch.setattr(
-            rt,
-            "list_models_for_shim",
-            lambda shim, cwd=None: ["shared:model", f"{shim}:only"],
-        )
+        def fake_list_models_for_shim(shim, cwd=None):
+            assert cwd == tmp_path
+            return ["shared:model", f"{shim}:only"]
+
+        monkeypatch.setattr(rt, "list_models_for_shim", fake_list_models_for_shim)
         monkeypatch.setattr(rt, "Path", SimpleNamespace(cwd=lambda: tmp_path))
         assert rt.list_all_model_ids() == ["shared:model", "alpha:only", "beta:only"]
 
@@ -300,7 +300,7 @@ class TestListModels:
         monkeypatch.setattr(
             rt,
             "_print",
-            lambda kind="md", value="", err=False, extra=None: printed.append(
+            lambda kind="md", value="", err=False, _extra=None: printed.append(
                 (kind, value, err)
             ),
         )

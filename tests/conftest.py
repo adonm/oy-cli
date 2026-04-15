@@ -76,7 +76,7 @@ def api_error(message: str, *, status_code: int = 400):
     )
 
 
-def noop(*args, **kwargs):
+def noop(*_args, **_kwargs):
     return None
 
 

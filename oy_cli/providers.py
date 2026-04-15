@@ -295,7 +295,7 @@ def run_cmd(cmd, cwd=None, env=None, timeout=120, stdin_text=None):
 # within a single oy run. If env vars change mid-process (e.g. in tests), the
 # cache will be stale.
 @lru_cache(maxsize=8)
-def command_env(cwd=None):
+def command_env(_cwd=None):
     return MappingProxyType(os.environ.copy())
 
 
@@ -515,7 +515,7 @@ class HTTPClient:
     def __enter__(self) -> "HTTPClient":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, _exc_type, _exc, _tb) -> bool:
         self.close()
         return False
 
@@ -1603,12 +1603,12 @@ def _responses_from_key(
     )
 
 
-def _require_openai_env(cwd: Path | None = None) -> None:
+def _require_openai_env(_cwd: Path | None = None) -> None:
     _require_string(os.environ.get("OPENAI_API_KEY"), "OPENAI_API_KEY is not set")
 
 
 def _openai_client(
-    cwd: Path | None = None,
+    _cwd: Path | None = None,
     *,
     max_retries: int = 3,
 ) -> CompletionClient:
@@ -1621,11 +1621,11 @@ def _openai_client(
     )
 
 
-def _require_codex_env(cwd: Path | None = None) -> None:
+def _require_codex_env(_cwd: Path | None = None) -> None:
     load_codex_session()
 
 
-def _codex_client(cwd: Path | None = None) -> CompletionClient:
+def _codex_client(_cwd: Path | None = None) -> CompletionClient:
     api_key = load_codex_auth().get("OPENAI_API_KEY")
     if isinstance(api_key, str) and api_key:
         return _responses_from_key(api_key)
@@ -1701,14 +1701,14 @@ def _get_github_token() -> str | None:
     return token if proc.returncode == 0 and token else None
 
 
-def _require_copilot_env(cwd: Path | None = None) -> None:
+def _require_copilot_env(_cwd: Path | None = None) -> None:
     _require_string(
         _get_github_token(),
         "No GitHub token found (set GH_TOKEN, GITHUB_TOKEN, or run `gh auth login`)",
     )
 
 
-def _copilot_completion_client(cwd: Path | None = None) -> CompletionClient:
+def _copilot_completion_client(_cwd: Path | None = None) -> CompletionClient:
     token = _require_string(_get_github_token(), "No GitHub token found")
     return _responses_from_key(
         token,
@@ -1740,7 +1740,7 @@ def _require_opencode_env(name: str, label: str) -> None:
     )
 
 
-def _require_opencode_zen_env(cwd: Path | None = None) -> None:
+def _require_opencode_zen_env(_cwd: Path | None = None) -> None:
     _require_opencode_env("opencode", "Zen")
 
 
@@ -1772,7 +1772,7 @@ def _opencode_client(
     return client
 
 
-def _opencode_zen_client(cwd: Path | None = None) -> CompletionClient:
+def _opencode_zen_client(_cwd: Path | None = None) -> CompletionClient:
     return _opencode_client("opencode", "Zen", SHIM_OPENCODE, OPENCODE_ZEN_URL)
 
 

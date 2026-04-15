@@ -58,7 +58,7 @@ class TestTranscriptLifecycle:
     def test_prepared_messages_pack_with_toons(self, monkeypatch):
         monkeypatch.setattr(agent, "count_tokens", lambda text: len(text))
         monkeypatch.setattr(
-            agent, "_packed_history_note", lambda messages: SystemMessage("packed")
+            agent, "_packed_history_note", lambda _messages: SystemMessage("packed")
         )
         packed = agent.prepared_messages(
             agent.transcript(
@@ -116,14 +116,14 @@ class TestRunTurn:
         printed: list[str] = []
         patch_runtime(
             monkeypatch,
-            _print=lambda *a, value="", **k: printed.append(value),
+            _print=lambda *_a, value="", **_k: printed.append(value),
             _debug_log=None,
             _note=None,
         )
 
         transcript = _transcript()
         code, content = agent.run_turn(
-            {"chat_completion": lambda **kwargs: next(responses)},
+            {"chat_completion": lambda **_kwargs: next(responses)},
             transcript,
             make_state(tmp_path, registry=registry),
             "openai:gpt-test",
@@ -143,15 +143,15 @@ class TestRunTurn:
         notes = []
         patch_runtime(
             monkeypatch,
-            _print=lambda *a, **k: None,
+            _print=lambda *_a, **_k: None,
             _debug_log=None,
             _note=None,
         )
         monkeypatch.setattr(agent, "wait", lambda message: {"message": message})
         monkeypatch.setattr(agent, "start_wait", lambda spinner: waits.append(spinner["message"]))
-        monkeypatch.setattr(agent, "stop_wait", lambda spinner: None)
-        monkeypatch.setattr(agent, "log_wait", lambda spinner, message: notes.append(message))
-        monkeypatch.setattr(agent, "update_wait", lambda spinner, message: updates.append(message))
+        monkeypatch.setattr(agent, "stop_wait", lambda _spinner: None)
+        monkeypatch.setattr(agent, "log_wait", lambda _spinner, message: notes.append(message))
+        monkeypatch.setattr(agent, "update_wait", lambda _spinner, message: updates.append(message))
 
         def fake_chat_completion(**kwargs):
             kwargs["on_retry"](
@@ -164,7 +164,7 @@ class TestRunTurn:
         code, content = agent.run_turn(
             {"chat_completion": fake_chat_completion},
             _transcript(),
-            make_state(tmp_path, registry=tool_handler("echo", lambda state, text: text)),
+            make_state(tmp_path, registry=tool_handler("echo", lambda _state, text: text)),
             "openai:gpt-test",
             tools.tool_specs({}),
         )

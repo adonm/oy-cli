@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -100,7 +98,7 @@ class TestMessageDecoding:
             "ok": True
         }
 
-    def test_responses_output_decoding(self):
+    def test_responses_output_decoding_basic(self):
         decoded = providers._decode_responses_output(
             {
                 "output": [
@@ -123,7 +121,7 @@ class TestMessageDecoding:
             tool_calls=[ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
         )
 
-    def test_responses_output_decoding(self):
+    def test_responses_output_decoding_with_refusal(self):
         decoded = providers._decode_responses_output(
             {
                 "output": [
@@ -248,7 +246,7 @@ class TestMalformedOutputRetry:
         monkeypatch.setattr(
             providers,
             "_call_responses",
-            lambda *args, **kwargs: next(responses),
+            lambda *_args, **_kwargs: next(responses),
         )
 
         client = providers._responses_client(Mock(), lambda: ["gpt-test"])
@@ -295,7 +293,7 @@ class TestMalformedOutputRetry:
         monkeypatch.setattr(
             providers,
             "_call_responses",
-            lambda *args, **kwargs: next(responses),
+            lambda *_args, **_kwargs: next(responses),
         )
 
         client = providers._responses_client(Mock(), lambda: ["gpt-test"])
@@ -321,7 +319,7 @@ class TestMalformedOutputRetry:
         monkeypatch.setattr(
             providers,
             "_call_responses",
-            lambda *args, **kwargs: attempts.append("call") or {"output": []},
+            lambda *_args, **_kwargs: attempts.append("call") or {"output": []},
         )
 
         client = providers._responses_client(Mock(), lambda: ["gpt-test"])
@@ -334,7 +332,7 @@ class TestClientFactories:
     def test_responses_from_key_uses_openai_helpers(self, monkeypatch):
         created = []
 
-        def fake_openai(*args, **kwargs):
+        def fake_openai(*_args, **_kwargs):
             return {"api": len(created)}
 
         def fake_create(api, path, *, source):
@@ -400,7 +398,7 @@ class TestClientFactories:
         monkeypatch.setattr(
             providers,
             "_opencode_list_models",
-            lambda name, provider_id, base_url: [f"{provider_id}-model"],
+            lambda _name, provider_id, _base_url: [f"{provider_id}-model"],
         )
 
         assert providers._opencode_api_key("opencode") == "zen-key"
@@ -429,12 +427,12 @@ class TestClientFactories:
         monkeypatch.setattr(
             providers,
             "_openai",
-            lambda *args, **kwargs: {"base_url": kwargs["base_url"]},
+            lambda *_args, **kwargs: {"base_url": kwargs["base_url"]},
         )
         monkeypatch.setattr(
             providers,
             "_model_ids",
-            lambda api: ["hf://Qwen/Qwen3.5-9B", "ollama://qwen3.5"],
+            lambda _api: ["hf://Qwen/Qwen3.5-9B", "ollama://qwen3.5"],
         )
         assert providers._local_list_models(shim="local-8080") == [
             "hf://Qwen/Qwen3.5-9B",
@@ -446,7 +444,7 @@ class TestClientFactories:
         monkeypatch.setattr(
             providers,
             "_openai",
-            lambda *args, **kwargs: {"base_url": kwargs["base_url"]},
+            lambda *_args, **kwargs: {"base_url": kwargs["base_url"]},
         )
         monkeypatch.setattr(providers, "_model_ids", lambda api: calls.append(api) or ["qwen"])
         providers._require_local_env(shim="local-8080")
@@ -458,12 +456,12 @@ class TestClientFactories:
 
     def test_local_client_uses_external_server(self, monkeypatch):
         monkeypatch.setenv("OY_MODEL", "local-8080:qwen3.5")
-        monkeypatch.setattr(providers, "_local_base_url", lambda shim, cwd=None: "http://127.0.0.1:8080/v1")
+        monkeypatch.setattr(providers, "_local_base_url", lambda _shim, _cwd=None: "http://127.0.0.1:8080/v1")
         calls = []
         monkeypatch.setattr(
             providers,
             "_req_json",
-            lambda api, method, path, *, source, json_body=None, data=None, headers=None: (
+            lambda api, method, path, *, source, json_body=None, _data=None, _headers=None: (
                 calls.append((api, method, path, source, json_body))
                 or {"output": [{"type": "message", "role": "assistant", "content": [{"text": "done"}]}]}
             ),
@@ -479,12 +477,12 @@ class TestClientFactories:
         )
 
     def test_opencode_list_models_uses_remote_models_endpoint(self, monkeypatch):
-        monkeypatch.setattr(providers, "_opencode_api_key", lambda name: "key")
-        monkeypatch.setattr(providers, "_openai", lambda *args, **kwargs: {"api": "ok"})
+        monkeypatch.setattr(providers, "_opencode_api_key", lambda _name: "key")
+        monkeypatch.setattr(providers, "_openai", lambda *_args, **_kwargs: {"api": "ok"})
         monkeypatch.setattr(
             providers,
             "_model_ids",
-            lambda api: ["chat-a", "responses-b"],
+            lambda _api: ["chat-a", "responses-b"],
         )
         assert providers._opencode_list_models(
             "opencode", "opencode", providers.OPENCODE_ZEN_URL
@@ -494,16 +492,16 @@ class TestClientFactories:
 class TestMantleClient:
     def test_uses_sigv4_client_in_aws_credentials_mode(self, monkeypatch, tmp_path):
         sentinel = {
-            "chat_completion": lambda *a, **k: None,
+            "chat_completion": lambda *_a, **_k: None,
             "list_models": lambda: ["alpha", "beta"],
         }
         monkeypatch.setattr(
-            providers, "default_region", lambda choice=None: "ap-southeast-2"
+            providers, "default_region", lambda _choice=None: "ap-southeast-2"
         )
         monkeypatch.setattr(
             providers,
             "load_aws_credentials",
-            lambda cwd=None, allow_login=True: {
+            lambda _cwd=None, _allow_login=True: {
                 "access_key": "AKIA",
                 "secret_key": "SECRET",
             },
@@ -511,7 +509,7 @@ class TestMantleClient:
         monkeypatch.setattr(
             providers,
             "_bedrock_mantle_client",
-            lambda credentials, region, timeout=providers.DEFAULT_HTTP_TIMEOUT: dict(
+            lambda _credentials, _region, _timeout=providers.DEFAULT_HTTP_TIMEOUT: dict(
                 sentinel
             ),
         )
@@ -521,14 +519,20 @@ class TestMantleClient:
 
     def test_bedrock_mantle_client_posts_to_responses_api(self, monkeypatch):
         requested = {}
-        monkeypatch.setattr(
-            providers,
-            "_bedrock_request_headers",
-            lambda credentials, region, method, url, body=b"", headers=None: {
+        def fake_bedrock_request_headers(
+            _credentials, _region, _method, _url, body=b"", headers=None
+        ):
+            assert isinstance(body, bytes)
+            return {
                 "Authorization": "AWS4-HMAC-SHA256 test",
                 "X-Amz-Date": "20260327T062009Z",
                 **(headers or {}),
-            },
+            }
+
+        monkeypatch.setattr(
+            providers,
+            "_bedrock_request_headers",
+            fake_bedrock_request_headers,
         )
 
         class FakeSession:
@@ -543,7 +547,7 @@ class TestMantleClient:
                     reason_phrase="OK",
                 )
 
-        monkeypatch.setattr(providers, "llm_session", lambda **kwargs: FakeSession())
+        monkeypatch.setattr(providers, "llm_session", lambda **_kwargs: FakeSession())
         client = providers._bedrock_mantle_client(
             {"access_key": "AKIA", "secret_key": "SECRET"},
             "ap-southeast-2",
@@ -562,12 +566,12 @@ class TestMantleClient:
     def test_load_bedrock_model_list_uses_mantle_endpoint(self, monkeypatch, tmp_path):
         requested = {}
         monkeypatch.setattr(
-            providers, "default_region", lambda choice=None: "ap-southeast-2"
+            providers, "default_region", lambda _choice=None: "ap-southeast-2"
         )
         monkeypatch.setattr(
             providers,
             "load_aws_credentials",
-            lambda cwd=None, allow_login=True: {
+            lambda _cwd=None, _allow_login=True: {
                 "access_key": "AKIDEXAMPLE",
                 "secret_key": "wJalrXUtnFEMI/I/K7MDENG+bPxRfiCYEXAMPLEKEY",
                 "session_token": "TOKEN",
@@ -576,7 +580,7 @@ class TestMantleClient:
         monkeypatch.setattr(
             providers,
             "_bedrock_request_headers",
-            lambda credentials, region, method, url, body=b"", headers=None: {
+            lambda _credentials, _region, _method, _url, _body=b"", headers=None: {
                 "Authorization": "AWS4-HMAC-SHA256 test",
                 "X-Amz-Date": "20260327T062009Z",
                 "X-Amz-Security-Token": "TOKEN",
@@ -602,7 +606,7 @@ class TestMantleClient:
                     reason_phrase="OK",
                 )
 
-        monkeypatch.setattr(providers, "llm_session", lambda **kwargs: FakeSession())
+        monkeypatch.setattr(providers, "llm_session", lambda **_kwargs: FakeSession())
         assert providers.load_bedrock_model_list(tmp_path) == [
             "zai.glm-4.6",
             "moonshotai.kimi-k2-thinking",
@@ -619,7 +623,7 @@ class TestShimRegistry:
     def test_registry_order_and_client_building(self, monkeypatch, tmp_path):
         calls: list[str] = []
         sentinel = {
-            "chat_completion": lambda *a, **k: None,
+            "chat_completion": lambda *_a, **_k: None,
             "list_models": lambda: ["demo"],
         }
 
@@ -641,18 +645,18 @@ class TestShimRegistry:
         specs = {
             "alpha": {
                 "ensure_env": ok("alpha"),
-                "build_client": lambda cwd: sentinel,
-                "list_models": lambda cwd: ["demo"],
+                "build_client": lambda _cwd: sentinel,
+                "list_models": lambda _cwd: ["demo"],
             },
             "beta": {
                 "ensure_env": fail("beta"),
-                "build_client": lambda cwd: None,
-                "list_models": lambda cwd: [],
+                "build_client": lambda _cwd: None,
+                "list_models": lambda _cwd: [],
             },
             "gamma": {
                 "ensure_env": ok("gamma"),
-                "build_client": lambda cwd: None,
-                "list_models": lambda cwd: ["demo"],
+                "build_client": lambda _cwd: None,
+                "list_models": lambda _cwd: ["demo"],
             },
         }
         monkeypatch.setattr(
@@ -674,8 +678,8 @@ class TestShimRegistry:
         assert providers.list_models_for_shim("gamma", cwd=tmp_path) == ["gamma:demo"]
 
     def test_dynamic_local_shim_is_valid_and_builds(self, monkeypatch):
-        monkeypatch.setattr(providers, "_openai", lambda *args, **kwargs: {"base_url": kwargs["base_url"]})
-        monkeypatch.setattr(providers, "_model_ids", lambda api: ["demo"])
+        monkeypatch.setattr(providers, "_openai", lambda *_args, **kwargs: {"base_url": kwargs["base_url"]})
+        monkeypatch.setattr(providers, "_model_ids", lambda _api: ["demo"])
         assert providers.validate_shim("local-8080") == "local-8080"
         assert providers.list_models_for_shim("local-8080") == ["local-8080:demo"]
 
@@ -689,11 +693,11 @@ class TestShimRegistry:
 
     def test_local_client_accepts_bare_model_id_with_colon(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(providers, "_local_base_url", lambda shim, cwd=None: "http://127.0.0.1:8080/v1")
+        monkeypatch.setattr(providers, "_local_base_url", lambda _shim, _cwd=None: "http://127.0.0.1:8080/v1")
         monkeypatch.setattr(
             providers,
             "_req_json",
-            lambda api, method, path, *, source, json_body=None, data=None, headers=None: (
+            lambda api, method, path, *, source, json_body=None, _data=None, _headers=None: (
                 calls.append((api, method, path, source, json_body))
                 or {"output": [{"type": "message", "role": "assistant", "content": [{"text": "done"}]}]}
             ),
@@ -711,14 +715,14 @@ class TestShimRegistry:
         specs = {
             "gamma": {
                 "ensure_env": lambda cwd: calls.append(cwd),
-                "build_client": lambda cwd: None,
-                "list_models": lambda cwd: (_ for _ in ()).throw(RuntimeError("boom")),
+                "build_client": lambda _cwd: None,
+                "list_models": lambda _cwd: (_ for _ in ()).throw(RuntimeError("boom")),
             },
         }
         monkeypatch.setattr(providers, "SHIM_ORDER", ("gamma",), raising=False)
         monkeypatch.setattr(providers, "KNOWN_SHIMS", set(specs), raising=False)
         monkeypatch.setattr(providers, "SHIM_SPECS", specs, raising=False)
-        monkeypatch.setattr(providers, "_shim_available", lambda shim: True)
+        monkeypatch.setattr(providers, "_shim_available", lambda _shim: True)
 
         with pytest.raises(RuntimeError, match="boom"):
             providers.list_models_for_shim("gamma", cwd=tmp_path)

@@ -32,14 +32,14 @@ def _stub_session(monkeypatch, tmp_path, *, interactive=False):
     monkeypatch.setattr(
         cli,
         "resolve_session",
-        lambda **kwargs: _session_state(tmp_path, interactive=interactive),
+        lambda **_kwargs: _session_state(tmp_path, interactive=interactive),
     )
 
 
 def _capture_defopt_run(monkeypatch):
     seen = {}
 
-    def fake_run(functions, *, argv, **kwargs):
+    def fake_run(_functions, *, argv, **_kwargs):
         seen["argv"] = argv
         return 0
 
@@ -76,7 +76,7 @@ class TestCLI:
         monkeypatch.setattr(
             cli.defopt,
             "run",
-            lambda *a, **k: pytest.fail("defopt.run should not be called"),
+            lambda *_a, **_k: pytest.fail("defopt.run should not be called"),
         )
 
         assert cli.main(["--version"]) == 0
@@ -93,12 +93,12 @@ class TestRalph:
 
         _stub_session(monkeypatch, tmp_path)
         monkeypatch.setattr(
-            cli, "_print_session_intro", lambda *a, **k: intro.update(k)
+            cli, "_print_session_intro", lambda *_a, **k: intro.update(k)
         )
         patch_runtime(
             monkeypatch, _note=lambda *a, **k: notes.append((a, k)), _print=None
         )
-        monkeypatch.setattr(rt, "ralph_limit_seconds", lambda default=10800: 120)
+        monkeypatch.setattr(rt, "ralph_limit_seconds", lambda _default=10800: 120)
         monkeypatch.setattr(cli.time, "monotonic", lambda: next(monotonic_values))
         monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
 
@@ -124,11 +124,11 @@ class TestRalph:
         monkeypatch.setattr(cli.sys.stdin, "read", lambda: "from stdin")
         monkeypatch.setattr(rt, "has_tty_stdin", lambda: False)
         _stub_session(monkeypatch, tmp_path)
-        monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: None)
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *_a, **_k: None)
         patch_runtime(monkeypatch, _note=None, _print=None)
-        monkeypatch.setattr(rt, "ralph_limit_seconds", lambda default=10800: 1)
+        monkeypatch.setattr(rt, "ralph_limit_seconds", lambda _default=10800: 1)
         monkeypatch.setattr(cli.time, "monotonic", lambda: next(monotonic_values))
-        monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+        monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
         monkeypatch.setattr(
             cli,
             "run_agent",
@@ -180,7 +180,7 @@ class TestRenovateLocal:
 
         monkeypatch.setattr(cli, "workspace_root", lambda: tmp_path)
         monkeypatch.setattr(cli, "_renovate_github_token", lambda: "ghs_test")
-        monkeypatch.setattr(cli.rt, "command_env", lambda cwd=None: {"PATH": "/bin"})
+        monkeypatch.setattr(cli.rt, "command_env", lambda _cwd=None: {"PATH": "/bin"})
 
         def fake_run(command, cwd=None, env=None, check=False):
             seen["command"] = command
@@ -194,7 +194,7 @@ class TestRenovateLocal:
         monkeypatch.setattr(cli.subprocess, "run", fake_run)
         patch_runtime(
             monkeypatch,
-            _note=lambda message, **k: notes.append(message),
+            _note=lambda message, **_k: notes.append(message),
             _print=lambda *a, **k: printed.append(k.get("value", a[1] if len(a) > 1 else a[0] if a else "")),
         )
 
@@ -228,9 +228,9 @@ class TestModelSelectionUI:
     def test_resolve_model_choice_uses_shared_model_list_ui(self, monkeypatch):
         printed = []
         monkeypatch.setattr(rt, "list_all_model_ids", lambda: ["openai:gpt-test"])
-        monkeypatch.setattr(rt, "_model", lambda configured=None: "openai:gpt-test")
+        monkeypatch.setattr(rt, "_model", lambda _configured=None: "openai:gpt-test")
         monkeypatch.setattr(rt, "can_prompt", lambda: True)
-        monkeypatch.setattr(rt, "ask", lambda *a, **k: "openai:gpt-test")
+        monkeypatch.setattr(rt, "ask", lambda *_a, **_k: "openai:gpt-test")
         patch_runtime(
             monkeypatch,
             _print=lambda *a, **k: printed.append(k.get("value", a[1] if len(a) > 1 else a[0] if a else "")),
@@ -290,7 +290,7 @@ class TestChatCommands:
         notes = []
         patch_runtime(
             monkeypatch,
-            _note=lambda message, **k: notes.append(message),
+            _note=lambda message, **_k: notes.append(message),
             _print=lambda *a, **k: printed.append(
                 k.get("value", a[1] if len(a) > 1 else a[0] if a else "")
             ),
@@ -301,18 +301,18 @@ class TestChatCommands:
             lambda: {"list": object(), "webfetch": object()},
         )
         monkeypatch.setattr(
-            cli, "transcript_with_system_prompt", lambda prompt: {"messages": []}
+            cli, "transcript_with_system_prompt", lambda _prompt: {"messages": []}
         )
-        monkeypatch.setattr(cli, "new_agent_state", lambda **k: {"state": True})
+        monkeypatch.setattr(cli, "new_agent_state", lambda **_k: {"state": True})
         monkeypatch.setattr(
             cli, "add_user", lambda tx, question: tx.update({"question": question})
         )
         monkeypatch.setattr(rt, "unattended_limit_seconds", lambda: 60)
-        monkeypatch.setattr(rt, "get_client", lambda model: object())
-        monkeypatch.setattr(cli, "tool_specs", lambda registry: [])
+        monkeypatch.setattr(rt, "get_client", lambda _model: object())
+        monkeypatch.setattr(cli, "tool_specs", lambda _registry: [])
         seen = {}
         monkeypatch.setattr(
-            cli, "run_turn", lambda *args, **kwargs: seen.update({"called": True})
+            cli, "run_turn", lambda *_args, **_kwargs: seen.update({"called": True})
         )
         session = _session_state(tmp_path, interactive=True)
 
@@ -375,12 +375,12 @@ class TestSessionContinuation:
         }
         (tmp_path / "saved.json").write_text(json.dumps(saved), encoding="utf-8")
         monkeypatch.setattr(cli, "workspace_root", lambda: tmp_path)
-        monkeypatch.setattr(rt, "_model", lambda configured=None: "openai:gpt-live")
+        monkeypatch.setattr(rt, "_model", lambda _configured=None: "openai:gpt-live")
         monkeypatch.setattr(rt, "_sys_file", lambda: None)
-        monkeypatch.setattr(rt, "yolo_enabled", lambda default=False: False)
+        monkeypatch.setattr(rt, "yolo_enabled", lambda _default=False: False)
         monkeypatch.setattr(rt, "can_prompt", lambda: False)
         monkeypatch.setattr(rt, "unattended_limit_seconds", lambda: 60)
-        monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: None)
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *_a, **_k: None)
         seen = {}
         monkeypatch.setattr(
             cli,
@@ -408,14 +408,14 @@ class TestSessionContinuation:
         (tmp_path / "latest.json").write_text(json.dumps(saved), encoding="utf-8")
         monkeypatch.setattr(cli, "_create_prompt_session", lambda: object())
         monkeypatch.setattr(cli, "workspace_root", lambda: tmp_path)
-        monkeypatch.setattr(rt, "_model", lambda configured=None: "openai:gpt-live")
+        monkeypatch.setattr(rt, "_model", lambda _configured=None: "openai:gpt-live")
         monkeypatch.setattr(rt, "_sys_file", lambda: None)
-        monkeypatch.setattr(rt, "yolo_enabled", lambda default=False: False)
+        monkeypatch.setattr(rt, "yolo_enabled", lambda _default=False: False)
         monkeypatch.setattr(rt, "can_prompt", lambda: True)
-        monkeypatch.setattr(cli, "_set_terminal_title", lambda *a, **k: None)
-        monkeypatch.setattr(cli, "_read_input", lambda *a, **k: (_ for _ in ()).throw(EOFError()))
+        monkeypatch.setattr(cli, "_set_terminal_title", lambda *_a, **_k: None)
+        monkeypatch.setattr(cli, "_read_input", lambda *_a, **_k: (_ for _ in ()).throw(EOFError()))
         intro = {}
-        monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: intro.update(k))
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *_a, **k: intro.update(k))
         patch_runtime(monkeypatch, print_console=None, rule_console=None, _note=None)
 
         assert cli.chat(continue_session=True) == 0
@@ -430,17 +430,17 @@ class TestChatRollback:
 
         monkeypatch.setattr(cli, "_create_prompt_session", lambda: object())
         _stub_session(monkeypatch, tmp_path, interactive=True)
-        monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: None)
-        monkeypatch.setattr(cli, "_set_terminal_title", lambda *a, **k: None)
-        monkeypatch.setattr(cli, "_read_input", lambda *a, **k: next(inputs))
-        monkeypatch.setattr(cli, "checkpoint", lambda tx: 7)
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *_a, **_k: None)
+        monkeypatch.setattr(cli, "_set_terminal_title", lambda *_a, **_k: None)
+        monkeypatch.setattr(cli, "_read_input", lambda *_a, **_k: next(inputs))
+        monkeypatch.setattr(cli, "checkpoint", lambda _tx: 7)
         monkeypatch.setattr(
-            cli, "rollback", lambda tx, point: rollback_calls.append(point)
+            cli, "rollback", lambda _tx, point: rollback_calls.append(point)
         )
         monkeypatch.setattr(
             cli,
             "run_agent",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         patch_runtime(
             monkeypatch,
@@ -529,9 +529,9 @@ class TestAuditWorkflow:
             "state_data": {"status": "in_progress"},
             "created": True,
         }
-        monkeypatch.setattr(cli, "_prepare_audit_run", lambda **kwargs: (artifacts, f"prompt {artifacts['session_path']} 64k chunks"))
+        monkeypatch.setattr(cli, "_prepare_audit_run", lambda **_kwargs: (artifacts, f"prompt {artifacts['session_path']} 64k chunks"))
         intro = {}
-        monkeypatch.setattr(cli, "_print_session_intro", lambda *a, **k: intro.update(k))
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *_a, **k: intro.update(k))
         seen = {}
         monkeypatch.setattr(cli, "_run_audit_workflow", lambda **kwargs: seen.update(kwargs) or 0)
 
@@ -589,7 +589,7 @@ class TestAuditWorkflow:
         })
         calls = []
 
-        def fake_run_agent(*args, **kwargs):
+        def fake_run_agent(*_args, **kwargs):
             calls.append(kwargs)
             if len(calls) == 2:
                 (tmp_path / "ISSUES.md").write_text("# Audit Issues\n\n## Important finding\n\n## Concise follow-up\n", encoding="utf-8")
@@ -694,7 +694,7 @@ class TestAuditWorkflow:
         })
         seen = []
 
-        def fake_run_agent(*args, **kwargs):
+        def fake_run_agent(*_args, **kwargs):
             seen.append(kwargs)
             if len(seen) == 1:
                 (tmp_path / "ISSUES.md").write_text("# Audit Issues\n\n## Finding\n\n## Another finding\n", encoding="utf-8")

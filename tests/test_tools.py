@@ -35,6 +35,7 @@ class TestToolApproval:
         calls: list[str] = []
 
         def mutating(state, text: str):
+            assert state["root"] == tmp_path
             calls.append(text)
             return f"done:{text}"
 
@@ -42,14 +43,14 @@ class TestToolApproval:
         patch_runtime(monkeypatch, _note=None)
 
         denied = make_state(tmp_path, interactive=True, registry=registry)
-        monkeypatch.setattr(rt, "select", lambda *a, **k: "deny")
+        monkeypatch.setattr(rt, "select", lambda *_a, **_k: "deny")
         result = tools.invoke_tool(registry, denied, "mutating", {"text": "nope"})
         assert result["ok"] is False
         assert result["content"]["error_type"] == "PermissionError"
         assert calls == []
 
         approved = make_state(tmp_path, interactive=True, registry=registry)
-        monkeypatch.setattr(rt, "select", lambda *a, **k: "all")
+        monkeypatch.setattr(rt, "select", lambda *_a, **_k: "all")
         first = tools.invoke_tool(registry, approved, "mutating", {"text": "first"})
         second = tools.invoke_tool(registry, approved, "mutating", {"text": "second"})
         assert first["ok"] is True and second["ok"] is True
@@ -61,7 +62,7 @@ class TestToolApproval:
         monkeypatch.setattr(
             rt,
             "select",
-            lambda *a, **k: pytest.fail("approval prompt should be skipped"),
+            lambda *_a, **_k: pytest.fail("approval prompt should be skipped"),
         )
         auto_result = tools.invoke_tool(registry, auto, "mutating", {"text": "auto"})
         assert auto_result["ok"] is True
@@ -78,9 +79,9 @@ class TestAskTodoTools:
     def test_ask_and_todo_update_state(self, monkeypatch, tmp_path):
         state = make_state(tmp_path)
         shown: list[str] = []
-        monkeypatch.setattr(rt, "require_prompt", lambda *a, **k: None)
-        monkeypatch.setattr(rt, "ask", lambda *a, **k: " free ")
-        monkeypatch.setattr(rt, "select", lambda *a, **k: "beta")
+        monkeypatch.setattr(rt, "require_prompt", lambda *_a, **_k: None)
+        monkeypatch.setattr(rt, "ask", lambda *_a, **_k: " free ")
+        monkeypatch.setattr(rt, "select", lambda *_a, **_k: "beta")
         patch_runtime(monkeypatch, note_tool=None)
         monkeypatch.setattr(rt, "show", shown.append)
 
@@ -119,9 +120,9 @@ class TestBashTool:
             ]
         )
         patch_runtime(monkeypatch, note_tool=None)
-        monkeypatch.setattr(rt, "require_command_env", lambda root: {"PATH": ""})
-        monkeypatch.setattr(rt, "which", lambda name, path=None: "/bin/bash")
-        monkeypatch.setattr(rt, "run_cmd", lambda *a, **k: next(results))
+        monkeypatch.setattr(rt, "require_command_env", lambda _root: {"PATH": ""})
+        monkeypatch.setattr(rt, "which", lambda _name, _path=None: "/bin/bash")
+        monkeypatch.setattr(rt, "run_cmd", lambda *_a, **_k: next(results))
         monkeypatch.setattr(rt, "show", shown.append)
 
         json_payload = tools.tool_bash(state, command="echo json")
@@ -415,7 +416,7 @@ class TestWebfetch:
     def test_webfetch_restricted_methods_and_headers(self, monkeypatch, tmp_path):
         state = make_state(tmp_path)
         monkeypatch.setattr(tools, "_validate_url_safe", lambda url: url)
-        monkeypatch.setattr(rt, "tool_session", lambda **kw: DummyHttpClient())
+        monkeypatch.setattr(rt, "tool_session", lambda **_kw: DummyHttpClient())
 
         for kwargs in (
             {"method": "POST"},

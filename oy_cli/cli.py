@@ -757,8 +757,9 @@ def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = F
         state = _audit_load_state(path)
         if state is not None and state.get("status") not in _AUDIT_DONE_STATUSES:
             return {"session_path": path, "state_data": state, "created": False}
-    files = _audit_file_items(workspace, _audit_sloc_plan(workspace, _audit_walk_files(workspace)))
-    sloc_plan = _audit_sloc_plan(workspace, [str(item["path"]) for item in files])
+    file_paths = _audit_walk_files(workspace)
+    sloc_plan = _audit_sloc_plan(workspace, file_paths)
+    files = _audit_file_items(workspace, sloc_plan)
     chunks = _audit_plan_chunks(files, target_tokens=rt.audit_settings()["review_chunk_target_tokens"])
     state = _audit_default_state(
         focus=focus,
