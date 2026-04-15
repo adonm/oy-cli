@@ -818,13 +818,14 @@ def _audit_split_chunk(chunk: dict[str, object], files_by_path: dict[str, dict[s
     return [item for item in result if item["paths"]]
 
 
-def _audit_default_state(*, focus: str, workspace: Path, sloc_plan: dict[str, object], files: list[dict[str, object]], chunks: list[dict[str, object]], mode: str = _AUDIT_DEFAULT_MODE) -> dict[str, object]:
+def _audit_default_state(*, focus: str, workspace: Path, sloc_plan: dict[str, object], files: list[dict[str, object]], chunks: list[dict[str, object]], mode: str = _AUDIT_DEFAULT_MODE, run_config: dict[str, object] | None = None) -> dict[str, object]:
     now = datetime.now(UTC).isoformat()
     return {
         "version": _AUDIT_STATE_VERSION,
         "workspace": str(workspace),
         "mode": mode,
         "focus": focus,
+        "run_config": dict(run_config or {}),
         "status": "in_progress",
         "created_at": now,
         "updated_at": now,
@@ -984,8 +985,49 @@ def _audit_pending_state(workspace: Path, *, mode: str = _AUDIT_DEFAULT_MODE) ->
     return path, state
 
 
-def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = False, mode: str = _AUDIT_DEFAULT_MODE) -> dict[str, object]:
+def _audit_run_config(*, model: str | None = None, agent: str = "default", max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str) -> dict[str, object]:
+    resolved_model = str(model or rt._model() or "").strip()
+    return {
+        "command": _audit_command(mode),
+        "mode": mode,
+        "model": resolved_model,
+        "agent": agent,
+        "max_context_tokens": int(max_context_tokens or 0),
+    }
+
+
+def _audit_transparency_snippet(run_config: dict[str, object]) -> str:
+    prefix = _audit_schema('transparency_prefix')
+    command = str(run_config.get('command') or _audit_command(str(run_config.get('mode') or _AUDIT_DEFAULT_MODE)))
+    model = str(run_config.get('model') or '').strip()
+    if model:
+        command = f"OY_MODEL={model} {command}"
+    return f"> {prefix} `{command}`"
+
+
+def _audit_upsert_transparency(text: str, run_config: dict[str, object]) -> str:
+    snippet = _audit_transparency_snippet(run_config)
+    lines = text.splitlines()
+    report_title = _audit_schema('report_title')
+    if not lines:
+        return snippet + "\n"
+    if lines[0].strip() not in {report_title, _audit_schema('legacy_report_title')}:
+        return text
+    body = lines[1:]
+    while body and not body[0].strip():
+        body = body[1:]
+    if body and body[0].startswith(f"> {_audit_schema('transparency_prefix')}"):
+        body = body[1:]
+        while body and not body[0].strip():
+            body = body[1:]
+    rebuilt = [lines[0], "", snippet]
+    if body:
+        rebuilt.extend(["", *body])
+    return "\n".join(rebuilt).rstrip() + "\n"
+
+def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = False, mode: str = _AUDIT_DEFAULT_MODE, run_config: dict[str, object] | None = None) -> dict[str, object]:
     path = _audit_session_path(workspace, mode=mode)
+    run_config = dict(run_config or _audit_run_config(mode=mode))
     if not restart:
         state = _audit_load_state(path)
         if state is not None and state.get("status") not in _AUDIT_DONE_STATUSES:
@@ -1001,6 +1043,7 @@ def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = F
         files=files,
         chunks=chunks,
         mode=mode,
+        run_config=run_config,
     )
     prepared_issues = _audit_prepare_issues_md(workspace, state)
     state['totals']['findings'] = int(prepared_issues.get('findings', 0) or 0)
@@ -1046,6 +1089,12 @@ def _build_audit_prompt(*, interactive: bool, focus: str, session_path: Path, mo
 
 
 def _prepare_audit_run(*, session, focus: str, interactive: bool, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[dict[str, object], str]:
+    run_config = _audit_run_config(
+        model=str(session.get("model") or ""),
+        agent=str(session.get("agent") or "default"),
+        max_context_tokens=int(session.get("max_context_tokens", rt.MAX_CONTEXT_TOKENS) or rt.MAX_CONTEXT_TOKENS),
+        mode=mode,
+    )
     decision = _audit_resume_decision(session["workspace"], interactive=interactive, mode=mode)
     if decision == "cancel":
         raise RuntimeError("audit cancelled")
@@ -1054,6 +1103,7 @@ def _prepare_audit_run(*, session, focus: str, interactive: bool, mode: str = _A
         focus=focus,
         restart=(decision == "restart"),
         mode=mode,
+        run_config=run_config,
     )
     return artifacts, _build_audit_prompt(
         interactive=interactive,
@@ -1194,16 +1244,20 @@ def _audit_normalize_issues_text(text: str) -> str:
 
 def _audit_prepare_issues_md(workspace: Path, state: dict[str, object]) -> dict[str, object]:
     issues_path = _audit_issues_path(workspace)
+    run_config = state.get('run_config') if isinstance(state.get('run_config'), dict) else {}
     if not issues_path.exists():
         _audit_seed_issues_md(workspace, state)
         text = _audit_read_issues(workspace)
         return {'changed': True, 'findings': _audit_issue_count(text)}
     before = _audit_read_issues(workspace)
     after = _audit_normalize_issues_text(before)
-    if after and after != before:
-        _audit_write_issues(workspace, after)
     final = after or before
-    return {'changed': bool(after and after != before), 'findings': _audit_issue_count(final)}
+    if run_config:
+        final = _audit_upsert_transparency(final, run_config)
+    changed = final != before
+    if changed:
+        _audit_write_issues(workspace, final)
+    return {'changed': changed, 'findings': _audit_issue_count(final)}
 
 def _audit_inbox_bounds(text: str) -> tuple[int, int] | None:
     match = re.search(rf"(?m)^{re.escape(_audit_h2(_audit_schema('inbox_title')))}\s*$", text)
@@ -1444,8 +1498,13 @@ def _audit_seed_issues_md(workspace: Path, state: dict[str, object]) -> None:
     commit_summary = _audit_git_commit_summary(workspace)
     text = (
         f"{_audit_schema('report_title')}\n\n"
-        f"> **Last audit**: {today} · commit `{commit_summary}` · cross-checked against [OWASP ASVS 5.0](https://owasp.org/www-project-application-security-verification-standard/) and [grugbrain.dev](https://grugbrain.dev/)\n\n"
-        f"> **Scope**: {state.get('totals', {}).get('queued', 0)} reviewable files · {sloc_plan.get('total_code_count', 0)} code lines · {sloc_plan.get('counted_files', 0)} counted by sloc\n\n"
+        + (
+            _audit_transparency_snippet(state.get('run_config', {})) + "\n\n"
+            if isinstance(state.get('run_config'), dict) and state.get('run_config')
+            else ""
+        )
+        + f"> **Last audit**: {today} · commit `{commit_summary}` · cross-checked against [OWASP ASVS 5.0](https://owasp.org/www-project-application-security-verification-standard/) and [grugbrain.dev](https://grugbrain.dev/)\n\n"
+        + f"> **Scope**: {state.get('totals', {}).get('queued', 0)} reviewable files · {sloc_plan.get('total_code_count', 0)} code lines · {sloc_plan.get('counted_files', 0)} counted by sloc\n\n"
         + _audit_inbox_section()
     )
     _audit_write_issues(workspace, text)

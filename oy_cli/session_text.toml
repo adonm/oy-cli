@@ -111,6 +111,7 @@ short_audit_log_title = "Short audit log"
 summary_title = "Summary"
 inbox_placeholder = "No inbox findings recorded yet."
 inbox_note = "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report."
+transparency_prefix = "Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli):"
 reference_suffix = """
 
 Use this embedded audit reference summary instead of fetching ASVS, MASVS, or grugbrain during the run. These are condensed heuristics, not the full standards, but they are broad enough to support repo review and report citations.

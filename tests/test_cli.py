@@ -482,6 +482,8 @@ class TestAuditWorkflow:
         assert artifacts["created"] is True
         session_path = artifacts["session_path"]
         state = rt.load_toon(session_path, {})
+        assert state["run_config"]["command"] == "oy audit"
+        assert isinstance(state["run_config"]["model"], str) and state["run_config"]["model"]
         assert state["focus"] == "auth"
         assert state["workspace"] == str(tmp_path)
         assert state["active_phase"] == "phase2"
@@ -510,12 +512,36 @@ class TestAuditWorkflow:
         issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
         state = rt.load_toon(artifacts["session_path"], {})
         assert artifacts["created"] is True
+        expected = f"> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL={state["run_config"]["model"]} oy audit`"
+        assert expected in issues_text
         assert issues_text.startswith("# Audit Issues\n")
         assert "## Inbox" in issues_text
         assert "### H1 · old title" in issues_text
         assert "## Short audit log" in issues_text
         assert state["totals"]["findings"] == 1
         assert any("Normalised ISSUES.md into audit inbox format" in note for note in state["notes"])
+
+    def test_audit_prepare_issues_md_upserts_transparency_snippet(self, tmp_path):
+        state = {
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072},
+            "totals": {"queued": 1, "total_code_count": 1, "counted_files": 1},
+            "sloc": {},
+        }
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "> **Last audit**: 2026-01-01 · commit `abc`\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            "No inbox findings recorded yet.\n",
+            encoding="utf-8",
+        )
+
+        result = cli._audit_prepare_issues_md(tmp_path, state)
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+        assert result["changed"] is True
+        assert "> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=copilot:gpt5.4 oy audit`" in issues_text
+        assert issues_text.startswith("# Audit Issues\n\n> Generated with [oy-cli]")
 
     def test_audit_plan_chunks_clusters_by_directory_before_splitting(self):
         files = [
