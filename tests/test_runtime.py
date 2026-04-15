@@ -23,17 +23,30 @@ class TestSessionText:
         assert "Stay no-write: leave files unchanged, skip `bash`, and keep `webfetch` available" in rt.ask_system_prompt("sys")
         audit_prompt = rt.audit_system_prompt()
         logic_audit_prompt = rt.logic_audit_system_prompt()
+        phase1_prompt = rt.audit_system_prompt(phase="phase1")
+        phase2_prompt = rt.audit_system_prompt(phase="phase2")
+        phase3_prompt = rt.audit_system_prompt(phase="phase3")
         assert ".tmp/renovate-*.json" in audit_prompt
         assert "LOGIC-FOCUSED audit mode" in logic_audit_prompt
         assert "phase1 should skip docs and lockfiles from the backlog" in logic_audit_prompt
         assert "comments and docstrings stripped where possible" in logic_audit_prompt
         assert "session dir" in audit_prompt
-        assert "3-phase workflow" in audit_prompt
-        assert "phase1 Python planning, phase2 Python-driven review loop, phase3 ISSUES.md condensation" in audit_prompt
-        assert "Phase 1 should run in Python with `sloc` plus `tiktoken` counts" in audit_prompt
-        assert "Phase 2 should stay simple: Python reads one planned chunk" in audit_prompt
-        assert "Python must validate that `ISSUES.md` changed" in audit_prompt
-        assert "Phase 3 must rewrite `ISSUES.md`" in audit_prompt
+        assert rt.session_text("audit", "report_title") == "# Audit Issues"
+        assert rt.session_text("audit", "inbox_title") == "Inbox"
+        assert "setup only" in phase1_prompt
+        assert "review plan and chunking are handled before you start" in phase1_prompt
+        assert "normalized into the inbox layout" in phase1_prompt
+        assert "review only the provided chunk" in phase2_prompt
+        assert "use `search` for repo lookups" in phase2_prompt
+        assert "AUDIT PHASE1" in phase1_prompt
+        assert "AUDIT PHASE2" in phase2_prompt
+        assert "AUDIT PHASE3" in phase3_prompt
+        assert "use `inbox_append` to add candidate findings" in phase2_prompt
+        assert "do not rewrite, merge, dedupe, or reorder old findings" in phase2_prompt
+        assert "final rewrite" in phase3_prompt
+        assert "rewriting `ISSUES.md` is expected" in phase3_prompt
+        assert "durable inbox update in `ISSUES.md`" in phase2_prompt
+        assert "Consume the inbox and rewrite `ISSUES.md` into the final report" in phase3_prompt
         assert "oy renovate-local" in audit_prompt
         assert "Skip cleanly when no report is present" in audit_prompt
         assert "Use the audit prompt's built-in ASVS, MASVS, and grugbrain summary" in audit_prompt

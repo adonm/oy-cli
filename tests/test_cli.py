@@ -492,6 +492,31 @@ class TestAuditWorkflow:
         assert state["phases"][0]["status"] == "done"
         assert state["phases"][1]["status"] == "pending"
 
+    def test_ensure_audit_session_normalizes_existing_issues_into_inbox(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _note=None, _print=None)
+        (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Findings\n\n"
+            "## H1 · old title\n\n"
+            "old detail\n\n"
+            "## Short audit log\n\n"
+            "- earlier run\n",
+            encoding="utf-8",
+        )
+
+        artifacts = cli._ensure_audit_session(tmp_path, focus="auth")
+
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+        state = rt.load_toon(artifacts["session_path"], {})
+        assert artifacts["created"] is True
+        assert issues_text.startswith("# Audit Issues\n")
+        assert "## Inbox" in issues_text
+        assert "### H1 · old title" in issues_text
+        assert "## Short audit log" in issues_text
+        assert state["totals"]["findings"] == 1
+        assert any("Normalised ISSUES.md into audit inbox format" in note for note in state["notes"])
+
     def test_audit_plan_chunks_clusters_by_directory_before_splitting(self):
         files = [
             {"path": "api/auth/a.py", "code_count": 50, "estimated_tokens": 20_000},
@@ -600,7 +625,7 @@ class TestAuditWorkflow:
         assert cli.audit_logic("auth") == 0
         assert "stripped comments" in seen["prompt"]
         assert seen["mode"] == cli._AUDIT_LOGIC_MODE
-        assert seen["system_prompt"] == cli.LOGIC_AUDIT_SYSTEM_PROMPT
+        assert seen["system_prompt"] == cli.LOGIC_AUDIT_PHASE1_SYSTEM_PROMPT
         assert intro["audit_state"] == artifacts["session_path"]
 
     def test_prepare_audit_run_prompts_to_resume_unfinished_audit(self, tmp_path, monkeypatch):
@@ -774,7 +799,72 @@ class TestAuditWorkflow:
             unattended_limit_seconds=60,
             agent="default",
         ) == 0
-        assert set(seen[0]["tool_registry"]) == {"search", "replace"}
+        assert set(seen[0]["tool_registry"]) == {"search", "inbox_append"}
         assert set(seen[1]["tool_registry"]) == {"replace"}
-        assert seen[0]["auto_approve_tools"] == {"replace"}
+        assert seen[0]["auto_approve_tools"] == {"inbox_append"}
         assert seen[1]["auto_approve_tools"] == {"replace"}
+
+
+    def test_audit_system_prompt_for_mode_supports_phase_specific_prompts(self):
+        assert cli._audit_system_prompt_for_mode(cli._AUDIT_DEFAULT_MODE, phase="phase1") == cli.AUDIT_PHASE1_SYSTEM_PROMPT
+        assert cli._audit_system_prompt_for_mode(cli._AUDIT_DEFAULT_MODE, phase="phase2") == cli.AUDIT_PHASE2_SYSTEM_PROMPT
+        assert cli._audit_system_prompt_for_mode(cli._AUDIT_DEFAULT_MODE, phase="phase3") == cli.AUDIT_PHASE3_SYSTEM_PROMPT
+        assert cli._audit_system_prompt_for_mode(cli._AUDIT_LOGIC_MODE, phase="phase2") == cli.LOGIC_AUDIT_PHASE2_SYSTEM_PROMPT
+
+
+    def test_audit_append_inbox_adds_entries_without_rewriting_report(self, tmp_path):
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "> scope\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            "No inbox findings recorded yet.\n\n"
+            "## Short audit log\n\n"
+            "- bootstrapped\n",
+            encoding="utf-8",
+        )
+
+        payload = cli._audit_append_inbox(tmp_path, "### New finding\n\n- evidence")
+        text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+        assert payload["path"] == "ISSUES.md"
+        assert payload["chars_appended"] == len("### New finding\n\n- evidence")
+        assert "### New finding" in text
+        assert "No inbox findings recorded yet." not in text
+        assert "## Short audit log" in text
+
+    def test_run_audit_chunk_uses_inbox_context(self, tmp_path, monkeypatch):
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "## Historical finding\n\nold detail\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            "### Inbox finding\n\n- short note\n",
+            encoding="utf-8",
+        )
+        seen = {}
+
+        def fake_run_agent(prompt, *_args, **kwargs):
+            seen["prompt"] = prompt
+            seen["kwargs"] = kwargs
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+
+        assert cli._run_audit_chunk(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+            chunk={"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1},
+            state={"sloc": {}, "completed_chunks": [], "totals": {"queued": 1, "reviewed": 0, "findings": 1}},
+        ) == (0, "")
+        assert "Current audit inbox:" in seen["prompt"]
+        assert "### Inbox finding" in seen["prompt"]
+        assert "Historical finding" not in seen["prompt"]
+        assert set(seen["kwargs"]["tool_registry"]) == {"search", "inbox_append"}
+        assert seen["kwargs"]["auto_approve_tools"] == {"inbox_append"}

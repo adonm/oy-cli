@@ -44,20 +44,20 @@ In chat, `/ask <question>` is research-only: no `bash`, no file changes, but pub
 
 `oy audit` now runs a resumable 3-phase repo audit automatically:
 
-- phase1 `plan` — Python uses `sloc` plus `tiktoken` counts to build a SLOC-ranked 64k-token chunk plan
-- phase2 `review` — Python reads each chunk, gives the model only that chunk plus the ASVS/grugbrain context, and exposes only `search` plus `replace` scoped to `ISSUES.md`
-- phase3 `summary` — rewrite `ISSUES.md` so the 10-15 most important issues keep detail and the rest become concise
+- phase1 `plan` — Python uses `sloc` plus `tiktoken` counts to build a SLOC-ranked 64k-token chunk plan and normalizes any existing `ISSUES.md` into inbox format before review starts
+- phase2 `review` — Python reads each chunk, gives the model only that chunk plus the phase2 audit system prompt and ASVS/grugbrain context, and keeps findings append-only via `search` and `inbox_append` scoped to `ISSUES.md`
+- phase3 `summary` — switch to the phase3 audit system prompt, consume the inbox, and rewrite `ISSUES.md` so the 10-15 most important issues keep detail and the rest become concise
 
 `oy audit-logic` is a stricter variant for reviewing actual software behaviour:
 
 - phase1 skips docs and lockfiles from the review backlog
 - phase2 builds chunk context from code and behaviour-shaping config, stripping comments and docstrings where possible before sending context to the model
 - limited `search` inside audit review also defaults to excluding docs and lockfiles so the audit budget stays on executable logic, trust boundaries, authz/authn checks, state changes, parsing, persistence, and network behaviour
-- phase3 keeps the final `ISSUES.md` summary focused on behavioural bugs and runtime-impacting configuration
+- phase3 keeps the final `ISSUES.md` summary focused on behavioural bugs and runtime-impacting configuration after deduping the inbox
 
 Normal `oy audit` is still useful when docs, comments, or dependency metadata may matter. `oy audit-logic` is for concentrating hard on control flow and real runtime behaviour.
 
-Each audit mode keeps its own resumable state file in the session dir so long-running audits can resume cleanly without colliding. After each chunk, Python verifies that `ISSUES.md` changed; if not, it retries with a smaller chunk instead of pretending review progress happened.
+Each audit mode keeps its own resumable state file in the session dir so long-running audits can resume cleanly without colliding. After each chunk, Python verifies that `ISSUES.md` changed; if not, it retries with a smaller chunk instead of pretending review progress happened. The per-chunk path is append-only inbox mode, so phase2 avoids repeatedly merging the full report on every chunk.
 
 `.tmp/` is still used for things like `oy renovate-local` reports, but audit progress itself now lives in the session cache.
 

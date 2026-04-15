@@ -1033,15 +1033,17 @@ def noninteractive_system_prompt() -> str:
     return session_text("system", "noninteractive_suffix").strip()
 
 
-def audit_system_prompt(*, logic_only: bool = False) -> str:
+def audit_system_prompt(*, logic_only: bool = False, phase: str | None = None) -> str:
     prompt = session_text("system", "audit").strip()
+    if phase:
+        prompt += "\n" + session_text("system", f"audit_{phase}").strip()
     if logic_only:
         prompt += "\n" + session_text("system", "audit_logic_suffix").strip()
     return prompt.strip()
 
 
-def logic_audit_system_prompt() -> str:
-    return audit_system_prompt(logic_only=True)
+def logic_audit_system_prompt(*, phase: str | None = None) -> str:
+    return audit_system_prompt(logic_only=True, phase=phase)
 
 
 BASE_SYSTEM_PROMPT = base_system_prompt()
@@ -1049,6 +1051,13 @@ INTERACTIVE_SYSTEM_PROMPT = interactive_system_prompt()
 NONINTERACTIVE_SYSTEM_PROMPT = noninteractive_system_prompt()
 AUDIT_SYSTEM_PROMPT = audit_system_prompt()
 LOGIC_AUDIT_SYSTEM_PROMPT = logic_audit_system_prompt()
+AUDIT_PHASE1_SYSTEM_PROMPT = audit_system_prompt(phase="phase1")
+AUDIT_PHASE2_SYSTEM_PROMPT = audit_system_prompt(phase="phase2")
+AUDIT_PHASE3_SYSTEM_PROMPT = audit_system_prompt(phase="phase3")
+LOGIC_AUDIT_PHASE1_SYSTEM_PROMPT = logic_audit_system_prompt(phase="phase1")
+LOGIC_AUDIT_PHASE2_SYSTEM_PROMPT = logic_audit_system_prompt(phase="phase2")
+LOGIC_AUDIT_PHASE3_SYSTEM_PROMPT = logic_audit_system_prompt(phase="phase3")
+
 _ASK_SYSTEM_SUFFIX = "\n" + session_text("system", "ask_suffix").strip() + "\n"
 _READ_ONLY_TOOLS = {"list", "read", "search", "sloc", "webfetch"}
 
@@ -1693,6 +1702,12 @@ _tokenizer: tiktoken.Encoding | None = None
 __all__ = [
     "AUDIT_SYSTEM_PROMPT",
     "LOGIC_AUDIT_SYSTEM_PROMPT",
+    "AUDIT_PHASE1_SYSTEM_PROMPT",
+    "AUDIT_PHASE2_SYSTEM_PROMPT",
+    "AUDIT_PHASE3_SYSTEM_PROMPT",
+    "LOGIC_AUDIT_PHASE1_SYSTEM_PROMPT",
+    "LOGIC_AUDIT_PHASE2_SYSTEM_PROMPT",
+    "LOGIC_AUDIT_PHASE3_SYSTEM_PROMPT",
     "BASE_SYSTEM_PROMPT",
     "BUDGETS",
     "INTERACTIVE_SYSTEM_PROMPT",
