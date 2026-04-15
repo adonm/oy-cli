@@ -22,7 +22,11 @@ class TestSessionText:
         assert rt.active_system_prompt(False).startswith(rt.BASE_SYSTEM_PROMPT)
         assert "Stay no-write: leave files unchanged, skip `bash`, and keep `webfetch` available" in rt.ask_system_prompt("sys")
         audit_prompt = rt.audit_system_prompt()
+        logic_audit_prompt = rt.logic_audit_system_prompt()
         assert ".tmp/renovate-*.json" in audit_prompt
+        assert "LOGIC-FOCUSED audit mode" in logic_audit_prompt
+        assert "phase1 should skip docs and lockfiles from the backlog" in logic_audit_prompt
+        assert "comments and docstrings stripped where possible" in logic_audit_prompt
         assert "session dir" in audit_prompt
         assert "3-phase workflow" in audit_prompt
         assert "phase1 Python planning, phase2 Python-driven review loop, phase3 ISSUES.md condensation" in audit_prompt

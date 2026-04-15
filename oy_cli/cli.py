@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 import hashlib
 import os
+import re
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -13,6 +14,10 @@ from pathlib import Path, PurePosixPath
 
 import defopt
 from prompt_toolkit.history import FileHistory
+from pygments import lex
+from pygments.lexers import get_lexer_for_filename
+from pygments.token import Comment, String
+from pygments.util import ClassNotFound
 
 from . import runtime as rt
 from . import tools as tools_lib
@@ -35,6 +40,7 @@ from .agent import (
 
 from .runtime import (
     AUDIT_SYSTEM_PROMPT,
+    LOGIC_AUDIT_SYSTEM_PROMPT,
     active_system_prompt,
     ask_system_prompt,
     read_only_tool_registry,
@@ -57,7 +63,7 @@ _AUDIT_PHASES = (
     ("phase3", "summary", "Summarise and reorganise ISSUES.md around the most critical, actionable findings, then close the audit."),
 )
 _AUDIT_PHASE_IDS = tuple(phase_id for phase_id, _, _ in _AUDIT_PHASES)
-_AUDIT_STATE_VERSION = 4
+_AUDIT_STATE_VERSION = 5
 _AUDIT_REVIEW_STATUSES = {"reviewed", "done", "flagged", "skipped"}
 _AUDIT_DONE_STATUSES = {"done", "completed"}
 _AUDIT_RETRYABLE_STATUSES = {"in_progress"}
@@ -66,6 +72,91 @@ _AUDIT_SESSION_DIRNAME = "audits"
 _AUDIT_MAX_ITERATIONS = 512
 _AUDIT_MAX_STALLS = 2
 _AUDIT_MAX_AGENT_FAILURES = 2
+_AUDIT_DEFAULT_MODE = "default"
+_AUDIT_LOGIC_MODE = "logic"
+_AUDIT_VALID_MODES = {_AUDIT_DEFAULT_MODE, _AUDIT_LOGIC_MODE}
+_AUDIT_DOC_DIRS = {"doc", "docs", "documentation"}
+_AUDIT_DOC_SUFFIXES = {".adoc", ".asciidoc", ".md", ".mdx", ".org", ".rst"}
+_AUDIT_DOC_NAME_PREFIXES = (
+    "authors",
+    "changelog",
+    "contributing",
+    "history",
+    "license",
+    "licence",
+    "notice",
+    "readme",
+    "release-notes",
+    "releases",
+    "security",
+)
+_AUDIT_LOCKFILE_NAMES = {
+    "bun.lock",
+    "bun.lockb",
+    "cargo.lock",
+    "composer.lock",
+    "flake.lock",
+    "gemfile.lock",
+    "go.sum",
+    "mix.lock",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "package.resolved",
+    "packages.lock.json",
+    "pipfile.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "podfile.lock",
+    "pubspec.lock",
+    "uv.lock",
+    "yarn.lock",
+}
+_AUDIT_LOGIC_SEARCH_EXCLUDES = (
+    "*.adoc",
+    "*.asciidoc",
+    "*.md",
+    "*.mdx",
+    "*.org",
+    "*.rst",
+    "AUTHORS",
+    "CHANGELOG",
+    "CONTRIBUTING",
+    "HISTORY",
+    "LICENSE",
+    "LICENCE",
+    "NOTICE",
+    "README",
+    "RELEASE",
+    "RELEASE-NOTES",
+    "RELEASES",
+    "SECURITY",
+    "doc/**",
+    "docs/**",
+    "documentation/**",
+    "**/doc/**",
+    "**/docs/**",
+    "**/documentation/**",
+    "bun.lock",
+    "bun.lockb",
+    "cargo.lock",
+    "composer.lock",
+    "flake.lock",
+    "gemfile.lock",
+    "go.sum",
+    "mix.lock",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "package.resolved",
+    "packages.lock.json",
+    "pipfile.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "podfile.lock",
+    "pubspec.lock",
+    "uv.lock",
+    "yarn.lock",
+)
+_AUDIT_COMMENT_GAP_RE = re.compile(r"\n{3,}")
 
 
 _SESSIONS_DIR: Path | None = None
@@ -81,6 +172,7 @@ _CHAT_COMMAND_HELP = (
     ("/yolo", "allow all tools for the rest of this session"),
     ("/ask <question>", f"research-only query ({_ASK_RULES})"),
     ("/audit [focus]", "run or resume a security/complexity audit"),
+    ("/audit-logic [focus]", "run or resume a logic-focused audit that ignores docs/comments"),
     ("/save [name]", "save session transcript"),
     ("/load [name]", "load a saved session"),
     ("/undo", "remove the last prompt and its follow-up messages"),
@@ -99,10 +191,11 @@ _CHAT_ACTIONS = {
     "/yolo": "yolo",
     "/ask": "ask",
     "/audit": "audit",
+    "/audit-logic": "audit_logic",
     "/save": "save",
     "/load": "load",
 }
-_CHAT_ACTIONS_WITH_ARGS = {"model", "ask", "audit", "save", "load"}
+_CHAT_ACTIONS_WITH_ARGS = {"model", "ask", "audit", "audit_logic", "save", "load"}
 
 
 def _sessions_dir() -> Path:
@@ -330,12 +423,94 @@ def _audit_workspace_key(workspace: Path) -> str:
     return f"{safe_name}-{digest}"
 
 
-def _audit_session_path(workspace: Path) -> Path:
-    return _audit_sessions_dir() / f"{_audit_workspace_key(workspace)}.toon"
+def _audit_session_path(workspace: Path, *, mode: str = _AUDIT_DEFAULT_MODE) -> Path:
+    suffix = "" if mode == _AUDIT_DEFAULT_MODE else f"-{mode}"
+    return _audit_sessions_dir() / f"{_audit_workspace_key(workspace)}{suffix}.toon"
 
 
 def _audit_empty_phase(phase_id: str, label: str) -> dict[str, object]:
     return {"id": phase_id, "label": label, "status": "pending", "notes": []}
+
+
+def _audit_section(mode: str) -> str:
+    return "audit_logic" if mode == _AUDIT_LOGIC_MODE else "audit"
+
+
+def _audit_command(mode: str, *, chat: bool = False) -> str:
+    if mode == _AUDIT_LOGIC_MODE:
+        return "/audit-logic" if chat else "oy audit-logic"
+    return "/audit" if chat else "oy audit"
+
+
+def _audit_title(mode: str) -> str:
+    return "Audit Logic" if mode == _AUDIT_LOGIC_MODE else "Audit"
+
+
+def _audit_mode_name(mode: str) -> str:
+    return "logic audit" if mode == _AUDIT_LOGIC_MODE else "audit"
+
+
+def _audit_system_prompt_for_mode(mode: str) -> str:
+    return LOGIC_AUDIT_SYSTEM_PROMPT if mode == _AUDIT_LOGIC_MODE else AUDIT_SYSTEM_PROMPT
+
+
+def _audit_is_doc_path(path: str) -> bool:
+    posix = PurePosixPath(path)
+    lowered_parts = [part.lower() for part in posix.parts]
+    if any(part in _AUDIT_DOC_DIRS for part in lowered_parts[:-1]):
+        return True
+    name = posix.name.lower()
+    if posix.suffix.lower() in _AUDIT_DOC_SUFFIXES:
+        return True
+    return posix.suffix == "" and name in _AUDIT_DOC_NAME_PREFIXES
+
+
+def _audit_is_lockfile(path: str) -> bool:
+    return PurePosixPath(path).name.lower() in _AUDIT_LOCKFILE_NAMES
+
+
+def _audit_should_skip_path(path: str, *, mode: str) -> bool:
+    if path.startswith('.tmp/'):
+        return True
+    if mode != _AUDIT_LOGIC_MODE:
+        return False
+    return _audit_is_doc_path(path) or _audit_is_lockfile(path)
+
+
+def _audit_logic_search_exclude(exclude: str | list[str] | None) -> str | list[str] | None:
+    if exclude is None:
+        return list(_AUDIT_LOGIC_SEARCH_EXCLUDES)
+    if isinstance(exclude, str):
+        return [exclude, *_AUDIT_LOGIC_SEARCH_EXCLUDES]
+    return [*exclude, *_AUDIT_LOGIC_SEARCH_EXCLUDES]
+
+
+def _audit_mask_text(text: str) -> str:
+    return "".join("\n" if char == "\n" else " " for char in text)
+
+
+def _audit_strip_comments(path: str, text: str) -> str:
+    try:
+        lexer = get_lexer_for_filename(path, stripnl=False, ensurenl=False)
+    except ClassNotFound:
+        return text
+    parts: list[str] = []
+    for token_type, value in lex(text, lexer):
+        if token_type in Comment or token_type in String.Doc:
+            parts.append(_audit_mask_text(value))
+        else:
+            parts.append(value)
+    cleaned = "".join(parts)
+    cleaned = "\n".join(line.rstrip() for line in cleaned.splitlines())
+    cleaned = _AUDIT_COMMENT_GAP_RE.sub("\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _audit_render_text(path: str, text: str, *, mode: str) -> str:
+    if mode != _AUDIT_LOGIC_MODE:
+        return text
+    stripped = _audit_strip_comments(path, text)
+    return stripped or "<logic-only excerpt empty after stripping comments/docstrings>"
 
 
 def _audit_is_reviewable_file(path: Path) -> bool:
@@ -347,11 +522,11 @@ def _audit_is_reviewable_file(path: Path) -> bool:
     return b"\x00" not in sample
 
 
-def _audit_walk_files(workspace: Path) -> list[str]:
+def _audit_walk_files(workspace: Path, *, mode: str = _AUDIT_DEFAULT_MODE) -> list[str]:
     queue: list[str] = []
     for file_path in _iter_files(workspace, ignore_root=workspace):
         rel = rt._rel(workspace, file_path)
-        if rel.startswith('.tmp/') or not _audit_is_reviewable_file(file_path):
+        if _audit_should_skip_path(rel, mode=mode) or not _audit_is_reviewable_file(file_path):
             continue
         queue.append(rel)
     return queue
@@ -423,9 +598,18 @@ def _audit_file_size(workspace: Path, path: str) -> int:
         return 0
 
 
-def _audit_file_tokens(workspace: Path, path: str) -> int:
+def _audit_file_tokens(workspace: Path, path: str, *, mode: str = _AUDIT_DEFAULT_MODE) -> int:
     try:
+        if mode == _AUDIT_LOGIC_MODE:
+            text = (workspace / path).read_text(encoding="utf-8")
+            return max(rt.count_tokens(_audit_render_text(path, text, mode=mode)), 0)
         return max(rt.count_file_tokens(workspace / path), 0)
+    except UnicodeDecodeError:
+        try:
+            text = (workspace / path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return 0
+        return max(rt.count_tokens(_audit_render_text(path, text, mode=mode)), 0)
     except OSError:
         return 0
 
@@ -439,14 +623,14 @@ def _audit_priority(item: dict[str, object]) -> tuple[int, int, int, str]:
     )
 
 
-def _audit_file_items(workspace: Path, sloc_plan: dict[str, object]) -> list[dict[str, object]]:
+def _audit_file_items(workspace: Path, sloc_plan: dict[str, object], *, mode: str = _AUDIT_DEFAULT_MODE) -> list[dict[str, object]]:
     sloc_by_path = {
         str(item.get("path")): item
         for item in sloc_plan.get("top_files", [])
         if isinstance(item, dict) and isinstance(item.get("path"), str)
     }
     files = []
-    for path in _audit_walk_files(workspace):
+    for path in _audit_walk_files(workspace, mode=mode):
         summary = sloc_by_path.get(path, {})
         line_count = int(summary.get("line_count", 0) or 0)
         files.append(
@@ -456,7 +640,7 @@ def _audit_file_items(workspace: Path, sloc_plan: dict[str, object]) -> list[dic
                 "code_count": int(summary.get("code_count", 0) or 0),
                 "line_count": line_count,
                 "size_bytes": _audit_file_size(workspace, path),
-                "estimated_tokens": max(_audit_file_tokens(workspace, path), line_count, 1),
+                "estimated_tokens": max(_audit_file_tokens(workspace, path, mode=mode), line_count, 1),
             }
         )
     return sorted(files, key=_audit_priority)
@@ -588,11 +772,12 @@ def _audit_split_chunk(chunk: dict[str, object], files_by_path: dict[str, dict[s
     return [item for item in result if item["paths"]]
 
 
-def _audit_default_state(*, focus: str, workspace: Path, sloc_plan: dict[str, object], files: list[dict[str, object]], chunks: list[dict[str, object]]) -> dict[str, object]:
+def _audit_default_state(*, focus: str, workspace: Path, sloc_plan: dict[str, object], files: list[dict[str, object]], chunks: list[dict[str, object]], mode: str = _AUDIT_DEFAULT_MODE) -> dict[str, object]:
     now = datetime.now(UTC).isoformat()
     return {
         "version": _AUDIT_STATE_VERSION,
         "workspace": str(workspace),
+        "mode": mode,
         "focus": focus,
         "status": "in_progress",
         "created_at": now,
@@ -604,7 +789,7 @@ def _audit_default_state(*, focus: str, workspace: Path, sloc_plan: dict[str, ob
         "chunks": chunks,
         "completed_chunks": [],
         "failed_chunks": [],
-        "notes": ["Bootstrapped by `oy audit`."],
+        "notes": [f"Bootstrapped by `{_audit_command(mode)}`."],
         "totals": {
             "queued": len(files),
             "reviewed": 0,
@@ -625,6 +810,8 @@ def _audit_normalize_state(data: dict[str, object], *, workspace: Path | None = 
         state["workspace"] = str(workspace)
     if not isinstance(state.get("workspace"), str) or not state.get("workspace"):
         state["workspace"] = str(workspace or Path.cwd())
+    if not isinstance(state.get("mode"), str) or state.get("mode") not in _AUDIT_VALID_MODES:
+        state["mode"] = _AUDIT_DEFAULT_MODE
     if not isinstance(state.get("focus"), str):
         state["focus"] = ""
     if not isinstance(state.get("status"), str) or not state.get("status"):
@@ -743,23 +930,23 @@ def _audit_state_summary(state: dict[str, object]) -> str:
     )
 
 
-def _audit_pending_state(workspace: Path) -> tuple[Path, dict[str, object]] | None:
-    path = _audit_session_path(workspace)
+def _audit_pending_state(workspace: Path, *, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[Path, dict[str, object]] | None:
+    path = _audit_session_path(workspace, mode=mode)
     state = _audit_load_state(path)
     if state is None or state.get("status") in _AUDIT_DONE_STATUSES:
         return None
     return path, state
 
 
-def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = False) -> dict[str, object]:
-    path = _audit_session_path(workspace)
+def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = False, mode: str = _AUDIT_DEFAULT_MODE) -> dict[str, object]:
+    path = _audit_session_path(workspace, mode=mode)
     if not restart:
         state = _audit_load_state(path)
         if state is not None and state.get("status") not in _AUDIT_DONE_STATUSES:
             return {"session_path": path, "state_data": state, "created": False}
-    file_paths = _audit_walk_files(workspace)
+    file_paths = _audit_walk_files(workspace, mode=mode)
     sloc_plan = _audit_sloc_plan(workspace, file_paths)
-    files = _audit_file_items(workspace, sloc_plan)
+    files = _audit_file_items(workspace, sloc_plan, mode=mode)
     chunks = _audit_plan_chunks(files, target_tokens=rt.audit_settings()["review_chunk_target_tokens"])
     state = _audit_default_state(
         focus=focus,
@@ -767,6 +954,7 @@ def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = F
         sloc_plan=sloc_plan,
         files=files,
         chunks=chunks,
+        mode=mode,
     )
     state["notes"].append(
         f"Planned {len(chunks)} chunk(s) from {len(files)} file(s) at 64k tokens using sloc+tiktoken."
@@ -776,13 +964,13 @@ def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = F
     return {"session_path": path, "state_data": state, "created": True}
 
 
-def _audit_resume_decision(workspace: Path, *, interactive: bool) -> str:
-    pending = _audit_pending_state(workspace)
+def _audit_resume_decision(workspace: Path, *, interactive: bool, mode: str = _AUDIT_DEFAULT_MODE) -> str:
+    pending = _audit_pending_state(workspace, mode=mode)
     if pending is None:
         return "resume"
     path, state = pending
     message = (
-        f"Found unfinished audit for {rt._fmt('inline', workspace)} at {rt._fmt('inline', path)} "
+        f"Found unfinished {_audit_mode_name(mode)} for {rt._fmt('inline', workspace)} at {rt._fmt('inline', path)} "
         f"({_audit_state_summary(state)})."
     )
     if interactive and rt.can_prompt():
@@ -797,28 +985,31 @@ def _audit_resume_decision(workspace: Path, *, interactive: bool) -> str:
     return "resume"
 
 
-def _build_audit_prompt(*, interactive: bool, focus: str, session_path: Path) -> str:
-    prompt = session_text("audit", "repo_user_prompt" if interactive else "default_user_prompt")
-    prompt += session_text("audit", "workflow_suffix", session_path=session_path)
+def _build_audit_prompt(*, interactive: bool, focus: str, session_path: Path, mode: str = _AUDIT_DEFAULT_MODE) -> str:
+    section = _audit_section(mode)
+    prompt = session_text(section, "repo_user_prompt" if interactive else "default_user_prompt")
+    prompt += session_text(section, "workflow_suffix", session_path=session_path)
     prompt += session_text("audit", "reference_suffix")
     if focus:
-        prompt += session_text("audit", "focus_suffix", focus=focus)
+        prompt += session_text(section, "focus_suffix", focus=focus)
     return prompt
 
 
-def _prepare_audit_run(*, session, focus: str, interactive: bool) -> tuple[dict[str, object], str]:
-    decision = _audit_resume_decision(session["workspace"], interactive=interactive)
+def _prepare_audit_run(*, session, focus: str, interactive: bool, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[dict[str, object], str]:
+    decision = _audit_resume_decision(session["workspace"], interactive=interactive, mode=mode)
     if decision == "cancel":
         raise RuntimeError("audit cancelled")
     artifacts = _ensure_audit_session(
         session["workspace"],
         focus=focus,
         restart=(decision == "restart"),
+        mode=mode,
     )
     return artifacts, _build_audit_prompt(
         interactive=interactive,
         focus=focus,
         session_path=artifacts["session_path"],
+        mode=mode,
     )
 
 
@@ -836,19 +1027,19 @@ def _audit_read_issues(workspace: Path) -> str:
         return ""
 
 
-def _audit_file_excerpt(workspace: Path, path: str) -> str:
+def _audit_file_excerpt(workspace: Path, path: str, *, mode: str = _AUDIT_DEFAULT_MODE) -> str:
     try:
         text = (workspace / path).read_text(encoding="utf-8")
     except UnicodeDecodeError:
         text = (workspace / path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return f"## {path}\n<read failed: {exc}>\n"
-    return f"## {path}\n{text}\n"
+    return f"## {path}\n{_audit_render_text(path, text, mode=mode)}\n"
 
 
-def _audit_chunk_text(workspace: Path, chunk: dict[str, object]) -> str:
+def _audit_chunk_text(workspace: Path, chunk: dict[str, object], *, mode: str = _AUDIT_DEFAULT_MODE) -> str:
     return "\n".join(
-        _audit_file_excerpt(workspace, path)
+        _audit_file_excerpt(workspace, path, mode=mode)
         for path in chunk.get("paths", [])
         if isinstance(path, str)
     )
@@ -858,15 +1049,17 @@ def _audit_limited_tool_registry(
     workspace: Path,
     *,
     allow_search: bool,
+    mode: str = _AUDIT_DEFAULT_MODE,
 ) -> dict[str, dict[str, object]]:
     issues_rel = rt._rel(workspace, _audit_issues_path(workspace))
 
     def audit_search(state: object, pattern: str, path: str = ".", exclude: str | list[str] | None = None, limit: int = rt.BUDGETS["default_line_limit"], fuzzy: str | None = None, best_match: bool = False, enhance_match: bool = False):
+        effective_exclude = _audit_logic_search_exclude(exclude) if mode == _AUDIT_LOGIC_MODE else exclude
         return tools_lib.tool_search(
             state,
             pattern=pattern,
             path=path,
-            exclude=exclude,
+            exclude=effective_exclude,
             limit=limit,
             fuzzy=fuzzy,
             best_match=best_match,
@@ -903,7 +1096,7 @@ def _audit_limited_tool_registry(
     return registry
 
 
-def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict[str, object], *, issues_rel: str) -> str:
+def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict[str, object], *, issues_rel: str, mode: str = _AUDIT_DEFAULT_MODE) -> str:
     sloc_plan = state.get("sloc") if isinstance(state.get("sloc"), dict) else {}
     return (
         base_prompt
@@ -927,6 +1120,9 @@ def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict
         + f" Use only `search` and `replace`. `replace` is scoped to `{issues_rel}`."
         + " Update ISSUES.md during this pass with concrete findings, ASVS/grugbrain references, severity, evidence, and remediation."
         + " Do not touch any file except ISSUES.md."
+        + (" Search defaults exclude docs and lockfiles in this mode." if mode == _AUDIT_LOGIC_MODE else "")
+        + " "
+        + session_text(_audit_section(mode), "review_suffix")
         + (
             f" Repo summary: counted_files={sloc_plan.get('counted_files', 0)}, total_code_lines={sloc_plan.get('total_code_count', 0)}."
             if sloc_plan
@@ -935,7 +1131,7 @@ def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict
     )
 
 
-def _audit_summary_prompt(base_prompt: str, state: dict[str, object], *, issues_rel: str) -> str:
+def _audit_summary_prompt(base_prompt: str, state: dict[str, object], *, issues_rel: str, mode: str = _AUDIT_DEFAULT_MODE) -> str:
     return (
         base_prompt
         + session_text(
@@ -951,6 +1147,8 @@ def _audit_summary_prompt(base_prompt: str, state: dict[str, object], *, issues_
         )
         + f" Final pass: rewrite `{issues_rel}` to preserve detail for the 10-15 most important issues and make the rest very concise."
         + " Keep ordering actionable, preserve evidence, and do not touch any other file."
+        + " "
+        + session_text(_audit_section(mode), "summary_suffix")
     )
 
 
@@ -1009,11 +1207,11 @@ def _audit_record_failed_chunk(state: dict[str, object], chunk: dict[str, object
     _audit_refresh_state(state)
 
 
-def _run_audit_chunk(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, chunk: dict[str, object], state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS) -> tuple[int, str]:
+def _run_audit_chunk(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, chunk: dict[str, object], state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[int, str]:
     issues_path = _audit_issues_path(workspace)
     issues_rel = rt._rel(workspace, issues_path)
-    review_prompt = _audit_review_prompt(prompt, state, chunk, issues_rel=issues_rel)
-    chunk_text = _audit_chunk_text(workspace, chunk)
+    review_prompt = _audit_review_prompt(prompt, state, chunk, issues_rel=issues_rel, mode=mode)
+    chunk_text = _audit_chunk_text(workspace, chunk, mode=mode)
     return run_agent(
         review_prompt
         + "\n\nCurrent ISSUES.md:\n\n"
@@ -1027,16 +1225,16 @@ def _run_audit_chunk(*, prompt: str, model: str, workspace: Path, system_prompt:
         interactive=False,
         transcript=_audit_transcript(max_context_tokens=max_context_tokens),
         agent=agent,
-        tool_registry=_audit_limited_tool_registry(workspace, allow_search=True),
+        tool_registry=_audit_limited_tool_registry(workspace, allow_search=True, mode=mode),
         auto_approve_tools={"replace"},
     )
 
 
-def _run_audit_summary(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS) -> tuple[int, str]:
+def _run_audit_summary(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[int, str]:
     issues_path = _audit_issues_path(workspace)
     issues_rel = rt._rel(workspace, issues_path)
     return run_agent(
-        _audit_summary_prompt(prompt, state, issues_rel=issues_rel)
+        _audit_summary_prompt(prompt, state, issues_rel=issues_rel, mode=mode)
         + "\n\nCurrent ISSUES.md:\n\n"
         + _audit_read_issues(workspace),
         model,
@@ -1046,14 +1244,14 @@ def _run_audit_summary(*, prompt: str, model: str, workspace: Path, system_promp
         interactive=False,
         transcript=_audit_transcript(max_context_tokens=max_context_tokens),
         agent=agent,
-        tool_registry=_audit_limited_tool_registry(workspace, allow_search=False),
+        tool_registry=_audit_limited_tool_registry(workspace, allow_search=False, mode=mode),
         auto_approve_tools={"replace"},
     )
 
-def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, transcript: Transcript | None = None, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS) -> int:
+def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, transcript: Transcript | None = None, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE) -> int:
     _ = transcript
     _ = max_context_tokens
-    session_path = _audit_session_path(workspace)
+    session_path = _audit_session_path(workspace, mode=mode)
     state = _audit_load_state(session_path)
     if state is None:
         return rt.fail(f"Audit state missing or invalid: {rt._fmt('inline', session_path)}")
@@ -1086,6 +1284,7 @@ def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prom
                 chunk=current_chunk,
                 state=state,
                 max_context_tokens=max_context_tokens,
+                mode=mode,
             )
             after_text = _audit_read_issues(workspace)
             if code == 0 and after_text != before_text:
@@ -1121,6 +1320,7 @@ def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prom
         agent=agent,
         state=state,
         max_context_tokens=max_context_tokens,
+        mode=mode,
     )
     after_summary = _audit_read_issues(workspace)
     if code != 0:
@@ -1223,20 +1423,16 @@ def _apply_resumed_session(session, loaded, loaded_model, loaded_agent):
     return loaded, loaded_model
 
 
-def audit(focus: str = ""):
-    """Run a one-shot security and complexity audit.
-
-    :param focus: Optional area to focus on, such as auth, tests, or a file path.
-    """
+def _run_audit_entrypoint(*, focus: str, mode: str) -> int:
     session = resolve_session(
         interactive=False,
-        system_prompt=AUDIT_SYSTEM_PROMPT,
+        system_prompt=_audit_system_prompt_for_mode(mode),
         include_system_file=False,
         agent="default",
     )
-    artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=False)
+    artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=False, mode=mode)
     _print_session_intro(
-        "Audit",
+        _audit_title(mode),
         session,
         focus=rt.preview(focus, 100) if focus else None,
         audit_state=artifacts["session_path"],
@@ -1249,7 +1445,24 @@ def audit(focus: str = ""):
         unattended_limit_seconds=rt.unattended_limit_seconds(),
         agent=session["agent"],
         max_context_tokens=int(session.get("max_context_tokens", rt.MAX_CONTEXT_TOKENS) or rt.MAX_CONTEXT_TOKENS),
+        mode=mode,
     )
+
+
+def audit(focus: str = ""):
+    """Run a one-shot security and complexity audit.
+
+    :param focus: Optional area to focus on, such as auth, tests, or a file path.
+    """
+    return _run_audit_entrypoint(focus=focus, mode=_AUDIT_DEFAULT_MODE)
+
+
+def audit_logic(focus: str = ""):
+    """Run a one-shot logic-focused security and complexity audit.
+
+    :param focus: Optional area to focus on, such as auth, tests, or a file path.
+    """
+    return _run_audit_entrypoint(focus=focus, mode=_AUDIT_LOGIC_MODE)
 
 
 def _create_prompt_session():
@@ -1496,34 +1709,39 @@ def _handle_ask(question, current_model, session, transcript):
     )
 
 
-def _handle_audit(focus, current_model, session, transcript=None):
+def _handle_audit(focus, current_model, session, transcript=None, *, mode: str = _AUDIT_DEFAULT_MODE):
     try:
-        _artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=True)
+        _artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=True, mode=mode)
     except RuntimeError as exc:
         if str(exc) == "audit cancelled":
-            rt._note("audit cancelled", tag="note")
+            rt._note(f"{_audit_mode_name(mode)} cancelled", tag="note")
             return
         raise
 
-    rt._note("audit mode", tag="note")
+    rt._note(f"{_audit_mode_name(mode)} mode", tag="note")
 
     def run_audit():
         code = _run_audit_workflow(
             prompt=audit_prompt,
             model=current_model,
             workspace=session["workspace"],
-            system_prompt=AUDIT_SYSTEM_PROMPT,
+            system_prompt=_audit_system_prompt_for_mode(mode),
             unattended_limit_seconds=rt.unattended_limit_seconds(),
             agent=session["agent"],
             max_context_tokens=int(
                 (transcript or {}).get("max_context_tokens", session.get("max_context_tokens", rt.MAX_CONTEXT_TOKENS))
                 or rt.MAX_CONTEXT_TOKENS
             ),
+            mode=mode,
         )
         if code != 0:
-            raise RuntimeError(f"audit failed with exit code {code}")
+            raise RuntimeError(f"{_audit_mode_name(mode)} failed with exit code {code}")
 
-    _run_mode(run_audit, cancel_note="audit cancelled", error_prefix="Audit error")
+    _run_mode(
+        run_audit,
+        cancel_note=f"{_audit_mode_name(mode)} cancelled",
+        error_prefix=f"{_audit_title(mode)} error",
+    )
 
 
 def _handle_save(name, transcript, current_model, current_agent):
@@ -1655,6 +1873,8 @@ def chat(
                     _handle_ask(result[1], current_model, session, transcript)
                 elif result[0] == "audit":
                     _handle_audit(result[1], current_model, session, transcript)
+                elif result[0] == "audit_logic":
+                    _handle_audit(result[1], current_model, session, transcript, mode=_AUDIT_LOGIC_MODE)
                 elif result[0] == "save":
                     _handle_save(result[1], transcript, current_model, session["agent"])
                 elif result[0] == "load":
@@ -1968,7 +2188,7 @@ def main(argv: list[str] | None = None):
     """
     args = list(sys.argv[1:] if argv is None else argv)
 
-    commands = {"run", "chat", "ralph", "model", "audit", "renovate-local", "-h", "--help"}
+    commands = {"run", "chat", "ralph", "model", "audit", "audit-logic", "renovate-local", "-h", "--help"}
     if not args:
         args = ["run"] if not rt.stdin_is_interactive() else ["--help"]
     elif args[0] in {"-v", "--version"}:
@@ -1987,6 +2207,7 @@ def main(argv: list[str] | None = None):
             "ralph": ralph,
             "model": model,
             "audit": audit,
+            "audit-logic": audit_logic,
             "renovate-local": renovate_local,
         },
         argv=args,
@@ -2006,6 +2227,7 @@ def main(argv: list[str] | None = None):
   oy chat --yolo
   oy ralph "fix the flaky test"
   oy audit auth
+  oy audit-logic auth
   oy renovate-local
   oy model gpt-5
   OY_MODEL=local-8080:qwen3.5 oy chat""",
@@ -2033,6 +2255,7 @@ __all__ = [
     "_set_terminal_title",
     "workspace_root",
     "audit",
+    "audit_logic",
     "chat",
     "main",
     "renovate_local",

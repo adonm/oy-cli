@@ -16,6 +16,7 @@ oy chat --agent plan
 oy chat --continue-session
 oy run --resume 20260325
 oy audit "focus on authentication"
+oy audit-logic "focus on authentication logic"
 ```
 
 ## Common tasks
@@ -30,6 +31,7 @@ oy chat --agent accept-edits
 oy chat --continue-session
 oy run --resume 20260325 "finish the refactor"
 oy audit [focus]
+oy audit-logic [focus]
 oy renovate-local
 oy ralph "prompt"
 oy model [filter]
@@ -46,7 +48,16 @@ In chat, `/ask <question>` is research-only: no `bash`, no file changes, but pub
 - phase2 `review` — Python reads each chunk, gives the model only that chunk plus the ASVS/grugbrain context, and exposes only `search` plus `replace` scoped to `ISSUES.md`
 - phase3 `summary` — rewrite `ISSUES.md` so the 10-15 most important issues keep detail and the rest become concise
 
-Audit state is cached in the session dir so long-running audits can resume cleanly. After each chunk, Python verifies that `ISSUES.md` changed; if not, it retries with a smaller chunk instead of pretending review progress happened.
+`oy audit-logic` is a stricter variant for reviewing actual software behaviour:
+
+- phase1 skips docs and lockfiles from the review backlog
+- phase2 builds chunk context from code and behaviour-shaping config, stripping comments and docstrings where possible before sending context to the model
+- limited `search` inside audit review also defaults to excluding docs and lockfiles so the audit budget stays on executable logic, trust boundaries, authz/authn checks, state changes, parsing, persistence, and network behaviour
+- phase3 keeps the final `ISSUES.md` summary focused on behavioural bugs and runtime-impacting configuration
+
+Normal `oy audit` is still useful when docs, comments, or dependency metadata may matter. `oy audit-logic` is for concentrating hard on control flow and real runtime behaviour.
+
+Each audit mode keeps its own resumable state file in the session dir so long-running audits can resume cleanly without colliding. After each chunk, Python verifies that `ISSUES.md` changed; if not, it retries with a smaller chunk instead of pretending review progress happened.
 
 `.tmp/` is still used for things like `oy renovate-local` reports, but audit progress itself now lives in the session cache.
 

@@ -32,7 +32,12 @@ def _stub_session(monkeypatch, tmp_path, *, interactive=False):
     monkeypatch.setattr(
         cli,
         "resolve_session",
-        lambda **_kwargs: _session_state(tmp_path, interactive=interactive),
+        lambda **kwargs: _session_state(
+            tmp_path,
+            interactive=kwargs.get("interactive", interactive),
+            system_prompt=kwargs.get("system_prompt", "sys"),
+            agent=kwargs.get("agent", "default"),
+        ),
     )
 
 
@@ -50,7 +55,7 @@ def _capture_defopt_run(monkeypatch):
 class TestCLI:
     @pytest.mark.parametrize(
         ("argv", "expected"),
-        [(["fix", "tests"], ["run", "fix", "tests"]), (["ralph", "fix", "tests"], ["ralph", "fix", "tests"]), (["renovate-local"], ["renovate-local"]), (["--continue"], ["run", "--continue-session"]), (["-c"], ["run", "--continue-session"]), (["--resume", "abc123"], ["run", "--resume", "abc123"])],
+        [(["fix", "tests"], ["run", "fix", "tests"]), (["ralph", "fix", "tests"], ["ralph", "fix", "tests"]), (["audit-logic", "auth"], ["audit-logic", "auth"]), (["renovate-local"], ["renovate-local"]), (["--continue"], ["run", "--continue-session"]), (["-c"], ["run", "--continue-session"]), (["--resume", "abc123"], ["run", "--resume", "abc123"])],
     )
     def test_main_normalizes_commands(self, monkeypatch, argv, expected):
         seen = _capture_defopt_run(monkeypatch)
@@ -281,6 +286,7 @@ class TestChatCommands:
             is True
         )
         assert "- `/ask <question>` -- research-only query" in printed[-1]
+        assert "- `/audit-logic [focus]` -- run or resume a logic-focused audit that ignores docs/comments" in printed[-1]
         assert "- `/quit` or `/exit` -- end session" in printed[-1]
 
     def test_ask_usage_and_note_are_explicit_about_webfetch(
@@ -347,6 +353,7 @@ class TestChatCommands:
         assert model == "openai:gpt-test"
         assert loaded_agent == "plan"
         assert loaded["messages"] == [SystemMessage("new system"), UserMessage("hello")]
+        assert cli._chat_command("/audit-logic auth", loaded, "new system", model) == ("audit_logic", "auth")
         assert cli._chat_command("/yolo", loaded, "new system", model) == ("yolo",)
         assert cli._session_file("bad name/..") == tmp_path / "bad_name___.json"
         assert cli._chat_command("/clear", loaded, "new system", model) is True
@@ -518,6 +525,38 @@ class TestAuditWorkflow:
 
         assert cli._audit_walk_files(tmp_path) == ["bad.txt", "big.txt", "notes"]
 
+    def test_audit_walk_files_logic_mode_skips_docs_and_lockfiles(self, tmp_path):
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "guide.md").write_text("# guide\n", encoding="utf-8")
+        (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+        (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+
+        assert cli._audit_walk_files(tmp_path, mode=cli._AUDIT_LOGIC_MODE) == ["src/main.py"]
+
+    def test_audit_file_excerpt_logic_mode_strips_comments_and_docstrings(self, tmp_path):
+        path = tmp_path / "main.py"
+        path.write_text(
+            '"""module docs"""\n# comment\ndef run():\n    """fn docs"""\n    value = 1  # inline\n    return value\n',
+            encoding="utf-8",
+        )
+
+        excerpt = cli._audit_file_excerpt(tmp_path, "main.py", mode=cli._AUDIT_LOGIC_MODE)
+
+        assert 'module docs' not in excerpt
+        assert '# comment' not in excerpt
+        assert 'fn docs' not in excerpt
+        assert 'inline' not in excerpt
+        assert 'def run()' in excerpt
+        assert 'return value' in excerpt
+
+    def test_audit_session_path_separates_logic_mode(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+
+        assert cli._audit_session_path(tmp_path) != cli._audit_session_path(tmp_path, mode=cli._AUDIT_LOGIC_MODE)
+        assert cli._audit_session_path(tmp_path, mode=cli._AUDIT_LOGIC_MODE).name.endswith('-logic.toon')
+
     def test_audit_uses_python_workflow(self, tmp_path, monkeypatch):
         _stub_session(monkeypatch, tmp_path)
         monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
@@ -539,6 +578,29 @@ class TestAuditWorkflow:
         assert "64k chunks" in seen["prompt"]
         assert str(artifacts["session_path"]) in seen["prompt"]
         assert seen["workspace"] == tmp_path
+        assert intro["audit_state"] == artifacts["session_path"]
+
+    def test_audit_logic_uses_logic_mode_workflow(self, tmp_path, monkeypatch):
+        _stub_session(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        monkeypatch.setattr(rt, "unattended_limit_seconds", lambda: 60)
+
+        artifacts = {
+            "session_path": tmp_path / ".sessions" / "audits" / "repo-logic.toon",
+            "state_data": {"status": "in_progress"},
+            "created": True,
+        }
+        monkeypatch.setattr(cli, "_prepare_audit_run", lambda **_kwargs: (artifacts, f"logic prompt {artifacts['session_path']} stripped comments"))
+        intro = {}
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *_a, **k: intro.update(k))
+        seen = {}
+        monkeypatch.setattr(cli, "_run_audit_workflow", lambda **kwargs: seen.update(kwargs) or 0)
+
+        assert cli.audit_logic("auth") == 0
+        assert "stripped comments" in seen["prompt"]
+        assert seen["mode"] == cli._AUDIT_LOGIC_MODE
+        assert seen["system_prompt"] == cli.LOGIC_AUDIT_SYSTEM_PROMPT
         assert intro["audit_state"] == artifacts["session_path"]
 
     def test_prepare_audit_run_prompts_to_resume_unfinished_audit(self, tmp_path, monkeypatch):

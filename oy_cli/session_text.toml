@@ -36,6 +36,12 @@ Prioritise critical/high-severity security findings and other issues with a clea
 Each finding should include location, category (security, complexity, or performance), reference, recommendation, status, and severity. Security findings should also note exploitability/attack preconditions when relevant.
 Manage context tightly: record findings, not long evidence dumps; keep paths, impact, exploitability, and remediation concise. Verify links and ids carefully.
 """
+audit_logic_suffix = """
+LOGIC-FOCUSED audit mode. Keep the same 3-phase workflow, but bias hard toward actual runtime behaviour, trust boundaries, state transitions, and security-critical control flow.
+In logic-focused audit mode, phase1 should skip docs and lockfiles from the backlog. Phase2 should build chunk context from code and behaviour-shaping config with comments and docstrings stripped where possible.
+Treat README claims, prose docs, comments, and lockfile churn as low-authority context. Do not spend meaningful audit budget on them unless code evidence already shows they materially affect execution or security posture.
+Prefer findings grounded in executable logic: authn/authz checks, parser behaviour, validation, state mutation, secret handling, persistence, network calls, error paths, privilege boundaries, and configuration that changes runtime behaviour.
+"""
 ask_suffix = """
 RESEARCH-ONLY mode. Use only list, read, search, sloc, and webfetch. Stay no-write: leave files unchanged, skip `bash`, and keep `webfetch` available. Focus on facts only, citing file paths and brief evidence.
 """
@@ -78,6 +84,8 @@ default_user_prompt = "Conduct a resumable 3-phase security and complexity audit
 repo_user_prompt = "Conduct a resumable 3-phase security and complexity audit of this repository: build a Python SLOC+tiktoken chunk plan, review 64k-token chunks, then condense ISSUES.md around the most critical vulnerabilities."
 workflow_suffix = " Audit state is cached at `{session_path}` in the session dir. Phase1 is planned in Python from `sloc` plus `tiktoken`; phase2 reviews one 64k chunk at a time with only `search` and `replace` scoped to `ISSUES.md`; phase3 rewrites `ISSUES.md` to keep the top 10-15 issues detailed and the rest concise."
 iteration_suffix = " Current audit iteration: {iteration}. Active phase: `{phase}`. Queue summary: queued={queued}, pending={pending}, in_progress={in_progress}, reviewed={reviewed}, findings={findings}. In phase2, review only the provided chunk, use only `search` and `replace` on `ISSUES.md`, and make sure the chunk leaves a durable update in `ISSUES.md`. In phase3, rewrite `ISSUES.md` so the most important 10-15 issues keep detail and the rest become concise."
+review_suffix = "Prefer concrete exploit paths, failure modes, or production impact rooted in actual code and behaviour. Use docs or comments only as secondary evidence after code."
+summary_suffix = "Prioritise the most exploitable or operationally dangerous issues first, and keep the rest concise without losing material evidence."
 reference_suffix = """
 
 Use this embedded audit reference summary instead of fetching ASVS, MASVS, or grugbrain during the run. These are condensed heuristics, not the full standards, but they are broad enough to support repo review and report citations.
@@ -193,6 +201,15 @@ Practical audit heuristics combining both lenses:
 - If a report consumer needs follow-up, give them the shortest reference string that is searchable and specific.
 """
 focus_suffix = " Additional focus: {focus}"
+
+
+[audit_logic]
+default_user_prompt = "Conduct a resumable 3-phase logic-focused security and complexity audit: build a Python SLOC+tiktoken chunk plan from code and behaviour-shaping config, review 64k-token chunks with docs, lockfiles, and comments stripped from context where possible, then condense ISSUES.md around the most critical behavioural vulnerabilities."
+repo_user_prompt = "Conduct a resumable 3-phase logic-focused security and complexity audit of this repository: build a Python SLOC+tiktoken chunk plan from code and behaviour-shaping config, review 64k-token chunks with docs, lockfiles, and comments stripped from context where possible, then condense ISSUES.md around the most critical behavioural vulnerabilities."
+workflow_suffix = " Audit state is cached at `{session_path}` in the session dir. Phase1 excludes docs and lockfiles from the backlog; phase2 reviews one 64k logic-focused chunk at a time with comments and docstrings stripped from chunk context where possible and only `search` plus `replace` scoped to `ISSUES.md`; phase3 rewrites `ISSUES.md` to keep the top 10-15 issues detailed and the rest concise."
+review_suffix = "Logic-focused pass: prefer control flow, trust boundaries, authn/authz decisions, validation, parser behaviour, state mutation, persistence, network calls, secret handling, error paths, and config that changes runtime behaviour. Ignore docs, comments, and lockfile churn unless code evidence shows they materially affect execution or security posture."
+summary_suffix = "Keep the summary logic-focused: prioritise concrete behavioural bugs, broken invariants, and behaviour-shaping configuration risks; trim commentary about prose docs or lockfile noise unless it directly changes runtime behaviour."
+focus_suffix = " Additional logic focus: {focus}"
 
 [tools.list]
 description = "List workspace paths with `pathlib.Path.glob()`. Use first for discovery. `path` is a workspace-relative glob and defaults to `\"*\"`. Use `exclude` to hide noise. Returns `items`, `count`, and `truncated`; directories end with `/`."
