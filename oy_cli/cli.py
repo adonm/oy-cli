@@ -859,6 +859,7 @@ def _audit_normalize_state(data: dict[str, object], *, workspace: Path | None = 
         state["workspace"] = str(workspace or Path.cwd())
     if not isinstance(state.get("mode"), str) or state.get("mode") not in _AUDIT_VALID_MODES:
         state["mode"] = _AUDIT_DEFAULT_MODE
+    state["run_config"] = _audit_resolve_run_config(state.get("run_config"), mode=str(state.get("mode") or _AUDIT_DEFAULT_MODE))
     if not isinstance(state.get("focus"), str):
         state["focus"] = ""
     if not isinstance(state.get("status"), str) or not state.get("status"):
@@ -996,33 +997,48 @@ def _audit_run_config(*, model: str | None = None, agent: str = "default", max_c
     }
 
 
-def _audit_transparency_snippet(run_config: dict[str, object]) -> str:
+def _audit_resolve_run_config(run_config: dict[str, object] | None = None, *, fallback: dict[str, object] | None = None, mode: str | None = None) -> dict[str, object]:
+    current = dict(run_config) if isinstance(run_config, dict) else {}
+    fallback_config = dict(fallback) if isinstance(fallback, dict) else {}
+    resolved_mode = str(current.get('mode') or fallback_config.get('mode') or mode or _AUDIT_DEFAULT_MODE)
+    if resolved_mode not in _AUDIT_VALID_MODES:
+        resolved_mode = _AUDIT_DEFAULT_MODE
+    return {
+        "command": str(current.get('command') or fallback_config.get('command') or _audit_command(resolved_mode)),
+        "mode": resolved_mode,
+        "model": str(current.get('model') or fallback_config.get('model') or '').strip(),
+        "agent": str(current.get('agent') or fallback_config.get('agent') or 'default'),
+        "max_context_tokens": int(current.get('max_context_tokens') or fallback_config.get('max_context_tokens') or 0),
+    }
+
+
+def _audit_transparency_snippet(run_config: dict[str, object] | None = None) -> str:
+    resolved = _audit_resolve_run_config(run_config)
     prefix = _audit_schema('transparency_prefix')
-    command = str(run_config.get('command') or _audit_command(str(run_config.get('mode') or _AUDIT_DEFAULT_MODE)))
-    model = str(run_config.get('model') or '').strip()
+    command = str(resolved['command'])
+    model = str(resolved.get('model') or '').strip()
     if model:
         command = f"OY_MODEL={model} {command}"
     return f"> {prefix} `{command}`"
 
 
-def _audit_upsert_transparency(text: str, run_config: dict[str, object]) -> str:
+def _audit_upsert_transparency(text: str, run_config: dict[str, object] | None = None) -> str:
     snippet = _audit_transparency_snippet(run_config)
-    lines = text.splitlines()
-    report_title = _audit_schema('report_title')
-    if not lines:
-        return snippet + "\n"
-    if lines[0].strip() not in {report_title, _audit_schema('legacy_report_title')}:
-        return text
-    body = lines[1:]
-    while body and not body[0].strip():
-        body = body[1:]
-    if body and body[0].startswith(f"> {_audit_schema('transparency_prefix')}"):
-        body = body[1:]
-        while body and not body[0].strip():
-            body = body[1:]
-    rebuilt = [lines[0], "", snippet]
-    if body:
-        rebuilt.extend(["", *body])
+    prefix = f"> {_audit_schema('transparency_prefix')}"
+    lines = [line for line in text.splitlines() if not line.startswith(prefix)]
+    report_titles = {_audit_schema('report_title'), _audit_schema('legacy_report_title')}
+    if not any(line.strip() for line in lines):
+        return f"{_audit_schema('report_title')}\n\n{snippet}\n"
+    insert_at = next((index for index, line in enumerate(lines) if line.strip() in report_titles), None)
+    if insert_at is None:
+        insert_at = next((index for index, line in enumerate(lines) if line.strip()), 0)
+    head = lines[: insert_at + 1]
+    tail = lines[insert_at + 1 :]
+    while tail and not tail[0].strip():
+        tail = tail[1:]
+    rebuilt = [*head, "", snippet]
+    if tail:
+        rebuilt.extend(["", *tail])
     return "\n".join(rebuilt).rstrip() + "\n"
 
 def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = False, mode: str = _AUDIT_DEFAULT_MODE, run_config: dict[str, object] | None = None) -> dict[str, object]:
@@ -1031,6 +1047,11 @@ def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = F
     if not restart:
         state = _audit_load_state(path)
         if state is not None and state.get("status") not in _AUDIT_DONE_STATUSES:
+            state['run_config'] = _audit_resolve_run_config(state.get('run_config'), fallback=run_config, mode=str(state.get('mode') or mode))
+            prepared_issues = _audit_prepare_issues_md(workspace, state)
+            state['totals']['findings'] = int(prepared_issues.get('findings', 0) or 0)
+            _audit_refresh_state(state)
+            _write_audit_state(path, state)
             return {"session_path": path, "state_data": state, "created": False}
     file_paths = _audit_walk_files(workspace, mode=mode)
     sloc_plan = _audit_sloc_plan(workspace, file_paths)
@@ -1244,16 +1265,15 @@ def _audit_normalize_issues_text(text: str) -> str:
 
 def _audit_prepare_issues_md(workspace: Path, state: dict[str, object]) -> dict[str, object]:
     issues_path = _audit_issues_path(workspace)
-    run_config = state.get('run_config') if isinstance(state.get('run_config'), dict) else {}
+    run_config = _audit_resolve_run_config(state.get('run_config'), mode=str(state.get('mode') or _AUDIT_DEFAULT_MODE))
+    state['run_config'] = run_config
     if not issues_path.exists():
         _audit_seed_issues_md(workspace, state)
         text = _audit_read_issues(workspace)
         return {'changed': True, 'findings': _audit_issue_count(text)}
     before = _audit_read_issues(workspace)
     after = _audit_normalize_issues_text(before)
-    final = after or before
-    if run_config:
-        final = _audit_upsert_transparency(final, run_config)
+    final = _audit_upsert_transparency(after or before, run_config)
     changed = final != before
     if changed:
         _audit_write_issues(workspace, final)
@@ -1493,16 +1513,15 @@ def _audit_seed_issues_md(workspace: Path, state: dict[str, object]) -> None:
     issues_path = _audit_issues_path(workspace)
     if issues_path.exists():
         return
+    run_config = _audit_resolve_run_config(state.get('run_config'), mode=str(state.get('mode') or _AUDIT_DEFAULT_MODE))
+    state['run_config'] = run_config
     sloc_plan = state.get("sloc") if isinstance(state.get("sloc"), dict) else {}
     today = datetime.now(UTC).date().isoformat()
     commit_summary = _audit_git_commit_summary(workspace)
     text = (
         f"{_audit_schema('report_title')}\n\n"
-        + (
-            _audit_transparency_snippet(state.get('run_config', {})) + "\n\n"
-            if isinstance(state.get('run_config'), dict) and state.get('run_config')
-            else ""
-        )
+        + _audit_transparency_snippet(run_config)
+        + "\n\n"
         + f"> **Last audit**: {today} · commit `{commit_summary}` · cross-checked against [OWASP ASVS 5.0](https://owasp.org/www-project-application-security-verification-standard/) and [grugbrain.dev](https://grugbrain.dev/)\n\n"
         + f"> **Scope**: {state.get('totals', {}).get('queued', 0)} reviewable files · {sloc_plan.get('total_code_count', 0)} code lines · {sloc_plan.get('counted_files', 0)} counted by sloc\n\n"
         + _audit_inbox_section()
@@ -1584,7 +1603,12 @@ def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prom
     state = _audit_load_state(session_path)
     if state is None:
         return rt.fail(f"Audit state missing or invalid: {rt._fmt('inline', session_path)}")
+    state['run_config'] = _audit_resolve_run_config(state.get('run_config'), mode=str(state.get('mode') or mode))
+    _write_audit_state(session_path, state)
     _audit_seed_issues_md(workspace, state)
+    prepared_issues = _audit_upsert_transparency(_audit_read_issues(workspace), state.get('run_config'))
+    if prepared_issues != _audit_read_issues(workspace):
+        _audit_write_issues(workspace, prepared_issues)
     _audit_ensure_inbox(workspace)
     files_by_path = {str(item['path']): item for item in state.get('files', []) if isinstance(item, dict) and isinstance(item.get('path'), str)}
     rt._note(f"audit plan ready: {_audit_state_summary(state)}", tag="note")
@@ -1654,6 +1678,10 @@ def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prom
         mode=mode,
     )
     after_summary = _audit_read_issues(workspace)
+    final_summary = _audit_upsert_transparency(after_summary, state.get('run_config'))
+    if final_summary != after_summary:
+        _audit_write_issues(workspace, final_summary)
+    after_summary = final_summary
     if code != 0:
         return code
     if before_summary == after_summary:

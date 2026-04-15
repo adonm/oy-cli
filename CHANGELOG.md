@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1] - 2026-04-15
+
+### Fixed
+- Audit reports now always upsert the transparency snippet instead of only when `# Audit Issues` is the first line, so banner/comment preambles no longer suppress it.
+- Resumed audits now backfill missing `run_config` state and reapply the transparency line before review continues.
+- Phase3 audit summary rewrites now reinsert the transparency line if the summary pass removes it.
+
 ## [0.5.0] - 2026-04-15
 
 Major changes since `v0.4.6`.

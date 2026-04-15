@@ -543,6 +543,25 @@ class TestAuditWorkflow:
         assert "> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=copilot:gpt5.4 oy audit`" in issues_text
         assert issues_text.startswith("# Audit Issues\n\n> Generated with [oy-cli]")
 
+    def test_audit_prepare_issues_md_upserts_transparency_without_report_title_on_line_one(self, tmp_path):
+        state = {
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072},
+            "totals": {"queued": 1, "total_code_count": 1, "counted_files": 1},
+            "sloc": {},
+        }
+        (tmp_path / "ISSUES.md").write_text(
+            "<!-- banner -->\n\n"
+            "# Audit Issues\n\n"
+            "> **Last audit**: 2026-01-01 · commit `abc`\n",
+            encoding="utf-8",
+        )
+
+        cli._audit_prepare_issues_md(tmp_path, state)
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+        assert issues_text.startswith("<!-- banner -->\n\n# Audit Issues\n\n> Generated with [oy-cli]")
+        assert issues_text.count("> Generated with [oy-cli]") == 1
+
     def test_audit_plan_chunks_clusters_by_directory_before_splitting(self):
         files = [
             {"path": "api/auth/a.py", "code_count": 50, "estimated_tokens": 20_000},
@@ -779,6 +798,54 @@ class TestAuditWorkflow:
         assert all(tx["max_context_tokens"] == 4321 for tx in seen)
         assert all(tx["max_message_tokens"] == 4321 for tx in seen)
         assert all(tx["messages"] == [] for tx in seen)
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+        assert issues_text.startswith("# Audit Issues\n\n> Generated with [oy-cli]")
+
+    def test_ensure_audit_session_resume_backfills_missing_run_config_and_transparency(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        session_path = cli._audit_session_path(tmp_path)
+        rt._ensure_private_dir(session_path.parent)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "> **Last audit**: 2026-01-01 · commit `abc`\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            "No inbox findings recorded yet.\n",
+            encoding="utf-8",
+        )
+        rt.save_toon(session_path, {
+            "version": cli._AUDIT_STATE_VERSION,
+            "workspace": str(tmp_path),
+            "mode": cli._AUDIT_DEFAULT_MODE,
+            "focus": "",
+            "status": "in_progress",
+            "active_phase": "phase2",
+            "phases": [
+                {"id": "phase1", "status": "done", "label": "plan", "notes": []},
+                {"id": "phase2", "status": "pending", "label": "review", "notes": []},
+                {"id": "phase3", "status": "pending", "label": "summary", "notes": []},
+            ],
+            "sloc": {"counted_files": 1, "total_code_count": 1},
+            "files": [{"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10}],
+            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1}],
+            "completed_chunks": [],
+            "failed_chunks": [],
+            "notes": [],
+            "totals": {"queued": 1, "reviewed": 0, "findings": 0, "counted_files": 1, "total_code_count": 1, "total_line_count": 1, "chunk_count": 1, "completed_chunks": 0},
+        })
+
+        artifacts = cli._ensure_audit_session(
+            tmp_path,
+            run_config={"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072},
+        )
+
+        state = rt.load_toon(session_path, {})
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+        assert artifacts["created"] is False
+        assert state["run_config"]["model"] == "copilot:gpt5.4"
+        assert issues_text.startswith("# Audit Issues\n\n> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=copilot:gpt5.4 oy audit`")
 
     def test_run_audit_workflow_uses_limited_tool_registry(self, tmp_path, monkeypatch):
         monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
