@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
+import tomllib
 
 import pytest
 
@@ -13,21 +15,54 @@ from tests.conftest import patch_runtime
 class TestSessionText:
     def test_guidance_mentions_exclude_and_todo_requirements(self):
         rt.load_session_text.cache_clear()
-        assert "Never guess" in rt.base_system_prompt()
+        assert "Inspect files, code, commands, and repo state first" in rt.base_system_prompt()
         assert "Follow the user's output constraints exactly" in rt.base_system_prompt()
         assert "Use `webfetch` freely" in rt.base_system_prompt()
         assert rt.active_system_prompt(True).startswith(rt.BASE_SYSTEM_PROMPT)
         assert rt.active_system_prompt(False).startswith(rt.BASE_SYSTEM_PROMPT)
-        assert "no-write rather than no-network" in rt.ask_system_prompt("sys")
+        assert "Stay no-write: leave files unchanged, skip `bash`, and keep `webfetch` available" in rt.ask_system_prompt("sys")
         audit_prompt = rt.audit_system_prompt()
-        assert "Renovate lookup report command" in audit_prompt
-        assert "pnpm dlx --allow-build=re2 renovate" in audit_prompt
-        assert "npm exec --yes --package renovate -- renovate" in audit_prompt
-        assert "--dry-run=lookup" in audit_prompt
-        assert "--report-path=renovate-report.json" in audit_prompt
-        assert "throwaway local artifact" in audit_prompt
-        assert "delete it or leave it untracked" in audit_prompt
-        assert "`jq` when available or Python otherwise" in audit_prompt
+        assert ".tmp/renovate-*.json" in audit_prompt
+        assert "session dir" in audit_prompt
+        assert "3-phase workflow" in audit_prompt
+        assert "phase1 Python planning, phase2 Python-driven review loop, phase3 ISSUES.md condensation" in audit_prompt
+        assert "Phase 1 should run in Python with `sloc` plus `tiktoken` counts" in audit_prompt
+        assert "Phase 2 should stay simple: Python reads one planned chunk" in audit_prompt
+        assert "Python must validate that `ISSUES.md` changed" in audit_prompt
+        assert "Phase 3 must rewrite `ISSUES.md`" in audit_prompt
+        assert "oy renovate-local" in audit_prompt
+        assert "Skip cleanly when no report is present" in audit_prompt
+        assert "Use the audit prompt's built-in ASVS, MASVS, and grugbrain summary" in audit_prompt
+        reference = rt.session_text("audit", "reference_suffix")
+        assert "OWASP ASVS quick map for web, API, and backend repos" in reference
+        assert "OWASP MASVS quick map for mobile repos only" in reference
+        assert "Grugbrain context and complexity filter" in reference
+        assert "v5.0.0-<chapter.section.requirement>" in reference
+        assert "`V1` Encoding and Sanitization" in reference
+        assert "`V8` Authorization" in reference
+        assert "`MASVS-STORAGE`" in reference
+        assert "`MASVS-AUTH`" in reference
+        assert "`MASWE`" in reference
+        assert "https://owasp.org/www-project-application-security-verification-standard/" in reference
+        assert "https://mas.owasp.org/MASVS/" in reference
+        assert "https://grugbrain.dev/" in reference
+        assert "How to use this block during audit" in reference
+        assert "OWASP ASVS context" in reference
+        assert "ASVS citation hints by finding type" in reference
+        assert "OWASP MAS ecosystem context for mobile repos" in reference
+        assert "Grugbrain context and complexity filter" in reference
+        assert "Practical audit heuristics combining both lenses" in reference
+        assert "small sharp tools" in reference
+        assert "reproduce bug first" in reference
+        assert "small focused unit tests around invariants" in reference
+        assert "thin layer of high-value end-to-end coverage" in reference
+        assert "authz boundaries" in reference
+        assert "Grugbrain has no formal section IDs" in reference
+        assert "`complexity very bad`" in reference
+        assert "`testing security boundaries`" in reference
+        assert "renovate-report.json" not in audit_prompt
+        assert "pnpm dlx --allow-build=re2 renovate" not in audit_prompt
+        assert "npm exec --yes --package renovate -- renovate" not in audit_prompt
         for name in ("list", "search", "replace", "sloc"):
             assert "exclude" in rt.tool_description(name)
         assert "public web research" in rt.tool_description("webfetch")
@@ -35,6 +70,40 @@ class TestSessionText:
             "Every item must include string `id`, string `task`, and a valid `status`"
             in rt.tool_description("todo")
         )
+
+    def test_audit_settings_use_more_of_large_context_budget(self):
+        tuned = rt.audit_settings(context_tokens=128_000)
+        assert tuned["review_chunk_target_tokens"] == 64_000
+        assert tuned["review_chunk_max_files"] == 64
+
+    def test_audit_settings_scale_with_context_budget(self):
+        small = rt.audit_settings(context_tokens=32_000)
+        large = rt.audit_settings(context_tokens=262_144)
+        assert small["review_chunk_target_tokens"] == 64_000
+        assert large["review_chunk_target_tokens"] == 64_000
+        assert small["review_chunk_max_files"] == 64
+        assert large["review_chunk_max_files"] == 64
+        assert small["report_context_limit"] == 64
+        assert large["report_context_limit"] == 64
+
+    def test_session_context_carries_max_context_tokens(self, tmp_path):
+        session = rt.session_context(
+            workspace=tmp_path,
+            model="openai:gpt-test",
+            interactive=False,
+            system_prompt="sys",
+            max_context_tokens=77777,
+        )
+        assert session["max_context_tokens"] == 77777
+
+
+class TestPackagingMetadata:
+    def test_project_scripts_expose_oy_and_oy_cli(self):
+        data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        assert data["project"]["scripts"] == {
+            "oy": "oy_cli.cli:main",
+            "oy-cli": "oy_cli.cli:main",
+        }
 
 
 class TestModelConfig:
@@ -58,7 +127,22 @@ class TestModelConfig:
         assert rt._model(None) == "copilot:gpt-live"
         assert rt.yolo_enabled() is True
         assert "ask" not in rt.active_tool_registry(False)
+        assert "audit_todo" not in rt.active_tool_registry(False)
         assert set(rt.read_only_tool_registry()) == rt._READ_ONLY_TOOLS
+
+    def test_agent_profiles_map_to_expected_modes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OY_CONFIG", str(tmp_path / "config.json"))
+        assert rt.list_agent_profiles() == [
+            "default",
+            "plan",
+            "accept-edits",
+            "auto-approve",
+        ]
+        assert rt.normalize_agent_profile("accept_edits") == "accept-edits"
+        assert rt.agent_profile("plan")["tool_mode"] == "read_only"
+        assert rt.agent_profile("accept-edits")["auto_approve_edits"] is True
+        assert rt.agent_profile("auto-approve")["yolo"] is True
+        assert set(rt.active_tool_registry(True, agent="plan")) == rt._READ_ONLY_TOOLS
 
     def test_unknown_saved_shim_falls_back_to_picker(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OY_CONFIG", str(tmp_path / "config.json"))
@@ -139,7 +223,8 @@ class TestDisplayHelpers:
                     "text.python: print('ok')",
                     "items[2]{id,task,status}:",
                     '  "1",ship it,done',
-                    "src/demo.py:12:7:print(⟦'ok'⟧)",
+                    "path: src/demo.py",
+                    "match: 12:7:python:print(⟦\'ok\'⟧)",
                     "skip: file.txt — archive",
                     "change: file.txt — 3 replacements",
                     "... [4 more matches omitted]",
@@ -149,8 +234,30 @@ class TestDisplayHelpers:
         assert "path:" in rendered
         assert "line1" in rendered and "line2" in rendered
         assert "text.python:" in rendered and "print('ok')" in rendered
+        assert "src/demo.py" in rendered and "12" in rendered and "7" in rendered
+        assert "match" in rendered and "python" in rendered
         assert "skip" in rendered and "file.txt" in rendered
         assert "change" in rendered and "3" in rendered and "replacement" in rendered
+
+
+    def test_render_preview_text_renders_raw_multiline_read_output_like_bat(self):
+        rendered = rt._render_preview_text(
+            "\n".join(
+                [
+                    "path: dir/demo.py",
+                    "lines: 5-7 of 20",
+                    "text.python: print('a')",
+                    '  print("b")',
+                    "  print(3)",
+                ]
+            )
+        )
+        assert "dir/demo.py" in rendered
+        assert "[demo.py]" in rendered and "[python]" in rendered
+        assert "5-7 of 20" in rendered
+        assert "5 print('a')" in rendered
+        assert '6 print("b")' in rendered
+        assert "7 print(3)" in rendered
 
     def test_show_truncates_preview(self, monkeypatch):
         rendered: list[str] = []

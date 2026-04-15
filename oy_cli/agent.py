@@ -36,6 +36,7 @@ def agent_state(
     interactive: bool = False,
     approve_all_mutating_tools: bool = False,
     yolo: bool = False,
+    auto_approve_tools: set[str] | None = None,
     todos: list[dict[str, str]] | None = None,
 ) -> AgentState:
     return {
@@ -45,6 +46,7 @@ def agent_state(
         "unattended_deadline": unattended_deadline,
         "interactive": interactive,
         "approve_all_mutating_tools": approve_all_mutating_tools,
+        "auto_approve_tools": set(auto_approve_tools or ()),
         "yolo": yolo,
         "todos": list(todos or []),
     }
@@ -57,6 +59,7 @@ def new_agent_state(
     unattended_limit_seconds: int,
     interactive: bool = False,
     yolo: bool = False,
+    auto_approve_tools: set[str] | None = None,
 ) -> AgentState:
     return agent_state(
         root=root,
@@ -66,6 +69,7 @@ def new_agent_state(
         interactive=interactive,
         yolo=yolo,
         approve_all_mutating_tools=yolo,
+        auto_approve_tools=auto_approve_tools,
     )
 
 
@@ -464,17 +468,29 @@ def run_agent(
     interactive,
     yolo: bool = False,
     transcript: Transcript | None = None,
+    agent: str = "default",
+    tool_registry: dict[str, dict[str, Any]] | None = None,
+    auto_approve_tools: set[str] | None = None,
 ):
-    tool_registry = active_tool_registry(interactive)
+    profile = rt.agent_profile(agent)
+    selected_tool_registry = tool_registry or active_tool_registry(
+        interactive, agent=profile["name"]
+    )
     unattended_limit_seconds = _positive_int(
         unattended_limit_seconds, "unattended_limit_seconds"
     )
+    approved_tools: set[str] = set(auto_approve_tools or ())
+    if profile["auto_approve_edits"]:
+        approved_tools.add("replace")
+    if profile["auto_approve_bash"]:
+        approved_tools.add("bash")
     state = new_agent_state(
         root=root,
-        tool_registry=tool_registry,
+        tool_registry=selected_tool_registry,
         unattended_limit_seconds=unattended_limit_seconds,
         interactive=interactive,
-        yolo=yolo,
+        yolo=yolo or bool(profile["yolo"]),
+        auto_approve_tools=approved_tools,
     )
     if transcript is None:
         transcript = transcript_with_system_prompt(system_prompt)
@@ -488,7 +504,7 @@ def run_agent(
             transcript,
             state,
             model,
-            tool_specs(tool_registry),
+            tool_specs(selected_tool_registry),
         )
 
     try:

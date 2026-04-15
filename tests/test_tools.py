@@ -56,6 +56,17 @@ class TestToolApproval:
         assert approved["approve_all_mutating_tools"] is True
         assert calls == ["first", "second"]
 
+        auto = make_state(tmp_path, interactive=True, registry=registry)
+        auto["auto_approve_tools"] = {"mutating"}
+        monkeypatch.setattr(
+            rt,
+            "select",
+            lambda *a, **k: pytest.fail("approval prompt should be skipped"),
+        )
+        auto_result = tools.invoke_tool(registry, auto, "mutating", {"text": "auto"})
+        assert auto_result["ok"] is True
+        assert calls == ["first", "second", "auto"]
+
         invalid = tools.invoke_tool(
             registry, make_state(tmp_path, registry=registry), "mutating", {}
         )
@@ -91,6 +102,8 @@ class TestAskTodoTools:
 
         with pytest.raises(tools.ValidationError):
             tools.tool_todo(state, [{"id": "t2", "task": "bad", "status": "wat"}])
+
+
 
 
 class TestBashTool:
@@ -204,7 +217,9 @@ class TestFileTools:
         )
         nested = tmp_path / "dir"
         nested.mkdir()
-        (nested / "b.py").write_text("print('hello')\n", encoding="utf-8")
+        (nested / "b.py").write_text(
+            "print('hello')\nprint(\"bye\")\n", encoding="utf-8"
+        )
         (tmp_path / "docs").mkdir()
         (tmp_path / "docs" / "banana.txt").write_text(
             "banana hidden\n", encoding="utf-8"
@@ -240,7 +255,17 @@ class TestFileTools:
         python_read = tools.tool_read(state, "dir/b.py", offset=1, limit=1)
         assert python_read["text"] == "print('hello')"
         assert (
-            shown[-1] == "path: dir/b.py\nlines: 1-1 of 1\ntext.python: print('hello')"
+            shown[-1] == "path: dir/b.py\nlines: 1-1 of 2\ntext.python: print('hello')"
+        )
+
+        shown.clear()
+        quoted_multiline = tools.tool_read(state, "dir/b.py", offset=1, limit=2)
+        assert quoted_multiline["text"] == "print('hello')\nprint(\"bye\")"
+        assert shown[-1] == (
+            "path: dir/b.py\n"
+            "lines: 1-2 of 2\n"
+            "text.python: print('hello')\n"
+            '  print("bye")'
         )
 
         shown.clear()
@@ -258,6 +283,8 @@ class TestFileTools:
         found = {match["path"]: match for match in search_payload["matches"]}
         assert {"a.txt", "dir/b.py"} <= set(found)
         assert "ignored.txt" not in found
+        assert shown[-1].startswith("path: a.txt\nmatch: 1:1:text:⟦alpha⟧")
+        assert "path: dir/b.py\nmatch: 1:8:python:print('⟦hello⟧')" in shown[-1]
 
         # Search with exclude
         excluded_payload = tools.tool_search(

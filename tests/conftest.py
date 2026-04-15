@@ -42,6 +42,7 @@ def make_state(
         unattended_deadline=float("inf"),
         interactive=interactive,
         approve_all_mutating_tools=yolo,
+        auto_approve_tools=set(),
         yolo=yolo,
     )
 

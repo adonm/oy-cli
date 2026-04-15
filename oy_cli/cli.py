@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import json
+from datetime import UTC, datetime
+import hashlib
 import os
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import defopt
 from prompt_toolkit.history import FileHistory
 
 from . import runtime as rt
+from . import tools as tools_lib
 from .agent import (
     Transcript,
     add_user,
@@ -29,6 +32,7 @@ from .agent import (
     transcript_with_system_prompt,
     undo_last_turn,
 )
+
 from .runtime import (
     AUDIT_SYSTEM_PROMPT,
     active_system_prompt,
@@ -36,7 +40,32 @@ from .runtime import (
     read_only_tool_registry,
     session_text,
 )
-from .tools import tool_specs
+from .tools import _iter_files, sloc, tool_specs
+
+
+def _audit_transcript(*, max_context_tokens: int) -> Transcript:
+    return transcript(
+        messages=[],
+        max_context_tokens=max_context_tokens,
+        max_message_tokens=max_context_tokens,
+    )
+
+
+_AUDIT_PHASES = (
+    ("phase1", "backlog", "Use the per-file SLOC report to build and refresh the audit backlog."),
+    ("phase2", "review", "Use tiktoken-sized chunks to review backlog files, update progress, and merge findings into ISSUES.md."),
+    ("phase3", "summary", "Summarise and reorganise ISSUES.md around the most critical, actionable findings, then close the audit."),
+)
+_AUDIT_PHASE_IDS = tuple(phase_id for phase_id, _, _ in _AUDIT_PHASES)
+_AUDIT_STATE_VERSION = 4
+_AUDIT_REVIEW_STATUSES = {"reviewed", "done", "flagged", "skipped"}
+_AUDIT_DONE_STATUSES = {"done", "completed"}
+_AUDIT_RETRYABLE_STATUSES = {"in_progress"}
+_AUDIT_BINARY_SAMPLE_BYTES = 8192
+_AUDIT_SESSION_DIRNAME = "audits"
+_AUDIT_MAX_ITERATIONS = 512
+_AUDIT_MAX_STALLS = 2
+_AUDIT_MAX_AGENT_FAILURES = 2
 
 
 _SESSIONS_DIR: Path | None = None
@@ -51,7 +80,7 @@ _CHAT_COMMAND_HELP = (
     ("/debug", "toggle debug logging"),
     ("/yolo", "allow all tools for the rest of this session"),
     ("/ask <question>", f"research-only query ({_ASK_RULES})"),
-    ("/audit [focus]", "run a security/complexity audit"),
+    ("/audit [focus]", "run or resume a security/complexity audit"),
     ("/save [name]", "save session transcript"),
     ("/load [name]", "load a saved session"),
     ("/undo", "remove the last prompt and its follow-up messages"),
@@ -64,17 +93,6 @@ _DEFAULT_RENOVATE_CONFIG = '''{
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests"]
 }
 '''
-_RENOVATE_CONFIG_CANDIDATES = (
-    "renovate.json",
-    "renovate.json5",
-    ".github/renovate.json",
-    ".github/renovate.json5",
-    ".gitlab/renovate.json",
-    ".gitlab/renovate.json5",
-    ".renovaterc",
-    ".renovaterc.json",
-    ".renovaterc.json5",
-)
 _CHAT_ACTIONS = {
     "/model": "model",
     "/debug": "debug",
@@ -97,6 +115,37 @@ def _session_file(name: str) -> Path:
         for char in name
     )
     return _sessions_dir() / f"{safe_name}.json"
+
+
+def _list_saved_sessions() -> list[Path]:
+    sessions_dir = rt._ensure_private_dir(_sessions_dir())
+    return sorted(
+        sessions_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True
+    )
+
+
+def _resolve_saved_session(name: str | None) -> Path | None:
+    sessions = _list_saved_sessions()
+    if not sessions:
+        return None
+    if not name:
+        return sessions[0]
+    target = None
+    if name.isdigit():
+        index = int(name) - 1
+        if 0 <= index < len(sessions):
+            target = sessions[index]
+    if target is None:
+        candidate = _session_file(name)
+        if candidate.exists():
+            target = candidate
+    if target is None:
+        matches = [path for path in sessions if name.lower() in path.stem.lower()]
+        if len(matches) == 1:
+            target = matches[0]
+        elif matches:
+            rt.abort(f"Ambiguous session match for {rt._fmt('inline', name)}.")
+    return target
 
 
 def _apply_session_title(workspace: Path, model_spec: str) -> None:
@@ -165,18 +214,23 @@ def _load_transcript(data: object) -> Transcript:
     )
 
 
-def load_system_prompt(system_file, interactive):
+def load_system_prompt(system_file, interactive, *, agent: str = "default"):
     base = active_system_prompt(interactive)
+    profile = rt.agent_profile(agent)
+    parts = [base]
+    if profile["system_prompt_suffix"]:
+        parts.append(profile["system_prompt_suffix"])
     if system_file is None:
-        return base
+        return "\n\n".join(parts)
     if not system_file.exists():
         rt.abort(f"System file does not exist: {rt._fmt('inline', system_file)}")
     if system_file.is_dir():
         rt.abort(f"System file is a directory: {rt._fmt('inline', system_file)}")
     try:
-        return base + "\n\n" + system_file.read_text(encoding="utf-8")
+        extra = system_file.read_text(encoding="utf-8")
     except OSError as exc:
         rt.abort(f"Could not read system file {rt._fmt('inline', system_file)}: {exc}")
+    return "\n\n".join([*parts, extra])
 
 
 def _set_terminal_title(title: str) -> None:
@@ -185,62 +239,911 @@ def _set_terminal_title(title: str) -> None:
         sys.stderr.flush()
 
 
-def _print_session_intro(heading: str, session, **extras) -> None:
+def _print_session_intro(heading: str, session_info, **extras) -> None:
     lines = [
         f"## {heading}",
         "",
-        f"- workspace: {rt._fmt('inline', session['workspace'])}",
-        f"- model: {rt._fmt('inline', session['model'])}",
-        f"- mode: {rt._fmt('inline', 'interactive' if session['interactive'] else 'non-interactive')}",
+        f"- workspace: {rt._fmt('inline', session_info['workspace'])}",
+        f"- model: {rt._fmt('inline', session_info['model'])}",
+        f"- agent: {rt._fmt('inline', session_info['agent'])}",
+        f"- mode: {rt._fmt('inline', 'interactive' if session_info['interactive'] else 'non-interactive')}",
     ]
-    if session["system_file"] is not None:
-        extras["system file"] = session["system_file"].resolve()
+    if session_info["system_file"] is not None:
+        extras["system file"] = session_info["system_file"].resolve()
     for key, value in extras.items():
         if value is not None:
             lines.append(f"- {key}: {rt._fmt('inline', value)}")
     if rt._debug_log_path:
         lines.append(f"- debug log: {rt._fmt('inline', rt._debug_log_path)}")
     rt._print(value="\n".join(lines), err=True)
-    _apply_session_title(session["workspace"], session["model"])
+    _apply_session_title(session_info["workspace"], session_info["model"])
 
 
-def _package_json_has_renovate_config(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return isinstance(data, dict) and "renovate" in data
-
-
-
-def _existing_renovate_config(workspace: Path) -> Path | None:
-    for relative in _RENOVATE_CONFIG_CANDIDATES:
-        candidate = workspace / relative
-        if candidate.exists():
-            return candidate
-    package_json = workspace / "package.json"
-    if _package_json_has_renovate_config(package_json):
-        return package_json
-    return None
-
-
-
-def _ensure_renovate_config(workspace: Path) -> Path | None:
-    if _existing_renovate_config(workspace) is not None:
-        return None
+def _ensure_renovate_config(workspace: Path) -> Path:
     path = workspace / "renovate.json"
+    if path.exists():
+        if not path.is_file():
+            raise RuntimeError(
+                f"Renovate config path is not a file: {rt._fmt('inline', path)}"
+            )
+        return path
     try:
         path.write_text(_DEFAULT_RENOVATE_CONFIG, encoding="utf-8")
     except OSError as exc:
-        rt._warn(
+        raise RuntimeError(
             f"Could not create default Renovate config {rt._fmt('inline', path)}: {exc}"
-        )
-        return None
+        ) from exc
     rt._note(f"created default Renovate config: {path.name}", tag="note")
     return path
 
+
+
+def _ensure_tmp_dir(workspace: Path) -> Path:
+    path = workspace / ".tmp"
+    if path.exists() and not path.is_dir():
+        raise RuntimeError(f"Temporary path is not a directory: {rt._fmt('inline', path)}")
+    existed = path.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    if not existed:
+        rt._note("created .tmp/", tag="note")
+    return path
+
+
+def _tmp_is_gitignored(lines: list[str]) -> bool:
+    patterns = {line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")}
+    return any(pattern in patterns for pattern in (".tmp", ".tmp/", "/.tmp", "/.tmp/"))
+
+
+def _ensure_tmp_gitignored(workspace: Path) -> None:
+    path = workspace / ".gitignore"
+    if path.exists() and not path.is_file():
+        raise RuntimeError(f"Gitignore path is not a file: {rt._fmt('inline', path)}")
+    try:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not read {rt._fmt('inline', path)}: {exc}"
+        ) from exc
+    if _tmp_is_gitignored(existing.splitlines()):
+        return
+    updated = existing if not existing or existing.endswith("\n") else f"{existing}\n"
+    updated += ".tmp/\n"
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not update {rt._fmt('inline', path)}: {exc}"
+        ) from exc
+    rt._note("updated .gitignore: .tmp/", tag="note")
+
+
+def _audit_sessions_dir() -> Path:
+    return rt._ensure_private_dir(_sessions_dir() / _AUDIT_SESSION_DIRNAME)
+
+
+def _audit_workspace_key(workspace: Path) -> str:
+    digest = hashlib.sha1(str(workspace.resolve()).encode("utf-8")).hexdigest()[:12]
+    safe_name = "".join(
+        char if char.isascii() and (char.isalnum() or char in "_.-") else "_"
+        for char in workspace.name
+    ).strip("._") or "workspace"
+    return f"{safe_name}-{digest}"
+
+
+def _audit_session_path(workspace: Path) -> Path:
+    return _audit_sessions_dir() / f"{_audit_workspace_key(workspace)}.toon"
+
+
+def _audit_empty_phase(phase_id: str, label: str) -> dict[str, object]:
+    return {"id": phase_id, "label": label, "status": "pending", "notes": []}
+
+
+def _audit_is_reviewable_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            sample = handle.read(_AUDIT_BINARY_SAMPLE_BYTES)
+    except OSError:
+        return False
+    return b"\x00" not in sample
+
+
+def _audit_walk_files(workspace: Path) -> list[str]:
+    queue: list[str] = []
+    for file_path in _iter_files(workspace, ignore_root=workspace):
+        rel = rt._rel(workspace, file_path)
+        if rel.startswith('.tmp/') or not _audit_is_reviewable_file(file_path):
+            continue
+        queue.append(rel)
+    return queue
+
+
+def _audit_sloc_plan(workspace: Path, files: list[str]) -> dict[str, object]:
+    if not files:
+        return {
+            "counted_files": 0,
+            "languages": [],
+            "top_files": [],
+            "largest_files": [],
+            "total_code_count": 0,
+            "total_line_count": 0,
+            "total_file_count": 0,
+            "non_countable_files": 0,
+        }
+    report = sloc(workspace, ignore_root=workspace)
+    by_path = {
+        rt._rel(workspace, Path(str(item.get("path", "")))): item
+        for item in report.get("top_files", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    top_files = []
+    for rel in files:
+        summary = by_path.get(rel)
+        if summary is None:
+            continue
+        top_files.append(
+            {
+                "path": rel,
+                "language": summary.get("language", "text"),
+                "code_count": int(summary.get("code_count", 0) or 0),
+                "line_count": int(summary.get("line_count", 0) or 0),
+            }
+        )
+    top_files.sort(
+        key=lambda item: (
+            -int(item["code_count"]),
+            -int(item["line_count"]),
+            str(item["path"]).lower(),
+        )
+    )
+    largest_files = [
+        {
+            "path": item["path"],
+            "language": item["language"],
+            "code_count": item["code_count"],
+            "line_count": item["line_count"],
+        }
+        for item in top_files[:20]
+    ]
+    return {
+        "counted_files": len(top_files),
+        "languages": list(report.get("languages", []))[:10],
+        "top_files": top_files,
+        "largest_files": largest_files,
+        "total_code_count": int(report.get("total_code_count", 0) or 0),
+        "total_line_count": int(report.get("total_line_count", 0) or 0),
+        "total_file_count": int(report.get("total_file_count", 0) or 0),
+        "non_countable_files": max(len(files) - len(top_files), 0),
+    }
+
+
+def _audit_file_size(workspace: Path, path: str) -> int:
+    try:
+        return max((workspace / path).stat().st_size, 0)
+    except OSError:
+        return 0
+
+
+def _audit_file_tokens(workspace: Path, path: str) -> int:
+    try:
+        return max(rt.count_file_tokens(workspace / path), 0)
+    except OSError:
+        return 0
+
+
+def _audit_priority(item: dict[str, object]) -> tuple[int, int, int, str]:
+    return (
+        -int(item.get("code_count", 0) or 0),
+        -int(item.get("estimated_tokens", 0) or 0),
+        -int(item.get("size_bytes", 0) or 0),
+        str(item.get("path", "")).lower(),
+    )
+
+
+def _audit_file_items(workspace: Path, sloc_plan: dict[str, object]) -> list[dict[str, object]]:
+    sloc_by_path = {
+        str(item.get("path")): item
+        for item in sloc_plan.get("top_files", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    files = []
+    for path in _audit_walk_files(workspace):
+        summary = sloc_by_path.get(path, {})
+        line_count = int(summary.get("line_count", 0) or 0)
+        files.append(
+            {
+                "path": path,
+                "language": summary.get("language", "text") if isinstance(summary.get("language"), str) else "text",
+                "code_count": int(summary.get("code_count", 0) or 0),
+                "line_count": line_count,
+                "size_bytes": _audit_file_size(workspace, path),
+                "estimated_tokens": max(_audit_file_tokens(workspace, path), line_count, 1),
+            }
+        )
+    return sorted(files, key=_audit_priority)
+
+
+def _audit_cluster_key(path: str) -> tuple[str, ...]:
+    parent = PurePosixPath(path).parent
+    if str(parent) in {"", "."}:
+        return ()
+    return parent.parts
+
+
+def _audit_cluster_score(files: list[dict[str, object]]) -> tuple[int, int, str]:
+    paths = [str(item.get("path", "")) for item in files]
+    total = sum(max(int(item.get("estimated_tokens", 0) or 0), 1) for item in files)
+    code = sum(int(item.get("code_count", 0) or 0) for item in files)
+    anchor = min(paths) if paths else ""
+    return (-code, -total, anchor)
+
+
+def _audit_chunk_payload(items: list[dict[str, object]], *, chunk_id: int) -> dict[str, object]:
+    return {
+        "id": f"chunk-{chunk_id:03d}",
+        "paths": [str(entry["path"]) for entry in items],
+        "estimated_tokens": sum(max(int(entry.get("estimated_tokens", 0) or 0), 1) for entry in items),
+        "files": len(items),
+    }
+
+
+def _audit_partition_cluster(files: list[dict[str, object]], *, target_tokens: int) -> list[list[dict[str, object]]]:
+    total = sum(max(int(item.get("estimated_tokens", 0) or 0), 1) for item in files)
+    if total <= target_tokens or len(files) <= 1:
+        return [files]
+
+    by_dir: dict[tuple[str, ...], list[dict[str, object]]] = {}
+    for item in files:
+        key = _audit_cluster_key(str(item.get("path", "")))
+        by_dir.setdefault(key, []).append(item)
+
+    if len(by_dir) > 1:
+        groups = [by_dir[key] for key in sorted(by_dir, key=lambda key: (len(key), key))]
+        return _audit_pack_groups(groups, target_tokens=target_tokens)
+
+    midpoint = max(len(files) // 2, 1)
+    return [
+        *(_audit_partition_cluster(files[:midpoint], target_tokens=target_tokens) if files[:midpoint] else []),
+        *(_audit_partition_cluster(files[midpoint:], target_tokens=target_tokens) if files[midpoint:] else []),
+    ]
+
+
+def _audit_pack_groups(groups: list[list[dict[str, object]]], *, target_tokens: int) -> list[list[dict[str, object]]]:
+    planned: list[list[dict[str, object]]] = []
+    current: list[dict[str, object]] = []
+    current_total = 0
+    for group in sorted(groups, key=_audit_cluster_score):
+        group_total = sum(max(int(item.get("estimated_tokens", 0) or 0), 1) for item in group)
+        if group_total > target_tokens:
+            if current:
+                planned.append(current)
+                current = []
+                current_total = 0
+            planned.extend(_audit_partition_cluster(group, target_tokens=target_tokens))
+            continue
+        if current and current_total + group_total > target_tokens:
+            planned.append(current)
+            current = []
+            current_total = 0
+        current.extend(group)
+        current_total += group_total
+    if current:
+        planned.append(current)
+    return planned
+
+
+def _audit_plan_chunks(files: list[dict[str, object]], *, target_tokens: int = 64_000) -> list[dict[str, object]]:
+    groups: dict[tuple[str, ...], list[dict[str, object]]] = {}
+    for item in files:
+        groups.setdefault(_audit_cluster_key(str(item.get("path", ""))), []).append(item)
+    packed = _audit_pack_groups(list(groups.values()), target_tokens=target_tokens)
+    return [
+        _audit_chunk_payload(group, chunk_id=index)
+        for index, group in enumerate(packed, start=1)
+        if group
+    ]
+
+
+def _audit_normalize_chunk(chunk: dict[str, object], files_by_path: dict[str, dict[str, object]], *, target_tokens: int = 64_000) -> dict[str, object]:
+    paths = [
+        path for path in chunk.get("paths", [])
+        if isinstance(path, str) and path in files_by_path
+    ]
+    total = 0
+    trimmed: list[str] = []
+    for path in paths:
+        estimate = max(int(files_by_path[path].get("estimated_tokens", 0) or 0), 1)
+        if trimmed and total + estimate > target_tokens:
+            break
+        trimmed.append(path)
+        total += estimate
+    if not trimmed and paths:
+        trimmed = [paths[0]]
+        total = max(int(files_by_path[paths[0]].get("estimated_tokens", 0) or 0), 1)
+    return {
+        "id": str(chunk.get("id", "chunk")),
+        "paths": trimmed,
+        "estimated_tokens": total,
+        "files": len(trimmed),
+    }
+
+
+def _audit_split_chunk(chunk: dict[str, object], files_by_path: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+    paths = [path for path in chunk.get("paths", []) if isinstance(path, str) and path in files_by_path]
+    if len(paths) <= 1:
+        return []
+    midpoint = max(len(paths) // 2, 1)
+    result = []
+    for index, group in enumerate((paths[:midpoint], paths[midpoint:]), start=1):
+        if not group:
+            continue
+        result.append(
+            _audit_normalize_chunk(
+                {
+                    "id": f"{chunk['id']}.{index}",
+                    "paths": group,
+                },
+                files_by_path,
+            )
+        )
+    return [item for item in result if item["paths"]]
+
+
+def _audit_default_state(*, focus: str, workspace: Path, sloc_plan: dict[str, object], files: list[dict[str, object]], chunks: list[dict[str, object]]) -> dict[str, object]:
+    now = datetime.now(UTC).isoformat()
+    return {
+        "version": _AUDIT_STATE_VERSION,
+        "workspace": str(workspace),
+        "focus": focus,
+        "status": "in_progress",
+        "created_at": now,
+        "updated_at": now,
+        "active_phase": "phase1",
+        "phases": [_audit_empty_phase(phase_id, label) for phase_id, label, _ in _AUDIT_PHASES],
+        "sloc": sloc_plan,
+        "files": files,
+        "chunks": chunks,
+        "completed_chunks": [],
+        "failed_chunks": [],
+        "notes": ["Bootstrapped by `oy audit`."],
+        "totals": {
+            "queued": len(files),
+            "reviewed": 0,
+            "findings": 0,
+            "counted_files": sum(int(item.get("code_count", 0) or 0) > 0 for item in files),
+            "total_code_count": sum(int(item.get("code_count", 0) or 0) for item in files),
+            "total_line_count": sum(int(item.get("line_count", 0) or 0) for item in files),
+            "chunk_count": len(chunks),
+            "completed_chunks": 0,
+        },
+    }
+
+
+def _audit_normalize_state(data: dict[str, object], *, workspace: Path | None = None) -> dict[str, object]:
+    state = dict(data)
+    state["version"] = _AUDIT_STATE_VERSION
+    if workspace is not None:
+        state["workspace"] = str(workspace)
+    if not isinstance(state.get("workspace"), str) or not state.get("workspace"):
+        state["workspace"] = str(workspace or Path.cwd())
+    if not isinstance(state.get("focus"), str):
+        state["focus"] = ""
+    if not isinstance(state.get("status"), str) or not state.get("status"):
+        state["status"] = "in_progress"
+    state["notes"] = [note for note in state.get("notes", []) if isinstance(note, str) and note.strip()] if isinstance(state.get("notes"), list) else []
+    state["completed_chunks"] = [item for item in state.get("completed_chunks", []) if isinstance(item, str) and item]
+    state["failed_chunks"] = [item for item in state.get("failed_chunks", []) if isinstance(item, dict)] if isinstance(state.get("failed_chunks"), list) else []
+    files = []
+    for item in state.get("files", []):
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            continue
+        files.append(
+            {
+                "path": item["path"],
+                "language": item.get("language", "text") if isinstance(item.get("language"), str) else "text",
+                "code_count": int(item.get("code_count", 0) or 0),
+                "line_count": int(item.get("line_count", 0) or 0),
+                "size_bytes": int(item.get("size_bytes", 0) or 0),
+                "estimated_tokens": int(item.get("estimated_tokens", 0) or 0),
+            }
+        )
+    state["files"] = sorted(files, key=_audit_priority)
+    valid_paths = {str(item["path"]) for item in state["files"]}
+    chunks = []
+    for item in state.get("chunks", []):
+        if not isinstance(item, dict):
+            continue
+        paths = [path for path in item.get("paths", []) if isinstance(path, str) and path in valid_paths]
+        if not paths:
+            continue
+        chunks.append(
+            {
+                "id": str(item.get("id", f"chunk-{len(chunks) + 1:03d}")),
+                "paths": paths,
+                "estimated_tokens": int(item.get("estimated_tokens", 0) or 0),
+                "files": len(paths),
+            }
+        )
+    state["chunks"] = chunks
+    phases = {
+        phase_id: _audit_empty_phase(phase_id, label)
+        for phase_id, label, _ in _AUDIT_PHASES
+    }
+    for phase in state.get("phases", []):
+        if isinstance(phase, dict) and phase.get("id") in phases:
+            current = phases[str(phase["id"])]
+            if isinstance(phase.get("status"), str) and phase.get("status"):
+                current["status"] = str(phase["status"])
+            if isinstance(phase.get("notes"), list):
+                current["notes"] = [note for note in phase["notes"] if isinstance(note, str) and note.strip()]
+    state["phases"] = [phases[phase_id] for phase_id, _, _ in _AUDIT_PHASES]
+    return _audit_refresh_state(state)
+
+
+def _audit_load_state(path: Path) -> dict[str, object] | None:
+    data = rt.load_toon(path, None)
+    if not isinstance(data, dict):
+        return None
+    return _audit_normalize_state(data)
+
+
+def _write_audit_state(path: Path, state: dict[str, object]) -> None:
+    state["updated_at"] = datetime.now(UTC).isoformat()
+    if not rt.save_toon(path, state):
+        raise RuntimeError(f"Could not write audit state {rt._fmt('inline', path)}")
+
+
+def _audit_refresh_state(state: dict[str, object], *, focus: str = "") -> dict[str, object]:
+    if focus:
+        state["focus"] = focus
+    files = [item for item in state.get("files", []) if isinstance(item, dict)]
+    chunks = [item for item in state.get("chunks", []) if isinstance(item, dict)]
+    completed = {item for item in state.get("completed_chunks", []) if isinstance(item, str)}
+    totals = state.get("totals") if isinstance(state.get("totals"), dict) else {}
+    state["totals"] = {
+        "queued": len(files),
+        "reviewed": len({path for chunk in chunks if str(chunk.get("id")) in completed for path in chunk.get("paths", []) if isinstance(path, str)}),
+        "findings": int(totals.get("findings", 0) or 0),
+        "counted_files": sum(int(item.get("code_count", 0) or 0) > 0 for item in files),
+        "total_code_count": sum(int(item.get("code_count", 0) or 0) for item in files),
+        "total_line_count": sum(int(item.get("line_count", 0) or 0) for item in files),
+        "chunk_count": len(chunks),
+        "completed_chunks": len(completed),
+    }
+    phase_map = {phase['id']: phase for phase in state.get('phases', []) if isinstance(phase, dict) and isinstance(phase.get('id'), str)}
+    for phase_id, label, _ in _AUDIT_PHASES:
+        phase_map.setdefault(phase_id, _audit_empty_phase(phase_id, label))['label'] = label
+    phase_map['phase1']['status'] = 'done'
+    if state.get('status') in _AUDIT_DONE_STATUSES:
+        phase_map['phase2']['status'] = 'done'
+        phase_map['phase3']['status'] = 'done'
+        state['active_phase'] = 'phase3'
+    elif len(completed) < len(chunks):
+        phase_map['phase2']['status'] = 'in_progress' if completed else 'pending'
+        phase_map['phase3']['status'] = 'pending'
+        state['active_phase'] = 'phase2'
+    else:
+        phase_map['phase2']['status'] = 'done'
+        phase_map['phase3']['status'] = 'in_progress'
+        state['active_phase'] = 'phase3'
+    state['phases'] = [phase_map[phase_id] for phase_id, _, _ in _AUDIT_PHASES]
+    return state
+
+
+def _audit_state_summary(state: dict[str, object]) -> str:
+    totals = state.get("totals") if isinstance(state.get("totals"), dict) else {}
+    queued = int(totals.get("queued", 0) or 0)
+    reviewed = int(totals.get("reviewed", 0) or 0)
+    chunks = int(totals.get("chunk_count", 0) or 0)
+    completed = int(totals.get("completed_chunks", 0) or 0)
+    percent = 100.0 if queued == 0 else min((reviewed / queued) * 100.0, 100.0)
+    return (
+        f"phase={state.get('active_phase', 'unknown')} "
+        f"progress={reviewed}/{queued} ({percent:.1f}%) "
+        f"chunks={completed}/{chunks} findings={totals.get('findings', 0)}"
+    )
+
+
+def _audit_pending_state(workspace: Path) -> tuple[Path, dict[str, object]] | None:
+    path = _audit_session_path(workspace)
+    state = _audit_load_state(path)
+    if state is None or state.get("status") in _AUDIT_DONE_STATUSES:
+        return None
+    return path, state
+
+
+def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = False) -> dict[str, object]:
+    path = _audit_session_path(workspace)
+    if not restart:
+        state = _audit_load_state(path)
+        if state is not None and state.get("status") not in _AUDIT_DONE_STATUSES:
+            return {"session_path": path, "state_data": state, "created": False}
+    files = _audit_file_items(workspace, _audit_sloc_plan(workspace, _audit_walk_files(workspace)))
+    sloc_plan = _audit_sloc_plan(workspace, [str(item["path"]) for item in files])
+    chunks = _audit_plan_chunks(files, target_tokens=rt.audit_settings()["review_chunk_target_tokens"])
+    state = _audit_default_state(
+        focus=focus,
+        workspace=workspace,
+        sloc_plan=sloc_plan,
+        files=files,
+        chunks=chunks,
+    )
+    state["notes"].append(
+        f"Planned {len(chunks)} chunk(s) from {len(files)} file(s) at 64k tokens using sloc+tiktoken."
+    )
+    _audit_refresh_state(state, focus=focus)
+    _write_audit_state(path, state)
+    return {"session_path": path, "state_data": state, "created": True}
+
+
+def _audit_resume_decision(workspace: Path, *, interactive: bool) -> str:
+    pending = _audit_pending_state(workspace)
+    if pending is None:
+        return "resume"
+    path, state = pending
+    message = (
+        f"Found unfinished audit for {rt._fmt('inline', workspace)} at {rt._fmt('inline', path)} "
+        f"({_audit_state_summary(state)})."
+    )
+    if interactive and rt.can_prompt():
+        return rt.select(
+            message + " Resume it?",
+            ["resume", "restart", "cancel"],
+            console=rt.STDERR,
+            default="resume",
+            option_text=lambda option, index: f"{index}. {rt._fmt('inline', option)}",
+        ).strip()
+    rt._note(message + " Resuming.", tag="note")
+    return "resume"
+
+
+def _build_audit_prompt(*, interactive: bool, focus: str, session_path: Path) -> str:
+    prompt = session_text("audit", "repo_user_prompt" if interactive else "default_user_prompt")
+    prompt += session_text("audit", "workflow_suffix", session_path=session_path)
+    prompt += session_text("audit", "reference_suffix")
+    if focus:
+        prompt += session_text("audit", "focus_suffix", focus=focus)
+    return prompt
+
+
+def _prepare_audit_run(*, session, focus: str, interactive: bool) -> tuple[dict[str, object], str]:
+    decision = _audit_resume_decision(session["workspace"], interactive=interactive)
+    if decision == "cancel":
+        raise RuntimeError("audit cancelled")
+    artifacts = _ensure_audit_session(
+        session["workspace"],
+        focus=focus,
+        restart=(decision == "restart"),
+    )
+    return artifacts, _build_audit_prompt(
+        interactive=interactive,
+        focus=focus,
+        session_path=artifacts["session_path"],
+    )
+
+
+def _audit_issues_path(workspace: Path) -> Path:
+    return workspace / "ISSUES.md"
+
+
+def _audit_read_issues(workspace: Path) -> str:
+    issues_path = _audit_issues_path(workspace)
+    if not issues_path.exists():
+        return ""
+    try:
+        return issues_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _audit_file_excerpt(workspace: Path, path: str) -> str:
+    try:
+        text = (workspace / path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = (workspace / path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"## {path}\n<read failed: {exc}>\n"
+    return f"## {path}\n{text}\n"
+
+
+def _audit_chunk_text(workspace: Path, chunk: dict[str, object]) -> str:
+    return "\n".join(
+        _audit_file_excerpt(workspace, path)
+        for path in chunk.get("paths", [])
+        if isinstance(path, str)
+    )
+
+
+def _audit_limited_tool_registry(
+    workspace: Path,
+    *,
+    allow_search: bool,
+) -> dict[str, dict[str, object]]:
+    issues_rel = rt._rel(workspace, _audit_issues_path(workspace))
+
+    def audit_search(state: object, pattern: str, path: str = ".", exclude: str | list[str] | None = None, limit: int = rt.BUDGETS["default_line_limit"], fuzzy: str | None = None, best_match: bool = False, enhance_match: bool = False):
+        return tools_lib.tool_search(
+            state,
+            pattern=pattern,
+            path=path,
+            exclude=exclude,
+            limit=limit,
+            fuzzy=fuzzy,
+            best_match=best_match,
+            enhance_match=enhance_match,
+        )
+
+    def issues_replace(state: object, pattern: str, replacement: str):
+        return tools_lib.tool_replace(
+            state,
+            pattern=pattern,
+            replacement=replacement,
+            path=issues_rel,
+            exclude=None,
+            limit=rt.BUDGETS["default_line_limit"],
+        )
+
+    registry = {
+        "replace": {
+            "name": "replace",
+            "fn": issues_replace,
+            "description": f"Replace text only inside `{issues_rel}`.",
+            "parameters": tools_lib.signature_schema(issues_replace, skip={"state"}),
+            "mutating": True,
+        },
+    }
+    if allow_search:
+        registry["search"] = {
+            "name": "search",
+            "fn": audit_search,
+            "description": tools_lib.TOOL_REGISTRY["search"]["description"],
+            "parameters": tools_lib.TOOL_REGISTRY["search"]["parameters"],
+            "mutating": False,
+        }
+    return registry
+
+
+def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict[str, object], *, issues_rel: str) -> str:
+    sloc_plan = state.get("sloc") if isinstance(state.get("sloc"), dict) else {}
+    return (
+        base_prompt
+        + session_text(
+            "audit",
+            "iteration_suffix",
+            iteration=len(state.get("completed_chunks", [])) + 1,
+            phase="phase2",
+            queued=state.get("totals", {}).get("queued", 0),
+            pending=max(
+                int(state.get("totals", {}).get("queued", 0) or 0)
+                - int(state.get("totals", {}).get("reviewed", 0) or 0),
+                0,
+            ),
+            in_progress=0,
+            reviewed=state.get("totals", {}).get("reviewed", 0),
+            findings=state.get("totals", {}).get("findings", 0),
+        )
+        + f" Review only this chunk: {', '.join(chunk['paths'])}."
+        + f" Chunk budget is {chunk['estimated_tokens']} estimated tokens; planned target is 64000."
+        + f" Use only `search` and `replace`. `replace` is scoped to `{issues_rel}`."
+        + " Update ISSUES.md during this pass with concrete findings, ASVS/grugbrain references, severity, evidence, and remediation."
+        + " Do not touch any file except ISSUES.md."
+        + (
+            f" Repo summary: counted_files={sloc_plan.get('counted_files', 0)}, total_code_lines={sloc_plan.get('total_code_count', 0)}."
+            if sloc_plan
+            else ""
+        )
+    )
+
+
+def _audit_summary_prompt(base_prompt: str, state: dict[str, object], *, issues_rel: str) -> str:
+    return (
+        base_prompt
+        + session_text(
+            "audit",
+            "iteration_suffix",
+            iteration=max(len(state.get("completed_chunks", [])), 1),
+            phase="phase3",
+            queued=state.get("totals", {}).get("queued", 0),
+            pending=0,
+            in_progress=0,
+            reviewed=state.get("totals", {}).get("reviewed", 0),
+            findings=state.get("totals", {}).get("findings", 0),
+        )
+        + f" Final pass: rewrite `{issues_rel}` to preserve detail for the 10-15 most important issues and make the rest very concise."
+        + " Keep ordering actionable, preserve evidence, and do not touch any other file."
+    )
+
+
+def _audit_issue_count(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.startswith('## '))
+
+
+def _audit_git_commit_summary(workspace: Path) -> str:
+    try:
+        result = rt.run_cmd(
+            ["git", "-C", str(workspace), "log", "-1", "--pretty=format:%h%x09%s"],
+            timeout=10,
+        )
+    except Exception:
+        return "unknown"
+    if result.returncode != 0 or not result.stdout.strip():
+        return "unknown"
+    short, _, subject = result.stdout.partition("	")
+    return f"{short.strip()} ({subject.strip()})" if subject.strip() else short.strip()
+
+
+def _audit_seed_issues_md(workspace: Path, state: dict[str, object]) -> None:
+    issues_path = _audit_issues_path(workspace)
+    if issues_path.exists():
+        return
+    sloc_plan = state.get("sloc") if isinstance(state.get("sloc"), dict) else {}
+    today = datetime.now(UTC).date().isoformat()
+    commit_summary = _audit_git_commit_summary(workspace)
+    text = (
+        "# Audit Issues\n\n"
+        f"> **Last audit**: {today} · commit `{commit_summary}` · cross-checked against [OWASP ASVS 5.0](https://owasp.org/www-project-application-security-verification-standard/) and [grugbrain.dev](https://grugbrain.dev/)\n\n"
+        f"> **Scope**: {state.get('totals', {}).get('queued', 0)} reviewable files · {sloc_plan.get('total_code_count', 0)} code lines · {sloc_plan.get('counted_files', 0)} counted by sloc\n\n"
+        "## Findings\n\n"
+        "No findings recorded yet.\n"
+    )
+    issues_path.write_text(text, encoding="utf-8")
+
+def _audit_mark_chunk_complete(state: dict[str, object], chunk_id: str, before_text: str, after_text: str) -> None:
+    completed = [item for item in state.get("completed_chunks", []) if isinstance(item, str)]
+    if chunk_id not in completed:
+        completed.append(chunk_id)
+    state["completed_chunks"] = completed
+    state["totals"]["findings"] = max(_audit_issue_count(after_text) - 1, 0)
+    state["notes"] = [
+        *state.get("notes", [])[-9:],
+        f"Completed {chunk_id}: ISSUES.md changed by {len(after_text) - len(before_text)} chars.",
+    ]
+    _audit_refresh_state(state)
+
+
+def _audit_record_failed_chunk(state: dict[str, object], chunk: dict[str, object], reason: str) -> None:
+    failed = [item for item in state.get("failed_chunks", []) if isinstance(item, dict)]
+    failed.append({"id": chunk["id"], "paths": list(chunk["paths"]), "reason": reason})
+    state["failed_chunks"] = failed[-20:]
+    state["notes"] = [*state.get("notes", [])[-9:], f"Failed {chunk['id']}: {reason}"]
+    _audit_refresh_state(state)
+
+
+def _run_audit_chunk(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, chunk: dict[str, object], state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS) -> tuple[int, str]:
+    issues_path = _audit_issues_path(workspace)
+    issues_rel = rt._rel(workspace, issues_path)
+    review_prompt = _audit_review_prompt(prompt, state, chunk, issues_rel=issues_rel)
+    chunk_text = _audit_chunk_text(workspace, chunk)
+    return run_agent(
+        review_prompt
+        + "\n\nCurrent ISSUES.md:\n\n"
+        + _audit_read_issues(workspace)
+        + "\n\nChunk contents:\n\n"
+        + chunk_text,
+        model,
+        workspace,
+        system_prompt,
+        unattended_limit_seconds,
+        interactive=False,
+        transcript=_audit_transcript(max_context_tokens=max_context_tokens),
+        agent=agent,
+        tool_registry=_audit_limited_tool_registry(workspace, allow_search=True),
+        auto_approve_tools={"replace"},
+    )
+
+
+def _run_audit_summary(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS) -> tuple[int, str]:
+    issues_path = _audit_issues_path(workspace)
+    issues_rel = rt._rel(workspace, issues_path)
+    return run_agent(
+        _audit_summary_prompt(prompt, state, issues_rel=issues_rel)
+        + "\n\nCurrent ISSUES.md:\n\n"
+        + _audit_read_issues(workspace),
+        model,
+        workspace,
+        system_prompt,
+        unattended_limit_seconds,
+        interactive=False,
+        transcript=_audit_transcript(max_context_tokens=max_context_tokens),
+        agent=agent,
+        tool_registry=_audit_limited_tool_registry(workspace, allow_search=False),
+        auto_approve_tools={"replace"},
+    )
+
+def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, transcript: Transcript | None = None, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS) -> int:
+    _ = transcript
+    _ = max_context_tokens
+    session_path = _audit_session_path(workspace)
+    state = _audit_load_state(session_path)
+    if state is None:
+        return rt.fail(f"Audit state missing or invalid: {rt._fmt('inline', session_path)}")
+    _audit_seed_issues_md(workspace, state)
+    files_by_path = {str(item['path']): item for item in state.get('files', []) if isinstance(item, dict) and isinstance(item.get('path'), str)}
+    rt._note(f"audit plan ready: {_audit_state_summary(state)}", tag="note")
+    queue = [chunk for chunk in state.get('chunks', []) if isinstance(chunk, dict)]
+    while queue:
+        chunk = queue.pop(0)
+        chunk = _audit_normalize_chunk(chunk, files_by_path)
+        if not chunk['paths'] or chunk['id'] in set(state.get('completed_chunks', [])):
+            continue
+        attempt = 0
+        current_chunk = chunk
+        completed = False
+        while attempt < _AUDIT_MAX_AGENT_FAILURES + 2:
+            attempt += 1
+            before_text = _audit_read_issues(workspace)
+            rt._note(
+                f"audit chunk {current_chunk['id']} attempt {attempt}: {len(current_chunk['paths'])} file(s), ~{current_chunk['estimated_tokens']} tokens",
+                tag='note',
+            )
+            code, _ = _run_audit_chunk(
+                prompt=prompt,
+                model=model,
+                workspace=workspace,
+                system_prompt=system_prompt,
+                unattended_limit_seconds=unattended_limit_seconds,
+                agent=agent,
+                chunk=current_chunk,
+                state=state,
+                max_context_tokens=max_context_tokens,
+            )
+            after_text = _audit_read_issues(workspace)
+            if code == 0 and after_text != before_text:
+                _audit_mark_chunk_complete(state, str(current_chunk['id']), before_text, after_text)
+                _write_audit_state(session_path, state)
+                completed = True
+                break
+            split = _audit_split_chunk(current_chunk, files_by_path)
+            if split:
+                queue = split + queue
+                reason = 'ISSUES.md unchanged after chunk review; split chunk for retry'
+            else:
+                reason = 'ISSUES.md unchanged after chunk review'
+            _audit_record_failed_chunk(state, current_chunk, reason)
+            _write_audit_state(session_path, state)
+            if split:
+                completed = True
+                break
+            if code != 0 and attempt <= _AUDIT_MAX_AGENT_FAILURES:
+                continue
+            return rt.fail(f"Audit chunk {current_chunk['id']} failed: {reason}")
+        if not completed:
+            return rt.fail(f"Audit chunk {current_chunk['id']} failed after retries.")
+    state = _audit_refresh_state(state)
+    _write_audit_state(session_path, state)
+    before_summary = _audit_read_issues(workspace)
+    code, _ = _run_audit_summary(
+        prompt=prompt,
+        model=model,
+        workspace=workspace,
+        system_prompt=system_prompt,
+        unattended_limit_seconds=unattended_limit_seconds,
+        agent=agent,
+        state=state,
+        max_context_tokens=max_context_tokens,
+    )
+    after_summary = _audit_read_issues(workspace)
+    if code != 0:
+        return code
+    if before_summary == after_summary:
+        return rt.fail("Audit summary pass did not update ISSUES.md")
+    state['status'] = 'done'
+    state['totals']['findings'] = max(_audit_issue_count(after_summary) - 1, 0)
+    state['notes'] = [*state.get('notes', [])[-9:], 'Condensed ISSUES.md to keep top 10-15 detailed findings and the rest concise.']
+    _audit_refresh_state(state)
+    _write_audit_state(session_path, state)
+    return 0
+
+def _renovate_github_token() -> str | None:
+    for var in ("RENOVATE_GITHUB_COM_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(var)
+        if isinstance(token, str) and token:
+            return token
+    try:
+        result = rt.run_cmd(["gh", "auth", "token"], timeout=10)
+    except Exception:
+        return None
+    token = result.stdout.strip()
+    return token if result.returncode == 0 and token else None
 
 
 def workspace_root():
@@ -255,8 +1158,11 @@ def resolve_session(
     interactive: bool | None = None,
     system_prompt: str | None = None,
     include_system_file: bool = True,
+    agent: str = "default",
 ):
     resolved_interactive = rt.can_prompt() if interactive is None else interactive
+    resolved_agent = rt.normalize_agent_profile(agent)
+    profile = rt.agent_profile(resolved_agent)
     system_file = rt._sys_file() if include_system_file else None
     model_spec = rt._model(None)
     return rt.session_context(
@@ -264,13 +1170,56 @@ def resolve_session(
         model=model_spec,
         interactive=resolved_interactive,
         system_prompt=(
-            load_system_prompt(system_file, resolved_interactive)
+            load_system_prompt(system_file, resolved_interactive, agent=resolved_agent)
             if system_prompt is None
             else system_prompt
         ),
         system_file=system_file,
-        yolo=rt.yolo_enabled(),
+        yolo=rt.yolo_enabled() or bool(profile["yolo"]),
+        agent=resolved_agent,
     )
+
+
+def _saved_session_context(path: Path) -> tuple[Transcript, str, str | None]:
+    data = rt.load_json(path, None)
+    if not isinstance(data, dict) or "transcript" not in data:
+        rt.abort(f"Invalid saved session: {rt._fmt('inline', path.name)}")
+    loaded = _load_transcript(data["transcript"])
+    model = data.get("model")
+    if not isinstance(model, str) or not model:
+        rt.abort(f"Saved session missing model: {rt._fmt('inline', path.name)}")
+    saved_agent = data.get("agent") if isinstance(data.get("agent"), str) else None
+    return loaded, model, saved_agent
+
+
+def _load_saved_session_context(name: str | None) -> tuple[Transcript, str, str | None]:
+    target = _resolve_saved_session(name)
+    if target is None:
+        rt.abort("No saved sessions found.")
+    return _saved_session_context(target)
+
+
+def _resume_target(continue_session: bool, resume: str) -> str | None:
+    if continue_session and resume:
+        rt.abort("Use either `--continue` or `--resume`, not both.")
+    return None if continue_session else (resume or None)
+
+
+def _resume_state(continue_session: bool, resume: str) -> tuple[bool, Transcript | None, str | None, str | None]:
+    target = _resume_target(continue_session, resume)
+    if target is None and not continue_session:
+        return False, None, None, None
+    loaded, loaded_model, loaded_agent = _load_saved_session_context(target)
+    return True, loaded, loaded_model, loaded_agent
+
+
+def _apply_resumed_session(session, loaded, loaded_model, loaded_agent):
+    if loaded is None or loaded_model is None:
+        return None, session["model"]
+    set_system_prompt(loaded, session["system_prompt"])
+    session["model"] = loaded_model
+    session["agent"] = rt.normalize_agent_profile(loaded_agent or session["agent"])
+    return loaded, loaded_model
 
 
 def audit(focus: str = ""):
@@ -282,23 +1231,24 @@ def audit(focus: str = ""):
         interactive=False,
         system_prompt=AUDIT_SYSTEM_PROMPT,
         include_system_file=False,
+        agent="default",
     )
-    _ensure_renovate_config(session["workspace"])
-    audit_prompt = session_text("audit", "default_user_prompt")
-    if focus:
-        audit_prompt += session_text("audit", "focus_suffix", focus=focus)
+    artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=False)
     _print_session_intro(
-        "Audit", session, focus=rt.preview(focus, 100) if focus else None
+        "Audit",
+        session,
+        focus=rt.preview(focus, 100) if focus else None,
+        audit_state=artifacts["session_path"],
     )
-    code, _ = run_agent(
-        audit_prompt,
-        session["model"],
-        session["workspace"],
-        session["system_prompt"],
-        rt.unattended_limit_seconds(),
-        interactive=False,
+    return _run_audit_workflow(
+        prompt=audit_prompt,
+        model=session["model"],
+        workspace=session["workspace"],
+        system_prompt=session["system_prompt"],
+        unattended_limit_seconds=rt.unattended_limit_seconds(),
+        agent=session["agent"],
+        max_context_tokens=int(session.get("max_context_tokens", rt.MAX_CONTEXT_TOKENS) or rt.MAX_CONTEXT_TOKENS),
     )
-    return code
 
 
 def _create_prompt_session():
@@ -314,25 +1264,67 @@ def _create_prompt_session():
 
 def _git_diff_shortstat(workspace: Path) -> str | None:
     try:
-        result = rt.run_cmd(
+        status_result = rt.run_cmd(
             [
                 "git",
                 "-C",
                 str(workspace),
-                "diff",
-                "--shortstat",
-                "--no-ext-diff",
-                "HEAD",
-                "--",
+                "status",
+                "--short",
+                "--untracked-files=all",
             ],
             timeout=5,
         )
     except Exception:
         return None
-    if result.returncode != 0:
+    if status_result.returncode != 0:
         return None
-    summary = result.stdout.strip()
-    return summary or "git diff: clean"
+    lines = [line for line in status_result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return "git diff: clean"
+    counts = {"staged": 0, "modified": 0, "untracked": 0}
+    for line in lines:
+        code = (line[:2] + "  ")[:2]
+        if code[0] == "?" and code[1] == "?":
+            counts["untracked"] += 1
+            continue
+        if code[0] not in {" ", "?"}:
+            counts["staged"] += 1
+        if code[1] not in {" ", "?"}:
+            counts["modified"] += 1
+    parts = [f"{len(lines)} change{'s' if len(lines) != 1 else ''}"]
+    for key in ("staged", "modified", "untracked"):
+        count = counts[key]
+        if count:
+            parts.append(f"{count} {key}")
+    try:
+        numstat_result = rt.run_cmd(
+            ["git", "-C", str(workspace), "diff", "--numstat", "HEAD", "--"],
+            timeout=5,
+        )
+    except Exception:
+        numstat_result = None
+    if numstat_result and numstat_result.returncode == 0:
+        added = 0
+        deleted = 0
+        for line in numstat_result.stdout.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split("	", 2)
+            if len(fields) < 2:
+                continue
+            if fields[0].isdigit():
+                added += int(fields[0])
+            if fields[1].isdigit():
+                deleted += int(fields[1])
+        line_parts = []
+        if added:
+            line_parts.append(f"+{added}")
+        if deleted:
+            line_parts.append(f"-{deleted}")
+        if line_parts:
+            parts.append("lines " + " ".join(line_parts))
+    return "; ".join(parts)
 
 
 def _read_input(prompt_session, workspace: Path):
@@ -503,36 +1495,44 @@ def _handle_ask(question, current_model, session, transcript):
     )
 
 
-def _handle_audit(focus, current_model, session):
-    _ensure_renovate_config(session["workspace"])
-    audit_prompt = session_text("audit", "repo_user_prompt")
-    if focus:
-        audit_prompt += session_text("audit", "focus_suffix", focus=focus)
+def _handle_audit(focus, current_model, session, transcript=None):
+    try:
+        _artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=True)
+    except RuntimeError as exc:
+        if str(exc) == "audit cancelled":
+            rt._note("audit cancelled", tag="note")
+            return
+        raise
 
     rt._note("audit mode", tag="note")
-    audit_transcript = transcript_with_system_prompt(AUDIT_SYSTEM_PROMPT)
 
     def run_audit():
-        run_agent(
-            audit_prompt,
-            current_model,
-            session["workspace"],
-            AUDIT_SYSTEM_PROMPT,
-            rt.unattended_limit_seconds(),
-            interactive=False,
-            transcript=audit_transcript,
+        code = _run_audit_workflow(
+            prompt=audit_prompt,
+            model=current_model,
+            workspace=session["workspace"],
+            system_prompt=AUDIT_SYSTEM_PROMPT,
+            unattended_limit_seconds=rt.unattended_limit_seconds(),
+            agent=session["agent"],
+            max_context_tokens=int(
+                (transcript or {}).get("max_context_tokens", session.get("max_context_tokens", rt.MAX_CONTEXT_TOKENS))
+                or rt.MAX_CONTEXT_TOKENS
+            ),
         )
+        if code != 0:
+            raise RuntimeError(f"audit failed with exit code {code}")
 
     _run_mode(run_audit, cancel_note="audit cancelled", error_prefix="Audit error")
 
 
-def _handle_save(name, transcript, current_model):
+def _handle_save(name, transcript, current_model, current_agent):
     rt._ensure_private_dir(_sessions_dir())
     if not name:
         name = time.strftime("%Y%m%d-%H%M%S")
     path = _session_file(name)
     data = {
         "model": current_model,
+        "agent": current_agent,
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "transcript": _transcript_data(transcript),
     }
@@ -540,14 +1540,11 @@ def _handle_save(name, transcript, current_model):
     rt._note(f"saved session: {path.name}", tag="note")
 
 
-def _handle_load(name, transcript, current_model, system_prompt):
-    sessions_dir = rt._ensure_private_dir(_sessions_dir())
-    sessions = sorted(
-        sessions_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True
-    )
+def _handle_load(name, transcript, current_model, system_prompt, current_agent):
+    sessions = _list_saved_sessions()
     if not sessions:
         rt._warn("No saved sessions found.")
-        return transcript, current_model
+        return transcript, current_model, current_agent
     if not name:
         lines = ["## Saved Sessions", ""]
         for index, path in enumerate(sessions[:20], 1):
@@ -556,67 +1553,67 @@ def _handle_load(name, transcript, current_model, system_prompt):
                 lines.append(f"{index}. {rt._fmt('inline', path.stem)} — (unreadable)")
                 continue
             model = meta.get("model", "?")
+            agent = meta.get("agent", "default")
             saved = meta.get("saved_at", "?")
             msgs = len(meta.get("transcript", {}).get("messages", []))
             lines.append(
-                f"{index}. {rt._fmt('inline', path.stem)} — {model}, {msgs} msgs, {saved}"
+                f"{index}. {rt._fmt('inline', path.stem)} — {model}, agent: {agent}, {msgs} msgs, {saved}"
             )
         lines.extend(["", "Usage: `/load <name>` or `/load <number>`"])
         rt._print(value="\n".join(lines), err=True)
-        return transcript, current_model
-    target = None
-    if name.isdigit():
-        index = int(name) - 1
-        if 0 <= index < len(sessions):
-            target = sessions[index]
-    if target is None:
-        candidate = _session_file(name)
-        if candidate.exists():
-            target = candidate
-    if target is None:
-        matches = [path for path in sessions if name.lower() in path.stem.lower()]
-        if len(matches) == 1:
-            target = matches[0]
-        elif matches:
-            rt._warn(f"Ambiguous — {len(matches)} sessions match. Be more specific.")
-            return transcript, current_model
+        return transcript, current_model, current_agent
+    target = _resolve_saved_session(name)
     if target is None:
         rt._warn(f"No session found matching {rt._fmt('inline', name)}.")
-        return transcript, current_model
+        return transcript, current_model, current_agent
     try:
-        data = rt.load_json(target, None)
-        if data is None:
-            raise ValueError("Empty or invalid session file")
-        loaded = _load_transcript(data["transcript"])
-        loaded_model = data.get("model", current_model)
+        loaded, loaded_model, loaded_agent = _saved_session_context(target)
         set_system_prompt(loaded, system_prompt)
+        resolved_agent = rt.normalize_agent_profile(loaded_agent or current_agent)
         rt._note(
-            f"loaded session: {target.stem} ({len(loaded['messages'])} messages, model: {loaded_model})",
+            f"loaded session: {target.stem} ({len(loaded['messages'])} messages, model: {loaded_model}, agent: {resolved_agent})",
             tag="note",
         )
-        return loaded, loaded_model
+        return loaded, loaded_model, resolved_agent
     except Exception as exc:
         rt._error(f"Failed to load session: {exc}")
-        return transcript, current_model
+        return transcript, current_model, current_agent
 
 
-def chat(*, yolo: bool = False):
+def chat(
+    *,
+    yolo: bool = False,
+    agent: str = "default",
+    continue_session: bool = False,
+    resume: str = "",
+):
     """Start an interactive multi-turn chat session.
 
     :param yolo: Allow all tools without per-action approval prompts.
+    :param agent: Agent profile (`default`, `plan`, `accept-edits`, `auto-approve`).
+    :param continue_session: Continue from the most recent saved session.
+    :param resume: Resume a specific saved session by name, number, or partial match.
     """
     if yolo:
         os.environ["OY_YOLO"] = "1"
     prompt_session = _create_prompt_session()
-    session = resolve_session(interactive=True)
-    _print_session_intro("Chat", session)
+    resumed, loaded, loaded_model, loaded_agent = _resume_state(
+        continue_session, resume
+    )
+    if continue_session and loaded_agent:
+        agent = loaded_agent
+    session = resolve_session(interactive=True, agent=agent)
+    transcript, current_model = _apply_resumed_session(
+        session, loaded, loaded_model, loaded_agent
+    )
+    if transcript is None:
+        transcript = transcript_with_system_prompt(session["system_prompt"])
+        current_model = session["model"]
+    _print_session_intro("Chat", session, session=("continued" if resumed else None))
     rt._note(
         "chat mode; /help for commands" + ("; yolo on" if session["yolo"] else ""),
         tag="note",
     )
-
-    transcript = transcript_with_system_prompt(session["system_prompt"])
-    current_model = session["model"]
 
     while True:
         try:
@@ -656,12 +1653,16 @@ def chat(*, yolo: bool = False):
                 elif result[0] == "ask":
                     _handle_ask(result[1], current_model, session, transcript)
                 elif result[0] == "audit":
-                    _handle_audit(result[1], current_model, session)
+                    _handle_audit(result[1], current_model, session, transcript)
                 elif result[0] == "save":
-                    _handle_save(result[1], transcript, current_model)
+                    _handle_save(result[1], transcript, current_model, session["agent"])
                 elif result[0] == "load":
-                    transcript, current_model = _handle_load(
-                        result[1], transcript, current_model, session["system_prompt"]
+                    transcript, current_model, session["agent"] = _handle_load(
+                        result[1],
+                        transcript,
+                        current_model,
+                        session["system_prompt"],
+                        session["agent"],
                     )
                     _apply_session_title(session["workspace"], current_model)
                 continue
@@ -682,6 +1683,7 @@ def chat(*, yolo: bool = False):
                 session["interactive"],
                 yolo=session["yolo"],
                 transcript=transcript,
+                agent=session["agent"],
             )
         except KeyboardInterrupt:
             rollback(transcript, checkpoint_point)
@@ -706,17 +1708,33 @@ def chat(*, yolo: bool = False):
     return 0
 
 
-def run(*task: str):
+def run(
+    *task: str,
+    agent: str = "default",
+    continue_session: bool = False,
+    resume: str = "",
+):
     """Run a one-shot task.
 
     :param task: Task text. If omitted, read from stdin or start chat in a TTY.
+    :param agent: Agent profile (`default`, `plan`, `accept-edits`, `auto-approve`).
+    :param continue_session: Continue from the most recent saved session.
+    :param resume: Resume a specific saved session by name, number, or partial match.
     """
     task_text = _task_text(task)
     if not task_text:
-        return chat()
-
-    session = resolve_session(interactive=False)
-    _print_session_intro("Run", session, prompt=rt.preview(task_text, 100))
+        return chat(agent=agent, continue_session=continue_session, resume=resume)
+    resumed, loaded, loaded_model, loaded_agent = _resume_state(
+        continue_session, resume
+    )
+    session = resolve_session(interactive=False, agent=agent)
+    transcript, _ = _apply_resumed_session(session, loaded, loaded_model, loaded_agent)
+    _print_session_intro(
+        "Run",
+        session,
+        prompt=rt.preview(task_text, 100),
+        session=("continued" if resumed else None),
+    )
     return run_agent(
         task_text,
         session["model"],
@@ -724,15 +1742,18 @@ def run(*task: str):
         session["system_prompt"],
         rt.unattended_limit_seconds(),
         session["interactive"],
+        transcript=transcript,
+        agent=session["agent"],
     )[0]
 
 
-def ralph(*task: str):
+def ralph(*task: str, agent: str = "default"):
     """Run a task in yolo mode every minute until the configured deadline.
 
     Controlled by `OY_RALPH_LIMIT` (default: `3h`).
 
     :param task: Task text. If omitted, read from stdin.
+    :param agent: Agent profile (`default`, `plan`, `accept-edits`, `auto-approve`).
     """
     task_text = _task_text(task)
     if not task_text:
@@ -742,7 +1763,7 @@ def ralph(*task: str):
         )
         return 1
 
-    session = resolve_session(interactive=False)
+    session = resolve_session(interactive=False, agent=agent)
     session["yolo"] = True
     delay_seconds = 60
     limit_seconds = rt.ralph_limit_seconds()
@@ -775,6 +1796,7 @@ def ralph(*task: str):
                 rt.unattended_limit_seconds(),
                 session["interactive"],
                 yolo=True,
+                agent=session["agent"],
             )
         if code != 0:
             exit_code = code
@@ -783,6 +1805,56 @@ def ralph(*task: str):
             break
         time.sleep(min(delay_seconds, sleep_seconds))
     return exit_code
+
+
+def renovate_local():
+    """Run Renovate locally and write a lookup report to `.tmp/renovate-<date>.json`."""
+    workspace = workspace_root()
+    try:
+        tmp_dir = _ensure_tmp_dir(workspace)
+        _ensure_tmp_gitignored(workspace)
+        config_path = _ensure_renovate_config(workspace)
+    except RuntimeError as exc:
+        return rt.fail(exc)
+
+    report_path = tmp_dir / f"renovate-{time.strftime('%Y-%m-%d')}.json"
+    token = _renovate_github_token()
+    if token is None:
+        return rt.fail(
+            "No GitHub token found (set RENOVATE_GITHUB_COM_TOKEN or run `gh auth login`)."
+        )
+    command = [
+        "renovate",
+        "--platform=local",
+        "--require-config=ignored",
+        "--dry-run=lookup",
+        "--report-type=file",
+        "--report-path",
+        f".tmp/{report_path.name}",
+    ]
+
+    rt._print(
+        value="\n".join(
+            [
+                "## Renovate Local",
+                "",
+                f"- workspace: {rt._fmt('inline', workspace)}",
+                f"- report: {rt._fmt('inline', Path('.tmp') / report_path.name)}",
+                f"- config: {rt._fmt('inline', config_path.name)}",
+            ]
+        ),
+        err=True,
+    )
+
+    env = dict(rt.command_env())
+    env["RENOVATE_GITHUB_COM_TOKEN"] = token
+    try:
+        result = subprocess.run(command, cwd=workspace, env=env, check=False)
+    except OSError as exc:
+        return rt.fail(f"Could not run Renovate: {exc}")
+    if result.returncode == 0:
+        rt._note(f"renovate report written: .tmp/{report_path.name}", tag="note")
+    return result.returncode
 
 
 def _current_model_text(model_spec: str) -> str:
@@ -895,16 +1967,27 @@ def main(argv: list[str] | None = None):
     """
     args = list(sys.argv[1:] if argv is None else argv)
 
-    commands = {"run", "chat", "ralph", "model", "audit", "-h", "--help"}
+    commands = {"run", "chat", "ralph", "model", "audit", "renovate-local", "-h", "--help"}
     if not args:
         args = ["run"] if not rt.stdin_is_interactive() else ["--help"]
     elif args[0] in {"-v", "--version"}:
         rt._print(value=f"oy {rt.__version__}")
         return 0
+    elif args[0] in {"--continue", "-c"}:
+        args = ["run", "--continue-session", *args[1:]]
+    elif args[0] == "--resume":
+        args = ["run", "--resume", *args[1:]]
     elif not args[0].startswith("-") and args[0] not in commands:
         args = ["run", *args]
     result = defopt.run(
-        [run, chat, ralph, model, audit],
+        {
+            "run": run,
+            "chat": chat,
+            "ralph": ralph,
+            "model": model,
+            "audit": audit,
+            "renovate-local": renovate_local,
+        },
         argv=args,
         version=rt.__version__,
         short={},
@@ -916,9 +1999,13 @@ def main(argv: list[str] | None = None):
   oy "fix the failing tests"
   oy run "fix the flaky test"
   oy chat
+  oy chat --agent plan
+  oy chat --continue-session
+  oy run --resume 20260325
   oy chat --yolo
   oy ralph "fix the flaky test"
   oy audit auth
+  oy renovate-local
   oy model gpt-5
   OY_MODEL=local-8080:qwen3.5 oy chat""",
             "formatter_class": argparse.RawDescriptionHelpFormatter,
@@ -947,6 +2034,7 @@ __all__ = [
     "audit",
     "chat",
     "main",
+    "renovate_local",
     "model",
     "load_system_prompt",
     "ralph",

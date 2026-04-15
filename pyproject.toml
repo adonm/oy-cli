@@ -11,30 +11,31 @@ requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "oy-cli contributors" }]
 dependencies = [
-  "rapidfuzz>=3.0.0",
+  "rapidfuzz>=3.14.3",
   "defopt>=7.0.0",
-  "markdownify>=1.2.0",
-  "pygments>=2.19.0",
-  "tiktoken>=0.7.0",
-  "tenacity>=9.0.0",
+  "markdownify>=1.2.2",
+  "pygments>=2.19.2",
+  "tiktoken>=0.12.0",
+  "tenacity>=9.1.4",
   "toons>=0.5.3",
-  "prompt-toolkit>=3.0.50",
-  "regex>=2026.0.0",
-  "pathspec>=0.12.1",
-  "zstandard>=0.23.0",
-  "pygount>=3.0.0",
-  "rich>=14.3.0",
-  "urllib3>=2.5.0",
+  "prompt-toolkit>=3.0.52",
+  "regex>=2026.2.28",
+  "pathspec>=1.0.4",
+  "zstandard>=0.25.0",
+  "pygount>=3.1.1",
+  "rich>=14.3.3",
+  "urllib3>=2.6.3",
 ]
 
 [dependency-groups]
 dev = [
-  "pytest>=8.0.0",
-  "ruff>=0.11.0",
+  "pytest>=9.0.2",
+  "ruff>=0.15.6",
 ]
 
 [project.scripts]
 oy = "oy_cli.cli:main"
+oy-cli = "oy_cli.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/wagov-dtt/oy-cli"

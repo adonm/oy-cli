@@ -1,216 +1,206 @@
 # Audit Findings
 
-> **Last audit**: 2026-04-03 · commit `5e8a8e3` (`Retry malformed model outputs`) · cross-checked against [OWASP ASVS 5.0](https://github.com/OWASP/ASVS/tree/master/5.0) and [grugbrain.dev](https://grugbrain.dev/)
+> **Last audit**: 2026-04-13 · commit `042569a` (`Embed richer audit reference guidance`) · cross-checked against [OWASP ASVS 5.0](https://owasp.org/www-project-application-security-verification-standard/) and [grugbrain.dev](https://grugbrain.dev/)
 >
-> **Codebase**: `oy-cli` — local coding CLI with workspace-bound file tools, shell execution, outbound fetch, transcript/debug logging, session save/load, and 6 provider shims.
+> **Codebase**: `oy-cli` — local coding CLI with workspace-bound file tools, shell execution, outbound fetch, transcript/debug logging, saved sessions, agent profiles, and Open Responses-oriented provider shims.
 >
 > | Metric | Value |
 > |---|---|
 > | Repo files counted by `sloc` | 26 |
+> | Total code lines | 7,239 |
 > | Python files | 14 |
-> | Python LoC | 6,314 code lines |
-> | Total repo lines | 9,568 |
-> | Largest modules (total lines) | `providers.py` 2,203; `tools.py` 1,867; `runtime.py` 1,481; `cli.py` 912 |
+> | Python code lines | 7,117 |
+> | Total repo lines | 10,890 |
+> | Largest modules (total lines) | `providers.py` 2,073; `tools.py` 1,868; `runtime.py` 1,652; `cli.py` 1,426 |
 > | Agent tools | 9 (`ask`, `bash`, `list`, `read`, `replace`, `search`, `sloc`, `todo`, `webfetch`) |
-> | Provider shims | 6 (`openai`, `codex`, `bedrock-mantle`, `copilot`, `opencode`, `opencode-go`) |
+> | Shim families | 6 (`openai`, `codex`, `bedrock-mantle`, `copilot`, `opencode`, `local-<port>`) |
 >
-> **Audit lens**: dangerous local execution (`bash`), outbound network use (`webfetch` + provider APIs), secret handling, workspace-boundary enforcement, module growth, and obvious latency/memory blow-ups on large repos.
+> **Audit lens**: critical security boundaries first; then material complexity and performance risks that are likely to cause review failure, unsafe defaults, or production-scale stalls.
 
-## H1 · `bash` runs `bash -c` with full user authority and inherited credentials
-
-| | |
-|---|---|
-| **Location** | `oy_cli/tools.py:635-660` |
-| **Category** | Security |
-| **Reference** | OWASP ASVS 5.0 (configuration / verification) |
-| **Recommendation** | Keep this as an explicit trusted-local-user feature only. Add a `--safe` / env-stripped mode and stronger checkpoints for destructive commands. |
-| **Status** | Accepted risk / Open |
-
-Evidence: `tool_bash()` executes `[bash_path, "-c", command]` with `rt.require_command_env(...)`, so commands inherit the caller's git, cloud, SSH, and other environment credentials.
-
----
-
-## H2 · `/ask` is still network-capable despite being framed as research-only
+## H1 · `sec-noninteractive-autoapprove` — Default non-interactive runs auto-approve mutating tools, including shell execution
 
 | | |
 |---|---|
-| **Location** | `oy_cli/runtime.py:844-865`, `oy_cli/cli.py:42-43`, `oy_cli/session_text.toml:33-34` |
+| **Location** | `oy_cli/cli.py:1094-1122`, `oy_cli/tools.py:333-342`, `oy_cli/tools.py:426-431`, `oy_cli/tools.py:637-657` |
 | **Category** | Security |
-| **Reference** | OWASP ASVS 5.0 (API / web service) |
-| **Recommendation** | Remove `webfetch` from `/ask`, or rename the mode so the remaining outbound network side effect is explicit. |
+| **Reference** | OWASP ASVS 5.0 V1/V15; grugbrain.dev |
+| **Severity** | High |
 | **Status** | Open |
+| **Exploitability** | High if prompts, repo content, or model output are untrusted; default one-shot `oy "..."` is non-interactive. |
+| **Recommendation** | Require explicit `--allow-bash` / `--yolo`-style opt-in for shell in non-interactive runs, or keep non-interactive mode read-only / edits-only until a user-approved checkpoint. |
 
-Evidence: `_READ_ONLY_TOOLS` includes `webfetch`, and both CLI help and prompt text say “public webfetch still allowed”.
+Evidence: `run()` resolves `interactive=False`; `_approve_mutating_tool()` returns `True` whenever `not interactive`; `tool_bash()` executes `[bash, "-c", command]` with `require_command_env()`.
 
 ---
 
-## H3 · `webfetch` validates only the initial URL; redirect/re-resolution can bypass the check
+## H2 · `sec-readonly-webfetch-exfil` — Read-only modes still permit outbound `webfetch`, creating a direct data-exfil path
 
 | | |
 |---|---|
-| **Location** | `oy_cli/tools.py:663-688`, `oy_cli/tools.py:859-864`, `oy_cli/providers.py:516-580` |
+| **Location** | `oy_cli/cli.py:67`, `oy_cli/runtime.py:915,985`, `oy_cli/session_text.toml:46,56`, `oy_cli/tools.py:735-847` |
 | **Category** | Security |
-| **Reference** | OWASP ASVS 5.0 (API / web service) |
-| **Recommendation** | Re-validate every redirect target and pin requests to the checked IP, or keep redirects permanently disabled for `webfetch`. |
+| **Reference** | OWASP ASVS 5.0 V12/V14/V15 |
+| **Severity** | High |
 | **Status** | Open |
+| **Exploitability** | Needs the model to see sensitive prompt or file text and then follow a malicious instruction; `/ask` and plan mode still have network egress. |
+| **Recommendation** | Remove `webfetch` from read-only modes or require explicit network opt-in; if kept, strip custom headers and make the no-write/not-no-network behavior explicit in UX. |
 
-Evidence: `_validate_url_safe()` resolves and checks the hostname once, but `HTTPClient.request()` later performs the actual request path independently; `tool_webfetch()` exposes `follow_redirects=True` to callers.
+Evidence: `_READ_ONLY_TOOLS` includes `webfetch`; `/ask` and plan text explicitly allow it; `tool_webfetch()` permits arbitrary public URLs and custom headers except a short denylist.
 
 ---
 
-## H4 · Debug logging still writes raw prompts and model output without redaction
+## H3 · `sec-webfetch-redirect-ssrf` — `webfetch` validates only the initial URL, so redirects can bypass the public-host restriction
 
 | | |
 |---|---|
-| **Location** | `oy_cli/runtime.py:868-901`, `oy_cli/agent.py:375-423` |
+| **Location** | `oy_cli/tools.py:664-688`, `oy_cli/tools.py:830-847`, `oy_cli/providers.py:531-566` |
 | **Category** | Security |
-| **Reference** | OWASP ASVS 5.0 (logging / verification) |
-| **Recommendation** | Add secret redaction plus retention/size controls, and warn more clearly that debug logs can persist prompts, file content, and provider responses. |
-| **Status** | Partially resolved |
+| **Reference** | OWASP ASVS 5.0 V12 |
+| **Severity** | High |
+| **Status** | Open |
+| **Exploitability** | Requires `follow_redirects=True` plus an attacker-controlled public URL that redirects to a private target. |
+| **Recommendation** | Re-validate every redirect target against the same public-IP policy and pin connections to validated addresses, or keep redirects disabled for `webfetch`. |
 
-Evidence: file permissions are hardened, but `_debug_log()` still JSON-serializes full request messages and assistant responses whenever `OY_DEBUG=1`.
+Evidence: `_validate_url_safe()` resolves and checks only the original hostname; `HTTPClient.request()` enables `urllib3` redirects when `follow_redirects=True` and does not re-check the destination.
 
 ---
 
-## M1 · `providers.py` remains the dominant complexity hotspot
+## H4 · `sec-devcontainer-docker-sock` — The provided devcontainer mounts `docker.sock`, giving container code host-equivalent Docker authority
 
 | | |
 |---|---|
-| **Location** | `oy_cli/providers.py` (2,203 total lines; 1,561 code) |
+| **Location** | `.devcontainer/devcontainer.json:1-13` |
+| **Category** | Security |
+| **Reference** | OWASP ASVS 5.0 V13/V15 |
+| **Severity** | High |
+| **Status** | Accepted risk |
+| **Exploitability** | Applies only when contributors use the checked-in devcontainer, but then any shell run inside it can control host Docker. |
+| **Recommendation** | Document this as host-root-equivalent, remove the mount by default, or gate it behind a separate profile for users who explicitly need Docker control. |
+
+Evidence: `.devcontainer/devcontainer.json` bind-mounts `/var/run/docker.sock` into the container.
+
+---
+
+## S1 · `sec-debug-log-secret-retention` — Debug logging still persists raw prompts and model replies without redaction or retention limits
+
+| | |
+|---|---|
+| **Location** | `oy_cli/runtime.py:989-1013`, `oy_cli/agent.py:375-427` |
+| **Category** | Security |
+| **Reference** | OWASP ASVS 5.0 V14/V16 |
+| **Severity** | Medium |
+| **Status** | Open |
+| **Exploitability** | Requires `OY_DEBUG=1` or `/debug`, but then prompts, file excerpts, and model replies are written to disk verbatim. |
+| **Recommendation** | Default to metadata-only logging, add secret-pattern redaction plus size/retention controls, and warn explicitly when debug mode is enabled. |
+
+Evidence: `_init_debug_log()` writes `~/.config/oy/debug.jsonl`; `_debug_log()` appends raw JSON; `run_turn()` logs full prepared messages and assistant responses.
+
+---
+
+## C1 · `cx-providers-monolith` — `providers.py` is still a trust-boundary monolith
+
+| | |
+|---|---|
+| **Location** | `oy_cli/providers.py` (2,073 total lines; 1,448 code) |
 | **Category** | Complexity |
-| **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Split transport/retry code, credential/session loading, model discovery, and per-provider adapters before adding more shims. |
+| **Reference** | grugbrain.dev; OWASP ASVS 5.0 V1/V16 |
+| **Severity** | Medium |
 | **Status** | Open |
+| **Recommendation** | Split transport/retry, credential storage, model discovery, and per-provider adapters into smaller modules with narrow invariants. |
 
-Evidence: one module owns subprocess auth checks, token refresh, HTTP transport, error translation, model listing, and six shim implementations.
+Evidence: one file still owns subprocess auth probes, HTTP transport, retries, credential loading/saving, model listing, and all shim implementations.
 
 ---
 
-## M2 · `tools.py` is still a second monolith mixing nine tools and archive/network logic
+## C2 · `cx-tools-monolith` — `tools.py` remains a second monolith spanning approvals, filesystem, network, archives, and repo analysis
 
 | | |
 |---|---|
-| **Location** | `oy_cli/tools.py` (1,867 total lines; 1,443 code) |
+| **Location** | `oy_cli/tools.py` (1,868 total lines; 1,444 code) |
 | **Category** | Complexity |
-| **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Split filesystem tools, network tools, and repo-analysis helpers; keep shared path/ignore/budget logic in one narrow boundary module. |
+| **Reference** | grugbrain.dev |
+| **Severity** | Medium |
 | **Status** | Open |
+| **Recommendation** | Split approval/policy, filesystem helpers, network fetch, and repo-analysis code into separate modules with explicit interfaces. |
 
-Evidence: `tools.py` contains tool schema/approval flow, `bash`, `webfetch`, `.gitignore` walking, archive readers, threaded search/replace, and `pygount` integration.
+Evidence: `tools.py` mixes mutating-tool approval, shell execution, `webfetch`, globbing, archive readers, threaded search/replace, and `pygount` integration.
 
 ---
 
-## P1 · `webfetch` buffers entire responses in memory before truncating output
+## C3 · `cx-model-discovery-fail-fast` — Model discovery is serial, subprocess-heavy, and fail-fast on the first broken shim
 
 | | |
 |---|---|
-| **Location** | `oy_cli/providers.py:516-580`, `oy_cli/tools.py:859-878` |
-| **Category** | Performance |
-| **Reference** | OWASP ASVS 5.0 (API / web service) |
-| **Recommendation** | Stream into a bounded buffer and reject oversized bodies early instead of after full download. |
+| **Location** | `oy_cli/runtime.py:1517-1535`, `oy_cli/providers.py:1945-1963` |
+| **Category** | Complexity |
+| **Reference** | grugbrain.dev; OWASP ASVS 5.0 V15 |
+| **Severity** | Medium |
 | **Status** | Open |
+| **Recommendation** | Memoize shim availability, parallelize safe model-list probes, and return partial results instead of aborting on the first broken backend. |
 
-Evidence: `HTTPClient.request()` sets `preload_content=True` and copies `raw.data` into `bytes`; `tool_webfetch()` summarizes only after the full body is already resident.
+Evidence: `detect_available_shims()` walks `SHIM_ORDER` serially; GitHub token lookup shells out; `list_all_model_ids()` loads shims one at a time and raises on the first exception.
 
 ---
 
-## P2 · `HTTPClient` has no explicit pool size or back-pressure limits
+## P1 · `pf-webfetch-full-buffer` — `webfetch` buffers full responses in memory before truncating output
 
 | | |
 |---|---|
-| **Location** | `oy_cli/providers.py:516-563` |
+| **Location** | `oy_cli/providers.py:531-566`, `oy_cli/tools.py:762-878` |
 | **Category** | Performance |
-| **Reference** | OWASP ASVS 5.0 (API / web service) |
-| **Recommendation** | Configure `PoolManager(maxsize=..., block=True)` and document per-service connection limits. |
+| **Reference** | OWASP ASVS 5.0 V12/V15 |
+| **Severity** | Medium |
 | **Status** | Open |
+| **Recommendation** | Stream into a bounded buffer and fail early once body size limits are exceeded. |
 
-Evidence: `HTTPClient.__init__()` uses bare `urllib3.PoolManager()` defaults and only tunes redirects/timeouts per request.
+Evidence: `HTTPClient.request()` sets `preload_content=True` and copies `raw.data` into `bytes`; `tool_webfetch()` truncates only after the full body is resident.
 
 ---
 
-## P3 · `search` does all matching work before applying the visible result limit
+## P2 · `pf-archive-search-unbounded` — Search scans archives and compressed files without decompression bounds
 
 | | |
 |---|---|
-| **Location** | `oy_cli/tools.py:1022-1085`, `oy_cli/tools.py:1419-1474` |
+| **Location** | `oy_cli/tools.py:958-1040` |
 | **Category** | Performance |
-| **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Add a global match budget and stop workers once enough results are collected for display. |
+| **Reference** | OWASP ASVS 5.0 V5/V15 |
+| **Severity** | Medium |
 | **Status** | Open |
-
-Evidence: `search()` collects every batch into `results`, and `_search_payload()` slices to `limit` only when formatting the payload.
-
----
-
-## P4 · Archive and compressed-file scanning has no explicit decompression bounds
-
-| | |
-|---|---|
-| **Location** | `oy_cli/tools.py:957-974`, `oy_cli/tools.py:1022-1048` |
-| **Category** | Performance |
-| **Reference** | OWASP ASVS 5.0 (API / web service / availability) |
 | **Recommendation** | Cap archive size, member count, and decompressed bytes, or disable archive scanning by default. |
-| **Status** | Open |
 
-Evidence: `_streams()` opens `zip`, `tar`, `gz`, `bz2`, `xz`, and `zst` inputs with no explicit size/member limits, and search fans that work out across worker threads.
-
----
-
-## M3 · Model discovery is serial, subprocess-heavy, and still hides failures behind broad `except Exception`
-
-| | |
-|---|---|
-| **Location** | `oy_cli/providers.py:1862-1926`, `oy_cli/providers.py:2071-2084`, `oy_cli/runtime.py:1357-1370`, `oy_cli/agent.py:495-515` |
-| **Category** | Complexity |
-| **Reference** | OWASP ASVS 5.0 (verification); grugbrain.dev |
-| **Recommendation** | Memoize shim availability for the process lifetime, parallelize model listing, and replace broad exception swallowing with narrower warnings. |
-| **Status** | Open |
-
-Evidence: `detect_available_shims()` walks `SHIM_ORDER` serially; Copilot checks can spawn `gh`; model listing loops shims one by one; several paths fall back through broad `except Exception` and silently degrade.
+Evidence: `_streams()` opens `.zip`, tar variants, `.gz`, `.bz2`, `.xz`, and `.zst` inputs with no member-count or decompressed-byte limits, and `search()` can fan this out across many files.
 
 ---
 
-## S1 · Release workflow action refs lag current major versions
+## P3 · `pf-search-limit-late` — `search` collects the full match set before applying the visible limit
 
 | | |
 |---|---|
-| **Location** | `.github/workflows/release.yml:15-39` |
-| **Category** | Security |
-| **Reference** | OWASP ASVS 5.0 (verification / dependency hygiene) |
-| **Recommendation** | Bump `actions/checkout` to `v6`, `actions/setup-python` to `v6`, `actions/upload-artifact` to `v7`, and `actions/download-artifact` to `v8`; keep Renovate or equivalent lookup in CI. |
+| **Location** | `oy_cli/tools.py:1053-1088`, `oy_cli/tools.py:1420-1528` |
+| **Category** | Performance |
+| **Reference** | grugbrain.dev |
+| **Severity** | Medium |
 | **Status** | Open |
+| **Recommendation** | Add a global match budget and stop workers once enough results are collected for display. |
 
-Evidence: local Renovate lookup on 2026-04-03 surfaced 4 GitHub Actions major updates; no `pep621` package updates or vulnerability metadata were reported.
+Evidence: `search()` extends `results` with every worker batch, and only `_search_payload()` trims to the requested `limit`.
 
 ## Resolved or improved since earlier audits
 
 | Item | Status | Notes |
 |---|---|---|
+| Release workflow action refs | **Resolved** | `.github/workflows/release.yml` is already on current major action tags. |
 | Private config/session/debug directories | **Resolved** | Directory creation hardens to `0o700`, files to `0o600`. |
-| Bedrock signing split out | **Resolved** | SigV4 logic lives in `oy_cli/aws_sigv4.py`. |
-| Default redirect behaviour | **Resolved** | Provider and tool HTTP sessions default to `follow_redirects=False`; explicit opt-in remains risky. |
+| Default redirect behaviour | **Resolved** | Provider and tool HTTP sessions default to `follow_redirects=False`; explicit opt-in remains risky because redirect targets are not revalidated. |
 | HTTP client lifecycle leak | **Improved** | `HTTPClient` now has `close()` and context-manager support. |
-| Reasoning cache thread safety | **Resolved** | `_REASONING_SUPPORT_CACHE` is guarded by `_REASONING_CACHE_LOCK`. |
-| HTTP dependency surface | **Improved** | `httpx` was replaced with `urllib3`, reducing runtime dependencies. |
-| Workspace path traversal | **Resolved** | `resolve_path()` enforces the workspace boundary. |
-| Streaming file reads | **Resolved** | `tool_read()` stops once `offset + limit` is satisfied instead of loading the whole file. |
+| Workspace path traversal | **Resolved** | `resolve_path()` and glob validation keep file tools inside the workspace root. |
+| Streaming file reads | **Resolved** | `tool_read()` stops once `offset + limit` is satisfied rather than loading the whole file. |
 
 ## Short audit log
 
-- 2026-04-03: refreshed for commit `5e8a8e3` (`Retry malformed model outputs`).
-  - Header updated from current `sloc`: 6,314 Python code lines, 9,568 total repo lines.
+- 2026-04-13: refreshed for commit `042569a` (`Embed richer audit reference guidance`).
+  - Header updated from current `sloc`: 7,117 Python code lines, 7,239 total code lines, 10,890 total repo lines.
   - Revalidated findings against OWASP ASVS 5.0 and grugbrain.dev.
-  - Ran local Renovate lookup: 0 `pep621` updates surfaced; 4 GitHub Actions major updates surfaced; no vulnerability metadata was present.
-  - Previous findings remain open or partially resolved; no new workspace-boundary regressions found.
-
-- 2026-04-02: refreshed for commit `c77e07e` (`Tighten docs and collapse small helpers`).
-  - Header updated from `sloc`: 6,339 Python code lines, 9,503 total repo lines.
-  - Revalidated findings against OWASP ASVS 5.0 and grugbrain.dev.
-  - Ran local Renovate lookup: 0 `pep621` updates surfaced; 4 GitHub Actions major updates surfaced; no vulnerability metadata was present in the report.
-  - Previous findings remain open or partially resolved; no new path-boundary regressions found.
-
-- 2026-03-28: refreshed for commit `25a4e2e` (`Reorganise tests into logical modules`).
-  - Header updated from `sloc`: 5,657 Python code lines, 8,298 total repo lines.
-  - Updated line numbers for all findings reflecting codebase changes.
-  - Noted `tools.py` growth from 1,643 to 1,906 lines; complexity concern deepened.
-  - Added workspace path traversal protection to resolved items.
+  - Inspected `.tmp/renovate-2026-04-14.json`: no actionable dependency or GitHub Actions updates; only Renovate's local RE2 fallback warning was reported.
+  - Replaced the earlier generic `bash` accepted-risk wording with the sharper non-interactive auto-approval finding.
+  - Main open risks remain non-interactive mutating-tool execution, read-only egress via `webfetch`, redirect-target revalidation gaps, debug-log secret retention, and unbounded search/webfetch work on hostile inputs.

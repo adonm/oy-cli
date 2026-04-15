@@ -31,6 +31,7 @@ from pygments.util import ClassNotFound
 from rich.console import Console as RichConsole, Group
 from rich.highlighter import ReprHighlighter
 from rich.padding import Padding
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -41,9 +42,11 @@ from .providers import (
     join_model_spec,
     llm_session,
     load_json,
+    load_toon,
     normalize_jsonlike,
     run_cmd,
     save_json,
+    save_toon,
     split_model_spec,
     tool_session,
     which,
@@ -78,6 +81,12 @@ _TOON_LINE_RE = re.compile(
 _SEARCH_PREVIEW_LINE_RE = re.compile(
     r"^(?P<path>.+):(?P<line>\d+):(?P<column>\d+):(?P<text>.*)$"
 )
+_SEARCH_PREVIEW_BLOCK_LINE_RE = re.compile(
+    r"^(?P<path>.+):(?P<line>\d+):(?P<column>\d+):(?P<language>[A-Za-z0-9_+.-]+):(?P<text>.*)$"
+)
+_SEARCH_GROUP_MATCH_LINE_RE = re.compile(
+    r"^(?P<indent>\s*)match: (?P<line>\d+):(?P<column>\d+):(?P<language>[A-Za-z0-9_+.-]+):(?P<text>.*)$"
+)
 _REPLACE_SKIPPED_PREVIEW_LINE_RE = re.compile(
     r"^(?P<path>.+): skipped \((?P<reason>.+)\)$"
 )
@@ -86,6 +95,9 @@ _REPLACE_CHANGED_PREVIEW_LINE_RE = re.compile(
 )
 _SEARCH_HIGHLIGHT_OPEN = "⟦"
 _SEARCH_HIGHLIGHT_CLOSE = "⟧"
+_READ_PREVIEW_LINE_RANGE_RE = re.compile(
+    r"^(?P<start>\d+)-(?P<end>\d+) of (?P<total>\d+)$"
+)
 _MULTILINE_PREVIEW_KEYS = frozenset({"stderr", "stdout", "text"})
 _RICH_REPR_HIGHLIGHTER = ReprHighlighter()
 
@@ -538,6 +550,73 @@ def _decode_preview_string(value: str) -> str | None:
     return decoded if isinstance(decoded, str) else None
 
 
+def _parse_read_preview_line_range(value: str) -> tuple[int, int, int] | None:
+    if not (match := _READ_PREVIEW_LINE_RANGE_RE.match(value)):
+        return None
+    return tuple(int(match.group(name)) for name in ("start", "end", "total"))
+
+
+def _preview_file_label(path: str) -> str:
+    target = path.split("::", 1)[1] if "::" in path else path
+    stripped = target.rstrip("/")
+    if not stripped:
+        return target or path
+    return stripped.rsplit("/", 1)[-1]
+
+
+def _preview_badge(label: str, *, style: str) -> Text:
+    badge = Text("[", style="dim")
+    badge.append(_sanitize_terminal_text(label), style=style)
+    badge.append("]", style="dim")
+    return badge
+
+
+def _preview_title(path: str, *, language: str | None = None, detail: str | None = None) -> Text:
+    title = Text()
+    title.append(_sanitize_terminal_text(path), style="bold cyan")
+    title.append(" ")
+    title.append_text(_preview_badge(_preview_file_label(path), style="bold white on blue"))
+    if language:
+        title.append(" ")
+        title.append_text(
+            _preview_badge(language.lower(), style="bold black on bright_cyan")
+        )
+    if detail:
+        title.append("  ", style="dim")
+        title.append(_sanitize_terminal_text(detail), style="dim")
+    return title
+
+
+def _search_preview_segments(text: str) -> tuple[str, list[tuple[int, int]]]:
+    sanitized = _sanitize_terminal_text(text)
+    if _SEARCH_HIGHLIGHT_OPEN not in sanitized:
+        return sanitized, []
+    parts: list[str] = []
+    spans: list[tuple[int, int]] = []
+    plain_index = 0
+    remaining = sanitized
+    while remaining:
+        start = remaining.find(_SEARCH_HIGHLIGHT_OPEN)
+        if start < 0:
+            parts.append(remaining)
+            break
+        prefix = remaining[:start]
+        parts.append(prefix)
+        plain_index += len(prefix)
+        remaining = remaining[start + len(_SEARCH_HIGHLIGHT_OPEN) :]
+        end = remaining.find(_SEARCH_HIGHLIGHT_CLOSE)
+        if end < 0:
+            parts.append(_SEARCH_HIGHLIGHT_OPEN + remaining)
+            break
+        highlighted = remaining[:end]
+        parts.append(highlighted)
+        if highlighted:
+            spans.append((plain_index, plain_index + len(highlighted)))
+            plain_index += len(highlighted)
+        remaining = remaining[end + len(_SEARCH_HIGHLIGHT_CLOSE) :]
+    return "".join(parts), spans
+
+
 def _render_preview_multiline(key: str, decoded: str, *, indent: str = "") -> Padding:
     return Padding(
         Syntax(
@@ -549,6 +628,36 @@ def _render_preview_multiline(key: str, decoded: str, *, indent: str = "") -> Pa
         ),
         pad=(0, 0, 0, len(indent) + 2),
     )
+
+
+def _render_read_preview(path: str, lines_value: str, key: str, value: str) -> list[Any] | None:
+    if not (line_range := _parse_read_preview_line_range(lines_value)):
+        return None
+    base_key, _, explicit_language = key.partition(".")
+    if base_key != "text":
+        return None
+    language = explicit_language or "text"
+    preview_text = value
+    return [
+        Rule(
+            title=_preview_title(
+                path,
+                language=language,
+                detail=f"{line_range[0]}-{line_range[1]} of {line_range[2]}",
+            ),
+            style="dim",
+        ),
+        Syntax(
+            _sanitize_terminal_text(preview_text).rstrip("\n") or " ",
+            language,
+            theme="ansi_dark",
+            word_wrap=True,
+            background_color="default",
+            line_numbers=True,
+            start_line=line_range[0],
+            indent_guides=True,
+        ),
+    ]
 
 
 def _render_preview_csv(line: str) -> Text:
@@ -563,27 +672,44 @@ def _render_preview_csv(line: str) -> Text:
 
 
 def _render_search_preview_text(text: str) -> Text:
-    sanitized = _sanitize_terminal_text(text)
-    if _SEARCH_HIGHLIGHT_OPEN not in sanitized:
-        return Text(sanitized)
-    rendered = Text()
-    remaining = sanitized
-    while remaining:
-        start = remaining.find(_SEARCH_HIGHLIGHT_OPEN)
-        if start < 0:
-            rendered.append(remaining)
-            break
-        rendered.append(remaining[:start])
-        remaining = remaining[start + len(_SEARCH_HIGHLIGHT_OPEN) :]
-        end = remaining.find(_SEARCH_HIGHLIGHT_CLOSE)
-        if end < 0:
-            rendered.append(_SEARCH_HIGHLIGHT_OPEN + remaining)
-            break
-        highlighted = remaining[:end]
-        if highlighted:
-            rendered.append(highlighted, style="bold yellow")
-        remaining = remaining[end + len(_SEARCH_HIGHLIGHT_CLOSE) :]
+    plain, spans = _search_preview_segments(text)
+    rendered = Text(plain)
+    for start, end in spans:
+        rendered.stylize("bold yellow", start, end)
     return rendered
+
+
+def _render_search_preview(
+    path: str,
+    line: int,
+    column: int,
+    language: str,
+    text: str,
+) -> list[Any]:
+    plain, spans = _search_preview_segments(text)
+    syntax = Syntax(
+        plain or " ",
+        language or "text",
+        theme="ansi_dark",
+        word_wrap=True,
+        background_color="default",
+        line_numbers=True,
+        start_line=line,
+        indent_guides=True,
+    )
+    for start, end in spans:
+        syntax.stylize_range("bold yellow", (1, start), (1, end))
+    return [
+        Rule(
+            title=_preview_title(
+                path,
+                language=language or "text",
+                detail=f"{line}:{column}",
+            ),
+            style="dim",
+        ),
+        syntax,
+    ]
 
 
 def _render_preview_line(line: str) -> list[Any]:
@@ -638,6 +764,30 @@ def _render_preview_line(line: str) -> list[Any]:
         text.append_text(_preview_repr(match.group("count"), style="bold magenta"))
         text.append(" replacement(s)", style="dim")
         return [text]
+    if match := _SEARCH_PREVIEW_BLOCK_LINE_RE.match(line):
+        return _render_search_preview(
+            match.group("path"),
+            int(match.group("line")),
+            int(match.group("column")),
+            match.group("language"),
+            match.group("text"),
+        )
+    if match := _SEARCH_GROUP_MATCH_LINE_RE.match(line):
+        indent = match.group("indent")
+        text = Text(indent)
+        text.append("match", style="magenta")
+        text.append(":", style="dim")
+        text.append(" ")
+        text.append(match.group("line"), style="magenta")
+        text.append(":", style="dim")
+        text.append(match.group("column"), style="dim")
+        text.append(" ")
+        text.append_text(
+            _preview_badge(match.group("language"), style="bold black on bright_cyan")
+        )
+        text.append(" ")
+        text.append_text(_render_search_preview_text(match.group("text")))
+        return [text]
     if match := _SEARCH_PREVIEW_LINE_RE.match(line):
         text = Text()
         text.append(_sanitize_terminal_text(match.group("path")), style="cyan")
@@ -683,15 +833,45 @@ def _render_preview_line(line: str) -> list[Any]:
 
 def _render_preview_text(text: str, *, console: Console = STDERR) -> str:
     rich_console, buffer = _rich_console_buffer(console)
-    rich_console.print(
-        Group(
-            *[
-                renderable
-                for line in str(text).splitlines()
-                for renderable in _render_preview_line(line)
-            ]
-        )
-    )
+    lines = str(text).splitlines()
+    renderables: list[Any] = []
+    index = 0
+    while index < len(lines):
+        if index + 2 < len(lines):
+            path_line = _TOON_LINE_RE.match(lines[index])
+            lines_line = _TOON_LINE_RE.match(lines[index + 1])
+            text_line = _TOON_LINE_RE.match(lines[index + 2])
+            if (
+                path_line
+                and not path_line.group("indent")
+                and path_line.group("key") == "path"
+                and path_line.group("value")
+                and lines_line
+                and not lines_line.group("indent")
+                and lines_line.group("key") == "lines"
+                and lines_line.group("value")
+                and text_line
+                and not text_line.group("indent")
+                and text_line.group("key").partition(".")[0] == "text"
+                and text_line.group("value") is not None
+            ):
+                text_value_lines = [text_line.group("value")]
+                next_index = index + 3
+                while next_index < len(lines) and lines[next_index].startswith("  "):
+                    text_value_lines.append(lines[next_index][2:])
+                    next_index += 1
+                if batlike := _render_read_preview(
+                    path_line.group("value"),
+                    lines_line.group("value"),
+                    text_line.group("key"),
+                    "\n".join(text_value_lines),
+                ):
+                    renderables.extend(batlike)
+                    index = next_index
+                    continue
+        renderables.extend(_render_preview_line(lines[index]))
+        index += 1
+    rich_console.print(Group(*renderables))
     return buffer.getvalue().rstrip("\n")
 
 
@@ -708,6 +888,22 @@ CONFIG_PATH = Path.home() / ".config" / "oy" / "config.json"
 type RuntimeBudgets = dict[str, int]
 type SessionContext = dict[str, Any]
 type SavedModelConfig = dict[str, str | None]
+type AgentProfile = dict[str, Any]
+type AuditSettings = dict[str, int]
+
+
+def audit_settings(
+    *,
+    context_tokens: int = MAX_CONTEXT_TOKENS,
+) -> AuditSettings:
+    _ = context_tokens
+    return {
+        "review_chunk_target_tokens": 64_000,
+        "review_chunk_max_files": 64,
+        "report_context_limit": 64,
+        "per_file_notes_limit": 5,
+        "audit_notes_limit": 10,
+    }
 
 
 def runtime_budgets(
@@ -733,6 +929,8 @@ def session_context(
     system_prompt: str,
     system_file: Path | None = None,
     yolo: bool = False,
+    agent: str = "default",
+    max_context_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> SessionContext:
     return {
         "workspace": workspace,
@@ -741,6 +939,8 @@ def session_context(
         "system_prompt": system_prompt,
         "system_file": system_file,
         "yolo": yolo,
+        "agent": agent,
+        "max_context_tokens": max(int(max_context_tokens or 0), 1),
     }
 
 
@@ -850,14 +1050,63 @@ def active_system_prompt(interactive: bool) -> str:
     return BASE_SYSTEM_PROMPT + "\n" + suffix + "\n"
 
 
-def active_tool_registry(interactive: bool):
-    from .tools import TOOL_REGISTRY, select_tools
-
-    return TOOL_REGISTRY if interactive else select_tools(exclude={"ask"})
-
-
 def ask_system_prompt(system_prompt: str) -> str:
     return system_prompt + _ASK_SYSTEM_SUFFIX
+
+
+def list_agent_profiles() -> list[str]:
+    agents = load_session_text().get("agents", {})
+    if not isinstance(agents, dict):
+        return ["default"]
+    return [str(name).replace("_", "-") for name in agents]
+
+
+def normalize_agent_profile(agent: str | None) -> str:
+    value = (agent or "default").strip().lower().replace("_", "-")
+    available = set(list_agent_profiles())
+    if value not in available:
+        abort(
+            "Unknown agent profile "
+            f"{_fmt('inline', value)}. Available: "
+            + ", ".join(_fmt('inline', name) for name in sorted(available))
+        )
+    return value
+
+
+def agent_profile(agent: str | None) -> AgentProfile:
+    name = normalize_agent_profile(agent)
+    raw = load_session_text().get("agents", {}).get(name.replace("-", "_"), {})
+    if not isinstance(raw, dict):
+        raw = {}
+    description = raw.get("description") if isinstance(raw.get("description"), str) else ""
+    system = raw.get("system") if isinstance(raw.get("system"), str) else ""
+    profile: AgentProfile = {
+        "name": name,
+        "description": description,
+        "system_prompt_suffix": system.strip(),
+        "tool_mode": "normal",
+        "auto_approve_edits": False,
+        "auto_approve_bash": False,
+        "yolo": False,
+    }
+    if name == "plan":
+        profile["tool_mode"] = "read_only"
+    elif name == "accept-edits":
+        profile["auto_approve_edits"] = True
+    elif name == "auto-approve":
+        profile["yolo"] = True
+        profile["auto_approve_edits"] = True
+        profile["auto_approve_bash"] = True
+    return profile
+
+
+def active_tool_registry(interactive: bool, *, agent: str | None = None):
+    from .tools import TOOL_REGISTRY, select_tools
+
+    profile = agent_profile(agent)
+    if profile["tool_mode"] == "read_only":
+        return read_only_tool_registry()
+    return TOOL_REGISTRY if interactive else select_tools(exclude={"ask"})
 
 
 def read_only_tool_registry():
@@ -1372,6 +1621,19 @@ def count_tokens(text: str) -> int:
     return len(encode_tokens(text))
 
 
+def count_file_tokens(path: Path) -> int:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return 0
+    except OSError:
+        return 0
+    return count_tokens(text)
+
+
 def truncate_str_to_tokens(
     text: str, max_tokens: int = BUDGETS["message_tokens"]
 ) -> str:
@@ -1467,7 +1729,9 @@ __all__ = [
     "_sys_file",
     "_truncate_long_lines",
     "active_system_prompt",
+    "agent_profile",
     "ask",
+    "audit_settings",
     "base_system_prompt",
     "active_tool_registry",
     "ask_system_prompt",
@@ -1475,6 +1739,7 @@ __all__ = [
     "abort",
     "clip_tokens",
     "command_env",
+    "count_file_tokens",
     "count_tokens",
     "decode_tokens",
     "encode_tokens",
@@ -1488,12 +1753,15 @@ __all__ = [
     "llm_session",
     "tool_session",
     "join_model_spec",
+    "list_agent_profiles",
     "list_all_model_ids",
     "load_json",
     "load_model_config",
+    "load_toon",
     "logging",
     "load_session_text",
     "noninteractive_system_prompt",
+    "normalize_agent_profile",
     "note_tool",
     "os",
     "preview",
@@ -1515,6 +1783,7 @@ __all__ = [
     "_shim_resolve_shim",
     "save_json",
     "save_model_config",
+    "save_toon",
     "show",
     "split_model_spec",
     "sys",

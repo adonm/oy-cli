@@ -12,6 +12,9 @@ Small local AI coding CLI for your shell. It can inspect files, search content, 
 uv tool install oy-cli
 oy "add docstrings to public functions"
 oy chat
+oy chat --agent plan
+oy chat --continue-session
+oy run --resume 20260325
 oy audit "focus on authentication"
 ```
 
@@ -22,13 +25,58 @@ oy "inspect the main module and suggest improvements"
 OY_ROOT=./my-project oy "fix the failing tests"
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy
 oy chat
+oy chat --agent plan
+oy chat --agent accept-edits
+oy chat --continue-session
+oy run --resume 20260325 "finish the refactor"
 oy audit [focus]
+oy renovate-local
 oy ralph "prompt"
 oy model [filter]
 oy --help
 ```
 
 In chat, `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed. It is no-write rather than no-network.
+
+## Audit workflow
+
+`oy audit` now runs a resumable 3-phase repo audit automatically:
+
+- phase1 `plan` — Python uses `sloc` plus `tiktoken` counts to build a SLOC-ranked 64k-token chunk plan
+- phase2 `review` — Python reads each chunk, gives the model only that chunk plus the ASVS/grugbrain context, and exposes only `search` plus `replace` scoped to `ISSUES.md`
+- phase3 `summary` — rewrite `ISSUES.md` so the 10-15 most important issues keep detail and the rest become concise
+
+Audit state is cached in the session dir so long-running audits can resume cleanly. After each chunk, Python verifies that `ISSUES.md` changed; if not, it retries with a smaller chunk instead of pretending review progress happened.
+
+`.tmp/` is still used for things like `oy renovate-local` reports, but audit progress itself now lives in the session cache.
+
+## Agent profiles
+
+`oy` now supports simple built-in agent profiles inspired by familiar coding-agent modes:
+
+- `default` — normal tool approvals
+- `plan` — read-only exploration and planning
+- `accept-edits` — auto-approves file edits, but not shell commands
+- `auto-approve` — auto-approves all available tools
+
+Examples:
+
+```bash
+oy chat --agent plan
+oy run --agent accept-edits "rename the helper and update callers"
+oy chat --agent auto-approve
+```
+
+## Session continuation
+
+Saved chat sessions can now be resumed from the CLI:
+
+- `oy chat --continue-session` — continue the most recent saved session
+- `oy run --continue-session "next task"` — continue the most recent session, then run one prompt
+- `oy run --resume <name-or-number> "next task"` — resume a specific saved session
+- in chat, `/save [name]` and `/load [name]` still work
+
+Saved sessions now keep both the transcript and the active agent profile.
 
 ## Design goals
 
@@ -66,7 +114,7 @@ Prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/se
 {"shim": "openai", "model": "glm-5"}
 ```
 
-Only `model` and `shim` are persisted. Selection order is `OY_MODEL`, then saved config, then the first-run picker. `OY_SHIM` only changes backend choice when the model name is bare or no model has been saved yet.
+Only `model` and `shim` are persisted in config. Session continuation uses per-session files under `~/.config/oy/sessions/`. Selection order is `OY_MODEL`, then saved config, then the first-run picker. `OY_SHIM` only changes backend choice when the model name is bare or no model has been saved yet.
 
 From local testing, `glm-5` and `kimi-k2.5` are good defaults.
 

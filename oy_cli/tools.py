@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import bz2
-from collections import Counter
+from collections import Counter, OrderedDict
 import concurrent.futures
 import gzip
 import ipaddress
@@ -316,6 +316,8 @@ class TodoItemInput(TypedDict, total=False):
     status: NotRequired[Literal["pending", "in_progress", "done"]]
 
 
+
+
 def _tool_name(name: str) -> str:
     return name[5:] if name.startswith("tool_") else name
 
@@ -371,8 +373,12 @@ def tool(*, mutating: bool = False):
     return deco
 
 
+def _public_tools() -> dict[str, dict[str, Any]]:
+    return {name: tool for name, tool in _TOOLS.items() if name != "audit_todo"}
+
+
 def tool_specs(tools: dict[str, dict[str, Any]] | None = None):
-    registry = _TOOLS if tools is None else tools
+    registry = _public_tools() if tools is None else tools
     return [
         {
             "name": tool["name"],
@@ -384,11 +390,12 @@ def tool_specs(tools: dict[str, dict[str, Any]] | None = None):
 
 
 def select_tools(*, include=None, exclude=frozenset()):
+    registry = _public_tools()
     if include is None and not exclude:
-        return _TOOLS
+        return registry
     return {
         name: tool
-        for name, tool in _TOOLS.items()
+        for name, tool in registry.items()
         if (include is None or name in include) and name not in exclude
     }
 
@@ -428,6 +435,7 @@ def _approve_mutating_tool(state: Any, name: str, args: dict[str, Any]) -> bool:
         state.get("yolo", False)
         or not state.get("interactive", False)
         or state.get("approve_all_mutating_tools", False)
+        or name in state.get("auto_approve_tools", set())
     ):
         return True
     choice = rt.select(
@@ -605,6 +613,8 @@ def tool_todo(state: Any, todos: list[TodoItemInput]):
     rt.note_tool(state, "todo", _suffix=f"({len(state['todos'])} items)")
     rt.show(_todo_preview(state["todos"]))
     return payload
+
+
 
 
 def _bash_payload(command: str, result) -> tuple[dict[str, Any], str]:
@@ -1227,17 +1237,14 @@ def sloc(
             item["language"].lower(),
         ),
     )
-    top_files = [
-        item
-        for item in sorted(
-            file_summaries,
-            key=lambda item: (
-                -int(item["code_count"]),
-                -int(item["line_count"]),
-                str(item["path"]).lower(),
-            ),
-        )
-    ]
+    top_files = sorted(
+        file_summaries,
+        key=lambda item: (
+            -int(item["code_count"]),
+            -int(item["line_count"]),
+            str(item["path"]).lower(),
+        ),
+    )
     ordered_states = tuple(
         {"state": state, "file_count": file_count}
         for state, file_count in sorted(
@@ -1370,12 +1377,14 @@ def tool_read(
     end_line = start + len(shown)
     if text:
         language = rt.preview_language_for_path(path, text)
-        preview = {
-            "path": path,
-            "lines": f"{start + 1}-{end_line} of {line_count}",
-            f"text.{language}" if language != "text" else "text": text,
-        }
-        rt.show(serialize_toon(preview))
+        text_key = f"text.{language}" if language != "text" else "text"
+        preview_lines = [
+            f"path: {path}",
+            f"lines: {start + 1}-{end_line} of {line_count}",
+            f"{text_key}: {shown[0]}",
+        ]
+        preview_lines.extend(f"  {line}" for line in shown[1:])
+        rt.show("\n".join(preview_lines))
     else:
         rt.show(
             f"path: {path}\nlines: {start + 1}-{end_line} of {line_count}\n<empty file>"
@@ -1404,12 +1413,26 @@ def _search_display_path(root: Path, source: str) -> str:
     return rt._rel(root, Path(source))
 
 
-def _search_preview_line(root: Path, match: dict[str, Any]) -> str:
-    path_text = _search_display_path(root, match["source"])
-    if match.get("error"):
-        return f"[!] {path_text}: {match['error']}"
-    text = rt._truncate_long_lines(match.get("preview_text") or match["text"])
-    return f"{path_text}:{match['line_number']}:{match.get('column', 1)}:{text}"
+def _group_search_preview_lines(root: Path, matches: list[dict[str, Any]]) -> list[str]:
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for match in matches:
+        path_text = _search_display_path(root, match["source"])
+        grouped.setdefault(path_text, []).append(match)
+    lines: list[str] = []
+    for path_text, path_matches in grouped.items():
+        if lines:
+            lines.append("")
+        lines.append(f"path: {path_text}")
+        for match in path_matches:
+            if match.get("error"):
+                lines.append(f"[!] {match['error']}")
+                continue
+            text = rt._truncate_long_lines(match.get("preview_text") or match["text"])
+            language = rt.preview_language_for_path(path_text, match["text"])
+            lines.append(
+                f"match: {match['line_number']}:{match.get('column', 1)}:{language}:{text}"
+            )
+    return lines
 
 
 def _optional_counts(**counts: int) -> dict[str, int]:
@@ -1463,11 +1486,10 @@ def _search_payload(
             }
             for match in errors[:shown_limit]
         ]
-    preview_lines = [_search_preview_line(root, match) for match in shown_matches]
+    preview_lines = _group_search_preview_lines(root, shown_matches)
     if errors:
-        preview_lines.extend(
-            _search_preview_line(root, match) for match in errors[:shown_limit]
-        )
+        error_lines = _group_search_preview_lines(root, errors[:shown_limit])
+        preview_lines.extend(([""] if preview_lines and error_lines else []) + error_lines)
     preview = "\n".join(preview_lines) if preview_lines else "<no matches>"
     if len(matches) > len(shown_matches):
         preview += f"\n... [{len(matches) - len(shown_matches)} more matches omitted]"
@@ -1833,6 +1855,9 @@ def tool_sloc(
     )
     rt.show(preview)
     return payload
+
+
+TOOL_REGISTRY = select_tools()
 
 
 __all__ = [

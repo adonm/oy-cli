@@ -178,6 +178,13 @@ def load_json(path, default):
         return default
 
 
+def load_toon(path, default):
+    try:
+        return toons.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return default
+
+
 def _load_json_object(path: Path) -> dict[str, Any]:
     data = load_json(path, {})
     return data if isinstance(data, dict) else {}
@@ -198,6 +205,17 @@ def save_json(path, data):
         path.chmod(0o600)
         return True
     except OSError:
+        return False
+
+
+def save_toon(path, data):
+    try:
+        _ensure_private_dir(path.parent)
+        payload = toons.dumps(normalize_jsonlike(data), indent=2)
+        path.write_text(payload + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        return True
+    except (OSError, TypeError, ValueError):
         return False
 
 
@@ -2037,6 +2055,7 @@ __all__ = [
     "llm_session",
     "list_models_for_shim",
     "load_json",
+    "load_toon",
     "normalize_jsonlike",
     "PermissionDeniedError",
     "RateLimitError",
@@ -2044,6 +2063,7 @@ __all__ = [
     "resolve_shim",
     "run_cmd",
     "save_json",
+    "save_toon",
     "serialize_json",
     "serialize_toon",
     "split_model_spec",
