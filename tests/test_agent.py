@@ -178,3 +178,39 @@ class TestRunTurn:
             "Retrying openai:gpt-test (attempt 2/3) | " + waits[0].split(" | ", 1)[1]
         ]
 
+    def test_wait_label_suffix_is_appended_to_wait_lines(self, monkeypatch, tmp_path):
+        waits = []
+        updates = []
+        patch_runtime(
+            monkeypatch,
+            _print=lambda *_a, **_k: None,
+            _debug_log=None,
+            _note=None,
+        )
+        monkeypatch.setattr(agent, "wait", lambda message: {"message": message})
+        monkeypatch.setattr(agent, "start_wait", lambda spinner: waits.append(spinner["message"]))
+        monkeypatch.setattr(agent, "stop_wait", lambda _spinner: None)
+        monkeypatch.setattr(agent, "log_wait", lambda *_a, **_k: None)
+        monkeypatch.setattr(agent, "update_wait", lambda _spinner, message: updates.append(message))
+
+        def fake_chat_completion(**kwargs):
+            kwargs["on_retry"](2, 3, "retrying")
+            return AssistantMessage("done")
+
+        code, content = agent.run_turn(
+            {"chat_completion": fake_chat_completion},
+            _transcript(),
+            make_state(tmp_path, registry=tool_handler("echo", lambda _state, text: text)),
+            "openai:gpt-test",
+            tools.tool_specs({}),
+            wait_label_suffix="audit phase2 | files 1/4 | chunks 0/2 | chunk-001 | findings 3",
+        )
+
+        assert (code, content) == (0, "done")
+        assert waits and waits[0].endswith("| audit phase2 | files 1/4 | chunks 0/2 | chunk-001 | findings 3")
+        assert updates == [
+            "Retrying openai:gpt-test (attempt 2/3) | "
+            + waits[0].split(" | ", 1)[1].split(" | audit ", 1)[0]
+            + " | audit phase2 | files 1/4 | chunks 0/2 | chunk-001 | findings 3"
+        ]
+

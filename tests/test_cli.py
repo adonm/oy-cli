@@ -55,7 +55,7 @@ def _capture_defopt_run(monkeypatch):
 class TestCLI:
     @pytest.mark.parametrize(
         ("argv", "expected"),
-        [(["fix", "tests"], ["run", "fix", "tests"]), (["ralph", "fix", "tests"], ["ralph", "fix", "tests"]), (["audit-logic", "auth"], ["audit-logic", "auth"]), (["renovate-local"], ["renovate-local"]), (["--continue"], ["run", "--continue-session"]), (["-c"], ["run", "--continue-session"]), (["--resume", "abc123"], ["run", "--resume", "abc123"])],
+        [(["fix", "tests"], ["run", "fix", "tests"]), (["ralph", "fix", "tests"], ["ralph", "fix", "tests"]), (["audit-logic", "auth"], ["audit-logic", "auth"]), (["audit", "auth", "--from", "HEAD~1"], ["audit", "auth", "--from", "HEAD~1"]), (["renovate-local"], ["renovate-local"]), (["--continue"], ["run", "--continue-session"]), (["-c"], ["run", "--continue-session"]), (["--resume", "abc123"], ["run", "--resume", "abc123"])],
     )
     def test_main_normalizes_commands(self, monkeypatch, argv, expected):
         seen = _capture_defopt_run(monkeypatch)
@@ -627,6 +627,67 @@ class TestAuditWorkflow:
         assert cli._audit_session_path(tmp_path) != cli._audit_session_path(tmp_path, mode=cli._AUDIT_LOGIC_MODE)
         assert cli._audit_session_path(tmp_path, mode=cli._AUDIT_LOGIC_MODE).name.endswith('-logic.toon')
 
+    def test_audit_session_path_separates_scope(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+
+        unscoped = cli._audit_session_path(tmp_path)
+        scoped = cli._audit_session_path(tmp_path, scope={"ref": "HEAD~1"})
+
+        assert scoped != unscoped
+        assert scoped.name.endswith('.toon')
+        assert '-from-' in scoped.name
+
+    def test_audit_parse_scope_supports_date_and_ref(self):
+        assert cli._audit_parse_scope('2026-04-01') == {"date": "2026-04-01"}
+        assert cli._audit_parse_scope('HEAD~3') == {"ref": "HEAD~3"}
+        assert cli._audit_parse_scope('ref:HEAD~3 date:2026-04-01') == {"ref": "HEAD~3", "date": "2026-04-01"}
+        with pytest.raises(ValueError):
+            cli._audit_parse_scope('date:20260401')
+
+    def test_build_audit_prompt_includes_scope_note(self, tmp_path):
+        prompt = cli._build_audit_prompt(
+            interactive=False,
+            focus='auth',
+            session_path=tmp_path / 'audit.toon',
+            scope={"ref": "HEAD~1", "date": "2026-04-01"},
+        )
+
+        assert 'Additional focus: auth' in prompt
+        assert 'Scoped with `--from` after commit `HEAD~1` and date `2026-04-01`.' in prompt
+
+    def test_audit_returns_error_for_invalid_from(self, monkeypatch):
+        patch_runtime(monkeypatch, _print=None, _note=None)
+
+        assert cli.audit(from_='date:20260401') == 1
+
+    def test_ensure_audit_session_scopes_files_with_git_name_only(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _note=None, _print=None)
+
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+        (tmp_path / "a.py").write_text("print(\'a\')\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("print(\'b\')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.py", "b.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+        (tmp_path / "b.py").write_text("print(\'b2\')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "b.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "update b"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+        artifacts = cli._ensure_audit_session(tmp_path, focus="auth", scope={"ref": base})
+
+        state = rt.load_toon(artifacts["session_path"], {})
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+        assert [item["path"] for item in state["files"]] == ["b.py"]
+        assert state["scope"] == {"ref": base}
+        assert state["run_config"]["from"] == f"ref:{base}"
+        assert state["totals"]["queued"] == 1
+        assert state["totals"]["total_code_count"] == 1
+        assert any("Scoped with `--from` after commit" in note for note in state["notes"])
+        assert "> **Scope**: 1 reviewable files" in issues_text
+
     def test_audit_uses_python_workflow(self, tmp_path, monkeypatch):
         _stub_session(monkeypatch, tmp_path)
         monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
@@ -644,7 +705,7 @@ class TestAuditWorkflow:
         seen = {}
         monkeypatch.setattr(cli, "_run_audit_workflow", lambda **kwargs: seen.update(kwargs) or 0)
 
-        assert cli.audit("auth") == 0
+        assert cli.audit("auth", from_="HEAD~1") == 0
         assert "64k chunks" in seen["prompt"]
         assert str(artifacts["session_path"]) in seen["prompt"]
         assert seen["workspace"] == tmp_path
@@ -667,7 +728,7 @@ class TestAuditWorkflow:
         seen = {}
         monkeypatch.setattr(cli, "_run_audit_workflow", lambda **kwargs: seen.update(kwargs) or 0)
 
-        assert cli.audit_logic("auth") == 0
+        assert cli.audit_logic("auth", from_="2026-04-01") == 0
         assert "stripped comments" in seen["prompt"]
         assert seen["mode"] == cli._AUDIT_LOGIC_MODE
         assert seen["system_prompt"] == cli.LOGIC_AUDIT_PHASE1_SYSTEM_PROMPT
@@ -896,7 +957,23 @@ class TestAuditWorkflow:
         assert set(seen[1]["tool_registry"]) == {"replace"}
         assert seen[0]["auto_approve_tools"] == {"inbox_append"}
         assert seen[1]["auto_approve_tools"] == {"replace"}
+        assert seen[0]["wait_label_suffix"] == "audit phase2 | files 0/1 | chunks 0/1 | chunk-001 | findings 0"
+        assert seen[1]["wait_label_suffix"] == "audit phase3 | files 1/1 | chunks 1/1 | findings 2"
 
+
+    def test_audit_wait_label_suffix_renders_progress(self):
+        state = {
+            "active_phase": "phase2",
+            "totals": {"queued": 7, "reviewed": 3, "chunk_count": 4, "completed_chunks": 1, "findings": 2},
+        }
+
+        assert cli._audit_wait_label_suffix(state, chunk={"id": "chunk-002"}) == (
+            "audit phase2 | files 3/7 | chunks 1/4 | chunk-002 | findings 2"
+        )
+        assert cli._audit_wait_label_suffix({
+            "active_phase": "phase3",
+            "totals": {"queued": 7, "reviewed": 7, "chunk_count": 4, "completed_chunks": 4, "findings": 5},
+        }) == "audit phase3 | files 7/7 | chunks 4/4 | findings 5"
 
     def test_audit_system_prompt_for_mode_supports_phase_specific_prompts(self):
         assert cli._audit_system_prompt_for_mode(cli._AUDIT_DEFAULT_MODE, phase="phase1") == cli.AUDIT_PHASE1_SYSTEM_PROMPT

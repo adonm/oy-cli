@@ -360,6 +360,11 @@ def log_wait(item: Wait, message: str) -> None:
     rt._note(message, tag="wait")
 
 
+def _wait_label(label: str, wait_label_suffix: str = "") -> str:
+    suffix = str(wait_label_suffix or "").strip()
+    return f"{label} | {suffix}" if suffix else label
+
+
 def _normalized_vote_text(text: str) -> str:
     return " ".join(text.split()).strip().lower()
 
@@ -371,6 +376,7 @@ def run_turn(
     state: AgentState,
     model_spec,
     tool_definitions,
+    wait_label_suffix: str = "",
 ):
     _, model = rt.split_model_spec(model_spec)
     step = 0
@@ -385,7 +391,7 @@ def run_turn(
             tool_count=len(tool_definitions),
         )
         size_str = rt.format_tokens(sum(map(_message_tokens, prepared)))
-        spinner = wait(f"Waiting for {model_spec} | {size_str}")
+        spinner = wait(_wait_label(f"Waiting for {model_spec} | {size_str}", wait_label_suffix))
         start_wait(spinner)
 
         def on_retry(attempt, max_attempts, error_ctx=None):
@@ -402,7 +408,10 @@ def run_turn(
             )
             update_wait(
                 spinner,
-                f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) | {size_str}",
+                _wait_label(
+                    f"Retrying {model_spec} (attempt {attempt}/{max_attempts}) | {size_str}",
+                    wait_label_suffix,
+                ),
             )
 
         try:
@@ -471,6 +480,7 @@ def run_agent(
     agent: str = "default",
     tool_registry: dict[str, dict[str, Any]] | None = None,
     auto_approve_tools: set[str] | None = None,
+    wait_label_suffix: str = "",
 ):
     profile = rt.agent_profile(agent)
     selected_tool_registry = tool_registry or active_tool_registry(
@@ -505,6 +515,7 @@ def run_agent(
             state,
             model,
             tool_specs(selected_tool_registry),
+            wait_label_suffix=wait_label_suffix,
         )
 
     try:

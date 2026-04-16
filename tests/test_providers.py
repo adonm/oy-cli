@@ -148,6 +148,36 @@ class TestMessageDecoding:
             tool_calls=[ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
         )
 
+class TestChatCompletions:
+    def test_decodes_chat_completions_tool_calls(self):
+        decoded = providers._decode_chat_completions_output(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "hello",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "echo",
+                                        "arguments": '{"value":"x"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+        assert decoded == AssistantMessage(
+            "hello",
+            tool_calls=[ToolCall(id="call_1", name="echo", arguments={"value": "x"})],
+        )
+
+
 class TestReasoningFallback:
     def test_drops_unsupported_reasoning_after_first_rejection(self):
         responses_create = Mock(
@@ -200,6 +230,72 @@ class TestReasoningFallback:
         client = providers._responses_client(responses_create, lambda: ["gpt-test"])
         with pytest.raises(RuntimeError, match="does not support the Open Responses / Responses API required by oy"):
             client["chat_completion"]("gpt-test", [])
+
+    def test_responses_from_key_falls_back_to_chat_completions_after_responses_unsupported(self, monkeypatch):
+        created = []
+        responses_calls = []
+        chat_calls = []
+
+        monkeypatch.setattr(providers, "_openai", lambda *_args, **_kwargs: {"api": "ok"})
+        monkeypatch.setattr(providers, "_openai_model_lister", lambda _api: lambda: ["gpt-test"])
+        monkeypatch.setattr(
+            providers,
+            "_openai_json_create",
+            lambda _api, path, *, source: created.append((path, source)) or f"create:{path}",
+        )
+
+        def fake_responses_client(create, list_models):
+            def chat_completion(*_args, **_kwargs):
+                responses_calls.append((create, _args, _kwargs))
+                raise providers.UnsupportedResponsesAPIError("no responses")
+            return {"chat_completion": chat_completion, "list_models": list_models}
+
+        def fake_chat_client(create, list_models):
+            def chat_completion(model, messages, tools=None, tool_choice="auto", on_retry=None):
+                chat_calls.append((create, model, messages, tools, tool_choice, on_retry))
+                return AssistantMessage("fallback")
+            return {"chat_completion": chat_completion, "list_models": list_models}
+
+        monkeypatch.setattr(providers, "_responses_client", fake_responses_client)
+        monkeypatch.setattr(providers, "_chat_completions_client", fake_chat_client)
+
+        client = providers._responses_from_key("key")
+        assert client["chat_completion"]("gpt-test", []) == AssistantMessage("fallback")
+        assert client["chat_completion"]("gpt-test", []) == AssistantMessage("fallback")
+        assert len(responses_calls) == 1
+        assert len(chat_calls) == 2
+        assert created == [
+            ("/responses", "Responses API"),
+            ("/chat/completions", "Chat Completions API"),
+        ]
+
+    def test_responses_from_key_falls_back_to_chat_completions_after_malformed_output(self, monkeypatch):
+        monkeypatch.setattr(providers, "_openai", lambda *_args, **_kwargs: {"api": "ok"})
+        monkeypatch.setattr(providers, "_openai_model_lister", lambda _api: lambda: ["gpt-test"])
+        monkeypatch.setattr(
+            providers,
+            "_openai_json_create",
+            lambda _api, path, *, source: f"create:{path}",
+        )
+        monkeypatch.setattr(
+            providers,
+            "_responses_client",
+            lambda create, list_models: {
+                "chat_completion": lambda *_args, **_kwargs: (_ for _ in ()).throw(providers.RetryableDecodeError("bad output")),
+                "list_models": list_models,
+            },
+        )
+        monkeypatch.setattr(
+            providers,
+            "_chat_completions_client",
+            lambda create, list_models: {
+                "chat_completion": lambda *_args, **_kwargs: AssistantMessage("fallback"),
+                "list_models": list_models,
+            },
+        )
+
+        client = providers._responses_from_key("key")
+        assert client["chat_completion"]("gpt-test", []) == AssistantMessage("fallback")
 
 
 class TestMalformedOutputRetry:
@@ -351,19 +447,29 @@ class TestClientFactories:
                 "kind": "responses",
                 "create": create,
                 "list_models": list_models,
+                "chat_completion": lambda *_args, **_kwargs: AssistantMessage("responses"),
+                **kwargs,
+            },
+        )
+        monkeypatch.setattr(
+            providers,
+            "_chat_completions_client",
+            lambda create, list_models, **kwargs: {
+                "kind": "chat",
+                "create": create,
+                "list_models": list_models,
+                "chat_completion": lambda *_args, **_kwargs: AssistantMessage("chat"),
                 **kwargs,
             },
         )
 
         responses = providers._responses_from_key("key")
 
-        assert responses == {
-            "kind": "responses",
-            "create": "create:/responses",
-            "list_models": "models:0",
-        }
+        assert callable(responses["chat_completion"])
+        assert responses["list_models"] == "models:0"
         assert created == [
             ({"api": 0}, "/responses", "Responses API"),
+            ({"api": 0}, "/chat/completions", "Chat Completions API"),
         ]
 
 
@@ -509,7 +615,7 @@ class TestMantleClient:
         monkeypatch.setattr(
             providers,
             "_bedrock_mantle_client",
-            lambda _credentials, _region, _timeout=providers.DEFAULT_HTTP_TIMEOUT: dict(
+            lambda _credentials, _region, timeout=providers.DEFAULT_HTTP_TIMEOUT: dict(
                 sentinel
             ),
         )
@@ -519,6 +625,7 @@ class TestMantleClient:
 
     def test_bedrock_mantle_client_posts_to_responses_api(self, monkeypatch):
         requested = {}
+
         def fake_bedrock_request_headers(
             _credentials, _region, _method, _url, body=b"", headers=None
         ):
@@ -562,6 +669,53 @@ class TestMantleClient:
         assert requested["headers"]["Content-Type"] == "application/json"
         assert b'"model":"zai.glm-4.6"' in requested["data"]
         assert b'"reasoning":{"effort":"high"}' in requested["data"]
+
+    def test_bedrock_mantle_client_falls_back_to_chat_completions_after_responses_unsupported(self, monkeypatch):
+        requested = []
+
+        monkeypatch.setattr(
+            providers,
+            "_bedrock_request_headers",
+            lambda _credentials, _region, _method, _url, body=b"", headers=None: {
+                "Authorization": "AWS4-HMAC-SHA256 test",
+                **(headers or {}),
+            },
+        )
+
+        class FakeSession:
+            def request(self, method, url, **req):
+                requested.append({"method": method, "url": url, **req})
+                if url.endswith("/responses"):
+                    return providers.response_adapter(
+                        status_code=404,
+                        headers={"Content-Type": "application/json"},
+                        text='{"error":{"message":"The model \'zai.glm-5\' does not support the \'/v1/responses\' API"}}',
+                        content=b'{"error":{"message":"The model \'zai.glm-5\' does not support the \'/v1/responses\' API"}}',
+                        url=url,
+                        reason_phrase="Not Found",
+                    )
+                return providers.response_adapter(
+                    status_code=200,
+                    headers={"Content-Type": "application/json"},
+                    text='{"choices":[{"message":{"content":"fallback ok"}}]}',
+                    content=b'{"choices":[{"message":{"content":"fallback ok"}}]}',
+                    url=url,
+                    reason_phrase="OK",
+                )
+
+        monkeypatch.setattr(providers, "llm_session", lambda **_kwargs: FakeSession())
+        client = providers._bedrock_mantle_client(
+            {"access_key": "AKIA", "secret_key": "SECRET"},
+            "ap-southeast-2",
+        )
+
+        assert client["chat_completion"]("zai.glm-5", []) == AssistantMessage("fallback ok")
+        assert client["chat_completion"]("zai.glm-5", []) == AssistantMessage("fallback ok")
+        assert [item["url"] for item in requested] == [
+            "https://bedrock-mantle.ap-southeast-2.api.aws/v1/responses",
+            "https://bedrock-mantle.ap-southeast-2.api.aws/v1/chat/completions",
+            "https://bedrock-mantle.ap-southeast-2.api.aws/v1/chat/completions",
+        ]
 
     def test_load_bedrock_model_list_uses_mantle_endpoint(self, monkeypatch, tmp_path):
         requested = {}

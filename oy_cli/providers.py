@@ -1485,6 +1485,95 @@ def _chat_completions_tools(
     return result or None
 
 
+def _chat_completions_payload(
+    model: str,
+    messages: list[ChatMessage],
+    tools: list[dict[str, Any]] | None,
+    tool_choice: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _chat_completions_messages(messages),
+    }
+    chat_tools = _chat_completions_tools(tools)
+    if chat_tools:
+        payload["tools"] = chat_tools
+        payload["tool_choice"] = tool_choice
+        payload["parallel_tool_calls"] = True
+    return payload
+
+
+def _chat_completions_text_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and not _is_blank_chat_value(text):
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _decode_chat_completions_output(response: Any) -> AssistantMessage:
+    data = (
+        response.model_dump(exclude_none=True)
+        if hasattr(response, "model_dump")
+        else response
+    )
+    if not isinstance(data, dict):
+        raise RuntimeError("Chat Completions API returned an unexpected payload")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("Chat Completions API returned no choices")
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first.get("message"), dict) else {}
+    content = _chat_completions_text_content(message.get("content"))
+    tool_calls: list[dict[str, Any]] = []
+    for item in message.get("tool_calls") or []:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        call_id = item.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        tool_calls.append(
+            ToolCall(
+                id=call_id,
+                name=str(function.get("name") or ""),
+                arguments=_decode_tool_call_arguments(function.get("arguments")),
+            )
+        )
+    return AssistantMessage(content=content, tool_calls=tool_calls)
+
+
+def _chat_completions_client(
+    create: Callable[[dict[str, Any]], dict[str, Any]],
+    list_models: Callable[[], list[str]],
+) -> CompletionClient:
+    def chat_completion(
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        on_retry=None,
+    ) -> AssistantMessage:
+        payload = _chat_completions_payload(model, messages, tools, tool_choice)
+        return _decode_with_retry(
+            lambda: _call_with_retry(lambda: create(payload), on_retry=on_retry),
+            _decode_chat_completions_output,
+            on_retry=on_retry,
+        )
+
+    return {
+        "chat_completion": chat_completion,
+        "list_models": list_models,
+    }
+
+
 def _responses_client(
     create: Callable[[dict[str, Any]], dict[str, Any]],
     list_models: Callable[[], list[str]],
@@ -1597,10 +1686,54 @@ def _responses_from_key(
         max_retries=max_retries,
         timeout=timeout,
     )
-    return _responses_client(
+    list_models = _openai_model_lister(api)
+    responses_client = _responses_client(
         _openai_json_create(api, "/responses", source="Responses API"),
-        _openai_model_lister(api),
+        list_models,
     )
+    chat_client = _chat_completions_client(
+        _openai_json_create(api, "/chat/completions", source="Chat Completions API"),
+        list_models,
+    )
+    fallback = {"enabled": True}
+
+    def chat_completion(
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        on_retry=None,
+    ) -> AssistantMessage:
+        if not fallback["enabled"]:
+            return chat_client["chat_completion"](
+                model,
+                messages,
+                tools,
+                tool_choice,
+                on_retry=on_retry,
+            )
+        try:
+            return responses_client["chat_completion"](
+                model,
+                messages,
+                tools,
+                tool_choice,
+                on_retry=on_retry,
+            )
+        except (UnsupportedResponsesAPIError, RetryableDecodeError, BadRequestError):
+            fallback["enabled"] = False
+            return chat_client["chat_completion"](
+                model,
+                messages,
+                tools,
+                tool_choice,
+                on_retry=on_retry,
+            )
+
+    return {
+        "chat_completion": chat_completion,
+        "list_models": list_models,
+    }
 
 
 def _require_openai_env(_cwd: Path | None = None) -> None:
@@ -1648,10 +1781,11 @@ def _bedrock_mantle_client(
         "base_url": bedrock_base_url(region),
         "http": llm_session(timeout=timeout, follow_redirects=False),
     }
+    list_models = lambda: load_bedrock_model_list(None, region)
 
-    def create(payload: dict[str, Any]) -> dict[str, Any]:
+    def create(endpoint: str, payload: dict[str, Any], *, source: str) -> dict[str, Any]:
         body = _encode_json_body(payload)
-        url = f"{api['base_url'].rstrip('/')}/responses"
+        url = f"{api['base_url'].rstrip('/')}/{endpoint.lstrip('/')}"
         response = api["http"].request(
             "POST",
             url,
@@ -1666,9 +1800,55 @@ def _bedrock_mantle_client(
             ),
         )
         response_raise_for_status(response)
-        return _response_json_object(response, "Responses API: invalid JSON response")
+        return _response_json_object(response, f"{source}: invalid JSON response")
 
-    return _responses_client(create, lambda: load_bedrock_model_list(None, region))
+    responses_client = _responses_client(
+        lambda payload: create("/responses", payload, source="Responses API"),
+        list_models,
+    )
+    chat_client = _chat_completions_client(
+        lambda payload: create("/chat/completions", payload, source="Chat Completions API"),
+        list_models,
+    )
+    fallback = {"enabled": True}
+
+    def chat_completion(
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        on_retry=None,
+    ) -> AssistantMessage:
+        if not fallback["enabled"]:
+            return chat_client["chat_completion"](
+                model,
+                messages,
+                tools,
+                tool_choice,
+                on_retry=on_retry,
+            )
+        try:
+            return responses_client["chat_completion"](
+                model,
+                messages,
+                tools,
+                tool_choice,
+                on_retry=on_retry,
+            )
+        except (UnsupportedResponsesAPIError, RetryableDecodeError, BadRequestError):
+            fallback["enabled"] = False
+            return chat_client["chat_completion"](
+                model,
+                messages,
+                tools,
+                tool_choice,
+                on_retry=on_retry,
+            )
+
+    return {
+        "chat_completion": chat_completion,
+        "list_models": list_models,
+    }
 
 
 def _mantle_completion_client(
