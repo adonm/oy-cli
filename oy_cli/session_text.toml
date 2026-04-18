@@ -25,7 +25,6 @@ Audit the repo for security, unnecessary complexity, and material performance is
 Keep audit state in the session dir cache instead of ad-hoc `.tmp` manifests.
 Keep the report focused on concrete, repo-specific issues with a clear attack path, trigger, or operational impact rather than low-signal style nits, generic best-practice warnings, or speculation.
 If you report a vulnerability, include the shortest evidence needed to show exploitability: entry point, trust boundary, sink, affected paths, impact, and the concrete fix.
-If `.tmp/renovate-*.json` reports exist, inspect the newest relevant one and fold any actionable dependency or update risk into `ISSUES.md`. Generate fresh Renovate lookup reports with `oy renovate-local` outside audit mode when needed. Skip cleanly when no report is present.
 Use the audit prompt's built-in ASVS, MASVS, and grugbrain summary as a lightweight checklist during audit runs, and spend tokens on repo evidence.
 Prioritise critical/high-severity security findings and other issues with a clear, actionable exploit or failure mode. Bias toward findings that are realistically exploitable, privilege-affecting, data-exposing, integrity-breaking, or likely to cause material production incidents.
 Each finding should include location, category (security, complexity, or performance), reference, recommendation, status, and severity. Security findings should also note exploitability/attack preconditions when relevant.
@@ -35,6 +34,7 @@ audit_phase1 = """
 AUDIT PHASE1: setup only.
 The review plan and chunking are handled before you start. Treat this phase as report bootstrap only.
 If `ISSUES.md` already exists, it will be normalized into the inbox layout before chunk review starts.
+If `.tmp/renovate-*.json` reports exist, inspect the newest relevant one once during phase1 and record a concise dependency/update assessment in `ISSUES.md`. Generate fresh Renovate lookup reports with `oy renovate-local` outside audit mode when needed. Skip cleanly when no report is present.
 Do not review code or merge findings in phase1.
 """
 audit_phase2 = """
@@ -45,8 +45,8 @@ Each chunk must leave a durable inbox update in `ISSUES.md`.
 """
 audit_phase3 = """
 AUDIT PHASE3: final rewrite.
-Consume the inbox and rewrite `ISSUES.md` into the final report.
-Dedupe overlapping inbox items, keep the most important 10-15 issues detailed, keep the rest concise, and preserve the shortest evidence that still proves exploitability or impact.
+Consume the inbox and rewrite `ISSUES.md` into a clear, easy to understand final report with minimal formatting.
+Dedupe overlapping inbox items, keep the most important 10-15 issues detailed, summarise the remainder concisely preserving key evidence that proves exploitability or impact.
 In this phase, rewriting `ISSUES.md` is expected.
 """
 audit_logic_suffix = """

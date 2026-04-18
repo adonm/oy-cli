@@ -99,8 +99,12 @@ def _message_tokens(message: ChatMessage) -> int:
     return 4 + count_tokens(_message_text(message))
 
 
+def _message_is_pinned(message: ChatMessage) -> bool:
+    return bool(message.get("pinned"))
+
+
 def _truncate_message(message: ChatMessage, max_tokens: int) -> ChatMessage:
-    if message.get("role") == "tool" or not message["content"]:
+    if message.get("role") == "tool" or not message["content"] or _message_is_pinned(message):
         return message
     if (
         truncated := rt.truncate_str_to_tokens(
@@ -127,6 +131,8 @@ def _message_role(message: ChatMessage) -> str:
 
 
 def _can_pack_message_with_toons(message: ChatMessage) -> bool:
+    if _message_is_pinned(message):
+        return False
     if message.get("role") == "user":
         return True
     if message.get("role") == "assistant":
@@ -248,8 +254,11 @@ def undo_last_turn(tx: Transcript) -> bool:
     return False
 
 
-def add_user(tx: Transcript, prompt: str) -> None:
-    tx["messages"].append(UserMessage(prompt))
+def add_user(tx: Transcript, prompt: str, *, pinned: bool = False) -> None:
+    message = UserMessage(prompt)
+    if pinned:
+        message["pinned"] = True
+    tx["messages"].append(message)
 
 
 def add_assistant(tx: Transcript, message: AssistantMessage) -> None:
@@ -290,7 +299,26 @@ def prepared_messages(
             )
         )
     other = [message for message in messages if message.get("role") != "system"]
+    pinned = [message for message in other if _message_is_pinned(message)]
     budget = tx["max_context_tokens"] - sum(map(_message_tokens, system_messages))
+    if pinned:
+        budget -= sum(map(_message_tokens, pinned))
+        if budget <= 0:
+            return system_messages + pinned
+        kept_units: list[list[ChatMessage]] = []
+        used = 0
+        for unit in reversed(_history_units([message for message in other if not _message_is_pinned(message)])):
+            cost = sum(_message_tokens(message) for message in unit)
+            if cost + used <= budget:
+                kept_units.append(unit)
+                used += cost
+        kept = [message for unit in reversed(kept_units) for message in unit]
+        kept_ids = {id(message) for message in kept}
+        return system_messages + [
+            message
+            for message in other
+            if _message_is_pinned(message) or id(message) in kept_ids
+        ]
     if budget <= 0:
         return system_messages
     kept_units: list[list[ChatMessage]] = []
@@ -481,6 +509,7 @@ def run_agent(
     tool_registry: dict[str, dict[str, Any]] | None = None,
     auto_approve_tools: set[str] | None = None,
     wait_label_suffix: str = "",
+    pin_user_prompt: bool = False,
 ):
     profile = rt.agent_profile(agent)
     selected_tool_registry = tool_registry or active_tool_registry(
@@ -506,7 +535,7 @@ def run_agent(
         transcript = transcript_with_system_prompt(system_prompt)
     else:
         set_system_prompt(transcript, system_prompt)
-    add_user(transcript, prompt)
+    add_user(transcript, prompt, pinned=pin_user_prompt)
 
     def runner(client):
         return run_turn(

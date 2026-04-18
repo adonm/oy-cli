@@ -104,6 +104,28 @@ class TestTranscriptLifecycle:
             UserMessage("tail"),
         ]
 
+    def test_prepared_messages_keep_pinned_user_message(self, monkeypatch):
+        monkeypatch.setattr(agent, "count_tokens", lambda text: len(text))
+        pinned = UserMessage("abcdef")
+        pinned["pinned"] = True
+        prepared = agent.prepared_messages(
+            agent.transcript(
+                messages=[
+                    SystemMessage("sys"),
+                    pinned,
+                    UserMessage("ghijklmnop"),
+                    UserMessage("qr"),
+                ],
+                max_context_tokens=26,
+                max_message_tokens=3,
+            )
+        )
+        assert prepared == [
+            SystemMessage("sys"),
+            pinned,
+            UserMessage("qr"),
+        ]
+
 
 class TestRunTurn:
     def test_executes_tool_calls_until_final_answer(self, monkeypatch, tmp_path):

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 from contextlib import contextmanager
+from threading import Lock, RLock
 from datetime import UTC, datetime
 import hashlib
 import os
@@ -69,7 +71,7 @@ _AUDIT_PHASES = (
     ("phase3", "summary", "Summarise and reorganise ISSUES.md around the most critical, actionable findings, then close the audit."),
 )
 _AUDIT_PHASE_IDS = tuple(phase_id for phase_id, _, _ in _AUDIT_PHASES)
-_AUDIT_STATE_VERSION = 5
+_AUDIT_STATE_VERSION = 6
 _AUDIT_REVIEW_STATUSES = {"reviewed", "done", "flagged", "skipped"}
 _AUDIT_DONE_STATUSES = {"done", "completed"}
 _AUDIT_RETRYABLE_STATUSES = {"in_progress"}
@@ -811,7 +813,26 @@ def _audit_chunk_payload(items: list[dict[str, object]], *, chunk_id: int) -> di
         "paths": [str(entry["path"]) for entry in items],
         "estimated_tokens": sum(max(int(entry.get("estimated_tokens", 0) or 0), 1) for entry in items),
         "files": len(items),
+        "segments": [],
+        "segment_count": 0,
     }
+
+
+def _audit_segment_id(chunk_id: str, index: int) -> str:
+    return f"{chunk_id}#{index:02d}"
+
+
+def _audit_segment_payload(*, chunk_id: str, index: int, start: int, end: int, estimated_tokens: int, path: str | None = None) -> dict[str, object]:
+    payload = {
+        "id": _audit_segment_id(chunk_id, index),
+        "index": index,
+        "start": max(int(start or 0), 0),
+        "end": max(int(end or 0), 0),
+        "estimated_tokens": max(int(estimated_tokens or 0), 1),
+    }
+    if isinstance(path, str) and path:
+        payload["path"] = path
+    return payload
 
 
 def _audit_partition_cluster(files: list[dict[str, object]], *, target_tokens: int) -> list[list[dict[str, object]]]:
@@ -871,6 +892,79 @@ def _audit_plan_chunks(files: list[dict[str, object]], *, target_tokens: int = 6
     ]
 
 
+def _audit_chunk_content_budget(*, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, inbox_text: str = "", prompt_text: str = "", system_prompt: str = "") -> int:
+    settings = rt.audit_settings(context_tokens=max_context_tokens)
+    margin = int(settings.get('review_prompt_margin_tokens', 0) or 0)
+    reserved = (
+        rt.count_tokens(system_prompt or '')
+        + rt.count_tokens(prompt_text or '')
+        + rt.count_tokens(inbox_text or '')
+        + margin
+    )
+    return max(int(max_context_tokens or 0) - reserved, 0)
+
+
+def _audit_segment_file_text(workspace: Path, path: str, *, mode: str = _AUDIT_DEFAULT_MODE) -> str:
+    return _audit_file_excerpt(workspace, path, mode=mode)
+
+
+def _audit_chunk_segments(
+    workspace: Path,
+    chunk: dict[str, object],
+    *,
+    max_context_tokens: int = rt.MAX_CONTEXT_TOKENS,
+    inbox_text: str = "",
+    prompt_text: str = "",
+    system_prompt: str = "",
+    mode: str = _AUDIT_DEFAULT_MODE,
+) -> list[dict[str, object]]:
+    paths = [path for path in chunk.get('paths', []) if isinstance(path, str)]
+    if not paths:
+        return []
+    budget = _audit_chunk_content_budget(
+        max_context_tokens=max_context_tokens,
+        inbox_text=inbox_text,
+        prompt_text=prompt_text,
+        system_prompt=system_prompt,
+    )
+    if budget <= 0:
+        return []
+    settings = rt.audit_settings(context_tokens=max_context_tokens)
+    overlap = min(int(settings.get('review_segment_overlap_tokens', 0) or 0), max(budget // 8, 0))
+    segments: list[dict[str, object]] = []
+    index = 1
+    for path in paths:
+        excerpt = _audit_segment_file_text(workspace, path, mode=mode)
+        tokens = rt.encode_tokens(excerpt)
+        if not tokens:
+            continue
+        start = 0
+        while start < len(tokens):
+            end = min(start + budget, len(tokens))
+            segment_tokens = tokens[start:end]
+            if not segment_tokens:
+                break
+            segments.append(
+                _audit_segment_payload(
+                    chunk_id=str(chunk.get('id', 'chunk')),
+                    index=index,
+                    start=start,
+                    end=end,
+                    estimated_tokens=len(segment_tokens),
+                    path=path,
+                )
+            )
+            if end >= len(tokens):
+                break
+            next_start = end - overlap if overlap and end - overlap > start else end
+            if next_start <= start:
+                next_start = end
+            start = next_start
+            index += 1
+        index += 1
+    return segments
+
+
 def _audit_normalize_chunk(chunk: dict[str, object], files_by_path: dict[str, dict[str, object]], *, target_tokens: int = 64_000) -> dict[str, object]:
     paths = [
         path for path in chunk.get("paths", [])
@@ -887,11 +981,28 @@ def _audit_normalize_chunk(chunk: dict[str, object], files_by_path: dict[str, di
     if not trimmed and paths:
         trimmed = [paths[0]]
         total = max(int(files_by_path[paths[0]].get("estimated_tokens", 0) or 0), 1)
+    raw_segments = chunk.get('segments', []) if isinstance(chunk.get('segments'), list) else []
+    segments = []
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            continue
+        segments.append(
+            _audit_segment_payload(
+                chunk_id=str(chunk.get('id', 'chunk')),
+                index=int(item.get('index', len(segments) + 1) or len(segments) + 1),
+                start=int(item.get('start', 0) or 0),
+                end=int(item.get('end', 0) or 0),
+                estimated_tokens=int(item.get('estimated_tokens', 0) or 0),
+                path=str(item.get('path')) if isinstance(item.get('path'), str) and item.get('path') else None,
+            )
+        )
     return {
         "id": str(chunk.get("id", "chunk")),
         "paths": trimmed,
         "estimated_tokens": total,
         "files": len(trimmed),
+        "segments": segments,
+        "segment_count": max(int(chunk.get('segment_count', 0) or 0), len(segments)),
     }
 
 
@@ -909,6 +1020,8 @@ def _audit_split_chunk(chunk: dict[str, object], files_by_path: dict[str, dict[s
                 {
                     "id": f"{chunk['id']}.{index}",
                     "paths": group,
+                    "segments": [],
+                    "segment_count": 0,
                 },
                 files_by_path,
             )
@@ -934,6 +1047,7 @@ def _audit_default_state(*, focus: str, workspace: Path, sloc_plan: dict[str, ob
         "files": files,
         "chunks": chunks,
         "completed_chunks": [],
+        "completed_segments": [],
         "failed_chunks": [],
         "notes": [f"Bootstrapped by `{_audit_command(mode)}`."],
         "totals": {
@@ -971,7 +1085,10 @@ def _audit_normalize_state(data: dict[str, object], *, workspace: Path | None = 
     if not isinstance(state.get("status"), str) or not state.get("status"):
         state["status"] = "in_progress"
     state["notes"] = [note for note in state.get("notes", []) if isinstance(note, str) and note.strip()] if isinstance(state.get("notes"), list) else []
-    state["completed_chunks"] = [item for item in state.get("completed_chunks", []) if isinstance(item, str) and item]
+    raw_completed = [item for item in state.get("completed_chunks", []) if isinstance(item, str) and item] if isinstance(state.get("completed_chunks"), list) else []
+    raw_segments = [item for item in state.get("completed_segments", []) if isinstance(item, str) and item] if isinstance(state.get("completed_segments"), list) else []
+    state["completed_chunks"] = [item for item in raw_completed if "#" not in item]
+    state["completed_segments"] = [*raw_segments, *(item for item in raw_completed if "#" in item)]
     state["failed_chunks"] = [item for item in state.get("failed_chunks", []) if isinstance(item, dict)] if isinstance(state.get("failed_chunks"), list) else []
     files = []
     for item in state.get("files", []):
@@ -1002,6 +1119,8 @@ def _audit_normalize_state(data: dict[str, object], *, workspace: Path | None = 
                 "paths": paths,
                 "estimated_tokens": int(item.get("estimated_tokens", 0) or 0),
                 "files": len(paths),
+                "segments": [segment for segment in item.get('segments', []) if isinstance(segment, dict)],
+                "segment_count": int(item.get('segment_count', 0) or 0),
             }
         )
     state["chunks"] = chunks
@@ -1021,6 +1140,14 @@ def _audit_normalize_state(data: dict[str, object], *, workspace: Path | None = 
 
 
 def _audit_load_state(path: Path) -> dict[str, object] | None:
+    with _AUDIT_STATE_LOCK:
+        data = rt.load_toon(path, None)
+    if not isinstance(data, dict):
+        return None
+    return _audit_normalize_state(data)
+
+
+def _audit_load_state_unlocked(path: Path) -> dict[str, object] | None:
     data = rt.load_toon(path, None)
     if not isinstance(data, dict):
         return None
@@ -1028,21 +1155,51 @@ def _audit_load_state(path: Path) -> dict[str, object] | None:
 
 
 def _write_audit_state(path: Path, state: dict[str, object]) -> None:
-    state["updated_at"] = datetime.now(UTC).isoformat()
-    if not rt.save_toon(path, state):
-        raise RuntimeError(f"Could not write audit state {rt._fmt('inline', path)}")
+    with _AUDIT_STATE_LOCK:
+        state["updated_at"] = datetime.now(UTC).isoformat()
+        if not rt.save_toon(path, state):
+            raise RuntimeError(f"Could not write audit state {rt._fmt('inline', path)}")
 
 
-def _audit_refresh_state(state: dict[str, object], *, focus: str = "") -> dict[str, object]:
+def _audit_update_state(path: Path, update_fn) -> dict[str, object]:
+    with _AUDIT_STATE_LOCK:
+        state = _audit_load_state_unlocked(path)
+        if state is None:
+            raise RuntimeError(f"Audit state missing or invalid: {rt._fmt('inline', path)}")
+        updated = update_fn(state)
+        state = updated if isinstance(updated, dict) else state
+        state["updated_at"] = datetime.now(UTC).isoformat()
+        if not rt.save_toon(path, state):
+            raise RuntimeError(f"Could not write audit state {rt._fmt('inline', path)}")
+        return state
+
+
+def _audit_refresh_state(state: dict[str, object], *, focus: str = "", force_phase: str = "") -> dict[str, object]:
     if focus:
         state["focus"] = focus
     files = [item for item in state.get("files", []) if isinstance(item, dict)]
     chunks = [item for item in state.get("chunks", []) if isinstance(item, dict)]
     completed = {item for item in state.get("completed_chunks", []) if isinstance(item, str)}
+    completed_segments = {item for item in state.get("completed_segments", []) if isinstance(item, str)}
     totals = state.get("totals") if isinstance(state.get("totals"), dict) else {}
+    reviewed_paths = {
+        path
+        for chunk in chunks
+        for path in chunk.get("paths", [])
+        if isinstance(path, str) and (
+            str(chunk.get("id")) in completed
+            or (
+                bool(chunk.get('segments'))
+                and all(
+                    isinstance(segment, dict) and str(segment.get('id') or '') in completed_segments
+                    for segment in chunk.get('segments', [])
+                )
+            )
+        )
+    }
     state["totals"] = {
         "queued": len(files),
-        "reviewed": len({path for chunk in chunks if str(chunk.get("id")) in completed for path in chunk.get("paths", []) if isinstance(path, str)}),
+        "reviewed": len(reviewed_paths),
         "findings": int(totals.get("findings", 0) or 0),
         "counted_files": sum(int(item.get("code_count", 0) or 0) > 0 for item in files),
         "total_code_count": sum(int(item.get("code_count", 0) or 0) for item in files),
@@ -1053,10 +1210,25 @@ def _audit_refresh_state(state: dict[str, object], *, focus: str = "") -> dict[s
     phase_map = {phase['id']: phase for phase in state.get('phases', []) if isinstance(phase, dict) and isinstance(phase.get('id'), str)}
     for phase_id, label, _ in _AUDIT_PHASES:
         phase_map.setdefault(phase_id, _audit_empty_phase(phase_id, label))['label'] = label
-    phase_map['phase1']['status'] = 'done'
+    forced = str(force_phase or '').strip().lower()
+    if forced not in _AUDIT_PHASE_IDS:
+        forced = ''
+    phase_map['phase1']['status'] = 'in_progress' if forced == 'phase1' else 'done'
     if state.get('status') in _AUDIT_DONE_STATUSES:
         phase_map['phase2']['status'] = 'done'
         phase_map['phase3']['status'] = 'done'
+        state['active_phase'] = 'phase3'
+    elif forced == 'phase1':
+        phase_map['phase2']['status'] = 'pending'
+        phase_map['phase3']['status'] = 'pending'
+        state['active_phase'] = 'phase1'
+    elif forced == 'phase2':
+        phase_map['phase2']['status'] = 'in_progress'
+        phase_map['phase3']['status'] = 'pending'
+        state['active_phase'] = 'phase2'
+    elif forced == 'phase3':
+        phase_map['phase2']['status'] = 'done' if len(completed) >= len(chunks) else ('in_progress' if completed else 'pending')
+        phase_map['phase3']['status'] = 'in_progress'
         state['active_phase'] = 'phase3'
     elif len(completed) < len(chunks):
         phase_map['phase2']['status'] = 'in_progress' if completed else 'pending'
@@ -1084,7 +1256,7 @@ def _audit_state_summary(state: dict[str, object]) -> str:
     )
 
 
-def _audit_wait_label_suffix(state: dict[str, object], *, chunk: dict[str, object] | None = None) -> str:
+def _audit_wait_label_suffix(state: dict[str, object], *, chunk: dict[str, object] | None = None, detail: str | None = None) -> str:
     totals = state.get("totals") if isinstance(state.get("totals"), dict) else {}
     queued = int(totals.get("queued", 0) or 0)
     reviewed = int(totals.get("reviewed", 0) or 0)
@@ -1097,6 +1269,8 @@ def _audit_wait_label_suffix(state: dict[str, object], *, chunk: dict[str, objec
         chunk_id = str(chunk.get("id") or "").strip()
         if chunk_id:
             parts.append(chunk_id)
+    if isinstance(detail, str) and detail.strip():
+        parts.append(detail.strip())
     parts.append(f"findings {findings}")
     return " | ".join(parts)
 
@@ -1117,6 +1291,8 @@ def _audit_run_config(*, model: str | None = None, agent: str = "default", max_c
         "model": resolved_model,
         "agent": agent,
         "max_context_tokens": int(max_context_tokens or 0),
+        "phase2_workers": int(rt.audit_settings(context_tokens=max_context_tokens).get('phase2_workers', 1) or 1),
+        "phase2_launch_delay_seconds": int(rt.audit_settings(context_tokens=max_context_tokens).get('phase2_launch_delay_seconds', 10) or 0),
         "from": _audit_scope_key(scope),
     }
 
@@ -1127,12 +1303,15 @@ def _audit_resolve_run_config(run_config: dict[str, object] | None = None, *, fa
     resolved_mode = str(current.get('mode') or fallback_config.get('mode') or mode or _AUDIT_DEFAULT_MODE)
     if resolved_mode not in _AUDIT_VALID_MODES:
         resolved_mode = _AUDIT_DEFAULT_MODE
+    resolved_context = int(current.get('max_context_tokens') or fallback_config.get('max_context_tokens') or 0)
     return {
         "command": str(current.get('command') or fallback_config.get('command') or _audit_command(resolved_mode)),
         "mode": resolved_mode,
         "model": str(current.get('model') or fallback_config.get('model') or '').strip(),
         "agent": str(current.get('agent') or fallback_config.get('agent') or 'default'),
-        "max_context_tokens": int(current.get('max_context_tokens') or fallback_config.get('max_context_tokens') or 0),
+        "max_context_tokens": resolved_context,
+        "phase2_workers": int(current.get('phase2_workers') or fallback_config.get('phase2_workers') or rt.audit_settings(context_tokens=resolved_context or rt.MAX_CONTEXT_TOKENS).get('phase2_workers', 1) or 1),
+        "phase2_launch_delay_seconds": int(current.get('phase2_launch_delay_seconds') or fallback_config.get('phase2_launch_delay_seconds') or rt.audit_settings(context_tokens=resolved_context or rt.MAX_CONTEXT_TOKENS).get('phase2_launch_delay_seconds', 10) or 0),
         "from": str(current.get('from') or fallback_config.get('from') or 'all'),
     }
 
@@ -1199,7 +1378,7 @@ def _ensure_audit_session(workspace: Path, focus: str = "", *, restart: bool = F
     prepared_issues = _audit_prepare_issues_md(workspace, state)
     state['totals']['findings'] = int(prepared_issues.get('findings', 0) or 0)
     state["notes"].append(
-        f"Planned {len(chunks)} chunk(s) from {len(files)} file(s) at 64k tokens using sloc+tiktoken."
+        f"Planned {len(chunks)} chunk(s) from {len(files)} file(s) at 64k tokens using sloc+tiktoken; prompt-fit segmenting runs at review time when needed."
     )
     if prepared_issues.get('changed'):
         state['notes'].append('Normalised ISSUES.md into audit inbox format before phase2 review.')
@@ -1276,17 +1455,23 @@ def _audit_issues_path(workspace: Path) -> Path:
 
 
 def _audit_read_issues(workspace: Path) -> str:
-    issues_path = _audit_issues_path(workspace)
-    if not issues_path.exists():
-        return ""
-    try:
-        return issues_path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
+    with _AUDIT_ISSUES_LOCK:
+        issues_path = _audit_issues_path(workspace)
+        if not issues_path.exists():
+            return ""
+        try:
+            return issues_path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+
+_AUDIT_ISSUES_LOCK = RLock()
+_AUDIT_STATE_LOCK = RLock()
 
 
 def _audit_write_issues(workspace: Path, text: str) -> None:
-    _audit_issues_path(workspace).write_text(text, encoding="utf-8")
+    with _AUDIT_ISSUES_LOCK:
+        _audit_issues_path(workspace).write_text(text, encoding="utf-8")
 
 
 def _audit_inbox_section(entries: str | None = None) -> str:
@@ -1406,18 +1591,18 @@ def _audit_prepare_issues_md(workspace: Path, state: dict[str, object]) -> dict[
     state['run_config'] = run_config
     if not issues_path.exists():
         _audit_seed_issues_md(workspace, state)
-        text = _audit_read_issues(workspace)
-        return {'changed': True, 'findings': _audit_issue_count(text)}
     before = _audit_read_issues(workspace)
     after = _audit_normalize_issues_text(before)
-    final = _audit_upsert_transparency(after or before, run_config)
+    prepared = _audit_upsert_transparency(after or before, run_config)
+    final = _audit_upsert_phase1_dependency_assessment(prepared, workspace)
     changed = final != before
     if changed:
         _audit_write_issues(workspace, final)
     return {'changed': changed, 'findings': _audit_issue_count(final)}
 
-def _audit_inbox_bounds(text: str) -> tuple[int, int] | None:
-    match = re.search(rf"(?m)^{re.escape(_audit_h2(_audit_schema('inbox_title')))}\s*$", text)
+
+def _audit_section_bounds(text: str, title: str) -> tuple[int, int] | None:
+    match = re.search(rf"(?m)^{re.escape(_audit_h2(title))}\s*$", text)
     if match is None:
         return None
     next_match = re.search(rf"(?m)^{re.escape(_audit_schema('report_h2_prefix'))}\S", text[match.end():])
@@ -1425,18 +1610,256 @@ def _audit_inbox_bounds(text: str) -> tuple[int, int] | None:
     return match.start(), end
 
 
-def _audit_ensure_inbox(workspace: Path) -> str:
-    text = _audit_read_issues(workspace)
-    if _audit_inbox_bounds(text) is not None:
-        return text
-    if text.strip():
-        text = text.rstrip() + "\n\n" + _audit_inbox_section()
+def _audit_inbox_bounds(text: str) -> tuple[int, int] | None:
+    return _audit_section_bounds(text, _audit_schema('inbox_title'))
+
+
+def _audit_upsert_section(text: str, *, title: str, body: str) -> str:
+    rendered = _audit_render_section(title, body).rstrip()
+    bounds = _audit_section_bounds(text, title)
+    if bounds is not None:
+        start, end = bounds
+        head = text[:start].rstrip()
+        tail = text[end:].lstrip("\n")
+        updated = ((head + "\n\n") if head else "") + rendered
+        if tail:
+            updated += "\n\n" + tail
+        return updated.rstrip() + "\n"
+    inbox_bounds = _audit_inbox_bounds(text)
+    if inbox_bounds is not None:
+        _start, end = inbox_bounds
+        head = text[:end].rstrip()
+        tail = text[end:].lstrip("\n")
+        updated = head + "\n\n" + rendered
+        if tail:
+            updated += "\n\n" + tail
+        return updated.rstrip() + "\n"
+    head = text.rstrip()
+    return (((head + "\n\n") if head else "") + rendered).rstrip() + "\n"
+
+
+def _audit_latest_renovate_report(workspace: Path) -> Path | None:
+    tmp_dir = workspace / ".tmp"
+    candidates = sorted(
+        (path for path in tmp_dir.glob("renovate-*.json") if path.is_file()),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _audit_extract_messages(value: object) -> list[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, dict):
+        result: list[str] = []
+        for key in ('message', 'warning', 'title', 'text'):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                result.append(candidate.strip())
+        return result
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            result.extend(_audit_extract_messages(item))
+        return result
+    return []
+
+
+def _audit_unique_text(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in items:
+        cleaned = item.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        unique.append(cleaned)
+    return unique
+
+
+def _audit_renovate_warnings(data: object) -> list[str]:
+    collected: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if str(key).lower() in {'warning', 'warnings'}:
+                    collected.extend(_audit_extract_messages(nested))
+                walk(nested)
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(data)
+    return _audit_unique_text(collected)
+
+
+def _audit_renovate_updates(data: object) -> list[dict[str, object]]:
+    updates: list[dict[str, object]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def add_update(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        if not any(isinstance(value.get(key), str) and str(value.get(key)).strip() for key in ('depName', 'packageName', 'packageFile', 'manager')):
+            return
+        if not any(key in value for key in ('currentVersion', 'currentValue', 'newVersion', 'newValue', 'updateType', 'skipReason', 'isVulnerabilityAlert')):
+            return
+        fingerprint = tuple(
+            str(value.get(key) or '')
+            for key in ('packageFile', 'depName', 'packageName', 'currentVersion', 'currentValue', 'newVersion', 'newValue', 'updateType', 'skipReason')
+        )
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        updates.append(value)
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if str(key) == 'updates' and isinstance(nested, list):
+                    for item in nested:
+                        add_update(item)
+                walk(nested)
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(data)
+    return updates
+
+
+def _audit_renovate_is_vulnerability_alert(update: dict[str, object]) -> bool:
+    skip_reason = str(update.get('skipReason') or '').strip().lower()
+    return bool(update.get('isVulnerabilityAlert')) or 'vulnerability' in skip_reason or any(key in update for key in ('vulnerabilityFixVersion', 'vulnerabilitySeverity'))
+
+
+def _audit_renovate_is_actions_update(update: dict[str, object]) -> bool:
+    manager = str(update.get('manager') or '').strip().lower()
+    package_file = str(update.get('packageFile') or '').strip().lower()
+    return manager == 'github-actions' or package_file.startswith('.github/workflows/')
+
+
+def _audit_renovate_is_major_update(update: dict[str, object]) -> bool:
+    return bool(update.get('isMajor')) or str(update.get('updateType') or '').strip().lower() == 'major'
+
+
+def _audit_renovate_update_note(update: dict[str, object]) -> str:
+    name = (
+        str(update.get('depName') or '').strip()
+        or str(update.get('packageName') or '').strip()
+        or str(update.get('packageFile') or '').strip()
+        or 'update'
+    )
+    current = str(update.get('currentVersion') or update.get('currentValue') or '').strip()
+    new = str(update.get('newVersion') or update.get('newValue') or '').strip()
+    detail_parts = []
+    if current and new:
+        detail_parts.append(f"{current} -> {new}")
+    elif new:
+        detail_parts.append(f"-> {new}")
+    if _audit_renovate_is_actions_update(update):
+        detail_parts.append('GitHub Actions')
+    elif manager := str(update.get('manager') or '').strip():
+        detail_parts.append(manager)
+    if update_type := str(update.get('updateType') or '').strip():
+        detail_parts.append(update_type)
+    if skip_reason := str(update.get('skipReason') or '').strip():
+        detail_parts.append(f"skip={skip_reason}")
+    return f"`{name}`" + (f" ({', '.join(detail_parts)})" if detail_parts else '')
+
+
+def _audit_phase1_dependency_assessment_line(workspace: Path) -> str:
+    report_path = _audit_latest_renovate_report(workspace)
+    if report_path is None:
+        return "- Phase1 dependency assessment: no `.tmp/renovate-*.json` report found; skipped dependency/update review. Run `oy renovate-local` if needed."
+    report_rel = rt._rel(workspace, report_path)
+    data = rt.load_json(report_path, None)
+    if not isinstance(data, (dict, list)):
+        return f"- Phase1 dependency assessment: could not parse `{report_rel}`; skipped dependency/update review."
+    warnings = _audit_renovate_warnings(data)
+    updates = _audit_renovate_updates(data)
+    vulnerability_updates = [update for update in updates if _audit_renovate_is_vulnerability_alert(update)]
+    malicious_updates = [update for update in updates if str(update.get('skipReason') or '').strip().lower() == 'malicious-update-proposed']
+    major_updates = [update for update in updates if _audit_renovate_is_major_update(update)]
+    actions_updates = [update for update in updates if _audit_renovate_is_actions_update(update)]
+    parts = [f"- Phase1 dependency assessment: inspected newest relevant Renovate report `{report_rel}`"]
+    if vulnerability_updates or malicious_updates:
+        findings = []
+        if vulnerability_updates:
+            count = len(vulnerability_updates)
+            findings.append(f"{count} vulnerability alert{'s' if count != 1 else ''}")
+        if malicious_updates:
+            count = len(malicious_updates)
+            findings.append(f"{count} malicious update proposal{'s' if count != 1 else ''}")
+        if major_updates:
+            count = len(major_updates)
+            findings.append(f"{count} major update{'s' if count != 1 else ''}")
+        if actions_updates:
+            count = len(actions_updates)
+            findings.append(f"{count} GitHub Actions update{'s' if count != 1 else ''}")
+        parts.append(': flagged ' + ', '.join(findings) + '.')
+        priority_examples = vulnerability_updates + malicious_updates + [
+            update for update in major_updates + actions_updates
+            if update not in vulnerability_updates and update not in malicious_updates
+        ]
+        example_notes = _audit_unique_text([_audit_renovate_update_note(update) for update in priority_examples])[:3]
+        if example_notes:
+            parts.append(' Examples: ' + '; '.join(example_notes) + '.')
     else:
-        text = _audit_inbox_section()
-    if not text.endswith("\n"):
-        text += "\n"
-    _audit_write_issues(workspace, text)
-    return text
+        summary = []
+        if updates:
+            count = len(updates)
+            summary.append(f"{count} update candidate{'s' if count != 1 else ''}")
+        if major_updates:
+            count = len(major_updates)
+            summary.append(f"{count} major")
+        if actions_updates:
+            count = len(actions_updates)
+            summary.append(f"{count} GitHub Actions")
+        if warnings:
+            count = len(warnings)
+            summary.append(f"{count} warning{'s' if count != 1 else ''}")
+        parts.append(': no clear dependency or GitHub Actions risk beyond routine maintenance')
+        parts.append(f" ({', '.join(summary)})." if summary else '.')
+    if warnings:
+        warning_preview = '; '.join(rt.preview(item, 80) for item in warnings[:2])
+        parts.append(f" Warnings: {warning_preview}.")
+    return ''.join(parts)
+
+
+def _audit_upsert_phase1_dependency_assessment(text: str, workspace: Path) -> str:
+    title = _audit_schema('short_audit_log_title')
+    line = _audit_phase1_dependency_assessment_line(workspace)
+    sections = _audit_markdown_blocks(text, prefix=_audit_schema('report_h2_prefix'))
+    body = line
+    for section in sections:
+        if str(section['title']).strip() != title:
+            continue
+        lines = [item.rstrip() for item in str(section['body']).splitlines()]
+        kept = [item for item in lines if item.strip() and not item.startswith('- Phase1 dependency assessment:')]
+        body = "\n".join([line, *kept]).strip()
+        break
+    return _audit_upsert_section(text, title=title, body=body)
+
+
+def _audit_ensure_inbox(workspace: Path) -> str:
+    with _AUDIT_ISSUES_LOCK:
+        text = _audit_read_issues(workspace)
+        if _audit_inbox_bounds(text) is not None:
+            return text
+        if text.strip():
+            text = text.rstrip() + "\n\n" + _audit_inbox_section()
+        else:
+            text = _audit_inbox_section()
+        if not text.endswith("\n"):
+            text += "\n"
+        _audit_write_issues(workspace, text)
+        return text
 
 
 def _audit_read_inbox(workspace: Path) -> str:
@@ -1451,24 +1874,25 @@ def _audit_append_inbox(workspace: Path, content: str) -> dict[str, object]:
     entry = content.strip()
     if not entry:
         raise ValueError("content must be non-empty")
-    text = _audit_ensure_inbox(workspace)
-    bounds = _audit_inbox_bounds(text)
-    if bounds is None:
-        raise RuntimeError("audit inbox missing")
-    start, end = bounds
-    section = text[start:end]
-    placeholder = _audit_schema('inbox_placeholder')
-    if placeholder in section:
-        updated = text[:start] + section.replace(placeholder, entry, 1) + text[end:]
-    else:
-        before = text[:end].rstrip()
-        after = text[end:].lstrip("\n")
-        updated = before + "\n\n" + entry + "\n"
-        if after:
-            updated += "\n" + after
-    if not updated.endswith("\n"):
-        updated += "\n"
-    _audit_write_issues(workspace, updated)
+    with _AUDIT_ISSUES_LOCK:
+        text = _audit_ensure_inbox(workspace)
+        bounds = _audit_inbox_bounds(text)
+        if bounds is None:
+            raise RuntimeError("audit inbox missing")
+        start, end = bounds
+        section = text[start:end]
+        placeholder = _audit_schema('inbox_placeholder')
+        if placeholder in section:
+            updated = text[:start] + section.replace(placeholder, entry, 1) + text[end:]
+        else:
+            before = text[:end].rstrip()
+            after = text[end:].lstrip("\n")
+            updated = before + "\n\n" + entry + "\n"
+            if after:
+                updated += "\n" + after
+        if not updated.endswith("\n"):
+            updated += "\n"
+        _audit_write_issues(workspace, updated)
     return {
         "path": rt._rel(workspace, _audit_issues_path(workspace)),
         "chars_appended": len(entry),
@@ -1476,17 +1900,86 @@ def _audit_append_inbox(workspace: Path, content: str) -> dict[str, object]:
     }
 
 
-def _audit_file_excerpt(workspace: Path, path: str, *, mode: str = _AUDIT_DEFAULT_MODE) -> str:
+def _audit_compact_inbox_text(text: str, *, max_tokens: int) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return _audit_inbox_section()
+    if rt.count_tokens(cleaned) <= max_tokens:
+        return cleaned + ("" if cleaned.endswith("\n") else "\n")
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+    kept: list[str] = []
+    entry: list[str] = []
+    note_line = _audit_schema('inbox_note')
+    heading_line = _audit_h2(_audit_schema('inbox_title'))
+    for line in lines:
+        if line == heading_line or line == note_line:
+            continue
+        if line.startswith(_audit_schema('report_h3_prefix')) or line.startswith('- ['):
+            if entry:
+                kept.append(" ".join(part.strip() for part in entry if part.strip()))
+            entry = [line]
+            continue
+        if line.strip():
+            entry.append(line.strip())
+    if entry:
+        kept.append(" ".join(part.strip() for part in entry if part.strip()))
+    compact = _audit_inbox_section()
+    selected: list[str] = []
+    for item in reversed(kept):
+        candidate_items = [item, *selected]
+        candidate = _audit_inbox_section("\n\n".join(reversed(candidate_items))).strip()
+        if selected and rt.count_tokens(candidate) > max_tokens:
+            break
+        selected.append(item)
+        compact = candidate
+        if rt.count_tokens(compact) >= max_tokens:
+            break
+    if not selected:
+        placeholder = _audit_schema('inbox_placeholder')
+        compact = _audit_inbox_section(rt.truncate_str_to_tokens(kept[-1] if kept else placeholder, max_tokens=max(max_tokens, 1)))
+    return compact.strip() + "\n"
+
+
+def _audit_inbox_context(workspace: Path, *, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS) -> str:
+    settings = rt.audit_settings(context_tokens=max_context_tokens)
+    limit = int(settings.get('review_inbox_context_tokens', 0) or 0)
+    return _audit_compact_inbox_text(_audit_read_inbox(workspace), max_tokens=max(limit, 1))
+
+
+def _audit_file_excerpt(workspace: Path, path: str, *, mode: str = _AUDIT_DEFAULT_MODE, start_token: int | None = None, end_token: int | None = None) -> str:
     try:
         text = (workspace / path).read_text(encoding="utf-8")
     except UnicodeDecodeError:
         text = (workspace / path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return f"{_audit_h2(path)}\n<read failed: {exc}>\n"
-    return f"{_audit_h2(path)}\n{_audit_render_text(path, text, mode=mode)}\n"
+    rendered = _audit_render_text(path, text, mode=mode)
+    if start_token is not None or end_token is not None:
+        tokens = rt.encode_tokens(rendered)
+        start = max(int(start_token or 0), 0)
+        end = len(tokens) if end_token is None else max(int(end_token or 0), 0)
+        excerpt_tokens = tokens[start:end]
+        rendered = rt.decode_tokens(excerpt_tokens) if excerpt_tokens else "<empty excerpt>"
+        rendered = (
+            f"<segment tokens {start}:{end}>\n"
+            f"{rendered}"
+        )
+    return f"{_audit_h2(path)}\n{rendered}\n"
 
 
-def _audit_chunk_text(workspace: Path, chunk: dict[str, object], *, mode: str = _AUDIT_DEFAULT_MODE) -> str:
+def _audit_chunk_text(workspace: Path, chunk: dict[str, object], *, mode: str = _AUDIT_DEFAULT_MODE, segment: dict[str, object] | None = None) -> str:
+    if isinstance(segment, dict):
+        segment_path = str(segment.get('path')) if isinstance(segment.get('path'), str) and segment.get('path') else ''
+        if not segment_path and len([path for path in chunk.get('paths', []) if isinstance(path, str)]) == 1:
+            segment_path = str(chunk['paths'][0])
+        if segment_path:
+            return _audit_file_excerpt(
+                workspace,
+                segment_path,
+                mode=mode,
+                start_token=int(segment.get('start', 0) or 0),
+                end_token=int(segment.get('end', 0) or 0),
+            )
     return "\n".join(
         _audit_file_excerpt(workspace, path, mode=mode)
         for path in chunk.get("paths", [])
@@ -1500,7 +1993,9 @@ def _audit_limited_tool_registry(
     allow_search: bool,
     allow_inbox_append: bool = False,
     allow_replace: bool = True,
+    prefix_replace_tokens: int = 0,
     mode: str = _AUDIT_DEFAULT_MODE,
+    inbox_append_fn = None,
 ) -> dict[str, dict[str, object]]:
     issues_rel = rt._rel(workspace, _audit_issues_path(workspace))
 
@@ -1528,10 +2023,35 @@ def _audit_limited_tool_registry(
         )
 
     def issues_inbox_append(state: object, content: str):
-        payload = _audit_append_inbox(workspace, content)
+        payload = (inbox_append_fn or _audit_append_inbox)(workspace, content)
         rt.note_tool(state, "inbox_append", path=issues_rel, chars=len(content))
         rt.show(f"{issues_rel}: appended {payload['chars_appended']} chars to audit inbox")
         return payload
+
+    def issues_replace_prefix(state: object, content: str):
+        current = _audit_read_issues(workspace)
+        tokens = rt.encode_tokens(current)
+        cut = min(max(int(prefix_replace_tokens or 0), 1), len(tokens))
+        suffix = rt.decode_tokens(tokens[cut:]) if cut < len(tokens) else ""
+        updated = f"{content}{suffix}"
+        _audit_write_issues(workspace, updated)
+        before_tokens = len(tokens)
+        after_tokens = rt.count_tokens(updated)
+        rt.note_tool(
+            state,
+            "replace_prefix",
+            path=issues_rel,
+            prefix_tokens=cut,
+            replacement_chars=len(content),
+        )
+        rt.show(f"{issues_rel}: rewrote first {cut} tokens; total {before_tokens}->{after_tokens} tokens")
+        return {
+            "path": issues_rel,
+            "prefix_tokens": cut,
+            "replacement_chars": len(content),
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+        }
 
     registry = {}
     if allow_replace:
@@ -1550,6 +2070,14 @@ def _audit_limited_tool_registry(
             "parameters": tools_lib.signature_schema(issues_inbox_append, skip={"state"}),
             "mutating": True,
         }
+    if prefix_replace_tokens > 0:
+        registry["replace_prefix"] = {
+            "name": "replace_prefix",
+            "fn": issues_replace_prefix,
+            "description": f"Rewrite only the first {int(prefix_replace_tokens)} tokens inside `{issues_rel}` and leave the unseen suffix untouched.",
+            "parameters": tools_lib.signature_schema(issues_replace_prefix, skip={"state"}),
+            "mutating": True,
+        }
     if allow_search:
         registry["search"] = {
             "name": "search",
@@ -1561,8 +2089,16 @@ def _audit_limited_tool_registry(
     return registry
 
 
-def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict[str, object], *, issues_rel: str, mode: str = _AUDIT_DEFAULT_MODE) -> str:
+def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict[str, object], *, issues_rel: str, mode: str = _AUDIT_DEFAULT_MODE, segment: dict[str, object] | None = None) -> str:
     sloc_plan = state.get("sloc") if isinstance(state.get("sloc"), dict) else {}
+    segment_note = ""
+    if isinstance(segment, dict):
+        segment_path = str(segment.get('path')) if isinstance(segment.get('path'), str) and segment.get('path') else ''
+        segment_note = (
+            f" Review only segment {segment.get('index', 1)}/{max(int(chunk.get('segment_count', 0) or 0), 1)}"
+            + (f" from {segment_path}" if segment_path else "")
+            + f" for this chunk ({segment.get('start', 0)}:{segment.get('end', 0)} tokens)."
+        )
     return (
         base_prompt
         + session_text(
@@ -1581,10 +2117,12 @@ def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict
             findings=state.get("totals", {}).get("findings", 0),
         )
         + f" Review only this chunk: {', '.join(chunk['paths'])}."
+        + segment_note
         + f" Chunk budget is {chunk['estimated_tokens']} estimated tokens; planned target is 64000."
         + f" Use only `search` and `inbox_append`. `inbox_append` is scoped to `{issues_rel}`."
         + " Phase2 is append-only: add new candidate findings to the inbox, and leave dedupe, ordering, and condensation for phase3."
         + " Prefer inbox entries that start with `###` and keep severity, evidence, references, impact, and remediation concise."
+        + " If this chunk was segmented to fit context, search adjacent code only when needed and avoid repeating earlier segment findings."
         + " Do not touch any file except ISSUES.md."
         + (" Search defaults exclude docs and lockfiles in this mode." if mode == _AUDIT_LOGIC_MODE else "")
         + " "
@@ -1595,6 +2133,22 @@ def _audit_review_prompt(base_prompt: str, state: dict[str, object], chunk: dict
             else ""
         )
     )
+
+
+def _audit_review_segments(workspace: Path, chunk: dict[str, object], *, prompt: str, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE) -> list[dict[str, object]]:
+    system_prompt = _audit_system_prompt_for_mode(mode, phase="phase2")
+    inbox_text = _audit_inbox_context(workspace, max_context_tokens=max_context_tokens)
+    review_prompt = _audit_review_prompt(prompt, {"completed_chunks": [], "totals": {}, "sloc": {}}, chunk, issues_rel="ISSUES.md", mode=mode)
+    segments = _audit_chunk_segments(
+        workspace,
+        chunk,
+        max_context_tokens=max_context_tokens,
+        inbox_text=inbox_text,
+        prompt_text=review_prompt,
+        system_prompt=system_prompt,
+        mode=mode,
+    )
+    return segments or [_audit_segment_payload(chunk_id=str(chunk.get('id', 'chunk')), index=1, start=0, end=0, estimated_tokens=max(int(chunk.get('estimated_tokens', 0) or 0), 1))]
 
 
 def _audit_summary_prompt(base_prompt: str, state: dict[str, object], *, issues_rel: str, mode: str = _AUDIT_DEFAULT_MODE) -> str:
@@ -1612,10 +2166,144 @@ def _audit_summary_prompt(base_prompt: str, state: dict[str, object], *, issues_
             findings=state.get("totals", {}).get("findings", 0),
         )
         + f" Final pass: consume the phase2 inbox and rewrite `{issues_rel}` to preserve detail for the 10-15 most important issues and make the rest very concise."
+        + " Treat repeated per-segment findings as one issue unless later segments add materially new evidence."
         + " Dedupe overlapping inbox items, keep ordering actionable, preserve evidence, and do not touch any other file."
         + " "
         + session_text(_audit_section(mode), "summary_suffix")
     )
+
+
+def _audit_summary_content_budget(*, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, prompt_text: str = "", system_prompt: str = "") -> int:
+    settings = rt.audit_settings(context_tokens=max_context_tokens)
+    margin = int(settings.get('review_prompt_margin_tokens', 0) or 0)
+    reserved = (
+        rt.count_tokens(system_prompt or '')
+        + rt.count_tokens(prompt_text or '')
+        + margin
+    )
+    return max(int(max_context_tokens or 0) - reserved, 0)
+
+
+def _audit_summary_prefix_budget(*, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, prompt_text: str = "", system_prompt: str = "") -> int:
+    return min(
+        _audit_summary_content_budget(
+            max_context_tokens=max_context_tokens,
+            prompt_text=prompt_text,
+            system_prompt=system_prompt,
+        ),
+        128_000,
+    )
+
+
+def _audit_summary_prefix_text(text: str, *, max_tokens: int) -> str:
+    tokens = rt.encode_tokens(text)
+    if not tokens:
+        return ""
+    return rt.decode_tokens(tokens[: max(max_tokens, 1)])
+
+
+def _audit_summary_prefix_condense_prompt(base_prompt: str, state: dict[str, object], *, issues_rel: str, prefix_text: str, iteration: int, total_tokens: int, content_budget: int, prefix_tokens: int, mode: str = _AUDIT_DEFAULT_MODE) -> str:
+    return (
+        _audit_summary_prompt(base_prompt, state, issues_rel=issues_rel, mode=mode)
+        + f" Budget-prep pass {iteration}: `{issues_rel}` is too large to fit the final phase3 prompt."
+        + f" Rewrite only the first {prefix_tokens} tokens so they are materially shorter."
+        + " Use only `replace_prefix`; it rewrites just that visible prefix and leaves the unseen suffix untouched."
+        + " This is not the final report pass. Preserve the report header/transparency block and the highest-signal evidence from the visible prefix."
+        + " Aggressively dedupe repeated findings, collapse lower-signal entries, and shorten prose."
+        + " Do not invent facts from the unseen tail or touch any other file."
+        + f" Current ISSUES.md size is about {total_tokens} tokens; the final summary input budget is about {content_budget} tokens."
+        + "\n\nVisible ISSUES.md prefix to condense:\n\n"
+        + prefix_text
+    )
+
+
+def _run_audit_summary_prefix_condense(*, prompt: str, model: str, workspace: Path, unattended_limit_seconds: int, agent: str, state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, iteration: int, content_budget: int, prefix_tokens: int, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[int, str]:
+    issues_path = _audit_issues_path(workspace)
+    issues_rel = rt._rel(workspace, issues_path)
+    issues_text = _audit_read_issues(workspace)
+    return run_agent(
+        _audit_summary_prefix_condense_prompt(
+            prompt,
+            state,
+            issues_rel=issues_rel,
+            prefix_text=_audit_summary_prefix_text(issues_text, max_tokens=prefix_tokens),
+            iteration=iteration,
+            total_tokens=rt.count_tokens(issues_text),
+            content_budget=content_budget,
+            prefix_tokens=prefix_tokens,
+            mode=mode,
+        ),
+        model,
+        workspace,
+        _audit_system_prompt_for_mode(mode, phase="phase3"),
+        unattended_limit_seconds,
+        interactive=False,
+        transcript=_audit_transcript(max_context_tokens=max_context_tokens),
+        agent=agent,
+        tool_registry=_audit_limited_tool_registry(
+            workspace,
+            allow_search=False,
+            allow_replace=False,
+            prefix_replace_tokens=prefix_tokens,
+            mode=mode,
+        ),
+        auto_approve_tools={"replace_prefix"},
+        wait_label_suffix=_audit_wait_label_suffix(state, detail=f"condense-{iteration:03d}"),
+        pin_user_prompt=True,
+    )
+
+
+def _audit_prepare_summary_input(*, prompt: str, model: str, workspace: Path, unattended_limit_seconds: int, agent: str, state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE, session_path: Path | None = None) -> tuple[int, str]:
+    issues_rel = rt._rel(workspace, _audit_issues_path(workspace))
+    prompt_text = _audit_summary_prompt(prompt, state, issues_rel=issues_rel, mode=mode)
+    system_prompt = _audit_system_prompt_for_mode(mode, phase="phase3")
+    content_budget = _audit_summary_content_budget(
+        max_context_tokens=max_context_tokens,
+        prompt_text=prompt_text,
+        system_prompt=system_prompt,
+    )
+    prefix_tokens = _audit_summary_prefix_budget(
+        max_context_tokens=max_context_tokens,
+        prompt_text=prompt_text,
+        system_prompt=system_prompt,
+    )
+    if content_budget <= 0 or prefix_tokens <= 0:
+        return rt.fail("Audit phase3 summary budget is too small"), _audit_read_issues(workspace)
+    for iteration in range(1, 33):
+        before_text = _audit_read_issues(workspace)
+        before_tokens = rt.count_tokens(before_text)
+        if before_tokens <= content_budget:
+            return 0, before_text
+        code, message = _run_audit_summary_prefix_condense(
+            prompt=prompt,
+            model=model,
+            workspace=workspace,
+            unattended_limit_seconds=unattended_limit_seconds,
+            agent=agent,
+            state=state,
+            max_context_tokens=max_context_tokens,
+            iteration=iteration,
+            content_budget=content_budget,
+            prefix_tokens=prefix_tokens,
+            mode=mode,
+        )
+        after_text = _audit_read_issues(workspace)
+        after_tokens = rt.count_tokens(after_text)
+        if code != 0:
+            return code, message
+        if after_text == before_text:
+            return rt.fail("Audit phase3 prefix-condense pass did not update ISSUES.md"), after_text
+        if after_tokens >= before_tokens:
+            return rt.fail("Audit phase3 prefix-condense pass did not reduce ISSUES.md token count"), after_text
+        state['totals']['findings'] = _audit_issue_count(after_text)
+        state['notes'] = [
+            *state.get('notes', [])[-9:],
+            f"Condensed phase3 prefix pass {iteration}: ISSUES.md tokens {before_tokens}->{after_tokens}.",
+        ]
+        _audit_refresh_state(state, force_phase='phase3')
+        if session_path is not None:
+            _write_audit_state(session_path, state)
+    return rt.fail("Audit phase3 prefix-condense exceeded 32 passes"), _audit_read_issues(workspace)
 
 
 def _audit_issue_count(text: str) -> int:
@@ -1665,36 +2353,117 @@ def _audit_seed_issues_md(workspace: Path, state: dict[str, object]) -> None:
     )
     _audit_write_issues(workspace, text)
 
-def _audit_mark_chunk_complete(state: dict[str, object], chunk_id: str, before_text: str, after_text: str) -> None:
-    completed = [item for item in state.get("completed_chunks", []) if isinstance(item, str)]
+def _audit_mark_chunk_complete(state: dict[str, object], chunk_id: str, before_text: str, after_text: str, *, note: str | None = None, segment: bool = False) -> None:
+    key = "completed_segments" if segment else "completed_chunks"
+    completed = [item for item in state.get(key, []) if isinstance(item, str)]
     if chunk_id not in completed:
         completed.append(chunk_id)
-    state["completed_chunks"] = completed
+    state[key] = completed
+    totals = state.get("totals") if isinstance(state.get("totals"), dict) else {}
+    state["totals"] = totals
     state["totals"]["findings"] = _audit_issue_count(after_text)
+    summary = note or f"Completed {chunk_id}: ISSUES.md changed by {len(after_text) - len(before_text)} chars."
     state["notes"] = [
         *state.get("notes", [])[-9:],
-        f"Completed {chunk_id}: ISSUES.md changed by {len(after_text) - len(before_text)} chars.",
+        summary,
     ]
     _audit_refresh_state(state)
 
 
-def _audit_record_failed_chunk(state: dict[str, object], chunk: dict[str, object], reason: str) -> None:
+def _audit_record_failed_chunk(state: dict[str, object], chunk: dict[str, object], reason: str, *, segment: dict[str, object] | None = None) -> None:
     failed = [item for item in state.get("failed_chunks", []) if isinstance(item, dict)]
-    failed.append({"id": chunk["id"], "paths": list(chunk["paths"]), "reason": reason})
+    failed.append({
+        "id": str(chunk["id"]),
+        "segment_id": str(segment.get('id')) if isinstance(segment, dict) and segment.get('id') else '',
+        "paths": list(chunk["paths"]),
+        "reason": reason,
+    })
     state["failed_chunks"] = failed[-20:]
-    state["notes"] = [*state.get("notes", [])[-9:], f"Failed {chunk['id']}: {reason}"]
+    label = str(segment.get('id')) if isinstance(segment, dict) and segment.get('id') else str(chunk['id'])
+    state["notes"] = [*state.get("notes", [])[-9:], f"Failed {label}: {reason}"]
     _audit_refresh_state(state)
 
 
-def _run_audit_chunk(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, chunk: dict[str, object], state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[int, str]:
+def _audit_review_worker(
+    *,
+    prompt: str,
+    model: str,
+    workspace: Path,
+    system_prompt: str,
+    unattended_limit_seconds: int,
+    agent: str,
+    chunk: dict[str, object],
+    state: dict[str, object],
+    max_context_tokens: int = rt.MAX_CONTEXT_TOKENS,
+    mode: str = _AUDIT_DEFAULT_MODE,
+    session_path: Path,
+) -> dict[str, object]:
+    before_text = _audit_read_issues(workspace)
+    segment_entries = [item for item in chunk.get('segments', []) if isinstance(item, dict)]
+    segments = segment_entries or [None]
+    reviewed_segment_ids: list[str] = []
+    for segment in segments:
+        latest_state = _audit_load_state(session_path) or state
+        completed_segments = {item for item in latest_state.get('completed_segments', []) if isinstance(item, str)}
+        segment_id = str(segment.get('id') or '') if isinstance(segment, dict) else ''
+        if segment_id and segment_id in completed_segments:
+            reviewed_segment_ids.append(segment_id)
+            continue
+        current_inbox = _audit_inbox_context(workspace, max_context_tokens=max_context_tokens)
+        code, message = _run_audit_chunk(
+            prompt=prompt,
+            model=model,
+            workspace=workspace,
+            system_prompt=system_prompt,
+            unattended_limit_seconds=unattended_limit_seconds,
+            agent=agent,
+            chunk=chunk,
+            state=state,
+            max_context_tokens=max_context_tokens,
+            mode=mode,
+            segment=segment if isinstance(segment, dict) else None,
+            inbox_text=current_inbox,
+        )
+        if code != 0:
+            return {
+                "chunk": dict(chunk),
+                "code": code,
+                "message": message,
+                "before_text": before_text,
+                "completed_segments": reviewed_segment_ids,
+                "failed_segment": dict(segment) if isinstance(segment, dict) else None,
+            }
+        if segment_id:
+            reviewed_segment_ids.append(segment_id)
+            completed_segments.add(segment_id)
+            def _mark_segment(current_state: dict[str, object]) -> dict[str, object]:
+                completed = [item for item in current_state.get('completed_segments', []) if isinstance(item, str)]
+                if segment_id not in completed:
+                    completed.append(segment_id)
+                current_state['completed_segments'] = completed
+                _audit_refresh_state(current_state)
+                return current_state
+            _audit_update_state(session_path, _mark_segment)
+    return {
+        "chunk": dict(chunk),
+        "code": 0,
+        "message": "",
+        "before_text": before_text,
+        "completed_segments": reviewed_segment_ids,
+        "failed_segment": None,
+    }
+
+
+def _run_audit_chunk(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, chunk: dict[str, object], state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE, segment: dict[str, object] | None = None, inbox_text: str | None = None, inbox_append_fn = None) -> tuple[int, str]:
     issues_path = _audit_issues_path(workspace)
     issues_rel = rt._rel(workspace, issues_path)
-    review_prompt = _audit_review_prompt(prompt, state, chunk, issues_rel=issues_rel, mode=mode)
-    chunk_text = _audit_chunk_text(workspace, chunk, mode=mode)
+    review_prompt = _audit_review_prompt(prompt, state, chunk, issues_rel=issues_rel, mode=mode, segment=segment)
+    current_inbox = inbox_text if isinstance(inbox_text, str) and inbox_text else _audit_inbox_context(workspace, max_context_tokens=max_context_tokens)
+    chunk_text = _audit_chunk_text(workspace, chunk, mode=mode, segment=segment)
     return run_agent(
         review_prompt
         + "\n\nCurrent audit inbox:\n\n"
-        + _audit_read_inbox(workspace)
+        + current_inbox
         + "\n\nChunk contents:\n\n"
         + chunk_text,
         model,
@@ -1710,13 +2479,16 @@ def _run_audit_chunk(*, prompt: str, model: str, workspace: Path, system_prompt:
             allow_inbox_append=True,
             allow_replace=False,
             mode=mode,
+            inbox_append_fn=inbox_append_fn or _audit_append_inbox,
         ),
         auto_approve_tools={"inbox_append"},
         wait_label_suffix=_audit_wait_label_suffix(state, chunk=chunk),
+        pin_user_prompt=True,
     )
 
 
 def _run_audit_summary(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, state: dict[str, object], max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE) -> tuple[int, str]:
+    _ = system_prompt
     issues_path = _audit_issues_path(workspace)
     issues_rel = rt._rel(workspace, issues_path)
     return run_agent(
@@ -1733,76 +2505,178 @@ def _run_audit_summary(*, prompt: str, model: str, workspace: Path, system_promp
         tool_registry=_audit_limited_tool_registry(workspace, allow_search=False, mode=mode),
         auto_approve_tools={"replace"},
         wait_label_suffix=_audit_wait_label_suffix(state),
+        pin_user_prompt=True,
     )
 
-def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, transcript: Transcript | None = None, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE) -> int:
+def _run_audit_workflow(*, prompt: str, model: str, workspace: Path, system_prompt: str, unattended_limit_seconds: int, agent: str, transcript: Transcript | None = None, max_context_tokens: int = rt.MAX_CONTEXT_TOKENS, mode: str = _AUDIT_DEFAULT_MODE, session_path: Path | None = None, phase: str = "") -> int:
     _ = transcript
     _ = max_context_tokens
-    session_path = _audit_session_path(workspace, mode=mode)
+    session_path = session_path or _audit_session_path(workspace, mode=mode)
     state = _audit_load_state(session_path)
     if state is None:
         return rt.fail(f"Audit state missing or invalid: {rt._fmt('inline', session_path)}")
     state['run_config'] = _audit_resolve_run_config(state.get('run_config'), mode=str(state.get('mode') or mode))
+    requested_phase = str(phase or '').strip().lower()
+    if requested_phase and requested_phase not in _AUDIT_PHASE_IDS:
+        return rt.fail(f"Invalid audit phase: {requested_phase}")
     _write_audit_state(session_path, state)
-    _audit_seed_issues_md(workspace, state)
-    prepared_issues = _audit_upsert_transparency(_audit_read_issues(workspace), state.get('run_config'))
-    if prepared_issues != _audit_read_issues(workspace):
-        _audit_write_issues(workspace, prepared_issues)
+    prepared_issues = _audit_prepare_issues_md(workspace, state)
+    state['totals']['findings'] = int(prepared_issues.get('findings', 0) or 0)
     _audit_ensure_inbox(workspace)
     files_by_path = {str(item['path']): item for item in state.get('files', []) if isinstance(item, dict) and isinstance(item.get('path'), str)}
+    queue = [
+        _audit_normalize_chunk(chunk, files_by_path)
+        for chunk in state.get('chunks', [])
+        if isinstance(chunk, dict)
+    ]
+    forced_phase = requested_phase if requested_phase in _AUDIT_PHASE_IDS else ''
+    if requested_phase == 'phase1':
+        state = _audit_refresh_state(state, force_phase='phase1')
+        _write_audit_state(session_path, state)
+        rt._note(f"audit plan ready: {_audit_state_summary(state)}", tag="note")
+        return 0
+    if requested_phase == 'phase3':
+        queue = []
+    state = _audit_refresh_state(state, force_phase=forced_phase)
+    _write_audit_state(session_path, state)
     rt._note(f"audit plan ready: {_audit_state_summary(state)}", tag="note")
-    queue = [chunk for chunk in state.get('chunks', []) if isinstance(chunk, dict)]
+    worker_count = int(state.get('run_config', {}).get('phase2_workers') or rt.audit_settings(context_tokens=max_context_tokens).get('phase2_workers', 1) or 1)
+    worker_count = max(worker_count, 1)
+    launch_delay_seconds = max(int(state.get('run_config', {}).get('phase2_launch_delay_seconds') or rt.audit_settings(context_tokens=max_context_tokens).get('phase2_launch_delay_seconds', 10) or 0), 0)
+    if queue:
+        rt._note(f"phase2 threaded review enabled: workers={worker_count}, launch_delay={launch_delay_seconds}s", tag="note")
     while queue:
-        chunk = queue.pop(0)
-        chunk = _audit_normalize_chunk(chunk, files_by_path)
-        if not chunk['paths'] or chunk['id'] in set(state.get('completed_chunks', [])):
-            continue
-        attempt = 0
-        current_chunk = chunk
-        completed = False
-        while attempt < _AUDIT_MAX_AGENT_FAILURES + 2:
-            attempt += 1
-            _audit_ensure_inbox(workspace)
-            before_text = _audit_read_issues(workspace)
-            rt._note(
-                f"audit chunk {current_chunk['id']} attempt {attempt}: {len(current_chunk['paths'])} file(s), ~{current_chunk['estimated_tokens']} tokens",
-                tag='note',
-            )
-            code, _ = _run_audit_chunk(
-                prompt=prompt,
-                model=model,
-                workspace=workspace,
-                system_prompt=system_prompt,
-                unattended_limit_seconds=unattended_limit_seconds,
-                agent=agent,
-                chunk=current_chunk,
-                state=state,
-                max_context_tokens=max_context_tokens,
-                mode=mode,
-            )
-            after_text = _audit_read_issues(workspace)
-            if code == 0 and after_text != before_text:
-                _audit_mark_chunk_complete(state, str(current_chunk['id']), before_text, after_text)
-                _write_audit_state(session_path, state)
-                completed = True
-                break
-            split = _audit_split_chunk(current_chunk, files_by_path)
-            if split:
-                queue = split + queue
-                reason = 'ISSUES.md unchanged after chunk review; split chunk for retry'
-            else:
-                reason = 'ISSUES.md unchanged after chunk review'
-            _audit_record_failed_chunk(state, current_chunk, reason)
-            _write_audit_state(session_path, state)
-            if split:
-                completed = True
-                break
-            if code != 0 and attempt <= _AUDIT_MAX_AGENT_FAILURES:
-                continue
-            return rt.fail(f"Audit chunk {current_chunk['id']} failed: {reason}")
-        if not completed:
-            return rt.fail(f"Audit chunk {current_chunk['id']} failed after retries.")
-    state = _audit_refresh_state(state)
+        ready = [
+            chunk for chunk in queue
+            if chunk.get('paths') and str(chunk.get('id')) not in set(state.get('completed_chunks', []))
+        ]
+        queue = []
+        if not ready:
+            break
+        inbox_text = _audit_inbox_context(workspace, max_context_tokens=max_context_tokens)
+        review_prompt = _audit_review_prompt(prompt, state, {"id": "chunk", "paths": [], "estimated_tokens": 0}, issues_rel="ISSUES.md", mode=mode)
+        phase2_system_prompt = _audit_system_prompt_for_mode(mode, phase="phase2")
+        budget = _audit_chunk_content_budget(
+            max_context_tokens=max_context_tokens,
+            inbox_text=inbox_text,
+            prompt_text=review_prompt,
+            system_prompt=phase2_system_prompt,
+        )
+        for current_chunk in ready:
+            segment_entries = [item for item in current_chunk.get('segments', []) if isinstance(item, dict)]
+            current_chunk['segments'] = segment_entries
+            current_chunk['segment_count'] = max(int(current_chunk.get('segment_count', 0) or 0), len(segment_entries))
+            if not segment_entries and budget > 0 and rt.count_tokens(_audit_chunk_text(workspace, current_chunk, mode=mode)) > budget:
+                segment_entries = _audit_review_segments(
+                    workspace,
+                    current_chunk,
+                    prompt=prompt,
+                    max_context_tokens=max_context_tokens,
+                    mode=mode,
+                )
+                current_chunk['segments'] = segment_entries
+                current_chunk['segment_count'] = len(segment_entries)
+            elif not segment_entries:
+                current_chunk['segment_count'] = 0
+            for index, queued_chunk in enumerate(state.get('chunks', [])):
+                if isinstance(queued_chunk, dict) and str(queued_chunk.get('id')) == str(current_chunk.get('id')):
+                    state['chunks'][index] = dict(current_chunk)
+                    break
+        _write_audit_state(session_path, state)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(worker_count, len(ready))) as pool:
+            futures = []
+            for index, current_chunk in enumerate(ready):
+                futures.append(
+                    pool.submit(
+                        _audit_review_worker,
+                        prompt=prompt,
+                        model=model,
+                        workspace=workspace,
+                        system_prompt=system_prompt,
+                        unattended_limit_seconds=unattended_limit_seconds,
+                        agent=agent,
+                        chunk=current_chunk,
+                        state=state,
+                        max_context_tokens=max_context_tokens,
+                        mode=mode,
+                        session_path=session_path,
+                    )
+                )
+                if launch_delay_seconds > 0 and index + 1 < len(ready):
+                    time.sleep(launch_delay_seconds)
+            batch_failures: list[tuple[dict[str, object], dict[str, object] | None]] = []
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                current_chunk = _audit_normalize_chunk(dict(result.get('chunk', {})), files_by_path)
+                before_text = _audit_read_issues(workspace)
+                result_code = int(result.get('code', 1) if result.get('code') is not None else 1)
+                failed_segment = result.get('failed_segment') if isinstance(result.get('failed_segment'), dict) else None
+                if result_code != 0:
+                    reason = 'agent error during chunk review'
+                    state = _audit_update_state(
+                        session_path,
+                        lambda current_state: (
+                            _audit_record_failed_chunk(current_state, current_chunk, reason, segment=failed_segment)
+                            or current_state
+                        ),
+                    )
+                    if len(current_chunk['paths']) > 1:
+                        split = _audit_split_chunk(current_chunk, files_by_path)
+                        if split:
+                            queue.extend(split)
+                            state = _audit_update_state(
+                                session_path,
+                                lambda current_state: (
+                                    current_state.__setitem__('notes', [*current_state.get('notes', [])[-9:], f"Split {current_chunk['id']} after threaded review failure."])
+                                    or _audit_refresh_state(current_state)
+                                    or current_state
+                                ),
+                            )
+                            continue
+                    batch_failures.append((current_chunk, failed_segment))
+                    continue
+                after_text = _audit_read_issues(workspace)
+                segment_note = ''
+                if current_chunk.get('segments'):
+                    segment_note = f" across {len([item for item in current_chunk.get('segments', []) if isinstance(item, dict)])} segment(s)"
+                state = _audit_update_state(
+                    session_path,
+                    lambda current_state: (
+                        _audit_mark_chunk_complete(
+                            current_state,
+                            str(current_chunk['id']),
+                            before_text,
+                            after_text,
+                            note=(
+                                f"Completed {current_chunk['id']}{segment_note} with threaded phase2 review: direct locked inbox writes; "
+                                f"ISSUES.md changed by {len(after_text) - len(before_text)} chars."
+                            ),
+                        )
+                        or current_state
+                    ),
+                )
+            if batch_failures:
+                failed_chunk, failed_segment = batch_failures[0]
+                label = str(failed_segment.get('id')) if isinstance(failed_segment, dict) else str(failed_chunk['id'])
+                return rt.fail(f"Audit chunk {label} failed: agent error during chunk review")
+    state = _audit_refresh_state(state, force_phase='phase3' if requested_phase == 'phase3' else '')
+    _write_audit_state(session_path, state)
+    if requested_phase == 'phase2':
+        return 0
+    code, _ = _audit_prepare_summary_input(
+        prompt=prompt,
+        model=model,
+        workspace=workspace,
+        unattended_limit_seconds=unattended_limit_seconds,
+        agent=agent,
+        state=state,
+        max_context_tokens=max_context_tokens,
+        mode=mode,
+        session_path=session_path,
+    )
+    if code != 0:
+        return code
+    state = _audit_refresh_state(state, force_phase='phase3')
     _write_audit_state(session_path, state)
     before_summary = _audit_read_issues(workspace)
     code, _ = _run_audit_summary(
@@ -1921,7 +2795,7 @@ def _apply_resumed_session(session, loaded, loaded_model, loaded_agent):
     return loaded, loaded_model
 
 
-def _run_audit_entrypoint(*, focus: str, mode: str, from_: str = "") -> int:
+def _run_audit_entrypoint(*, focus: str, mode: str, from_: str = "", phase: str = "") -> int:
     try:
         scope = _audit_parse_scope(from_)
     except ValueError as exc:
@@ -1948,23 +2822,27 @@ def _run_audit_entrypoint(*, focus: str, mode: str, from_: str = "") -> int:
         agent=session["agent"],
         max_context_tokens=int(session.get("max_context_tokens", rt.MAX_CONTEXT_TOKENS) or rt.MAX_CONTEXT_TOKENS),
         mode=mode,
+        session_path=artifacts["session_path"],
+        phase=phase,
     )
 
 
-def audit(focus: str = "", *, from_: str = ""):
+def audit(focus: str = "", *, from_: str = "", phase: str = ""):
     """Run a one-shot security and complexity audit.
 
     :param focus: Optional area to focus on, such as auth, tests, or a file path.
+    :param phase: Optional phase selector: phase1, phase2, or phase3.
     """
-    return _run_audit_entrypoint(focus=focus, mode=_AUDIT_DEFAULT_MODE, from_=from_)
+    return _run_audit_entrypoint(focus=focus, mode=_AUDIT_DEFAULT_MODE, from_=from_, phase=phase)
 
 
-def audit_logic(focus: str = "", *, from_: str = ""):
+def audit_logic(focus: str = "", *, from_: str = "", phase: str = ""):
     """Run a one-shot logic-focused security and complexity audit.
 
     :param focus: Optional area to focus on, such as auth, tests, or a file path.
+    :param phase: Optional phase selector: phase1, phase2, or phase3.
     """
-    return _run_audit_entrypoint(focus=focus, mode=_AUDIT_LOGIC_MODE, from_=from_)
+    return _run_audit_entrypoint(focus=focus, mode=_AUDIT_LOGIC_MODE, from_=from_, phase=phase)
 
 
 def _create_prompt_session():
@@ -2212,8 +3090,14 @@ def _handle_ask(question, current_model, session, transcript):
 
 
 def _handle_audit(focus, current_model, session, transcript=None, *, mode: str = _AUDIT_DEFAULT_MODE):
+    phase = ""
+    if isinstance(focus, str) and focus.startswith("--phase "):
+        parts = focus.split(None, 2)
+        if len(parts) >= 2:
+            phase = parts[1].strip()
+        focus = parts[2].strip() if len(parts) >= 3 else ""
     try:
-        _artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=True, mode=mode)
+        artifacts, audit_prompt = _prepare_audit_run(session=session, focus=focus, interactive=True, mode=mode)
     except (RuntimeError, ValueError) as exc:
         if str(exc) == "audit cancelled":
             rt._note(f"{_audit_mode_name(mode)} cancelled", tag="note")
@@ -2235,6 +3119,8 @@ def _handle_audit(focus, current_model, session, transcript=None, *, mode: str =
                 or rt.MAX_CONTEXT_TOKENS
             ),
             mode=mode,
+            session_path=artifacts["session_path"],
+            phase=phase,
         )
         if code != 0:
             raise RuntimeError(f"{_audit_mode_name(mode)} failed with exit code {code}")

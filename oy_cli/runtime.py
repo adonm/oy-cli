@@ -896,13 +896,18 @@ def audit_settings(
     *,
     context_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> AuditSettings:
-    _ = context_tokens
+    context = max(int(context_tokens or 0), 1)
     return {
         "review_chunk_target_tokens": 64_000,
         "review_chunk_max_files": 64,
         "report_context_limit": 64,
         "per_file_notes_limit": 5,
         "audit_notes_limit": 10,
+        "phase2_workers": 8,
+        "phase2_launch_delay_seconds": 10,
+        "review_inbox_context_tokens": _clamp_int(context // 10, 2_048, 16_384),
+        "review_prompt_margin_tokens": _clamp_int(context // 32, 1_024, 4_096),
+        "review_segment_overlap_tokens": _clamp_int(context // 256, 64, 512),
     }
 
 

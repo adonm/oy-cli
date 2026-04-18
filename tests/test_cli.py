@@ -55,7 +55,7 @@ def _capture_defopt_run(monkeypatch):
 class TestCLI:
     @pytest.mark.parametrize(
         ("argv", "expected"),
-        [(["fix", "tests"], ["run", "fix", "tests"]), (["ralph", "fix", "tests"], ["ralph", "fix", "tests"]), (["audit-logic", "auth"], ["audit-logic", "auth"]), (["audit", "auth", "--from", "HEAD~1"], ["audit", "auth", "--from", "HEAD~1"]), (["renovate-local"], ["renovate-local"]), (["--continue"], ["run", "--continue-session"]), (["-c"], ["run", "--continue-session"]), (["--resume", "abc123"], ["run", "--resume", "abc123"])],
+        [(["fix", "tests"], ["run", "fix", "tests"]), (["ralph", "fix", "tests"], ["ralph", "fix", "tests"]), (["audit-logic", "auth"], ["audit-logic", "auth"]), (["audit", "auth", "--from", "HEAD~1"], ["audit", "auth", "--from", "HEAD~1"]), (["audit", "auth", "--phase", "phase3"], ["audit", "auth", "--phase", "phase3"]), (["renovate-local"], ["renovate-local"]), (["--continue"], ["run", "--continue-session"]), (["-c"], ["run", "--continue-session"]), (["--resume", "abc123"], ["run", "--resume", "abc123"])],
     )
     def test_main_normalizes_commands(self, monkeypatch, argv, expected):
         seen = _capture_defopt_run(monkeypatch)
@@ -354,6 +354,7 @@ class TestChatCommands:
         assert loaded_agent == "plan"
         assert loaded["messages"] == [SystemMessage("new system"), UserMessage("hello")]
         assert cli._chat_command("/audit-logic auth", loaded, "new system", model) == ("audit_logic", "auth")
+        assert cli._chat_command("/audit --phase phase3 auth", loaded, "new system", model) == ("audit", "--phase phase3 auth")
         assert cli._chat_command("/yolo", loaded, "new system", model) == ("yolo",)
         assert cli._session_file("bad name/..") == tmp_path / "bad_name___.json"
         assert cli._chat_command("/clear", loaded, "new system", model) is True
@@ -483,6 +484,8 @@ class TestAuditWorkflow:
         session_path = artifacts["session_path"]
         state = rt.load_toon(session_path, {})
         assert state["run_config"]["command"] == "oy audit"
+        assert state["run_config"]["phase2_workers"] == rt.audit_settings()["phase2_workers"]
+        assert state["run_config"]["phase2_launch_delay_seconds"] == 10
         assert isinstance(state["run_config"]["model"], str) and state["run_config"]["model"]
         assert state["focus"] == "auth"
         assert state["workspace"] == str(tmp_path)
@@ -490,6 +493,7 @@ class TestAuditWorkflow:
         assert {item["path"] for item in state["files"]} == {".gitignore", "README.md", "script", "src/main.py"}
         assert state["chunks"]
         assert all(chunk["estimated_tokens"] <= 64_000 or len(chunk["paths"]) == 1 for chunk in state["chunks"])
+        assert all(chunk.get("segment_count", 0) == 0 for chunk in state["chunks"])
         assert state["totals"]["chunk_count"] == len(state["chunks"])
         assert state["phases"][0]["status"] == "done"
         assert state["phases"][1]["status"] == "pending"
@@ -523,7 +527,7 @@ class TestAuditWorkflow:
 
     def test_audit_prepare_issues_md_upserts_transparency_snippet(self, tmp_path):
         state = {
-            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072},
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 8, "phase2_launch_delay_seconds": 0},
             "totals": {"queued": 1, "total_code_count": 1, "counted_files": 1},
             "sloc": {},
         }
@@ -545,7 +549,7 @@ class TestAuditWorkflow:
 
     def test_audit_prepare_issues_md_upserts_transparency_without_report_title_on_line_one(self, tmp_path):
         state = {
-            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072},
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 8, "phase2_launch_delay_seconds": 0},
             "totals": {"queued": 1, "total_code_count": 1, "counted_files": 1},
             "sloc": {},
         }
@@ -562,6 +566,46 @@ class TestAuditWorkflow:
         assert issues_text.startswith("<!-- banner -->\n\n# Audit Issues\n\n> Generated with [oy-cli]")
         assert issues_text.count("> Generated with [oy-cli]") == 1
 
+    def test_audit_prepare_issues_md_records_phase1_dependency_assessment_once(self, tmp_path):
+        state = {
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 8, "phase2_launch_delay_seconds": 0},
+            "totals": {"queued": 1, "total_code_count": 1, "counted_files": 1},
+            "sloc": {},
+        }
+        (tmp_path / ".tmp").mkdir()
+        (tmp_path / ".tmp" / "renovate-2026-01-02.json").write_text(
+            json.dumps(
+                {
+                    "repositories": [
+                        {
+                            "warnings": ["Using local RE2 fallback"],
+                            "packageFiles": [
+                                {
+                                    "packageFile": "package.json",
+                                    "manager": "npm",
+                                    "updates": [
+                                        {"depName": "lodash", "currentVersion": "4.17.20", "newVersion": "4.17.21", "updateType": "patch", "manager": "npm", "packageFile": "package.json"},
+                                        {"depName": "actions/checkout", "currentVersion": "v4", "newVersion": "v5", "updateType": "major", "manager": "github-actions", "packageFile": ".github/workflows/ci.yml"},
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cli._audit_prepare_issues_md(tmp_path, state)
+        cli._audit_prepare_issues_md(tmp_path, state)
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+        assert issues_text.count("Phase1 dependency assessment:") == 1
+        assert "## Short audit log" in issues_text
+        assert "`.tmp/renovate-2026-01-02.json`" in issues_text
+        assert "no clear dependency or GitHub Actions risk beyond routine maintenance" in issues_text
+        assert "Warnings: Using local RE2 fallback." in issues_text
+
     def test_audit_plan_chunks_clusters_by_directory_before_splitting(self):
         files = [
             {"path": "api/auth/a.py", "code_count": 50, "estimated_tokens": 20_000},
@@ -577,6 +621,44 @@ class TestAuditWorkflow:
             ["web/ui/d.ts"],
         ]
         assert all(chunk["estimated_tokens"] <= 64_000 for chunk in chunks)
+
+    def test_audit_chunk_segments_split_large_single_file_to_fit_prompt(self, tmp_path):
+        big = tmp_path / "big.py"
+        big.write_text("\n".join(f"value_{i} = {i}" for i in range(6000)), encoding="utf-8")
+        chunk = {"id": "chunk-001", "paths": ["big.py"], "estimated_tokens": 200_000, "files": 1}
+
+        segments = cli._audit_chunk_segments(
+            tmp_path,
+            chunk,
+            max_context_tokens=4096,
+            inbox_text=cli._audit_inbox_section(),
+            prompt_text="prompt",
+            system_prompt="sys",
+        )
+
+        assert len(segments) > 1
+        assert segments[0]["start"] == 0
+        assert all(segments[i]["start"] < segments[i]["end"] for i in range(len(segments)))
+        assert segments[-1]["end"] >= segments[-1]["start"]
+
+    def test_audit_inbox_context_compacts_to_recent_entries(self, tmp_path):
+        entries = "\n\n".join(
+            f"### Finding {i}\n\n- detail {'x' * 120}"
+            for i in range(8)
+        )
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            f"{entries}\n",
+            encoding="utf-8",
+        )
+
+        compact = cli._audit_compact_inbox_text(cli._audit_read_inbox(tmp_path), max_tokens=150)
+
+        assert "Finding 7" in compact
+        assert "Finding 0" not in compact
+        assert rt.count_tokens(compact) <= 160
 
     def test_audit_walk_files_respects_gitignore(self, tmp_path):
         (tmp_path / "keep.py").write_text("print('keep')\n", encoding="utf-8")
@@ -667,8 +749,8 @@ class TestAuditWorkflow:
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
-        (tmp_path / "a.py").write_text("print(\'a\')\n", encoding="utf-8")
-        (tmp_path / "b.py").write_text("print(\'b\')\n", encoding="utf-8")
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("print('b')\n", encoding="utf-8")
         subprocess.run(["git", "add", "a.py", "b.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
         subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
         base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
@@ -709,7 +791,28 @@ class TestAuditWorkflow:
         assert "64k chunks" in seen["prompt"]
         assert str(artifacts["session_path"]) in seen["prompt"]
         assert seen["workspace"] == tmp_path
+        assert seen["session_path"] == artifacts["session_path"]
         assert intro["audit_state"] == artifacts["session_path"]
+
+    def test_audit_phase_option_forwards_requested_phase(self, tmp_path, monkeypatch):
+        _stub_session(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        monkeypatch.setattr(rt, "unattended_limit_seconds", lambda: 60)
+
+        artifacts = {
+            "session_path": tmp_path / ".sessions" / "audits" / "repo.toon",
+            "state_data": {"status": "in_progress"},
+            "created": True,
+        }
+        monkeypatch.setattr(cli, "_prepare_audit_run", lambda **_kwargs: (artifacts, "prompt"))
+        monkeypatch.setattr(cli, "_print_session_intro", lambda *_a, **_k: None)
+        seen = {}
+        monkeypatch.setattr(cli, "_run_audit_workflow", lambda **kwargs: seen.update(kwargs) or 0)
+
+        assert cli.audit("auth", phase="phase3") == 0
+        assert seen["phase"] == "phase3"
+        assert seen["session_path"] == artifacts["session_path"]
 
     def test_audit_logic_uses_logic_mode_workflow(self, tmp_path, monkeypatch):
         _stub_session(monkeypatch, tmp_path)
@@ -774,8 +877,9 @@ class TestAuditWorkflow:
                 {"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
                 {"path": "b.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
             ],
-            "chunks": [{"id": "chunk-001", "paths": ["a.py", "b.py"], "estimated_tokens": 20, "files": 2}],
+            "chunks": [{"id": "chunk-001", "paths": ["a.py", "b.py"], "estimated_tokens": 20, "files": 2, "segments": [], "segment_count": 0}],
             "completed_chunks": [],
+            "completed_segments": [],
             "failed_chunks": [],
             "notes": [],
             "totals": {"queued": 2, "reviewed": 0, "findings": 0, "counted_files": 2, "total_code_count": 2, "total_line_count": 2, "chunk_count": 1, "completed_chunks": 0},
@@ -803,11 +907,74 @@ class TestAuditWorkflow:
             agent="default",
         ) == 0
         saved = rt.load_toon(session_path, {})
-        assert len(calls) == 4
+        assert len(calls) == 2
         assert saved["status"] == "done"
-        assert saved["failed_chunks"]
         assert saved["completed_chunks"]
+        assert "chunk-001" in saved["completed_chunks"]
+        assert not saved.get("completed_segments")
         assert "Important finding" in (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+    def test_run_audit_workflow_reviews_oversized_chunk_via_segments(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        session_path = cli._audit_session_path(tmp_path)
+        rt._ensure_private_dir(session_path.parent)
+        (tmp_path / "big.py").write_text("\n".join(f"value_{i} = {i}" for i in range(6000)), encoding="utf-8")
+        rt.save_toon(session_path, {
+            "version": cli._AUDIT_STATE_VERSION,
+            "workspace": str(tmp_path),
+            "focus": "",
+            "status": "in_progress",
+            "active_phase": "phase2",
+            "phases": [
+                {"id": "phase1", "status": "done", "label": "plan", "notes": []},
+                {"id": "phase2", "status": "pending", "label": "review", "notes": []},
+                {"id": "phase3", "status": "pending", "label": "summary", "notes": []},
+            ],
+            "sloc": {"counted_files": 1, "total_code_count": 6000},
+            "files": [{"path": "big.py", "language": "Python", "code_count": 6000, "line_count": 6000, "size_bytes": 100000, "estimated_tokens": 200000}],
+            "chunks": [{"id": "chunk-001", "paths": ["big.py"], "estimated_tokens": 200000, "files": 1, "segments": [], "segment_count": 0}],
+            "completed_chunks": [],
+            "completed_segments": [],
+            "failed_chunks": [],
+            "notes": [],
+            "totals": {"queued": 1, "reviewed": 0, "findings": 0, "counted_files": 1, "total_code_count": 6000, "total_line_count": 6000, "chunk_count": 1, "completed_chunks": 0},
+        })
+        prompts = []
+
+        def fake_run_agent(prompt, *_args, **kwargs):
+            prompts.append(prompt)
+            if "Chunk contents:" in prompt:
+                payload = kwargs["tool_registry"]["inbox_append"]["fn"](
+                    {"interactive": False, "unattended_deadline": 999999, "unattended_limit_seconds": 999999},
+                    f"### Segment {len([item for item in prompts if 'Chunk contents:' in item])}\n\n- detail",
+                )
+                assert payload["buffered"] is True
+            else:
+                (tmp_path / "ISSUES.md").write_text("# Audit Issues\n\n## Summary\n", encoding="utf-8")
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+
+        assert cli._run_audit_workflow(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+            max_context_tokens=4096,
+        ) == 0
+        saved = rt.load_toon(session_path, {})
+        assert len([prompt for prompt in prompts if "Chunk contents:" in prompt]) > 1
+        assert any("Review only segment 1/" in prompt for prompt in prompts)
+        assert any("Review only segment 2/" in prompt for prompt in prompts)
+        assert "chunk-001" in saved["completed_chunks"]
+        assert len(saved["completed_segments"]) > 1
+        assert saved["chunks"][0]["segment_count"] > 1
+        assert len(saved["chunks"][0]["segments"]) > 1
+        issues_text = (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+        assert "## Summary" in issues_text
 
     def test_run_audit_workflow_uses_non_truncating_audit_transcript(self, tmp_path, monkeypatch):
         monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
@@ -828,8 +995,9 @@ class TestAuditWorkflow:
             ],
             "sloc": {"counted_files": 1, "total_code_count": 1},
             "files": [{"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10}],
-            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1}],
+            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0}],
             "completed_chunks": [],
+            "completed_segments": [],
             "failed_chunks": [],
             "notes": [],
             "totals": {"queued": 1, "reviewed": 0, "findings": 0, "counted_files": 1, "total_code_count": 1, "total_line_count": 1, "chunk_count": 1, "completed_chunks": 0},
@@ -855,7 +1023,7 @@ class TestAuditWorkflow:
             agent="default",
             max_context_tokens=4321,
         ) == 0
-        assert len(seen) == 2
+        assert len(seen) >= 2
         assert all(tx["max_context_tokens"] == 4321 for tx in seen)
         assert all(tx["max_message_tokens"] == 4321 for tx in seen)
         assert all(tx["messages"] == [] for tx in seen)
@@ -890,8 +1058,9 @@ class TestAuditWorkflow:
             ],
             "sloc": {"counted_files": 1, "total_code_count": 1},
             "files": [{"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10}],
-            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1}],
+            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0}],
             "completed_chunks": [],
+            "completed_segments": [],
             "failed_chunks": [],
             "notes": [],
             "totals": {"queued": 1, "reviewed": 0, "findings": 0, "counted_files": 1, "total_code_count": 1, "total_line_count": 1, "chunk_count": 1, "completed_chunks": 0},
@@ -899,7 +1068,7 @@ class TestAuditWorkflow:
 
         artifacts = cli._ensure_audit_session(
             tmp_path,
-            run_config={"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072},
+            run_config={"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 8, "phase2_launch_delay_seconds": 0},
         )
 
         state = rt.load_toon(session_path, {})
@@ -927,8 +1096,9 @@ class TestAuditWorkflow:
             ],
             "sloc": {"counted_files": 1, "total_code_count": 1},
             "files": [{"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10}],
-            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1}],
+            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0}],
             "completed_chunks": [],
+            "completed_segments": [],
             "failed_chunks": [],
             "notes": [],
             "totals": {"queued": 1, "reviewed": 0, "findings": 0, "counted_files": 1, "total_code_count": 1, "total_line_count": 1, "chunk_count": 1, "completed_chunks": 0},
@@ -954,11 +1124,13 @@ class TestAuditWorkflow:
             agent="default",
         ) == 0
         assert set(seen[0]["tool_registry"]) == {"search", "inbox_append"}
-        assert set(seen[1]["tool_registry"]) == {"replace"}
+        assert set(seen[-1]["tool_registry"]) == {"replace"}
         assert seen[0]["auto_approve_tools"] == {"inbox_append"}
-        assert seen[1]["auto_approve_tools"] == {"replace"}
+        assert seen[-1]["auto_approve_tools"] == {"replace"}
+        assert seen[0]["pin_user_prompt"] is True
+        assert seen[-1]["pin_user_prompt"] is True
         assert seen[0]["wait_label_suffix"] == "audit phase2 | files 0/1 | chunks 0/1 | chunk-001 | findings 0"
-        assert seen[1]["wait_label_suffix"] == "audit phase3 | files 1/1 | chunks 1/1 | findings 2"
+        assert seen[-1]["wait_label_suffix"] == "audit phase3 | files 1/1 | chunks 1/1 | findings 2"
 
 
     def test_audit_wait_label_suffix_renders_progress(self):
@@ -974,6 +1146,12 @@ class TestAuditWorkflow:
             "active_phase": "phase3",
             "totals": {"queued": 7, "reviewed": 7, "chunk_count": 4, "completed_chunks": 4, "findings": 5},
         }) == "audit phase3 | files 7/7 | chunks 4/4 | findings 5"
+
+    def test_audit_wait_label_suffix_supports_phase3_detail(self):
+        assert cli._audit_wait_label_suffix({
+            "active_phase": "phase3",
+            "totals": {"queued": 7, "reviewed": 7, "chunk_count": 4, "completed_chunks": 4, "findings": 5},
+        }, detail="condense-001") == "audit phase3 | files 7/7 | chunks 4/4 | condense-001 | findings 5"
 
     def test_audit_system_prompt_for_mode_supports_phase_specific_prompts(self):
         assert cli._audit_system_prompt_for_mode(cli._AUDIT_DEFAULT_MODE, phase="phase1") == cli.AUDIT_PHASE1_SYSTEM_PROMPT
@@ -1011,7 +1189,9 @@ class TestAuditWorkflow:
             "## Historical finding\n\nold detail\n\n"
             "## Inbox\n\n"
             "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
-            "### Inbox finding\n\n- short note\n",
+            "### Inbox finding\n\n- short note\n\n"
+            "## Short audit log\n\n"
+            "- Phase1 dependency assessment: inspected newest relevant Renovate report `.tmp/renovate-2026-01-02.json`: no clear dependency risk.\n",
             encoding="utf-8",
         )
         seen = {}
@@ -1036,5 +1216,509 @@ class TestAuditWorkflow:
         assert "Current audit inbox:" in seen["prompt"]
         assert "### Inbox finding" in seen["prompt"]
         assert "Historical finding" not in seen["prompt"]
+        assert "Phase1 dependency assessment" not in seen["prompt"]
         assert set(seen["kwargs"]["tool_registry"]) == {"search", "inbox_append"}
         assert seen["kwargs"]["auto_approve_tools"] == {"inbox_append"}
+        assert seen["kwargs"]["pin_user_prompt"] is True
+
+    def test_run_audit_chunk_uses_segment_excerpt(self, tmp_path, monkeypatch):
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        (tmp_path / "a.py").write_text("\n".join(f"value_{i} = {i}" for i in range(400)), encoding="utf-8")
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            "### Inbox finding\n\n- short note\n",
+            encoding="utf-8",
+        )
+        seen = {}
+
+        def fake_run_agent(prompt, *_args, **kwargs):
+            seen["prompt"] = prompt
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+        segment = {"id": "chunk-001#01", "index": 1, "start": 0, "end": 50, "estimated_tokens": 50}
+
+        assert cli._run_audit_chunk(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+            chunk={"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 400, "files": 1, "segment_count": 2},
+            state={"sloc": {}, "completed_chunks": [], "totals": {"queued": 1, "reviewed": 0, "findings": 1}},
+            segment=segment,
+        ) == (0, "")
+        assert "Review only segment 1/2" in seen["prompt"]
+        assert "<segment tokens 0:50>" in seen["prompt"]
+
+    def test_audit_review_worker_buffers_inbox_entries_until_serial_merge(self, tmp_path, monkeypatch):
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            "No inbox findings recorded yet.\n",
+            encoding="utf-8",
+        )
+
+        def fake_run_agent(_prompt, *_args, **kwargs):
+            payload = kwargs["tool_registry"]["inbox_append"]["fn"]({"interactive": False, "unattended_deadline": 999999, "unattended_limit_seconds": 999999}, "### Buffered finding\n\n- detail")
+            assert payload["buffered"] is True
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+        result = cli._audit_review_worker(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+            chunk={"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1},
+            state={"sloc": {}, "completed_chunks": [], "totals": {"queued": 1, "reviewed": 0, "findings": 0}},
+            inbox_text=cli._audit_inbox_context(tmp_path),
+        )
+        assert result["code"] == 0
+        assert result["entries"] == ["### Buffered finding\n\n- detail"]
+        assert "Buffered finding" not in (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+        merged = cli._audit_merge_buffered_entries(tmp_path, result["entries"])
+        assert merged["merged"] == 1
+        assert "Buffered finding" in (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+
+    def test_audit_review_worker_reviews_all_segments_for_oversized_chunk(self, tmp_path, monkeypatch):
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        (tmp_path / "a.py").write_text("\n".join(f"value_{i} = {i}" for i in range(400)), encoding="utf-8")
+        (tmp_path / "ISSUES.md").write_text(
+            "# Audit Issues\n\n"
+            "## Inbox\n\n"
+            "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report.\n\n"
+            "No inbox findings recorded yet.\n",
+            encoding="utf-8",
+        )
+        prompts = []
+
+        def fake_run_agent(prompt, *_args, **kwargs):
+            prompts.append(prompt)
+            payload = kwargs["tool_registry"]["inbox_append"]["fn"](
+                {"interactive": False, "unattended_deadline": 999999, "unattended_limit_seconds": 999999},
+                f"### Segment {len(prompts)}\n\n- detail",
+            )
+            assert payload["buffered"] is True
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+        segment_one = {"id": "chunk-001#01", "index": 1, "start": 0, "end": 50, "estimated_tokens": 50, "path": "a.py"}
+        segment_two = {"id": "chunk-001#02", "index": 2, "start": 50, "end": 100, "estimated_tokens": 50, "path": "a.py"}
+
+        result = cli._audit_review_worker(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+            chunk={"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 400, "files": 1, "segments": [segment_one, segment_two], "segment_count": 2},
+            state={"sloc": {}, "completed_chunks": [], "completed_segments": [], "totals": {"queued": 1, "reviewed": 0, "findings": 0}},
+            inbox_text=cli._audit_inbox_context(tmp_path),
+        )
+        assert result["code"] == 0
+        assert len(prompts) == 2
+        assert "Review only segment 1/2 from a.py" in prompts[0]
+        assert "Review only segment 2/2 from a.py" in prompts[1]
+        assert "### Segment 1" in prompts[1]
+        assert result["completed_segments"] == ["chunk-001#01", "chunk-001#02"]
+        assert result["entries"] == ["### Segment 1\n\n- detail", "### Segment 2\n\n- detail"]
+
+    def test_run_audit_workflow_persists_threaded_worker_results_as_completed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        session_path = cli._audit_session_path(tmp_path)
+        rt._ensure_private_dir(session_path.parent)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("print('b')\n", encoding="utf-8")
+        rt.save_toon(session_path, {
+            "version": cli._AUDIT_STATE_VERSION,
+            "workspace": str(tmp_path),
+            "focus": "",
+            "status": "in_progress",
+            "active_phase": "phase2",
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 2, "phase2_launch_delay_seconds": 0},
+            "phases": [
+                {"id": "phase1", "status": "done", "label": "plan", "notes": []},
+                {"id": "phase2", "status": "pending", "label": "review", "notes": []},
+                {"id": "phase3", "status": "pending", "label": "summary", "notes": []},
+            ],
+            "sloc": {"counted_files": 2, "total_code_count": 2},
+            "files": [
+                {"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
+                {"path": "b.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
+            ],
+            "chunks": [
+                {"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0},
+                {"id": "chunk-002", "paths": ["b.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0},
+            ],
+            "completed_chunks": [],
+            "completed_segments": [],
+            "failed_chunks": [],
+            "notes": [],
+            "totals": {"queued": 2, "reviewed": 0, "findings": 0, "counted_files": 2, "total_code_count": 2, "total_line_count": 2, "chunk_count": 2, "completed_chunks": 0},
+        })
+        observed = {"persisted": False}
+
+        def fake_review_worker(*, chunk, workspace, **_kwargs):
+            if chunk["id"] == "chunk-001":
+                return {
+                    "chunk": dict(chunk),
+                    "code": 0,
+                    "message": "",
+                    "entries": ["### Finding one\n\n- detail"],
+                    "before_text": cli._audit_read_issues(workspace),
+                    "completed_segments": [],
+                }
+            deadline = cli.time.monotonic() + 2
+            while cli.time.monotonic() < deadline:
+                saved = rt.load_toon(session_path, {})
+                issues_text = cli._audit_read_issues(workspace)
+                if "chunk-001" in saved.get("completed_chunks", []) and "Finding one" in issues_text:
+                    observed["persisted"] = True
+                    break
+                cli.time.sleep(0.01)
+            return {
+                "chunk": dict(chunk),
+                "code": 0 if observed["persisted"] else 1,
+                "message": "" if observed["persisted"] else "chunk-001 did not persist before batch end",
+                "entries": ["### Finding two\n\n- detail"] if observed["persisted"] else [],
+                "before_text": cli._audit_read_issues(workspace),
+                "completed_segments": [],
+            }
+
+        def fake_run_summary(**kwargs):
+            workspace = kwargs["workspace"]
+            text = cli._audit_read_issues(workspace)
+            (workspace / "ISSUES.md").write_text(text + "\n## Summary\n", encoding="utf-8")
+            return 0, ""
+
+        monkeypatch.setattr(cli, "_audit_review_worker", fake_review_worker)
+        monkeypatch.setattr(cli, "_run_audit_summary", fake_run_summary)
+
+        assert cli._run_audit_workflow(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+        ) == 0
+        saved = rt.load_toon(session_path, {})
+        assert observed["persisted"] is True
+        assert saved["completed_chunks"] == ["chunk-001", "chunk-002"]
+        assert "Finding one" in (tmp_path / "ISSUES.md").read_text(encoding="utf-8")
+
+    def test_run_audit_workflow_persists_completed_chunks_before_failing_batch(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        session_path = cli._audit_session_path(tmp_path)
+        rt._ensure_private_dir(session_path.parent)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("print('b')\n", encoding="utf-8")
+        rt.save_toon(session_path, {
+            "version": cli._AUDIT_STATE_VERSION,
+            "workspace": str(tmp_path),
+            "focus": "",
+            "status": "in_progress",
+            "active_phase": "phase2",
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 2, "phase2_launch_delay_seconds": 0},
+            "phases": [
+                {"id": "phase1", "status": "done", "label": "plan", "notes": []},
+                {"id": "phase2", "status": "pending", "label": "review", "notes": []},
+                {"id": "phase3", "status": "pending", "label": "summary", "notes": []},
+            ],
+            "sloc": {"counted_files": 2, "total_code_count": 2},
+            "files": [
+                {"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
+                {"path": "b.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
+            ],
+            "chunks": [
+                {"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0},
+                {"id": "chunk-002", "paths": ["b.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0},
+            ],
+            "completed_chunks": [],
+            "completed_segments": [],
+            "failed_chunks": [],
+            "notes": [],
+            "totals": {"queued": 2, "reviewed": 0, "findings": 0, "counted_files": 2, "total_code_count": 2, "total_line_count": 2, "chunk_count": 2, "completed_chunks": 0},
+        })
+
+        def fake_review_worker(*, chunk, workspace, **_kwargs):
+            if chunk["id"] == "chunk-001":
+                text = cli._audit_read_issues(workspace)
+                (workspace / "ISSUES.md").write_text(text + "\n### Finding one\n\n- detail\n", encoding="utf-8")
+                return {
+                    "chunk": dict(chunk),
+                    "code": 0,
+                    "message": "",
+                    "entries": [],
+                    "before_text": text,
+                    "completed_segments": [],
+                }
+            return {
+                "chunk": dict(chunk),
+                "code": 1,
+                "message": "boom",
+                "entries": [],
+                "before_text": cli._audit_read_issues(workspace),
+                "completed_segments": [],
+                "failed_segment": None,
+            }
+
+        monkeypatch.setattr(cli, "_audit_review_worker", fake_review_worker)
+
+        assert cli._run_audit_workflow(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+        ) == 1
+        saved = rt.load_toon(session_path, {})
+        assert "chunk-001" in saved["completed_chunks"]
+        assert saved["failed_chunks"]
+        assert saved["failed_chunks"][0]["id"] == "chunk-002"
+
+    def test_run_audit_workflow_staggers_thread_launches(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        session_path = cli._audit_session_path(tmp_path)
+        rt._ensure_private_dir(session_path.parent)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("print('b')\n", encoding="utf-8")
+        rt.save_toon(session_path, {
+            "version": cli._AUDIT_STATE_VERSION,
+            "workspace": str(tmp_path),
+            "focus": "",
+            "status": "in_progress",
+            "active_phase": "phase2",
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 8, "phase2_launch_delay_seconds": 10},
+            "phases": [
+                {"id": "phase1", "status": "done", "label": "plan", "notes": []},
+                {"id": "phase2", "status": "pending", "label": "review", "notes": []},
+                {"id": "phase3", "status": "pending", "label": "summary", "notes": []},
+            ],
+            "sloc": {"counted_files": 2, "total_code_count": 2},
+            "files": [
+                {"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
+                {"path": "b.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10},
+            ],
+            "chunks": [
+                {"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0},
+                {"id": "chunk-002", "paths": ["b.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0},
+            ],
+            "completed_chunks": [],
+            "completed_segments": [],
+            "failed_chunks": [],
+            "notes": [],
+            "totals": {"queued": 2, "reviewed": 0, "findings": 0, "counted_files": 2, "total_code_count": 2, "total_line_count": 2, "chunk_count": 2, "completed_chunks": 0},
+        })
+        sleeps = []
+        monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+        calls = []
+
+        def fake_run_agent(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 3:
+                (tmp_path / "ISSUES.md").write_text("# Audit Issues\n\n## Summary\n", encoding="utf-8")
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+
+        assert cli._run_audit_workflow(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+        ) == 0
+        assert sleeps == [10]
+
+    def test_run_audit_workflow_phase2_only_skips_summary(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        session_path = cli._audit_session_path(tmp_path)
+        rt._ensure_private_dir(session_path.parent)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        rt.save_toon(session_path, {
+            "version": cli._AUDIT_STATE_VERSION,
+            "workspace": str(tmp_path),
+            "focus": "",
+            "status": "in_progress",
+            "active_phase": "phase2",
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 1, "phase2_launch_delay_seconds": 0},
+            "phases": [
+                {"id": "phase1", "status": "done", "label": "plan", "notes": []},
+                {"id": "phase2", "status": "pending", "label": "review", "notes": []},
+                {"id": "phase3", "status": "pending", "label": "summary", "notes": []},
+            ],
+            "sloc": {"counted_files": 1, "total_code_count": 1},
+            "files": [{"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10}],
+            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0}],
+            "completed_chunks": [],
+            "completed_segments": [],
+            "failed_chunks": [],
+            "notes": [],
+            "totals": {"queued": 1, "reviewed": 0, "findings": 0, "counted_files": 1, "total_code_count": 1, "total_line_count": 1, "chunk_count": 1, "completed_chunks": 0},
+        })
+        (tmp_path / "ISSUES.md").write_text("# Audit Issues\n\n## Inbox\n\n- awaiting review\n", encoding="utf-8")
+
+        def fake_review_worker(*, chunk, workspace, **_kwargs):
+            text = cli._audit_read_issues(workspace)
+            (workspace / "ISSUES.md").write_text(text + "\n### Finding one\n\n- detail\n", encoding="utf-8")
+            return {
+                "chunk": dict(chunk),
+                "code": 0,
+                "message": "",
+                "entries": [],
+                "before_text": text,
+                "completed_segments": [],
+            }
+
+        monkeypatch.setattr(cli, "_audit_review_worker", fake_review_worker)
+        monkeypatch.setattr(cli, "_run_audit_summary", lambda **_kwargs: pytest.fail("phase2-only run should not summarize"))
+
+        assert cli._run_audit_workflow(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+            session_path=session_path,
+            phase="phase2",
+        ) == 0
+        saved = rt.load_toon(session_path, {})
+        assert saved["status"] == "in_progress"
+        assert saved["active_phase"] == "phase3"
+        assert saved["completed_chunks"] == ["chunk-001"]
+
+    def test_run_audit_workflow_phase3_only_skips_review_and_runs_summary(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path / ".sessions")
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        session_path = cli._audit_session_path(tmp_path)
+        rt._ensure_private_dir(session_path.parent)
+        (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+        rt.save_toon(session_path, {
+            "version": cli._AUDIT_STATE_VERSION,
+            "workspace": str(tmp_path),
+            "focus": "",
+            "status": "in_progress",
+            "active_phase": "phase2",
+            "run_config": {"command": "oy audit", "mode": cli._AUDIT_DEFAULT_MODE, "model": "copilot:gpt5.4", "agent": "default", "max_context_tokens": 131072, "phase2_workers": 1, "phase2_launch_delay_seconds": 0},
+            "phases": [
+                {"id": "phase1", "status": "done", "label": "plan", "notes": []},
+                {"id": "phase2", "status": "done", "label": "review", "notes": []},
+                {"id": "phase3", "status": "pending", "label": "summary", "notes": []},
+            ],
+            "sloc": {"counted_files": 1, "total_code_count": 1},
+            "files": [{"path": "a.py", "language": "Python", "code_count": 1, "line_count": 1, "size_bytes": 10, "estimated_tokens": 10}],
+            "chunks": [{"id": "chunk-001", "paths": ["a.py"], "estimated_tokens": 10, "files": 1, "segments": [], "segment_count": 0}],
+            "completed_chunks": ["chunk-001"],
+            "completed_segments": [],
+            "failed_chunks": [],
+            "notes": [],
+            "totals": {"queued": 1, "reviewed": 1, "findings": 1, "counted_files": 1, "total_code_count": 1, "total_line_count": 1, "chunk_count": 1, "completed_chunks": 1},
+        })
+        (tmp_path / "ISSUES.md").write_text("# Audit Issues\n\n## Inbox\n\n### Finding\n\n- detail\n", encoding="utf-8")
+        called = {"review": 0, "summary": 0}
+
+        monkeypatch.setattr(cli, "_audit_review_worker", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("phase3-only run should not review chunks")))
+        monkeypatch.setattr(cli, "_audit_prepare_summary_input", lambda **kwargs: (0, cli._audit_read_issues(kwargs["workspace"])))
+
+        def fake_run_summary(**kwargs):
+            called["summary"] += 1
+            text = cli._audit_read_issues(kwargs["workspace"])
+            (kwargs["workspace"] / "ISSUES.md").write_text(text + "\n## Summary\n", encoding="utf-8")
+            return 0, ""
+
+        monkeypatch.setattr(cli, "_run_audit_summary", fake_run_summary)
+
+        assert cli._run_audit_workflow(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            system_prompt="sys",
+            unattended_limit_seconds=60,
+            agent="default",
+            session_path=session_path,
+            phase="phase3",
+        ) == 0
+        saved = rt.load_toon(session_path, {})
+        assert called["summary"] == 1
+        assert saved["status"] == "done"
+        assert saved["active_phase"] == "phase3"
+
+    def test_audit_prepare_summary_input_iteratively_condenses_prefix_until_final_pass_fits(self, tmp_path, monkeypatch):
+        patch_runtime(monkeypatch, _print=None, _note=None)
+        issues_path = tmp_path / "ISSUES.md"
+        huge_text = "# Audit Issues\n\n" + "\n\n".join(
+            f"## Finding {i}\n\n- detail {'x' * 1200}"
+            for i in range(220)
+        ) + "\n"
+        issues_path.write_text(huge_text, encoding="utf-8")
+        state = {
+            "active_phase": "phase3",
+            "completed_chunks": ["chunk-001"],
+            "notes": [],
+            "totals": {"queued": 1, "reviewed": 1, "findings": 220, "chunk_count": 1, "completed_chunks": 1},
+        }
+        waits = []
+
+        def fake_run_agent(prompt, _model, workspace, _system_prompt, _timeout, interactive=False, transcript=None, agent=None, tool_registry=None, auto_approve_tools=None, wait_label_suffix=None, pin_user_prompt=None):
+            assert interactive is False
+            assert transcript is not None
+            assert agent == "default"
+            assert pin_user_prompt is True
+            waits.append(wait_label_suffix)
+            assert auto_approve_tools == {"replace_prefix"}
+            assert set(tool_registry) == {"replace_prefix"}
+            current = cli._audit_read_issues(workspace)
+            shortened = cli._audit_summary_prefix_text(current, max_tokens=512)
+            payload = tool_registry["replace_prefix"]["fn"](
+                {"interactive": False, "unattended_deadline": 999999, "unattended_limit_seconds": 999999, "root": workspace},
+                shortened,
+            )
+            assert payload["after_tokens"] < payload["before_tokens"]
+            return 0, ""
+
+        monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+        monkeypatch.setattr(cli.rt, "count_tokens", lambda text: len(text))
+        monkeypatch.setattr(cli.rt, "encode_tokens", lambda text: list(text))
+        monkeypatch.setattr(cli.rt, "decode_tokens", lambda tokens: "".join(tokens))
+
+        code, prepared = cli._audit_prepare_summary_input(
+            prompt="prompt",
+            model="openai:gpt-test",
+            workspace=tmp_path,
+            unattended_limit_seconds=60,
+            agent="default",
+            state=state,
+            max_context_tokens=20000,
+            mode=cli._AUDIT_DEFAULT_MODE,
+        )
+        assert code == 0
+        assert waits
+        assert waits[0].startswith("audit phase3 | files 1/1 | chunks 1/1 | condense-001 | findings 220")
+        assert len(prepared) <= cli._audit_summary_content_budget(
+            max_context_tokens=20000,
+            prompt_text=cli._audit_summary_prompt("prompt", state, issues_rel="ISSUES.md"),
+            system_prompt=cli._audit_system_prompt_for_mode(cli._AUDIT_DEFAULT_MODE, phase="phase3"),
+        )
+        assert len(cli._audit_read_issues(tmp_path)) == len(prepared)
+
