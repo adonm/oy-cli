@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.0] - 2026-04-22
+
+Major changes since `v0.5.1`.
+
+### Added
+- Bedrock Mantle provider support for AWS credential/SigV4 mode, including model listing against the Mantle endpoint.
+- A `SECURITY.md` policy pointing researchers to the WA Government vulnerability disclosure process.
+
+### Changed
+- Audit runs now show clearer wait/progress reporting while long-running review work is in flight.
+- Audit dependency assessment now records Renovate warnings in `ISSUES.md` and keeps the phase1 summary idempotent.
+
+### Fixed
+- Bedrock Mantle chat requests now fall back from `/v1/responses` to `/v1/chat/completions` when a model does not support the responses API.
+- Resumed audits continue to backfill missing `run_config` state and restore the generated transparency snippet in `ISSUES.md`.
+- Audit review flow was tuned for better speed and output quality.
+
 ## [0.5.1] - 2026-04-15
 
 ### Fixed
