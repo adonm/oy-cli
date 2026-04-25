@@ -22,7 +22,6 @@ cargo run -- --help
 - `src/ui.rs` — reedline chat loop, slash commands, prompts, and interactive model picker
 - `src/highlight.rs` — terminal syntax highlighting via `syntect`
 - `assets/session_text.toml` — system prompts, agent text, audit text, and tool descriptions
-- `legacy-python/` — archived Python implementation, packaging, lockfile, and reference tests
 
 ## Crate map
 

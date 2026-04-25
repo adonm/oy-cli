@@ -1,6 +1,6 @@
 # oy
 
-Small local AI coding CLI for your shell. The active implementation is Rust; the old Python package lives under `legacy-python/` for reference only.
+Small local AI coding CLI for your shell. The active implementation is Rust.
 
 Design summary:
 
@@ -59,7 +59,7 @@ cargo run -- model local-8080::qwen3.5
 ```
 
 In chat, `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed.
-Chat uses reedline prompts, so terminal scrollback/history work normally. Tab completes commands/models/choices. Use `/help` for commands, `/history [limit]` to print the transcript, and short aliases like `/q`, `/h`, `/m`, `/t`, `/u`.
+Chat uses reedline prompts, so terminal scrollback/history work normally. Tab completes commands/models/choices. Use `/help` for commands and short aliases like `/q`, `/h`, `/m`, `/t`, `/u`.
 
 ## Model ids
 

@@ -4,7 +4,7 @@ use reedline_repl_rs::reedline::{
 };
 use std::path::PathBuf;
 
-use crate::agent::{self, Session, StoredMessage};
+use crate::agent::{self, Session};
 use crate::config;
 use crate::model;
 
@@ -79,11 +79,6 @@ async fn handle_slash_command(session: &mut Session, command: &str) -> Result<bo
             crate::highlight::stdout(&format!("{}\n", chat_help_text()));
             Ok(true)
         }
-        "history" => {
-            let limit = parts.next().and_then(|value| value.parse::<usize>().ok());
-            print_history(session, limit);
-            Ok(true)
-        }
         "tokens" => tokens_command(session),
         "model" => model_command(parts.next(), session).await,
         "debug" => debug_command(session),
@@ -107,7 +102,6 @@ async fn handle_slash_command(session: &mut Session, command: &str) -> Result<bo
 fn normalize_chat_command(command: &str) -> &str {
     match command {
         "h" | "?" => "help",
-        "hist" => "history",
         "t" => "tokens",
         "m" => "model",
         "d" => "debug",
@@ -121,7 +115,6 @@ fn normalize_chat_command(command: &str) -> &str {
 fn chat_help_text() -> String {
     [
         "/help (/h, /?) -- show command help",
-        "/history [limit] (/hist) -- print transcript in scrollback",
         "/tokens (/t) -- show approximate context tokens",
         "/model [value] (/m) -- show or switch model",
         "/debug (/d) -- show session debug info",
@@ -219,25 +212,6 @@ fn clear_command(session: &mut Session) -> Result<bool> {
     session.transcript.messages.clear();
     println!("conversation cleared");
     Ok(true)
-}
-
-fn print_history(session: &Session, limit: Option<usize>) {
-    let messages = &session.transcript.messages;
-    let start = limit
-        .map(|limit| messages.len().saturating_sub(limit))
-        .unwrap_or(0);
-    for message in &messages[start..] {
-        match message {
-            StoredMessage::User { content } => println!("user: {content}"),
-            StoredMessage::Assistant { content } => println!("assistant: {content}"),
-            StoredMessage::AssistantToolCalls { tool_calls } => {
-                for call in tool_calls {
-                    println!("tool_call: {} {}", call.fn_name, call.fn_arguments);
-                }
-            }
-            StoredMessage::Tool { call_id, content } => println!("tool[{call_id}]: {content}"),
-        }
-    }
 }
 
 async fn run_prompt_with_model_reselect(session: &mut Session, prompt: &str) -> Result<()> {
@@ -428,7 +402,6 @@ mod tests {
     #[test]
     fn normalize_chat_command_maps_slash_aliases() {
         assert_eq!(normalize_chat_command("q"), "quit");
-        assert_eq!(normalize_chat_command("hist"), "history");
         assert_eq!(normalize_chat_command("tokens"), "tokens");
     }
 
@@ -436,7 +409,6 @@ mod tests {
     fn chat_help_uses_slash_commands() {
         let help = chat_help_text();
         assert!(help.contains("/help"));
-        assert!(help.contains("/history [limit]"));
         assert!(help.contains("/quit"));
     }
 

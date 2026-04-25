@@ -693,16 +693,6 @@ impl EmptyStringExt for String {
     }
 }
 
-pub fn load_todos_from_file(root: &Path) -> Result<Vec<TodoItem>> {
-    let path = todo_path(root);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", TODO_FILE))?;
-    Ok(parse_todo_markdown(&text))
-}
-
 pub fn save_todos_to_file(root: &Path, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(root);
     fs::write(&path, todos_to_markdown(todos))
@@ -735,46 +725,6 @@ fn todos_to_markdown(todos: &[TodoItem]) -> String {
         let _ = writeln!(out, "- [{box_mark}] {}: {}", item.id, item.task);
     }
     out
-}
-
-fn parse_todo_markdown(text: &str) -> Vec<TodoItem> {
-    text.lines()
-        .filter_map(parse_todo_markdown_line)
-        .enumerate()
-        .map(|(idx, mut item)| {
-            if item.id.is_empty() {
-                item.id = (idx + 1).to_string();
-            }
-            item
-        })
-        .collect()
-}
-
-fn parse_todo_markdown_line(line: &str) -> Option<TodoItem> {
-    let line = line.trim_start();
-    let rest = line
-        .strip_prefix("- [")
-        .or_else(|| line.strip_prefix("* ["))?;
-    let (mark, rest) = rest.split_once(']')?;
-    let status = match mark.trim().to_ascii_lowercase().as_str() {
-        "x" | "✓" | "done" => "done",
-        "~" | ">" | "…" | "in_progress" | "in-progress" => "in_progress",
-        "" | " " | "." | "pending" => "pending",
-        _ => "pending",
-    }
-    .to_string();
-    let body = compact_spaces(rest.trim_start());
-    if body.is_empty() {
-        return None;
-    }
-    let (id, task) = body
-        .split_once(':')
-        .map(|(id, task)| (compact_spaces(id), compact_spaces(task)))
-        .unwrap_or_else(|| (String::new(), body));
-    if task.is_empty() {
-        return None;
-    }
-    Some(TodoItem { id, task, status })
 }
 
 fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
@@ -1770,8 +1720,5 @@ three
         assert_eq!(value["persisted"], true);
         let text = fs::read_to_string(dir.path().join(TODO_FILE)).unwrap();
         assert!(text.contains("- [~] a: ship it"));
-        let loaded = load_todos_from_file(dir.path()).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].status, "in_progress");
     }
 }

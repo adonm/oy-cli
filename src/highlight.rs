@@ -40,15 +40,6 @@ pub fn for_stderr(text: &str) -> String {
     }
 }
 
-#[allow(dead_code)]
-pub fn for_path(text: &str, path: &str) -> String {
-    if std::io::stdout().is_terminal() {
-        highlight(text, syntax_for_path(path))
-    } else {
-        text.to_string()
-    }
-}
-
 fn highlight(text: &str, syntax: Option<&'static SyntaxReference>) -> String {
     let syntax = syntax.unwrap_or_else(|| syntax_for_text(text));
     let mut highlighter = HighlightLines::new(syntax, theme());
@@ -118,17 +109,6 @@ fn env_contains(name: &str, needle: &str) -> bool {
     std::env::var(name)
         .map(|value| value.to_ascii_lowercase().contains(needle))
         .unwrap_or(false)
-}
-
-fn syntax_for_path(path: &str) -> Option<&'static SyntaxReference> {
-    SYNTAX_SET
-        .find_syntax_for_file(path)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            path.rsplit_once('.')
-                .and_then(|(_, ext)| SYNTAX_SET.find_syntax_by_extension(ext))
-        })
 }
 
 fn syntax_for_text(text: &str) -> &'static SyntaxReference {
