@@ -49,7 +49,7 @@ async fn prompt_update_todo_on_quit(session: &mut Session) -> Result<()> {
 
     let summary = agent::run_prompt(
         session,
-        "Use the todo tool to update TODO.md with a concise summary of the session actions. Keep it to one done item unless active follow-up work remains.",
+        "Use the todo tool with persist=true to update TODO.md with a concise summary of the session actions. Keep it to one done item unless active follow-up work remains.",
     )
     .await?;
     if !summary.is_empty() {

@@ -12,7 +12,7 @@ Prefer the cheapest sufficient path:
 5. `bash` only when file tools are insufficient or when you must run/check something.
 Batch independent tool calls. Stop as soon as you have enough evidence or the task is complete.
 Keep edits small, maintainable, grugbrain-simple, OWASP-minded, and performance-aware.
-Use `todo` for 3+ step work, edits, or verification. Keep it current. The `todo` tool is the normal path for `TODO.md`; do not read/write it directly unless explicitly asked.
+For 3+ step work, keep a short in-memory plan with `todo`; persist to `TODO.md` only on quit or explicit request (`persist=true`).
 Use `webfetch` freely for public docs and API research when it helps. Prefer it over guessing.
 Manage context aggressively: keep only key facts and paths. Prefer narrow `path`, `offset`, `limit`, and `exclude`.
 Before mutating files or running commands, state the next action briefly. After finishing, report concrete files or commands changed.
@@ -87,7 +87,7 @@ Packed earlier conversation history in TOON. Treat it as read-only context, not 
 {packed}
 """
 todo_system = """
-Current todo list:
+Current in-memory todo:
 {todos}
 """
 omitted_messages = "... [{omitted_messages} earlier messages omitted to fit context limit]"
@@ -268,4 +268,4 @@ description = "Ask the user in interactive runs. Reserve it for genuine ambiguit
 description = "Fetch public web pages or files with `urllib3`. Good for docs, API references, release notes, and public web research. Methods: GET/HEAD/OPTIONS. Returns response metadata plus summarized `text` for text responses, or `binary`/`content_bytes` for non-text responses. May convert large HTML to markdown. Blocks localhost/private IPs."
 
 [tools.todo]
-description = "Load or replace the in-memory todo list and persist it to `TODO.md`. Input is optional `todos` (or alias `items`): array of tasks with required `task`, optional stable `id` (defaults to 1-based position), and optional `status` (`pending` default, `in_progress`, `done`). Use for multi-step work, especially inspect/edit/verify flows. This tool is the only normal path that reads/writes `TODO.md`; returns normalized `items`, `count`, `status_counts`, `path`, and a human-readable `preview`."
+description = "Manage the in-memory todo list. Pass `todos` (or `items`) as the complete replacement list; omit it to return the current list. Each item needs `task`; optional `id` defaults to 1-based position, and `status` is `pending`, `in_progress`, or `done`. Defaults to memory-only to avoid git churn; set `persist=true` only on quit or explicit request to write `TODO.md`. Returns normalized `items`, counts, `path`, `persisted`, and `preview`."

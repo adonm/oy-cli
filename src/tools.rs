@@ -165,6 +165,8 @@ struct AskArgs {
 struct TodoArgs {
     #[serde(default, alias = "items")]
     todos: Vec<TodoItemInput>,
+    #[serde(default)]
+    persist: bool,
 }
 
 fn default_glob() -> String {
@@ -247,7 +249,7 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
                     "properties": {
                         "todos": {
                             "type": "array",
-                            "description": "Complete replacement todo list. Alias: items. Omit to load TODO.md.",
+                            "description": "Complete replacement todo list. Alias: items. Omit to return current list.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -272,12 +274,12 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
                                 "required": ["task"],
                                 "additionalProperties": false
                             }
-                        }
+                        },
+                        "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn."}
                     },
-                    "anyOf": [{"required": ["todos"]}, {"required": ["items"]}],
                     "additionalProperties": false
                 }))
-    ];
+        ];
 
     if ctx.interactive {
         tools.push(
@@ -1119,7 +1121,7 @@ fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
 
 fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
     let input_todos = if args.todos.is_empty() {
-        load_todos_from_file(&ctx.root)?
+        ctx.todos.clone()
     } else {
         args.todos
             .into_iter()
@@ -1148,13 +1150,15 @@ fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
             status: item.status,
         });
     }
-
-    save_todos_to_file(&ctx.root, &todos)?;
     ctx.todos = todos;
+    if args.persist {
+        save_todos_to_file(&ctx.root, &ctx.todos)?;
+    }
     let counts = todo_status_counts(&ctx.todos);
     let preview = format_todo_preview(&ctx.todos);
     Ok(json!({
         "path": TODO_FILE,
+        "persisted": args.persist,
         "items": ctx.todos,
         "count": ctx.todos.len(),
         "status_counts": {
@@ -1741,7 +1745,7 @@ three
     }
 
     #[test]
-    fn todo_tool_writes_and_loads_markdown() {
+    fn todo_tool_persists_markdown_when_requested() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ToolContext {
             root: dir.path().to_path_buf(),
@@ -1758,10 +1762,12 @@ three
                     task: "ship it".into(),
                     status: "in_progress".into(),
                 }],
+                persist: true,
             },
         )
         .unwrap();
         assert_eq!(value["path"], TODO_FILE);
+        assert_eq!(value["persisted"], true);
         let text = fs::read_to_string(dir.path().join(TODO_FILE)).unwrap();
         assert!(text.contains("- [~] a: ship it"));
         let loaded = load_todos_from_file(dir.path()).unwrap();
