@@ -1,3 +1,4 @@
+use crate::tools::ToolPolicy;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use dirs::config_dir;
@@ -49,8 +50,6 @@ struct SessionText {
     transcript: BTreeMap<String, String>,
     #[serde(default)]
     audit: BTreeMap<String, String>,
-    #[serde(default)]
-    audit_logic: BTreeMap<String, String>,
     #[serde(default)]
     tools: BTreeMap<String, ToolText>,
 }
@@ -122,7 +121,6 @@ pub fn session_text_value(section: &str, key: &str) -> Result<String> {
         "system" => session_text().system.get(key),
         "transcript" => session_text().transcript.get(key),
         "audit" => session_text().audit.get(key),
-        "audit_logic" => session_text().audit_logic.get(key),
         _ => None,
     };
     value
@@ -203,6 +201,18 @@ pub fn agent_profile(agent: &str) -> Result<AgentProfile> {
         _ => {}
     }
     Ok(profile)
+}
+
+pub fn tool_policy(agent: &str) -> ToolPolicy {
+    let profile = agent_profile(agent).ok();
+    let yolo = yolo_enabled() || profile.as_ref().is_some_and(|p| p.yolo);
+    ToolPolicy {
+        read_only: profile
+            .as_ref()
+            .is_some_and(|p| p.tool_mode == ToolMode::ReadOnly),
+        auto_approve_edits: yolo || profile.as_ref().is_some_and(|p| p.auto_approve_edits),
+        auto_approve_bash: yolo || profile.as_ref().is_some_and(|p| p.auto_approve_bash),
+    }
 }
 
 pub fn load_model_config() -> Result<SavedModelConfig> {
@@ -407,10 +417,7 @@ pub fn resolve_saved_session(name: Option<&str>) -> Result<Option<PathBuf>> {
 pub fn load_session_file(path: &Path) -> Result<SessionFile> {
     let data =
         fs::read_to_string(path).with_context(|| format!("failed reading {}", path.display()))?;
-    Ok(
-        serde_json::from_str(&data)
-            .with_context(|| format!("failed parsing {}", path.display()))?,
-    )
+    serde_json::from_str(&data).with_context(|| format!("failed parsing {}", path.display()))
 }
 
 pub fn sanitize_session_name(name: &str) -> String {

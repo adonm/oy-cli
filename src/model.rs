@@ -312,16 +312,17 @@ fn shim_endpoint_config(shim: &str) -> Option<ShimEndpointConfig> {
 
 fn extra_local_shims() -> Vec<String> {
     let mut items = BTreeSet::new();
-    for source in [
+    for value in [
         resolve_model(None).ok(),
         env_value("OY_MODEL"),
         resolve_shim().ok().flatten(),
-    ] {
-        if let Some(value) = source {
-            let (shim, _) = config::split_model_spec(&value);
-            if let Some(shim) = shim.filter(|s| s.starts_with("local-")) {
-                items.insert(shim.to_string());
-            }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let (shim, _) = config::split_model_spec(&value);
+        if let Some(shim) = shim.filter(|s| s.starts_with("local-")) {
+            items.insert(shim.to_string());
         }
     }
     items.into_iter().collect()

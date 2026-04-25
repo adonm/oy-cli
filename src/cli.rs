@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
+use ignore::WalkBuilder;
 use std::io::IsTerminal as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::agent::{self, Session};
 use crate::config;
@@ -24,10 +24,6 @@ enum Command {
     Ralph(RalphArgs),
     Model(ModelArgs),
     Audit(AuditArgs),
-    #[command(name = "audit-logic")]
-    AuditLogic(AuditArgs),
-    #[command(name = "renovate-local")]
-    RenovateLocal,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -44,6 +40,8 @@ struct SharedAgentArgs {
 struct RunArgs {
     #[command(flatten)]
     shared: SharedAgentArgs,
+    #[arg(long)]
+    out: Option<PathBuf>,
     task: Vec<String>,
 }
 
@@ -69,11 +67,9 @@ struct ModelArgs {
 
 #[derive(Debug, Args, Clone)]
 struct AuditArgs {
-    focus: Option<String>,
-    #[arg(long = "from", default_value = "")]
-    from_: String,
-    #[arg(long, default_value = "")]
-    phase: String,
+    focus: Vec<String>,
+    #[arg(long, default_value_t = 6000)]
+    chunk_lines: usize,
 }
 
 pub async fn run(argv: Vec<String>) -> Result<i32> {
@@ -85,15 +81,14 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             continue_session: false,
             resume: String::new(),
         },
+        out: None,
         task: Vec::new(),
     })) {
         Command::Run(args) => run_command(args).await,
         Command::Chat(args) => chat_command(args).await,
         Command::Ralph(args) => ralph_command(args).await,
         Command::Model(args) => model_command(args).await,
-        Command::Audit(args) => audit_command(args, false).await,
-        Command::AuditLogic(args) => audit_command(args, true).await,
-        Command::RenovateLocal => renovate_local().await,
+        Command::Audit(args) => audit_command(args).await,
     }
 }
 
@@ -117,17 +112,7 @@ fn normalize_args(mut args: Vec<String>) -> Vec<String> {
     if args.first().map(String::as_str) == Some("--resume") {
         return std::iter::once("run".to_string()).chain(args).collect();
     }
-    let commands = [
-        "run",
-        "chat",
-        "ralph",
-        "model",
-        "audit",
-        "audit-logic",
-        "renovate-local",
-        "-h",
-        "--help",
-    ];
+    let commands = ["run", "chat", "ralph", "model", "audit", "-h", "--help"];
     if args
         .first()
         .is_some_and(|arg| !arg.starts_with('-') && !commands.contains(&arg.as_str()))
@@ -154,10 +139,13 @@ async fn run_command(args: RunArgs) -> Result<i32> {
         args.shared.continue_session,
         &args.shared.resume,
     )?;
-    print_session_intro("Run", &session, Some(&task));
+    print_session_intro("run", &session, Some(&task));
     let answer = agent::run_prompt(&mut session, &task).await?;
-    if !answer.is_empty() {
-        crate::highlight::stdout_as(&format!("{answer}\n"), "Markdown");
+    if let Some(path) = args.out {
+        write_workspace_file(&session.root, &path, &answer)?;
+        crate::ui::success(format_args!("wrote {}", path.display()));
+    } else if !answer.is_empty() {
+        crate::ui::markdown(&format!("{answer}\n"));
     }
     Ok(0)
 }
@@ -170,9 +158,10 @@ async fn chat_command(args: ChatArgs) -> Result<i32> {
         &args.shared.resume,
     )?;
     if args.yolo {
-        session.yolo = true;
+        session.policy.auto_approve_edits = true;
+        session.policy.auto_approve_bash = true;
     }
-    print_session_intro("Chat", &session, None);
+    print_session_intro("chat", &session, None);
     crate::ui::run_chat(&mut session).await
 }
 
@@ -182,17 +171,18 @@ async fn ralph_command(args: RalphArgs) -> Result<i32> {
         bail!("Usage: `oy ralph <prompt>` — or pipe prompt text on stdin.");
     }
     let mut session = load_or_new(false, &args.agent, false, "")?;
-    session.yolo = true;
-    print_session_intro("Ralph", &session, Some(&task));
+    session.policy.auto_approve_edits = true;
+    session.policy.auto_approve_bash = true;
+    print_session_intro("ralph", &session, Some(&task));
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(config::ralph_limit_seconds());
     let mut exit_code = 0;
     let mut run_number = 0usize;
     while std::time::Instant::now() < deadline {
         run_number += 1;
-        eprintln!("ralph run {run_number}");
+        crate::ui::err_line(format_args!("ralph run {run_number}"));
         if let Err(err) = agent::run_prompt(&mut session, &task).await {
-            eprintln!("ralph error: {err:#}");
+            crate::ui::err_line(format_args!("ralph error: {err:#}"));
             exit_code = 1;
         }
         let now = std::time::Instant::now();
@@ -206,16 +196,13 @@ async fn ralph_command(args: RalphArgs) -> Result<i32> {
 
 async fn model_command(args: ModelArgs) -> Result<i32> {
     let listing = model::inspect_models().await?;
-
     if let Some(model_spec) = args.model {
         let normalized = resolve_model_choice(&listing, &model_spec)?;
         config::save_model_config(&normalized)?;
         print_saved_model(&normalized);
         return Ok(0);
     }
-
     print_model_listing(&listing);
-
     if config::can_prompt() && !listing.all_models.is_empty() {
         if let Some(chosen) = crate::ui::choose_model_with_initial_list(
             listing.current.as_deref(),
@@ -230,58 +217,59 @@ async fn model_command(args: ModelArgs) -> Result<i32> {
 }
 
 fn print_model_listing(listing: &model::ModelListing) {
-    println!("## Models");
-    println!(
-        "- current: {}",
+    crate::ui::section("Models");
+    crate::ui::kv(
+        "current",
         current_model_text(
             listing.current.as_deref().unwrap_or("<unset>"),
             listing.current_shim.as_deref(),
-        )
+        ),
     );
-    println!("- selectable: {}", listing.all_models.len());
+    crate::ui::kv("selectable", listing.all_models.len());
 
     if !listing.auth.is_empty() {
-        println!("\n### Auth / shims");
+        crate::ui::line("");
+        crate::ui::section("Auth / shims");
         for item in &listing.auth {
             let env_var = item.env_var.as_deref().unwrap_or("-");
-            let configured = if listing.current_shim.as_deref() == Some(item.adapter.as_str()) {
-                " active"
+            let active = if listing.current_shim.as_deref() == Some(item.adapter.as_str()) {
+                " *"
             } else {
                 ""
             };
-            println!(
-                "- {}{}: {} ({})",
-                item.adapter, configured, env_var, item.source
-            );
-            println!("  {}", item.detail);
+            crate::ui::line(format_args!(
+                "  {}{}  {} ({})",
+                item.adapter, active, env_var, item.source
+            ));
+            crate::ui::line(format_args!("    {}", item.detail));
         }
     }
 
-    if !listing.dynamic.is_empty() {
-        println!("\n### Introspected endpoint models");
+    crate::ui::line("");
+    crate::ui::section("Introspected endpoint models");
+    if listing.dynamic.is_empty() {
+        crate::ui::line("  none found from configured OpenAI-compatible endpoints");
+    } else {
         for item in &listing.dynamic {
-            println!(
-                "- {}: {} models via {}",
+            crate::ui::line(format_args!(
+                "  {}  {} models via {}",
                 item.adapter, item.count, item.source
-            );
+            ));
             for model_name in item.models.iter().take(MODEL_LIST_LIMIT) {
                 let marker = if listing.current.as_deref() == Some(model_name.as_str()) {
                     "*"
                 } else {
                     " "
                 };
-                println!("  {marker} {model_name}");
+                crate::ui::line(format_args!("    {marker} {model_name}"));
             }
             if item.models.len() > MODEL_LIST_LIMIT {
-                println!(
-                    "  … {} more; use `oy model <filter>` or interactive selection",
+                crate::ui::line(format_args!(
+                    "    … {} more; use `oy model <filter>` or interactive selection",
                     item.models.len() - MODEL_LIST_LIMIT
-                );
+                ));
             }
         }
-    } else {
-        println!("\n### Introspected endpoint models");
-        println!("none found from configured OpenAI-compatible endpoints");
     }
 
     let hinted = listing
@@ -295,12 +283,16 @@ fn print_model_listing(listing: &model::ModelListing) {
         })
         .collect::<Vec<_>>();
     if !hinted.is_empty() {
-        println!("\n### Built-in selectable hints");
+        crate::ui::line("");
+        crate::ui::section("Built-in selectable hints");
         for hint in hinted.iter().take(MODEL_LIST_LIMIT) {
-            println!("  - {hint}");
+            crate::ui::line(format_args!("  {hint}"));
         }
         if hinted.len() > MODEL_LIST_LIMIT {
-            println!("  … {} more hints", hinted.len() - MODEL_LIST_LIMIT);
+            crate::ui::line(format_args!(
+                "  … {} more hints",
+                hinted.len() - MODEL_LIST_LIMIT
+            ));
         }
     }
 }
@@ -314,12 +306,12 @@ fn current_model_text(model_spec: &str, shim: Option<&str>) -> String {
 
 fn print_saved_model(selection: &str) {
     let saved = config::saved_model_config_from_selection(selection);
-    println!(
-        "saved model: {}",
+    crate::ui::success(format_args!(
+        "saved model {}",
         saved.model.as_deref().unwrap_or(selection)
-    );
+    ));
     if let Some(shim) = saved.shim {
-        println!("shim: {shim}");
+        crate::ui::kv("shim", shim);
     }
 }
 
@@ -350,53 +342,215 @@ fn resolve_model_choice(listing: &model::ModelListing, query: &str) -> Result<St
         .map(|value| value.unwrap_or(normalized))
 }
 
-async fn audit_command(args: AuditArgs, logic: bool) -> Result<i32> {
-    let focus = args.focus.unwrap_or_default();
-    let mode = if logic { "logic" } else { "default" };
-    let mut session = load_or_new(false, "default", false, "")?;
-    let prompt = build_audit_prompt(&session, &focus, &args.from_, &args.phase, logic);
-    print_session_intro(
-        if logic { "Audit Logic" } else { "Audit" },
-        &session,
-        Some(&prompt),
+async fn audit_command(args: AuditArgs) -> Result<i32> {
+    let root = config::oy_root()?;
+    let model = model::resolve_model(None)?;
+    let focus = args.focus.join(" ");
+    let mut session = Session::new(
+        root.clone(),
+        model,
+        false,
+        "auto-approve".to_string(),
+        config::tool_policy("auto-approve"),
     );
-    let answer = agent::run_prompt(&mut session, &prompt).await?;
-    if answer.trim().is_empty() {
-        bail!("audit returned empty output");
+    print_session_intro(
+        "audit",
+        &session,
+        (!focus.is_empty()).then_some(focus.as_str()),
+    );
+
+    let sloc = crate::tools::compact_workspace_snapshot(&root).unwrap_or_default();
+    let docs = audit_docs(&root)?;
+    let chunks = audit_chunks(&root, args.chunk_lines.max(500))?;
+    let draft_path = root.join("ISSUES.md");
+    std::fs::write(
+        &draft_path,
+        format!(
+            "# Audit draft\n\n{sloc}\n\n{} chunks planned.\n\n",
+            chunks.len()
+        ),
+    )?;
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        crate::ui::section(&format!("audit chunk {}/{}", idx + 1, chunks.len()));
+        let prompt = build_audit_chunk_prompt(&session, &focus, &sloc, &docs, chunk)?;
+        let findings = agent::run_prompt(&mut session, &prompt).await?;
+        append_audit_section(
+            &draft_path,
+            &format!("Chunk {}: {}", idx + 1, chunk.label),
+            &findings,
+        )?;
     }
-    let output = write_audit_report(&session.root, &session.model, mode, &focus, &answer)?;
-    println!("wrote {}", output.display());
+
+    crate::ui::section("audit final reduction");
+    let draft = std::fs::read_to_string(&draft_path).unwrap_or_default();
+    let final_prompt = build_audit_final_prompt(&sloc, &docs, &draft)?;
+    let final_report = agent::run_prompt(&mut session, &final_prompt).await?;
+    write_workspace_file(&root, Path::new("ISSUES.md"), &final_report)?;
+    crate::ui::success("wrote ISSUES.md");
     Ok(0)
 }
 
-async fn renovate_local() -> Result<i32> {
-    let workspace = config::oy_root()?;
-    let tmp_dir = ensure_tmp_dir(&workspace)?;
-    ensure_tmp_gitignored(&workspace)?;
-    let config_path = ensure_renovate_config(&workspace)?;
-    let report_name = format!("renovate-{}.json", Utc::now().format("%Y-%m-%d"));
-    let report_path = tmp_dir.join(&report_name);
-    let token = renovate_github_token().await?.ok_or_else(|| anyhow::anyhow!("No GitHub token found (set RENOVATE_GITHUB_COM_TOKEN, GH_TOKEN, or GITHUB_TOKEN; or run `gh auth login`)."))?;
-    println!("## Renovate Local");
-    println!("- workspace: {}", workspace.display());
-    println!("- report: {}", report_path.display());
-    println!("- config: {}", config_path.display());
-    let status = tokio::process::Command::new("renovate")
-        .arg("--platform=local")
-        .arg("--require-config=ignored")
-        .arg("--dry-run=lookup")
-        .arg("--report-type=file")
-        .arg("--report-path")
-        .arg(format!(".tmp/{report_name}"))
-        .current_dir(&workspace)
-        .env("RENOVATE_GITHUB_COM_TOKEN", token)
-        .status()
-        .await
-        .context("could not run `renovate`")?;
-    if status.success() {
-        println!("renovate report written: .tmp/{report_name}");
+#[derive(Debug, Clone)]
+struct AuditChunk {
+    label: String,
+    files: Vec<String>,
+}
+
+fn audit_chunks(root: &Path, max_lines: usize) -> Result<Vec<AuditChunk>> {
+    let mut chunks = Vec::new();
+    let mut current = AuditChunk {
+        label: String::new(),
+        files: Vec::new(),
+    };
+    let mut current_lines = 0usize;
+    for (path, lines) in workspace_text_files(root)? {
+        if !current.files.is_empty() && current_lines + lines > max_lines {
+            current.label = chunk_label(&current.files);
+            chunks.push(current);
+            current = AuditChunk {
+                label: String::new(),
+                files: Vec::new(),
+            };
+            current_lines = 0;
+        }
+        current.files.push(path);
+        current_lines += lines;
     }
-    Ok(status.code().unwrap_or(1))
+    if !current.files.is_empty() {
+        current.label = chunk_label(&current.files);
+        chunks.push(current);
+    }
+    Ok(chunks)
+}
+
+fn chunk_label(files: &[String]) -> String {
+    match (files.first(), files.last()) {
+        (Some(first), Some(last)) if first != last => format!("{first}..{last}"),
+        (Some(first), _) => first.clone(),
+        _ => "workspace".to_string(),
+    }
+}
+
+fn workspace_text_files(root: &Path) -> Result<Vec<(String, usize)>> {
+    let mut files = Vec::new();
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .build()
+    {
+        let entry = entry.map_err(|err| anyhow::anyhow!(err))?;
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if skip_audit_file(&rel) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(path) else {
+            continue;
+        };
+        if raw.contains(&0) {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(raw) else {
+            continue;
+        };
+        files.push((rel, text.lines().count().max(1)));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+fn skip_audit_file(path: &str) -> bool {
+    path == "ISSUES.md"
+        || path.starts_with(".git/")
+        || path.starts_with("target/")
+        || path.starts_with(".tmp/")
+        || path.ends_with("Cargo.lock")
+}
+
+fn audit_docs(root: &Path) -> Result<String> {
+    let mut out = String::new();
+    for name in [
+        "README.md",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        "CHANGELOG.md",
+        "Cargo.toml",
+        "assets/session_text.toml",
+    ] {
+        let path = root.join(name);
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            out.push_str(&format!(
+                "\n## {name}\n{}\n",
+                crate::ui::truncate_chars(&text, 8000)
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn build_audit_chunk_prompt(
+    session: &Session,
+    focus: &str,
+    sloc: &str,
+    docs: &str,
+    chunk: &AuditChunk,
+) -> Result<String> {
+    let mut parts = vec![
+        config::session_text_value("system", "audit")?,
+        config::session_text_value("audit", "default_user_prompt")?,
+        config::session_text_value("audit", "inspect_suffix")?,
+        config::session_text_format(
+            "audit",
+            "model_suffix",
+            &[("model", model::to_genai_model_spec(&session.model))],
+        )?,
+        config::session_text_format("audit", "chunk_hint", &[("chunk", chunk.label.clone())])?,
+        format!("Workspace SLOC/context:\n{sloc}"),
+        format!("Docs/session context:\n{docs}"),
+        format!(
+            "Pinned files to inspect with read/search before reporting:\n{}",
+            chunk.files.join("\n")
+        ),
+        config::session_text_value("audit", "return_suffix")?,
+    ];
+    if !focus.trim().is_empty() {
+        parts.push(config::session_text_format(
+            "audit",
+            "focus_hint",
+            &[("focus", focus.to_string())],
+        )?);
+    }
+    Ok(parts.join("\n\n"))
+}
+
+fn build_audit_final_prompt(sloc: &str, docs: &str, draft: &str) -> Result<String> {
+    Ok(format!(
+        "{}\n\nWorkspace SLOC/context:\n{}\n\nDocs/session context:\n{}\n\nCollected draft findings:\n{}",
+        config::session_text_value("audit", "final_reduce_prompt")?,
+        sloc,
+        docs,
+        draft
+    ))
+}
+
+fn append_audit_section(path: &Path, heading: &str, body: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "\n## {heading}\n\n{}\n", body.trim())?;
+    Ok(())
 }
 
 fn load_or_new(
@@ -414,13 +568,8 @@ fn load_or_new(
     let root = config::oy_root()?;
     let model = model::resolve_model(None)?;
     let profile = config::agent_profile(agent_name)?;
-    Ok(Session::new(
-        root,
-        model,
-        interactive,
-        profile.name,
-        config::yolo_enabled() || profile.yolo,
-    ))
+    let policy = config::tool_policy(&profile.name);
+    Ok(Session::new(root, model, interactive, profile.name, policy))
 }
 
 fn collect_task(parts: &[String]) -> Result<String> {
@@ -437,163 +586,32 @@ fn collect_task(parts: &[String]) -> Result<String> {
 }
 
 fn print_session_intro(mode: &str, session: &Session, prompt: Option<&str>) {
-    println!("## {mode}");
-    println!("- workspace: {}", session.root.display());
-    println!("- model: {}", session.model);
-    println!("- agent: {}", session.agent);
+    crate::ui::section(mode);
+    crate::ui::kv("workspace", session.root.display());
+    crate::ui::kv("model", &session.model);
+    crate::ui::kv("agent", &session.agent);
     if let Some(prompt) = prompt {
-        println!("- prompt: {}", crate::text::compact_preview(prompt, 100));
+        crate::ui::kv("prompt", crate::ui::compact_preview(prompt, 100));
     }
 }
 
-fn build_audit_prompt(
-    session: &Session,
-    focus: &str,
-    from_: &str,
-    phase: &str,
-    logic: bool,
-) -> String {
-    let mut parts = vec![
-        if logic {
-            config::session_text_value("audit_logic", "default_user_prompt").unwrap_or_default()
-        } else {
-            config::session_text_value("audit", "default_user_prompt").unwrap_or_default()
-        },
-        config::session_text_value("audit", "inspect_suffix").unwrap_or_default(),
-        config::session_text_value("audit", "return_suffix").unwrap_or_default(),
-        config::session_text_format(
-            "audit",
-            "model_suffix",
-            &[("model", model::to_genai_model_spec(&session.model))],
-        )
-        .unwrap_or_default(),
-    ];
-    if !focus.trim().is_empty() {
-        if let Ok(value) = config::session_text_format(
-            "audit",
-            "focus_hint",
-            &[("focus", focus.trim().to_string())],
-        ) {
-            parts.push(value);
-        }
+fn write_workspace_file(root: &Path, requested: &Path, body: &str) -> Result<()> {
+    if requested.is_absolute()
+        || requested
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!(
+            "output path must stay inside the workspace: {}",
+            requested.display()
+        );
     }
-    if !from_.trim().is_empty() {
-        if let Ok(value) =
-            config::session_text_format("audit", "from_hint", &[("from", from_.trim().to_string())])
-        {
-            parts.push(value);
-        }
+    let path = root.join(requested);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
     }
-    if !phase.trim().is_empty() {
-        if let Ok(value) = config::session_text_format(
-            "audit",
-            "phase_hint",
-            &[("phase", phase.trim().to_string())],
-        ) {
-            parts.push(value);
-        }
-    }
-    parts.join(" ")
-}
-
-fn write_audit_report(
-    workspace: &PathBuf,
-    model_spec: &str,
-    mode: &str,
-    focus: &str,
-    report_body: &str,
-) -> Result<PathBuf> {
-    let path = workspace.join("ISSUES.md");
-    let mut out = String::new();
-    out.push_str("# Audit Issues\n\n");
-    out.push_str(&format!(
-        "> Generated by `oy {}` with `OY_MODEL={}`\n\n",
-        if mode == "logic" {
-            "audit-logic"
-        } else {
-            "audit"
-        },
-        model::to_genai_model_spec(model_spec)
-    ));
-    if !focus.trim().is_empty() {
-        out.push_str(&format!("> focus: {}\n\n", focus.trim()));
-    }
-    out.push_str(report_body.trim());
+    let mut out = body.trim_end().to_string();
     out.push('\n');
-    std::fs::write(&path, out).with_context(|| format!("failed writing {}", path.display()))?;
-    Ok(path)
-}
-
-fn ensure_tmp_dir(workspace: &PathBuf) -> Result<PathBuf> {
-    let path = workspace.join(".tmp");
-    if path.exists() && !path.is_dir() {
-        bail!("temporary path is not a directory: {}", path.display());
-    }
-    std::fs::create_dir_all(&path)?;
-    Ok(path)
-}
-
-fn ensure_tmp_gitignored(workspace: &PathBuf) -> Result<()> {
-    let path = workspace.join(".gitignore");
-    if path.exists() && !path.is_file() {
-        bail!("gitignore path is not a file: {}", path.display());
-    }
-    let existing = if path.exists() {
-        std::fs::read_to_string(&path)?
-    } else {
-        String::new()
-    };
-    let ignored = existing
-        .lines()
-        .map(str::trim)
-        .any(|line| matches!(line, ".tmp" | ".tmp/" | "/.tmp" | "/.tmp/"));
-    if ignored {
-        return Ok(());
-    }
-    let mut updated = existing;
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated.push_str(".tmp/\n");
-    std::fs::write(&path, updated)?;
-    Ok(())
-}
-
-fn ensure_renovate_config(workspace: &PathBuf) -> Result<PathBuf> {
-    let path = workspace.join("renovate.json");
-    if path.exists() {
-        if !path.is_file() {
-            bail!("renovate config path is not a file: {}", path.display());
-        }
-        return Ok(path);
-    }
-    std::fs::write(&path, "{\n  \"extends\": [\"config:recommended\"]\n}\n")?;
-    Ok(path)
-}
-
-async fn renovate_github_token() -> Result<Option<String>> {
-    for key in ["RENOVATE_GITHUB_COM_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.trim().is_empty() {
-                return Ok(Some(value));
-            }
-        }
-    }
-    let output = tokio::process::Command::new("gh")
-        .arg("auth")
-        .arg("token")
-        .output()
-        .await;
-    let Ok(output) = output else {
-        return Ok(None);
-    };
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if token.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(token))
-    }
+    std::fs::write(&path, out).with_context(|| format!("failed writing {}", path.display()))
 }

@@ -178,25 +178,13 @@ Current in-memory todo:
 omitted_messages = "... [{omitted_messages} earlier messages omitted to fit context limit]"
 
 [audit]
-    default_user_prompt = "Audit the repository for security, unnecessary complexity, and material performance issues, then produce a concise prioritized ISSUES.md-ready report."
-    repo_user_prompt = "Audit this repository for security, unnecessary complexity, and material performance issues, then produce a concise prioritized ISSUES.md-ready report."
-    review_suffix = "Prefer concrete exploit paths, failure modes, or production impact rooted in actual code and behaviour. Use docs or comments only as secondary evidence after code."
-    summary_suffix = "Prioritise the most exploitable or operationally dangerous issues first, and keep the rest concise without losing material evidence."
-    inspect_suffix = "Inspect the repo first with tools, then write a concise Markdown report suitable for `ISSUES.md`."
-    return_suffix = "Return only the final Markdown report body. Include a short summary, then a prioritized table with columns: id, severity, file, summary, evidence, fix."
-    model_suffix = "Use the active model id `{model}`."
-    focus_hint = "Focus hint: {focus}."
-    from_hint = "Start from this area first: {from}."
-    phase_hint = "Compatibility hint: requested phase is `{phase}`; reflect that in the report heading if useful."
-    focus_suffix = " Additional focus: {focus}"
-    
-    
-[audit_logic]
-    default_user_prompt = "Audit executable logic for security and complexity issues, focusing on control flow, trust boundaries, validation, state mutation, persistence, network calls, secret handling, error paths, and behaviour-shaping config. Produce a concise prioritized ISSUES.md-ready report."
-    repo_user_prompt = "Audit this repository executable logic for security and complexity issues, focusing on control flow, trust boundaries, validation, state mutation, persistence, network calls, secret handling, error paths, and behaviour-shaping config. Produce a concise prioritized ISSUES.md-ready report."
-review_suffix = "Logic-focused pass: prefer control flow, trust boundaries, authn/authz decisions, validation, parser behaviour, state mutation, persistence, network calls, secret handling, error paths, and config that changes runtime behaviour. Ignore docs, comments, and lockfile churn unless code evidence shows they materially affect execution or security posture."
-summary_suffix = "Keep the summary logic-focused: prioritise concrete behavioural bugs, broken invariants, and behaviour-shaping configuration risks; trim commentary about prose docs or lockfile noise unless it directly changes runtime behaviour."
-focus_suffix = " Additional logic focus: {focus}"
+default_user_prompt = "Audit the repository for security, unnecessary complexity, and material performance issues, then produce concise prioritized findings."
+inspect_suffix = "Inspect the pinned workspace chunk and use docs/sloc context. Report only findings grounded in code or documented behavior."
+return_suffix = "Return Markdown findings only. Each finding needs severity, file:line or symbol refs, evidence, impact, and fix. Avoid duplicates and speculation."
+model_suffix = "Use active model id `{model}` as context only."
+focus_hint = "Focus hint: {focus}."
+chunk_hint = "Pinned chunk: {chunk}. Assess only this chunk plus directly relevant docs/context."
+final_reduce_prompt = "Reduce the collected audit draft into final ISSUES.md. Keep at most 20 detailed high-priority findings with clear code refs, evidence, impact, and fix. Summarize all remaining lower-priority or duplicate findings under a brief 'Other findings summarized' section. Return complete Markdown only."
 
 [tools.list]
 description = "List workspace paths with `pathlib.Path.glob()`. Use first for discovery. `path` is a workspace-relative glob and defaults to `\"*\"`. Use `exclude` to hide noise. Returns `items`, `count`, and `truncated`; directories end with `/`."

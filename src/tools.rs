@@ -60,9 +60,29 @@ struct TodoItemInput {
 pub struct ToolContext {
     pub root: PathBuf,
     pub interactive: bool,
-    pub yolo: bool,
-    pub agent: String,
+    pub policy: ToolPolicy,
     pub todos: Vec<TodoItem>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ToolPolicy {
+    pub read_only: bool,
+    pub auto_approve_edits: bool,
+    pub auto_approve_bash: bool,
+}
+
+impl ToolPolicy {
+    pub fn can_mutate(self) -> bool {
+        !self.read_only
+    }
+
+    fn auto_approves(self, tool: &str) -> bool {
+        match tool {
+            "replace" => self.auto_approve_edits,
+            "bash" => self.auto_approve_bash,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -200,161 +220,132 @@ fn default_todo_status() -> String {
     "pending".to_string()
 }
 
+fn spec(name: &str, schema: Value) -> Tool {
+    Tool::new(name)
+        .with_description(crate::config::tool_description(name))
+        .with_schema(schema)
+}
+
+fn object(properties: Value, required: &[&str]) -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": false
+    });
+    if !required.is_empty() {
+        schema["required"] = json!(required);
+    }
+    schema
+}
+
+fn exclude_schema() -> Value {
+    json!({"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]})
+}
+
+fn todo_item_schema() -> Value {
+    object(
+        json!({
+            "id": {"type": "string", "description": "Stable short id; optional, defaults to 1-based position."},
+            "task": {"type": "string"},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "default": "pending"}
+        }),
+        &["task"],
+    )
+}
+
 pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
     let mut tools = vec![
-        Tool::new("list")
-            .with_description(&crate::config::tool_description("list"))
-            .with_schema(json!({
-                "type": "object",
-                "properties": {
+        spec(
+            "list",
+            object(
+                json!({
                     "path": {"type": "string", "default": "*"},
-                    "exclude": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+                    "exclude": exclude_schema(),
                     "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                },
-                "additionalProperties": false
-            })),
-        Tool::new("read")
-            .with_description(&crate::config::tool_description("read"))
-            .with_schema(json!({
-                "type": "object",
-                "properties": {
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "read",
+            object(
+                json!({
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "default": 1},
                     "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            })),
-        Tool::new("search")
-            .with_description(&crate::config::tool_description("search"))
-            .with_schema(json!({
-                "type": "object",
-                "properties": {
+                }),
+                &["path"],
+            ),
+        ),
+        spec(
+            "search",
+            object(
+                json!({
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "default": "."},
-                    "exclude": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+                    "exclude": exclude_schema(),
                     "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                },
-                "required": ["pattern"],
-                "additionalProperties": false
-            })),
-        Tool::new("sloc")
-            .with_description(&crate::config::tool_description("sloc"))
-            .with_schema(json!({
-                "type": "object",
-                "properties": {
+                }),
+                &["pattern"],
+            ),
+        ),
+        spec(
+            "sloc",
+            object(
+                json!({
                     "path": {"type": "string", "default": "."},
-                    "exclude": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
-                    },
-                    "additionalProperties": false
-                })),
-            Tool::new("todo")
-                .with_description(&crate::config::tool_description("todo"))
-                .with_schema(json!({
-                    "type": "object",
-                    "properties": {
-                        "todos": {
-                            "type": "array",
-                            "description": "Complete replacement todo list. Alias: items. Omit to return current list.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "string", "description": "Stable short id; optional, defaults to 1-based position."},
-                                    "task": {"type": "string"},
-                                    "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "default": "pending"}
-                                },
-                                "required": ["task"],
-                                "additionalProperties": false
-                            }
-                        },
-                        "items": {
-                            "type": "array",
-                            "description": "Alias for todos.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "string", "description": "Stable short id; optional, defaults to 1-based position."},
-                                    "task": {"type": "string"},
-                                    "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "default": "pending"}
-                                },
-                                "required": ["task"],
-                                "additionalProperties": false
-                            }
-                        },
-                        "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn. If TODO.md exists, read it first and pass a merged list so still-relevant existing items are preserved."}
-                    },
-                    "additionalProperties": false
-                }))
-        ];
+                    "exclude": exclude_schema()
+                }),
+                &[],
+            ),
+        ),
+        spec(
+            "todo",
+            object(
+                json!({
+                    "todos": {"type": "array", "description": "Complete replacement todo list. Alias: items. Omit to return current list.", "items": todo_item_schema()},
+                    "items": {"type": "array", "description": "Alias for todos.", "items": todo_item_schema()},
+                    "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn."}
+                }),
+                &[],
+            ),
+        ),
+    ];
 
     if ctx.interactive {
-        tools.push(
-            Tool::new("ask")
-                .with_description(&crate::config::tool_description("ask"))
-                .with_schema(json!({
-                    "type": "object",
-                    "properties": {
-                        "question": {"type": "string"},
-                        "choices": {"type": ["array", "null"], "items": {"type": "string"}}
-                    },
-                    "required": ["question"],
-                    "additionalProperties": false
-                })),
-        );
+        tools.push(spec(
+            "ask",
+            object(
+                json!({
+                    "question": {"type": "string"},
+                    "choices": {"type": ["array", "null"], "items": {"type": "string"}}
+                }),
+                &["question"],
+            ),
+        ));
     }
 
-    if ctx.agent != "plan" {
-        tools.push(
-            Tool::new("webfetch")
-                .with_description(&crate::config::tool_description("webfetch"))
-                .with_schema(json!({
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string"},
-                        "method": {"type": "string", "default": "GET"},
-                        "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
-                        "follow_redirects": {"type": "boolean", "default": false},
-                        "timeout_seconds": {"type": "integer", "default": DEFAULT_WEBFETCH_TIMEOUT_SECONDS}
-                    },
-                    "required": ["url"],
-                    "additionalProperties": false
-                })),
-        );
-    }
-
-    if ctx.agent != "plan" {
-        tools.push(
-            Tool::new("replace")
-                .with_description(&crate::config::tool_description("replace"))
-                .with_schema(json!({
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string"},
-                        "replacement": {"type": "string"},
-                        "path": {"type": "string", "default": "."},
-                        "exclude": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
-                        "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                    },
-                    "required": ["pattern", "replacement"],
-                    "additionalProperties": false
-                })),
-        );
-    }
-
-    if ctx.agent != "plan" {
-        tools.push(
-            Tool::new("bash")
-                .with_description(&crate::config::tool_description("bash"))
-                .with_schema(json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string"},
-                        "timeout_seconds": {"type": "integer", "default": 120}
-                    },
-                    "required": ["command"],
-                    "additionalProperties": false
-                })),
-        );
+    if ctx.policy.can_mutate() {
+        tools.extend([
+            spec("webfetch", object(json!({
+                "url": {"type": "string"},
+                "method": {"type": "string", "default": "GET"},
+                "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+                "follow_redirects": {"type": "boolean", "default": false},
+                "timeout_seconds": {"type": "integer", "default": DEFAULT_WEBFETCH_TIMEOUT_SECONDS}
+            }), &["url"])),
+            spec("replace", object(json!({
+                "pattern": {"type": "string"},
+                "replacement": {"type": "string"},
+                "path": {"type": "string", "default": "."},
+                "exclude": exclude_schema(),
+                "limit": {"type": "integer", "default": DEFAULT_LIMIT}
+            }), &["pattern", "replacement"])),
+            spec("bash", object(json!({
+                "command": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "default": 120}
+            }), &["command"])),
+        ]);
     }
 
     tools
@@ -375,12 +366,9 @@ pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Va
         other => bail!("unknown tool: {other}"),
     };
     if let Ok(value) = &result {
-        let preview = preview_tool_output(name, value);
-        if !preview.trim().is_empty() {
-            crate::highlight::stderr(&(preview.trim_end().to_string() + "\n"));
-        }
+        crate::ui::tool_result(&preview_tool_output(name, value));
     } else if let Err(err) = &result {
-        crate::highlight::stderr(&format!("✗ {name}: {err:#}\n"));
+        crate::ui::tool_error(name, err);
     }
     result
 }
@@ -393,11 +381,7 @@ pub fn encode_tool_output(value: &Value) -> String {
 
 fn note_tool(name: &str, args: &Value) {
     let detail = tool_call_summary(name, args);
-    if detail.is_empty() {
-        crate::highlight::stderr(&format!("→ {name}\n"));
-    } else {
-        crate::highlight::stderr(&format!("→ {name} {detail}\n"));
-    }
+    crate::ui::tool_start(name, &detail);
 }
 
 fn tool_call_summary(name: &str, args: &Value) -> String {
@@ -476,7 +460,7 @@ fn preview_value(value: &Value, max: usize) -> String {
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| value.to_string());
-    crate::text::compact_preview(&raw, max)
+    crate::ui::compact_preview(&raw, max)
 }
 
 fn value_str<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -497,7 +481,7 @@ fn append_preview_lines(out: &mut String, text: &str, indent: &str) {
         let _ = write!(
             out,
             "\n{indent}{}",
-            crate::text::truncate_chars(line, PREVIEW_LINE_CHARS)
+            crate::ui::truncate_chars(line, PREVIEW_LINE_CHARS)
         );
     }
     if line_count > PREVIEW_LINES {
@@ -510,7 +494,7 @@ fn append_preview_lines(out: &mut String, text: &str, indent: &str) {
 }
 
 fn preview_generic(value: &Value) -> String {
-    crate::text::clamp_lines(
+    crate::ui::clamp_lines(
         &encode_tool_output(value),
         PREVIEW_LINES,
         PREVIEW_LINE_CHARS,
@@ -534,7 +518,7 @@ fn preview_list(value: &Value) -> String {
         let _ = write!(
             out,
             "\n  {}",
-            crate::text::truncate_chars(item.as_str().unwrap_or(""), PREVIEW_LINE_CHARS)
+            crate::ui::truncate_chars(item.as_str().unwrap_or(""), PREVIEW_LINE_CHARS)
         );
     }
     let shown = items.len().min(PREVIEW_ITEMS);
@@ -589,7 +573,7 @@ fn preview_search(value: &Value) -> String {
         let path = value_str(item, "path");
         let line = value_usize(item, "line_number");
         let col = value_usize(item, "column");
-        let text = crate::text::truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
+        let text = crate::ui::truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
         let _ = write!(out, "\n  {path}:{line}:{col}: {text}");
     }
     if value
@@ -682,7 +666,7 @@ fn preview_webfetch(value: &Value) -> String {
     let mut out = format!("HTTP {status} {url}");
     let text = value_str(value, "text");
     if !text.is_empty() {
-        let preview = crate::text::clamp_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
+        let preview = crate::ui::clamp_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
         for line in preview.lines() {
             let _ = write!(out, "\n  {line}");
         }
@@ -739,7 +723,7 @@ fn preview_ask(value: &Value) -> String {
     } else {
         format!(
             "selected: {}",
-            crate::text::truncate_chars(answer, PREVIEW_LINE_CHARS)
+            crate::ui::truncate_chars(answer, PREVIEW_LINE_CHARS)
         )
     }
 }
@@ -1152,11 +1136,8 @@ fn collect_largest_reports(root: &Path, language: &TokeiLanguage, out: &mut Vec<
 }
 async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
     require_mutation_approval(ctx, "bash")?;
-    if args.command.as_bytes().len() > config::max_bash_cmd_bytes() {
-        bail!(
-            "command too large ({} bytes)",
-            args.command.as_bytes().len()
-        );
+    if args.command.len() > config::max_bash_cmd_bytes() {
+        bail!("command too large ({} bytes)", args.command.len());
     }
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
@@ -1168,8 +1149,8 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
     let output = timeout(Duration::from_secs(args.timeout_seconds), cmd.output()).await??;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let (stdout, stdout_truncated) = crate::text::head_tail(&stdout, 6000);
-    let (stderr, stderr_truncated) = crate::text::head_tail(&stderr, 4000);
+    let (stdout, stdout_truncated) = crate::ui::head_tail(&stdout, 6000);
+    let (stderr, stderr_truncated) = crate::ui::head_tail(&stderr, 4000);
     Ok(json!({
         "command": args.command,
         "returncode": output.status.code().unwrap_or(-1),
@@ -1255,7 +1236,7 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         } else {
             text
         };
-        let (text, truncated) = crate::text::head_tail(&normalized, 12000);
+        let (text, truncated) = crate::ui::head_tail(&normalized, 12000);
         return Ok(json!({
             "method": method,
             "url": final_url,
@@ -1306,10 +1287,10 @@ fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
     };
     let mut todos = Vec::with_capacity(input_todos.len());
     for (index, item) in input_todos.into_iter().enumerate() {
-        let id = Some(crate::text::compact_spaces(&item.id))
+        let id = Some(crate::ui::compact_spaces(&item.id))
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| (index + 1).to_string());
-        let task = crate::text::compact_spaces(&item.task);
+        let task = crate::ui::compact_spaces(&item.task);
         if task.is_empty() {
             bail!("todo task cannot be empty");
         }
@@ -1643,7 +1624,7 @@ fn push_match(
         "path": display_path,
         "line_number": line_number,
         "column": column,
-        "text": crate::text::truncate_chars(line.trim_end_matches(['\r', '\n']), 1000)
+        "text": crate::ui::truncate_chars(line.trim_end_matches(['\r', '\n']), 1000)
     }));
 }
 
@@ -1769,7 +1750,7 @@ fn require_mutation_approval(ctx: &ToolContext, tool: &str) -> Result<()> {
     if !ctx.interactive {
         return Ok(());
     }
-    crate::highlight::stderr(&format!("approve {tool}? [y/N]\n"));
+    crate::ui::err_line(format_args!("approve {tool}? [y/N]"));
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let answer = line.trim().to_ascii_lowercase();
@@ -1781,7 +1762,7 @@ fn require_mutation_approval(ctx: &ToolContext, tool: &str) -> Result<()> {
 }
 
 fn auto_approved(ctx: &ToolContext, tool: &str) -> bool {
-    ctx.yolo || ctx.agent == "auto-approve" || (ctx.agent == "accept-edits" && tool == "replace")
+    ctx.policy.auto_approves(tool)
 }
 
 #[cfg(test)]
@@ -1835,8 +1816,11 @@ three
             &ToolContext {
                 root: dir.path().to_path_buf(),
                 interactive: false,
-                yolo: false,
-                agent: "default".into(),
+                policy: ToolPolicy {
+                    read_only: false,
+                    auto_approve_edits: true,
+                    auto_approve_bash: true,
+                },
                 todos: Vec::new(),
             },
             ReadArgs {
@@ -1870,8 +1854,11 @@ three
             &ToolContext {
                 root: dir.path().to_path_buf(),
                 interactive: false,
-                yolo: false,
-                agent: "default".into(),
+                policy: ToolPolicy {
+                    read_only: false,
+                    auto_approve_edits: true,
+                    auto_approve_bash: true,
+                },
                 todos: Vec::new(),
             },
             ListArgs {
@@ -1892,8 +1879,11 @@ three
         let mut ctx = ToolContext {
             root: dir.path().to_path_buf(),
             interactive: false,
-            yolo: false,
-            agent: "default".into(),
+            policy: ToolPolicy {
+                read_only: false,
+                auto_approve_edits: true,
+                auto_approve_bash: true,
+            },
             todos: Vec::new(),
         };
         let value = tool_todo(
