@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Rewrote the CLI in Rust around `genai`, `rustyline`, ripgrep ecosystem crates, and `toon-format`.
+- Updated docs and examples to prefer native `genai` model ids such as `github_copilot::openai/gpt-4.1-mini` and `local-8080::qwen3.5`.
+
+### Added
+- Rust `audit`, `audit-logic`, and `renovate-local` command support.
+- Rust fuzzy search fallback for the `search` tool.
+
 ## [0.6.0] - 2026-04-22
 
 Major changes since `v0.5.1`.

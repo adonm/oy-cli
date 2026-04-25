@@ -1,69 +1,67 @@
-# oy-cli
+# oy
 
-[![PyPI](https://img.shields.io/pypi/v/oy-cli)](https://pypi.org/project/oy-cli/)
+Small local AI coding CLI for your shell, rewritten in Rust.
 
-Small local AI coding CLI for your shell. It can inspect files, search content, fetch public docs, and run commands in the current workspace.
+It uses:
 
-`oy-cli` is intentionally OpenResponses-first: provider integrations are expected to support the [Open Responses](https://www.openresponses.org/) / OpenAI Responses API shape, and `oy` is optimized around that interface rather than chat-completions compatibility layers.
+- [`genai`](https://crates.io/crates/genai) for model access and tool calls
+- [`rustyline`](https://crates.io/crates/rustyline) for chat UX
+- ripgrep ecosystem crates (`ignore`, `globset`, `regex`) for repo search
+- [`toon-format`](https://crates.io/crates/toon-format) for compact tool payload encoding
 
 ## Quick start
 
 ```bash
-uv tool install oy-cli
-oy "add docstrings to public functions"
-oy chat
-oy chat --agent plan
-oy chat --continue-session
-oy run --resume 20260325
-oy audit "focus on authentication"
-oy audit-logic "focus on authentication logic"
+cargo run -- "inspect this repo and summarize the main risks"
+cargo run -- chat
+cargo run -- chat --agent plan
+cargo run -- run --resume 20260325 "finish the refactor"
+cargo run -- audit "focus on authentication"
+cargo run -- audit-logic "focus on runtime behavior"
 ```
 
 ## Common tasks
 
 ```bash
-oy "inspect the main module and suggest improvements"
-OY_ROOT=./my-project oy "fix the failing tests"
-echo "update the changelog" | OY_NON_INTERACTIVE=1 oy
-oy chat
-oy chat --agent plan
-oy chat --agent accept-edits
-oy chat --continue-session
-oy run --resume 20260325 "finish the refactor"
-oy audit [focus]
-oy audit-logic [focus]
-oy renovate-local
-oy ralph "prompt"
-oy model [filter]
-oy --help
+cargo run -- "inspect the main module and suggest improvements"
+OY_ROOT=./my-project cargo run -- "fix the failing tests"
+echo "update the changelog" | OY_NON_INTERACTIVE=1 cargo run -- run
+cargo run -- chat
+cargo run -- chat --agent accept-edits
+cargo run -- chat --continue-session
+cargo run -- ralph "re-run the maintenance prompt every minute"
+cargo run -- model                         # list detected auth/env + available models
+cargo run -- model github_copilot::openai/gpt-4.1-mini
+cargo run -- model local-8080::qwen3.5
 ```
 
-In chat, `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed. It is no-write rather than no-network.
+In chat, `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed.
 
-## Audit workflow
+## Model ids
 
-`oy audit` now runs a resumable 3-phase repo audit automatically:
+`oy model` now:
 
-- phase1 `plan` — Python uses `sloc` plus `tiktoken` counts to build a SLOC-ranked 64k-token chunk plan and normalizes any existing `ISSUES.md` into inbox format before review starts
-- phase2 `review` — Python reads each chunk, gives the model only that chunk plus the phase2 audit system prompt and ASVS/grugbrain context, and keeps findings append-only via `search` and `inbox_append` scoped to `ISSUES.md`
-- phase3 `summary` — switch to the phase3 audit system prompt, consume the inbox, and rewrite `ISSUES.md` so the 10-15 most important issues keep detail and the rest become concise
+- shows the current normalized model id
+- introspects relevant auth env vars and auto-populates `GITHUB_TOKEN` from `gh auth token` when missing
+- sends direct `GET /models` requests to configured OpenAI-compatible endpoints
+- covers default OpenAI, `OPENAI_BASE_URL`, GitHub/Copilot-style endpoints, and local `local-<port>` shims
+- hides missing auth and failed/static provider sections to keep output high-signal
+- in a TTY, `oy model` can open an interactive fuzzy picker for choosing and saving a model
 
-`oy audit-logic` is a stricter variant for reviewing actual software behaviour:
+Use native `genai` model ids in docs, config, and examples:
 
-- phase1 skips docs and lockfiles from the review backlog
-- phase2 builds chunk context from code and behaviour-shaping config, stripping comments and docstrings where possible before sending context to the model
-- limited `search` inside audit review also defaults to excluding docs and lockfiles so the audit budget stays on executable logic, trust boundaries, authz/authn checks, state changes, parsing, persistence, and network behaviour
-- phase3 keeps the final `ISSUES.md` summary focused on behavioural bugs and runtime-impacting configuration after deduping the inbox
+- plain provider-native ids when `genai` can infer the adapter:
+  - `gpt-5.4-mini`
+  - `gemini-2.0-flash`
+  - `claude-3-7-sonnet-latest`
+- explicit adapter-prefixed ids when needed:
+  - `github_copilot::openai/gpt-4.1-mini`
+  - `local-8080::qwen3.5`
+  - `local-11434::qwen3.5`
 
-Normal `oy audit` is still useful when docs, comments, or dependency metadata may matter. `oy audit-logic` is for concentrating hard on control flow and real runtime behaviour.
-
-Each audit mode keeps its own resumable state file in the session dir so long-running audits can resume cleanly without colliding. After each chunk, Python verifies that `ISSUES.md` changed; if not, it retries with a smaller chunk instead of pretending review progress happened. The per-chunk path is append-only inbox mode, so phase2 avoids repeatedly merging the full report on every chunk.
-
-`.tmp/` is still used for things like `oy renovate-local` reports, but audit progress itself now lives in the session cache.
+Compatibility aliases like `copilot:...` and `local-8080:...` are still accepted, but the Rust CLI normalizes them to native `genai` ids internally.
 
 ## Agent profiles
-
-`oy` now supports simple built-in agent profiles inspired by familiar coding-agent modes:
 
 - `default` — normal tool approvals
 - `plan` — read-only exploration and planning
@@ -73,32 +71,51 @@ Each audit mode keeps its own resumable state file in the session dir so long-ru
 Examples:
 
 ```bash
-oy chat --agent plan
-oy run --agent accept-edits "rename the helper and update callers"
-oy chat --agent auto-approve
+cargo run -- chat --agent plan
+cargo run -- run --agent accept-edits "rename the helper and update callers"
+cargo run -- chat --agent auto-approve
 ```
 
 ## Session continuation
 
-Saved chat sessions can now be resumed from the CLI:
+Saved chat sessions can be resumed:
 
-- `oy chat --continue-session` — continue the most recent saved session
-- `oy run --continue-session "next task"` — continue the most recent session, then run one prompt
-- `oy run --resume <name-or-number> "next task"` — resume a specific saved session
-- in chat, `/save [name]` and `/load [name]` still work
+- `oy chat --continue-session`
+- `oy run --continue-session "next task"`
+- `oy run --resume <name-or-number> "next task"`
+- in chat, `/save [name]` and `/load [name]`
 
-Saved sessions now keep both the transcript and the active agent profile.
+Saved sessions keep the transcript and active agent profile under `~/.config/oy/sessions/`.
 
-## Design goals
+## Audit commands
 
-- keep the codebase small and auditable
-- expose a narrow built-in tool set
-- keep provider support behind thin shims
-- target providers that implement the Open Responses / OpenAI Responses API surface
-- start fresh by default for one-shot runs
-- make approvals and checkpoints explicit when they matter
+`oy audit [focus]`:
 
-Prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/session_text.toml). Core modules are [`oy_cli/runtime.py`](oy_cli/runtime.py), [`oy_cli/agent.py`](oy_cli/agent.py), [`oy_cli/cli.py`](oy_cli/cli.py), [`oy_cli/tools.py`](oy_cli/tools.py), and [`oy_cli/providers.py`](oy_cli/providers.py). Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- runs a repo audit with the normal audit prompt
+- writes the final Markdown report to `ISSUES.md`
+- includes a transparency line with the normalized active model id
+
+`oy audit-logic [focus]` is stricter:
+
+- focuses on runtime behavior, security boundaries, auth/authz, state changes, parsing, persistence, and network behavior
+- deprioritizes docs/comment quality unless it changes behavior
+
+Compatibility flags are still accepted:
+
+```bash
+cargo run -- audit auth --from src/
+cargo run -- audit-logic payments --phase phase2
+```
+
+## Renovate local
+
+`oy renovate-local` runs Renovate in local lookup mode and writes a report to `.tmp/renovate-YYYY-MM-DD.json`.
+
+Requirements:
+
+- `renovate` installed in your `PATH`
+- a GitHub token via `RENOVATE_GITHUB_COM_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`
+  - if unset, `oy` also tries `gh auth token`
 
 ## Configuration
 
@@ -106,114 +123,93 @@ Prompt text and tool descriptions live in [`oy_cli/session_text.toml`](oy_cli/se
 
 | Variable | Purpose |
 |---|---|
-| `OY_MODEL` | Override the model for this session (`model` or `shim:model`) |
-| `OY_SHIM` | Force a shim when the model name is bare |
+| `OY_MODEL` | Override the model for this session using a native `genai` model id |
+| `OY_SHIM` | Apply a shim when the model name is bare |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable approval and prompt pauses |
 | `OY_UNATTENDED_LIMIT` | Agent deadline window, such as `1h`, `30m`, or `3600s` |
 | `OY_RALPH_LIMIT` | Ralph deadline window, such as `3h`, `90m`, or `3600s` |
 | `OY_ROOT` | Run against a different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
-| `OY_DEBUG` | Enable debug logging |
 | `OY_YOLO` | Start with all tool approvals enabled |
-| `OY_MAX_CONTEXT_TOKENS` | Override transcript and tool context budget |
 | `OY_MAX_BASH_CMD_BYTES` | Override max accepted bash command size |
+| `OPENAI_API_KEY` | OpenAI-compatible auth, including many local/self-hosted adapters |
+| `OPENAI_BASE_URL` | Override the OpenAI-compatible endpoint |
 
 ### Config file
 
 ```json
-{"shim": "openai", "model": "glm-5"}
+{"shim": "github_copilot", "model": "openai/gpt-4.1-mini"}
 ```
 
-Only `model` and `shim` are persisted in config. Session continuation uses per-session files under `~/.config/oy/sessions/`. Selection order is `OY_MODEL`, then saved config, then the first-run picker. `OY_SHIM` only changes backend choice when the model name is bare or no model has been saved yet.
-
-From local testing, `glm-5` and `kimi-k2.5` are good defaults.
+Only `model` and `shim` are persisted in config.
 
 ## Installation
 
+For local development:
+
 ```bash
-uv tool install oy-cli  # preferred
-pip install oy-cli      # alternative
+cargo build
+cargo run -- --help
+```
+
+For a local install:
+
+```bash
+cargo install --path .
 ```
 
 ## Requirements
 
-- Python 3.13+
+- Rust toolchain
 - `bash`
-- Provider credentials for a backend that supports the Open Responses / OpenAI Responses API shape (for example via OpenAI credentials, Codex auth, Copilot auth, OpenCode auth, or AWS credentials for Bedrock Mantle)
-
-## Development
-
-Use `uv` for local development. Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-```bash
-uv sync
-uv run ruff check .
-uv run pytest -q
-uv run pytest tests/test_providers.py -q
-uv run oy --help
-uv build
-```
+- credentials for a `genai`-supported backend, or a local OpenAI-compatible server
 
 ## Authentication
 
-OpenAI or other Open Responses-compatible endpoint:
+OpenAI-compatible endpoint:
 
 ```bash
 export OPENAI_API_KEY=...
 export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 ```
 
-Copilot and Codex credentials are discovered automatically when available.
-
-Bedrock Mantle:
+GitHub Copilot via native `genai` id:
 
 ```bash
-export OY_SHIM=bedrock-mantle
-export AWS_PROFILE=my-profile
-export AWS_REGION=ap-southeast-2
+cargo run -- model github_copilot::openai/gpt-4.1-mini
 ```
 
-`oy` loads models from `GET /models` and targets the Open Responses / OpenAI Responses API at `POST /responses`. Provider support in `oy` is intentionally centered on that API shape. Providers that do not support `/responses` fail with a clear error instead of falling back to legacy chat-completions behavior.
-
-
-## Local model workflow
-
-Run any OpenAI-compatible server on localhost. By default `oy` probes:
-
-- `local-8080` at `http://127.0.0.1:8080/v1` (typical `llama-server` port)
-- `local-11434` at `http://127.0.0.1:11434/v1` (typical Ollama port)
-
-Examples:
+Local OpenAI-compatible servers:
 
 ```bash
-OY_MODEL=local-8080:qwen3.5 oy chat
-# or save it once:
-oy model local-11434:qwen3.5
-oy chat
+cargo run -- model local-8080::qwen3.5
+cargo run -- chat
 ```
 
-You can also target any localhost port with the `local-<port>` shim form.
+## Development
 
-## Troubleshooting
+```bash
+cargo fmt
+cargo check
+cargo test
+cargo run -- --help
+```
 
-- **Missing credentials** — start a local OpenAI-compatible server on `127.0.0.1:8080` or `127.0.0.1:11434`, set `OPENAI_API_KEY`, sign in with `codex`, authenticate `gh` for Copilot, run `opencode auth`, or configure AWS credentials / SSO for Bedrock Mantle.
-- **stdin is not a TTY** — piping input disables `ask`; set `OY_NON_INTERACTIVE=1` to make that explicit.
-- **AWS SSO session is stale** — run `aws sso login --use-device-code --no-browser`.
+Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Security
 
-`oy` can run shell commands and modify files with your permissions. `bash` also inherits your environment, so git, cloud, and SSH credentials visible to your shell are visible to the command.
+`oy` can run shell commands and modify files with your permissions.
 
 Recommended:
 
 - run in a repo or workspace you trust
-- mount only the directories you need in containers
 - avoid exposing long-lived secrets in the environment
-- use `/ask` when you want no-write research mode
+- use `/ask` for no-write research mode
 - review generated changes before shipping
 
-Protections include workspace-bound file tools, public-only `webfetch`, and default credential flows for supported providers. For provider authors, the intended compatibility target is Open Responses compliance rather than ad hoc OpenAI-compatible subsets. `oy` still acts with your user permissions, so treat generated shell commands and file edits as local code execution.
+Protections include workspace-bound file tools, public-only `webfetch`, and explicit approval modes.
 
 ## License
 

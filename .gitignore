@@ -31,3 +31,9 @@ htmlcov/
 
 # Local audit artifacts
 .tmp/
+
+# Rust build artifacts
+target/
+
+# Local config/session smoke-test artifacts
+.config/oy/
