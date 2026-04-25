@@ -59,7 +59,7 @@ cargo run -- model local-8080::qwen3.5
 ```
 
 In chat, `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed.
-Chat uses reedline prompts, so terminal scrollback/history work normally. Tab completes commands/models/choices. Use `/help` for commands and short aliases like `/q`, `/h`, `/m`, `/t`, `/u`.
+Chat uses reedline prompts, so terminal scrollback/history work normally. Enter sends complete input; Alt/Shift+Enter inserts a newline; Ctrl+J force-sends even when brackets/quotes look incomplete. Pasted multiline text stays in the editor before submit. Tab completes commands/models/choices. Use `/help` for commands and short aliases like `/q`, `/h`, `/m`, `/t`, `/u`.
 
 ## Model ids
 

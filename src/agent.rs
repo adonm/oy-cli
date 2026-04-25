@@ -182,10 +182,11 @@ impl Session {
         agent: String,
         yolo: bool,
     ) -> Self {
+        let system_prompt = session_system_prompt(&root, interactive, &agent);
         Self {
             root,
             model,
-            system_prompt: config::active_system_prompt(interactive, &agent),
+            system_prompt,
             interactive,
             yolo,
             agent,
@@ -244,16 +245,26 @@ pub fn load_saved(name: Option<&str>, interactive: bool) -> Result<Option<Sessio
     let transcript: Transcript = serde_json::from_value(saved.transcript)
         .with_context(|| format!("invalid saved transcript in {}", path.display()))?;
     let root = config::oy_root()?;
+    let system_prompt = session_system_prompt(&root, interactive, &saved.agent);
     Ok(Some(Session {
         root,
         model: saved.model,
-        system_prompt: config::active_system_prompt(interactive, &saved.agent),
+        system_prompt,
         interactive,
         yolo: config::yolo_enabled() || saved.agent == "auto-approve",
         agent: saved.agent,
         transcript,
         todos: Vec::new(),
     }))
+}
+
+fn session_system_prompt(root: &Path, interactive: bool, agent: &str) -> String {
+    let mut prompt = config::active_system_prompt(interactive, agent);
+    if let Some(snapshot) = crate::tools::compact_workspace_snapshot(root) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&snapshot);
+    }
+    prompt
 }
 
 fn model_suffix(model_spec: &str) -> &str {

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use reedline_repl_rs::reedline::{
-    DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal,
+    DefaultPrompt, DefaultPromptSegment, DefaultValidator, EditCommand, Emacs, FileBackedHistory,
+    KeyCode, KeyModifiers, Reedline, ReedlineEvent, Signal, default_emacs_keybindings,
 };
 use std::path::PathBuf;
 
@@ -10,13 +11,38 @@ use crate::model;
 
 const HISTORY_SIZE: usize = 10_000;
 
+fn chat_line_editor(history_path: PathBuf) -> Result<Reedline> {
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Enter,
+        ReedlineEvent::SubmitOrNewline,
+    );
+    let insert_newline = ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
+    keybindings.add_binding(KeyModifiers::SHIFT, KeyCode::Enter, insert_newline.clone());
+    keybindings.add_binding(KeyModifiers::ALT, KeyCode::Enter, insert_newline);
+    keybindings.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('j'),
+        ReedlineEvent::Submit,
+    );
+
+    Ok(Reedline::create()
+        .with_history(Box::new(FileBackedHistory::with_file(
+            HISTORY_SIZE,
+            history_path,
+        )?))
+        .with_edit_mode(Box::new(Emacs::new(keybindings)))
+        .with_validator(Box::new(DefaultValidator))
+        .use_bracketed_paste(true))
+}
+
 pub async fn run_chat(session: &mut Session) -> Result<i32> {
-    println!("oy chat — type a prompt to send, /help for commands, /quit to exit");
+    println!(
+        "oy chat — Enter sends; Alt/Shift+Enter inserts newline; Ctrl+J force-sends; /help for commands"
+    );
     let history_path = history_path("chat")?;
-    let mut line_editor = Reedline::create().with_history(Box::new(FileBackedHistory::with_file(
-        HISTORY_SIZE,
-        history_path,
-    )?));
+    let mut line_editor = chat_line_editor(history_path)?;
     let prompt = DefaultPrompt::new(
         DefaultPromptSegment::Basic("oy".to_string()),
         DefaultPromptSegment::Empty,
@@ -49,7 +75,7 @@ async fn prompt_update_todo_on_quit(session: &mut Session) -> Result<()> {
 
     let summary = agent::run_prompt(
         session,
-        "Use the todo tool with persist=true to update TODO.md with a concise summary of the session actions. Keep it to one done item unless active follow-up work remains.",
+        "Update TODO.md with a concise summary of the session actions. If TODO.md already exists, read it first and merge its still-relevant items with the session summary before calling the todo tool with persist=true; do not blindly overwrite existing project todos. Keep the session summary to one done item unless active follow-up work remains.",
     )
     .await?;
     if !summary.is_empty() {
@@ -114,6 +140,7 @@ fn normalize_chat_command(command: &str) -> &str {
 
 fn chat_help_text() -> String {
     [
+        "Enter sends complete input; Alt/Shift+Enter inserts newline; Ctrl+J force-sends",
         "/help (/h, /?) -- show command help",
         "/tokens (/t) -- show approximate context tokens",
         "/model [value] (/m) -- show or switch model",

@@ -18,7 +18,10 @@ use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokei::{Config as TokeiConfig, Languages as TokeiLanguages, Sort as TokeiSort};
+use tokei::{
+    Config as TokeiConfig, Language as TokeiLanguage, Languages as TokeiLanguages,
+    Sort as TokeiSort,
+};
 use tokio::net::lookup_host;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -275,7 +278,7 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
                                 "additionalProperties": false
                             }
                         },
-                        "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn."}
+                        "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn. If TODO.md exists, read it first and pass a merged list so still-relevant existing items are preserved."}
                     },
                     "additionalProperties": false
                 }))
@@ -925,6 +928,74 @@ fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
 fn sort_tokei_reports(languages: &mut TokeiLanguages) {
     for language in languages.values_mut() {
         language.sort_by(TokeiSort::Code);
+    }
+}
+
+pub fn compact_workspace_snapshot(root: &Path) -> Option<String> {
+    let config = TokeiConfig {
+        hidden: Some(false),
+        no_ignore: Some(false),
+        no_ignore_parent: Some(false),
+        no_ignore_dot: Some(false),
+        no_ignore_vcs: Some(false),
+        ..TokeiConfig::default()
+    };
+    let target = root.to_string_lossy().to_string();
+    let mut languages = TokeiLanguages::new();
+    languages.get_statistics(&[target.as_str()], &[] as &[&str], &config);
+    if languages.is_empty() {
+        return None;
+    }
+    sort_tokei_reports(&mut languages);
+    Some(format_workspace_snapshot(root, &languages))
+}
+
+fn format_workspace_snapshot(root: &Path, languages: &TokeiLanguages) -> String {
+    let total = languages.total();
+    let mut language_parts = languages
+        .iter()
+        .filter(|(_, language)| language.code > 0 || language.comments > 0)
+        .map(|(name, language)| (name.to_string(), language.code, language.reports.len()))
+        .collect::<Vec<_>>();
+    language_parts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut largest = Vec::new();
+    collect_largest_reports(root, &total, &mut largest);
+    largest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let largest = largest
+        .into_iter()
+        .take(5)
+        .map(|(path, code)| format!("{path} {code}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut out = format!(
+        "Workspace size snapshot: total {} code LOC, {} comment lines, {} blank lines.",
+        total.code, total.comments, total.blanks
+    );
+    if !language_parts.is_empty() {
+        let shown = language_parts
+            .into_iter()
+            .take(8)
+            .map(|(name, code, files)| format!("{name}: {code} LOC/{files} files"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push_str(&format!(" Languages: {shown}."));
+    }
+    if !largest.is_empty() {
+        out.push_str(&format!(" Largest files: {largest}."));
+    }
+    out
+}
+
+fn collect_largest_reports(root: &Path, language: &TokeiLanguage, out: &mut Vec<(String, usize)>) {
+    for report in &language.reports {
+        out.push((rel_path(root, &report.name), report.stats.code));
+    }
+    for reports in language.children.values() {
+        for report in reports {
+            out.push((rel_path(root, &report.name), report.stats.code));
+        }
     }
 }
 async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {

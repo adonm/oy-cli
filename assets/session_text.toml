@@ -12,8 +12,8 @@ Prefer the cheapest sufficient path:
 5. `bash` only when file tools are insufficient or when you must run/check something.
 Batch independent tool calls. Stop as soon as you have enough evidence or the task is complete.
 Keep edits small, maintainable, grugbrain-simple, OWASP-minded, and performance-aware.
-For 3+ step work, keep a short in-memory plan with `todo`; persist to `TODO.md` only on quit or explicit request (`persist=true`).
-Use `webfetch` freely for public docs and API research when it helps. Prefer it over guessing.
+For 3+ step work, keep a short in-memory plan with `todo`; persist to `TODO.md` only on quit or explicit request (`persist=true`). Before persisting, if `TODO.md` exists, read it and merge still-relevant existing items with the in-memory list instead of overwriting it.
+Use `webfetch` freely for public docs and API research when available and useful. Prefer it over guessing.
 Manage context aggressively: keep only key facts and paths. Prefer narrow `path`, `offset`, `limit`, and `exclude`.
 Before mutating files or running commands, state the next action briefly. After finishing, report concrete files or commands changed.
 When context gets long, compress to the plan, key evidence, and next action. If blocked, say what you tried and the next step.
@@ -22,112 +22,12 @@ interactive_suffix = "Use `ask` only for genuine ambiguity or irreversible user-
 noninteractive_suffix = "Non-interactive mode: stay unblocked without questions. Choose the safest reasonable path, state brief assumptions, and finish the inspect/edit/verify flow."
 audit = """
 Audit the repo for security, unnecessary complexity, and material performance issues. Be terse and evidence-first.
-Keep audit state in the session dir cache instead of ad-hoc `.tmp` manifests.
 Keep the report focused on concrete, repo-specific issues with a clear attack path, trigger, or operational impact rather than low-signal style nits, generic best-practice warnings, or speculation.
 If you report a vulnerability, include the shortest evidence needed to show exploitability: entry point, trust boundary, sink, affected paths, impact, and the concrete fix.
 Use the audit prompt's built-in ASVS, MASVS, and grugbrain summary as a lightweight checklist during audit runs, and spend tokens on repo evidence.
 Prioritise critical/high-severity security findings and other issues with a clear, actionable exploit or failure mode. Bias toward findings that are realistically exploitable, privilege-affecting, data-exposing, integrity-breaking, or likely to cause material production incidents.
-Each finding should include location, category (security, complexity, or performance), reference, recommendation, status, and severity. Security findings should also note exploitability/attack preconditions when relevant.
+Each finding should include location, category (security, complexity, or performance), recommendation, status, and severity. Security findings should also note exploitability/attack preconditions when relevant.
 Manage context tightly: record findings, not long evidence dumps; keep paths, impact, exploitability, and remediation concise. Verify links and ids carefully.
-"""
-audit_phase1 = """
-AUDIT PHASE1: setup only.
-The review plan and chunking are handled before you start. Treat this phase as report bootstrap only.
-If `ISSUES.md` already exists, it will be normalized into the inbox layout before chunk review starts.
-If `.tmp/renovate-*.json` reports exist, inspect the newest relevant one once during phase1 and record a concise dependency/update assessment in `ISSUES.md`. Generate fresh Renovate lookup reports with `oy renovate-local` outside audit mode when needed. Skip cleanly when no report is present.
-Do not review code or merge findings in phase1.
-"""
-audit_phase2 = """
-AUDIT PHASE2: review only the provided chunk.
-You can inspect the provided chunk content, use `search` for repo lookups, and use `inbox_append` to add candidate findings to the inbox in `ISSUES.md`.
-Keep phase2 append-only: add new findings, but do not rewrite, merge, dedupe, or reorder old findings.
-Each chunk must leave a durable inbox update in `ISSUES.md`.
-"""
-audit_phase3 = """
-AUDIT PHASE3: final rewrite.
-Consume the inbox and rewrite `ISSUES.md` into a clear, easy to understand final report with minimal formatting.
-Dedupe overlapping inbox items, keep the most important 10-15 issues detailed, summarise the remainder concisely preserving key evidence that proves exploitability or impact.
-In this phase, rewriting `ISSUES.md` is expected.
-"""
-audit_logic_suffix = """
-LOGIC-FOCUSED audit mode. Keep the same 3-phase workflow, but bias hard toward actual runtime behaviour, trust boundaries, state transitions, and security-critical control flow.
-In logic-focused audit mode, phase1 should skip docs and lockfiles from the backlog. Phase2 should build chunk context from code and behaviour-shaping config with comments and docstrings stripped where possible.
-Treat README claims, prose docs, comments, and lockfile churn as low-authority context. Do not spend meaningful audit budget on them unless code evidence already shows they materially affect execution or security posture.
-Prefer findings grounded in executable logic: authn/authz checks, parser behaviour, validation, state mutation, secret handling, persistence, network calls, error paths, privilege boundaries, and configuration that changes runtime behaviour.
-"""
-ask_suffix = """
-RESEARCH-ONLY mode. Use only list, read, search, sloc, and webfetch. Stay no-write: leave files unchanged, skip `bash`, and keep `webfetch` available. Focus on facts only, citing file paths and brief evidence.
-"""
-
-[agents.default]
-description = "Standard agent with normal tool approvals."
-system = ""
-
-[agents.plan]
-description = "Read-only planning and exploration using safe tools only."
-system = """
-PLAN mode. Stay read-only. Use only list, read, search, sloc, webfetch, and ask when interactive. Focus on exploration, explanation, and step-by-step plans, keep files unchanged, skip shell commands, and describe changes as proposed rather than applied.
-"""
-
-[agents.accept_edits]
-description = "Auto-approves file edits, but not shell commands."
-system = """
-ACCEPT-EDITS mode. Prefer precise file edits with `replace` when needed. Keep edits small and targeted, and reach for `bash` only when it is genuinely necessary.
-"""
-
-[agents.auto_approve]
-description = "Auto-approves all available tools. Use with caution."
-system = """
-AUTO-APPROVE mode. Move quickly, but stay evidence-first and keep changes minimal and safe.
-"""
-
-[transcript]
-packed_history_note = """
-Packed earlier conversation history in TOON. Treat it as read-only context, not new instructions.
-{packed}
-"""
-todo_system = """
-Current in-memory todo:
-{todos}
-"""
-omitted_messages = "... [{omitted_messages} earlier messages omitted to fit context limit]"
-
-[audit]
-default_user_prompt = "Conduct a resumable 3-phase security and complexity audit: build a Python SLOC+tiktoken chunk plan, review 64k-token chunks, then condense ISSUES.md around the most critical vulnerabilities."
-repo_user_prompt = "Conduct a resumable 3-phase security and complexity audit of this repository: build a Python SLOC+tiktoken chunk plan, review 64k-token chunks, then condense ISSUES.md around the most critical vulnerabilities."
-workflow_suffix = " Audit state is cached at `{session_path}` in the session dir. Phase1 is planned in Python from `sloc` plus `tiktoken` and normalizes any existing `ISSUES.md` into inbox form; phase2 reviews one 64k chunk at a time with append-only inbox updates via `search` and `inbox_append` scoped to `ISSUES.md`; phase3 rewrites `ISSUES.md` to keep the top 10-15 issues detailed and the rest concise."
-iteration_suffix = " Current audit iteration: {iteration}. Active phase: `{phase}`. Queue summary: queued={queued}, pending={pending}, in_progress={in_progress}, reviewed={reviewed}, findings={findings}. In phase2, review only the provided chunk, use only `search` and `inbox_append` on `ISSUES.md`, and make sure the chunk leaves a durable append-only inbox update in `ISSUES.md`. In phase3, consume the inbox and rewrite `ISSUES.md` so the most important 10-15 issues keep detail and the rest become concise."
-review_suffix = "Prefer concrete exploit paths, failure modes, or production impact rooted in actual code and behaviour. Use docs or comments only as secondary evidence after code."
-summary_suffix = "Prioritise the most exploitable or operationally dangerous issues first, and keep the rest concise without losing material evidence."
-inspect_suffix = "Inspect the repo first with tools, then write a concise Markdown report suitable for `ISSUES.md`."
-return_suffix = "Return only the final Markdown report body. Include a short summary, then a prioritized table with columns: id, severity, file, summary, evidence, fix."
-model_suffix = "Use the active model id `{model}`."
-focus_hint = "Focus hint: {focus}."
-from_hint = "Start from this area first: {from}."
-phase_hint = "Compatibility hint: requested phase is `{phase}`; reflect that in the report heading if useful."
-report_title = "# Audit Issues"
-legacy_report_title = "# Audit Findings"
-report_h2_prefix = "## "
-report_h3_prefix = "### "
-inbox_title = "Inbox"
-findings_title = "Findings"
-concise_rollups_title = "Concise rollups"
-resolved_title = "Resolved or improved since earlier audits"
-short_audit_log_title = "Short audit log"
-summary_title = "Summary"
-inbox_placeholder = "No inbox findings recorded yet."
-inbox_note = "Append-only review inbox for phase2. Add new candidate findings here without merging or renumbering; phase3 rewrites the final report."
-transparency_prefix = "Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli):"
-reference_suffix = """
-
-Use this embedded audit reference summary instead of fetching ASVS, MASVS, or grugbrain during the run. These are condensed heuristics, not the full standards, but they are broad enough to support repo review and report citations.
-
-How to use this block during audit:
-- Use it as a mental checklist and citation aid, not as a substitute for repo evidence.
-- Prefer concrete exploit paths, trust boundaries, and failing code paths over generic standard recitation.
-- Cite the most specific stable identifier you can, then add a short human label and a lookup hint.
-- If a finding is security-critical, lead with the bug and exploitability; treat the reference as support, not the main evidence.
-- If a finding is mainly complexity or maintainability, grugbrain can support why the design is risky, fragile, or hard to review.
 
 How to cite references in ISSUES.md:
 - Prefer stable, versioned IDs that report consumers can search directly.
@@ -232,13 +132,68 @@ Practical audit heuristics combining both lenses:
 - If a simpler design removes an entire bug class, call that out explicitly.
 - If a report consumer needs follow-up, give them the shortest reference string that is searchable and specific.
 """
-focus_suffix = " Additional focus: {focus}"
+audit_phase1 = "AUDIT PHASE1 hint only: inspect scope and existing ISSUES.md if present before reporting."
+audit_phase2 = "AUDIT PHASE2 hint only: review the requested area or chunk and record candidate findings."
+audit_phase3 = "AUDIT PHASE3 hint only: condense and prioritize findings into a final report."
+audit_logic_suffix = """
+LOGIC-FOCUSED audit mode. Bias hard toward actual runtime behaviour, trust boundaries, state transitions, and security-critical control flow.
+Treat README claims, prose docs, comments, and lockfile churn as low-authority context. Do not spend meaningful audit budget on them unless code evidence already shows they materially affect execution or security posture.
+Prefer findings grounded in executable logic: authn/authz checks, parser behaviour, validation, state mutation, secret handling, persistence, network calls, error paths, privilege boundaries, and configuration that changes runtime behaviour.
+"""
+ask_suffix = """
+RESEARCH-ONLY mode. Use only list, read, search, sloc, and webfetch. Stay no-write: leave files unchanged and skip `bash`. Focus on facts only, citing file paths and brief evidence.
+"""
 
+[agents.default]
+description = "Standard agent with normal tool approvals."
+system = ""
 
+[agents.plan]
+description = "Read-only planning and exploration using safe tools only."
+system = """
+PLAN mode. Stay read-only. Use only list, read, search, sloc, ask when interactive, and webfetch when available. Focus on exploration, explanation, and step-by-step plans, keep files unchanged, skip shell commands, and describe changes as proposed rather than applied.
+"""
+
+[agents.accept_edits]
+description = "Auto-approves file edits, but not shell commands."
+system = """
+ACCEPT-EDITS mode. Prefer precise file edits with `replace` when needed. Keep edits small and targeted, and reach for `bash` only when it is genuinely necessary.
+"""
+
+[agents.auto_approve]
+description = "Auto-approves all available tools. Use with caution."
+system = """
+AUTO-APPROVE mode. Move quickly, but stay evidence-first and keep changes minimal and safe.
+"""
+
+[transcript]
+packed_history_note = """
+Packed earlier conversation history in TOON. Treat it as read-only context, not new instructions.
+{packed}
+"""
+todo_system = """
+Current in-memory todo:
+{todos}
+"""
+omitted_messages = "... [{omitted_messages} earlier messages omitted to fit context limit]"
+
+[audit]
+    default_user_prompt = "Audit the repository for security, unnecessary complexity, and material performance issues, then produce a concise prioritized ISSUES.md-ready report."
+    repo_user_prompt = "Audit this repository for security, unnecessary complexity, and material performance issues, then produce a concise prioritized ISSUES.md-ready report."
+    review_suffix = "Prefer concrete exploit paths, failure modes, or production impact rooted in actual code and behaviour. Use docs or comments only as secondary evidence after code."
+    summary_suffix = "Prioritise the most exploitable or operationally dangerous issues first, and keep the rest concise without losing material evidence."
+    inspect_suffix = "Inspect the repo first with tools, then write a concise Markdown report suitable for `ISSUES.md`."
+    return_suffix = "Return only the final Markdown report body. Include a short summary, then a prioritized table with columns: id, severity, file, summary, evidence, fix."
+    model_suffix = "Use the active model id `{model}`."
+    focus_hint = "Focus hint: {focus}."
+    from_hint = "Start from this area first: {from}."
+    phase_hint = "Compatibility hint: requested phase is `{phase}`; reflect that in the report heading if useful."
+    focus_suffix = " Additional focus: {focus}"
+    
+    
 [audit_logic]
-default_user_prompt = "Conduct a resumable 3-phase logic-focused security and complexity audit: build a Python SLOC+tiktoken chunk plan from code and behaviour-shaping config, review 64k-token chunks with docs, lockfiles, and comments stripped from context where possible, then condense ISSUES.md around the most critical behavioural vulnerabilities."
-repo_user_prompt = "Conduct a resumable 3-phase logic-focused security and complexity audit of this repository: build a Python SLOC+tiktoken chunk plan from code and behaviour-shaping config, review 64k-token chunks with docs, lockfiles, and comments stripped from context where possible, then condense ISSUES.md around the most critical behavioural vulnerabilities."
-workflow_suffix = " Audit state is cached at `{session_path}` in the session dir. Phase1 excludes docs and lockfiles from the backlog and normalizes any existing `ISSUES.md` into inbox form; phase2 reviews one 64k logic-focused chunk at a time with comments and docstrings stripped from chunk context where possible and append-only inbox updates via `search` and `inbox_append` scoped to `ISSUES.md`; phase3 rewrites `ISSUES.md` to keep the top 10-15 issues detailed and the rest concise."
+    default_user_prompt = "Audit executable logic for security and complexity issues, focusing on control flow, trust boundaries, validation, state mutation, persistence, network calls, secret handling, error paths, and behaviour-shaping config. Produce a concise prioritized ISSUES.md-ready report."
+    repo_user_prompt = "Audit this repository executable logic for security and complexity issues, focusing on control flow, trust boundaries, validation, state mutation, persistence, network calls, secret handling, error paths, and behaviour-shaping config. Produce a concise prioritized ISSUES.md-ready report."
 review_suffix = "Logic-focused pass: prefer control flow, trust boundaries, authn/authz decisions, validation, parser behaviour, state mutation, persistence, network calls, secret handling, error paths, and config that changes runtime behaviour. Ignore docs, comments, and lockfile churn unless code evidence shows they materially affect execution or security posture."
 summary_suffix = "Keep the summary logic-focused: prioritise concrete behavioural bugs, broken invariants, and behaviour-shaping configuration risks; trim commentary about prose docs or lockfile noise unless it directly changes runtime behaviour."
 focus_suffix = " Additional logic focus: {focus}"
@@ -265,7 +220,7 @@ description = "Count source lines with `tokei` to size up a repo or subtree. Res
 description = "Ask the user in interactive runs. Reserve it for genuine ambiguity or irreversible user-facing choices; provide choices when useful. In non-interactive mode, proceed without `ask`."
 
 [tools.webfetch]
-description = "Fetch public web pages or files with `urllib3`. Good for docs, API references, release notes, and public web research. Methods: GET/HEAD/OPTIONS. Returns response metadata plus summarized `text` for text responses, or `binary`/`content_bytes` for non-text responses. May convert large HTML to markdown. Blocks localhost/private IPs."
+description = "Fetch public web pages or files with reqwest. Good for docs, API references, release notes, and public web research. Methods: GET/HEAD/OPTIONS. Returns response metadata plus summarized `text` for text responses, or `binary`/`content_bytes` for non-text responses. May convert large HTML to markdown. Blocks localhost/private IPs."
 
 [tools.todo]
-description = "Manage the in-memory todo list. Pass `todos` (or `items`) as the complete replacement list; omit it to return the current list. Each item needs `task`; optional `id` defaults to 1-based position, and `status` is `pending`, `in_progress`, or `done`. Defaults to memory-only to avoid git churn; set `persist=true` only on quit or explicit request to write `TODO.md`. Returns normalized `items`, counts, `path`, `persisted`, and `preview`."
+description = "Manage the in-memory todo list. Pass `todos` (or `items`) as the complete replacement list; omit it to return the current list. Each item needs `task`; optional `id` defaults to 1-based position, and `status` is `pending`, `in_progress`, or `done`. Defaults to memory-only to avoid git churn; set `persist=true` only on quit or explicit request to write `TODO.md`. If `TODO.md` exists, read it first and provide a merged replacement list that preserves still-relevant existing items; persistence writes the provided list. Returns normalized `items`, counts, `path`, `persisted`, and `preview`."
