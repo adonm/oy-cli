@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+expression: "tools::preview_tool_output(\"read\", &value)"
+---
+src/main.rs:1-3 · 3/10 lines · 7 more
+1 │ fn main() {
+2 │     println!("hi");
+3 │ }
+  … read truncated: 7 more lines available

@@ -1,0 +1,5 @@
+---
+source: tests/snapshots.rs
+expression: "tools::preview_tool_output(\"webfetch\", &value)"
+---
+HTTP 200 · markdown · 2 lines · https://example.com/docs

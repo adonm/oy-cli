@@ -1,0 +1,5 @@
+---
+source: tests/snapshots.rs
+expression: "tools::preview_tool_output(\"bash\", &value)"
+---
+✗ exit 2 · stdout 0 lines · stderr 2 lines · missing file

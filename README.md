@@ -65,6 +65,7 @@ oy model local-8080::qwen3.5
 ```bash
 oy audit
 oy audit auth --chunk-lines 4000
+oy audit --standards "auth and storage"
 ```
 
 ## Model setup
@@ -97,13 +98,24 @@ oy chat
 - Alt+Enter or Shift+Enter inserts a newline
 - pasted multiline text stays editable before submit
 - `/help` lists commands
+- `/status` shows model, workspace, approvals, context, and todos
 - short aliases include `/q`, `/h`, `/m`, `/t`, `/u`
 
 `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed.
 
 ## Safety and approval modes
 
-`oy` can run shell commands and modify files with your permissions. `bash` inherits your environment, so git, cloud, and SSH credentials visible to your shell are visible to commands.
+`oy` is not a sandbox. It can run shell commands and modify files with your permissions. `bash` inherits your environment, so git, cloud, SSH, package registry, and Docker credentials visible to your shell may be visible to approved commands. Model providers may receive prompts, source snippets, tool output, and command output.
+
+For untrusted repositories, start read-only and contained:
+
+```bash
+oy chat --agent plan
+docker run --rm -it -v "$PWD:/workspace:ro" -w /workspace oy-image oy chat --agent plan
+docker run --rm -it -v "$PWD:/workspace:rw" -w /workspace -e OPENAI_API_KEY oy-image oy chat
+```
+
+Avoid mounting the host Docker socket into AI-assisted containers; it is usually host-root-equivalent. Avoid `auto-approve` and `OY_YOLO` unless the workspace, model, and requested task are trusted.
 
 | Mode | File edits | Bash | Notes |
 |---|---:|---:|---|
@@ -112,7 +124,7 @@ oy chat
 | `accept-edits` | auto | asks | Useful for trusted mechanical edits |
 | `auto-approve` | auto | auto | Highest-risk unattended mode |
 | `/ask` | unavailable | unavailable | No-write research; public `webfetch` allowed |
-| `OY_YOLO=1` | auto | auto | Environment override for approvals |
+| `OY_YOLO=1` | auto | auto | Legacy environment override for approvals |
 
 Non-interactive mode cannot pause for approval or questions. Use explicit agents/env only in workspaces and automation contexts you trust.
 
@@ -177,6 +189,13 @@ Override the config file path with `OY_CONFIG` and workspace with `OY_ROOT`.
 | `LOCAL_API_KEY` | Local `local-<port>` shim key; falls back to `OPENAI_API_KEY` then `oy-local` |
 | `OPENCODE_API_KEY` | OpenCode shim key; falls back to `~/.local/share/opencode/auth.json` |
 | `AWS_REGION`, `AWS_DEFAULT_REGION` | Bedrock-Mantle region detection |
+
+## Troubleshooting
+
+- No model configured: run `oy model copilot::gpt-4.1-mini`, set `OPENAI_API_KEY` and run `oy model gpt-4.1-mini`, or use `oy model local-8080::qwen3.5`.
+- Tool denied: switch agent mode only if trusted, for example `oy chat --agent accept-edits` for automatic file edits.
+- Model call failed: check `oy model`, provider credentials, routing shim, and local server availability.
+- Untrusted repo: use `oy chat --agent plan` first, preferably inside a container or VM.
 
 ## Development
 

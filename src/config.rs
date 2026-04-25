@@ -1,4 +1,4 @@
-use crate::tools::ToolPolicy;
+use crate::tools::{Approval, ToolPolicy};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use dirs::config_dir;
@@ -22,6 +22,33 @@ pub struct SessionFile {
     pub agent: String,
     pub saved_at: String,
     pub transcript: serde_json::Value,
+    #[serde(default)]
+    pub todos: Vec<crate::tools::TodoItem>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ContextConfig {
+    pub limit_tokens: usize,
+    pub output_reserve_tokens: usize,
+    pub safety_reserve_tokens: usize,
+    pub auto_compact: bool,
+    pub trigger_ratio: f64,
+    pub recent_messages: usize,
+    pub tool_output_tokens: usize,
+    pub summary_tokens: usize,
+}
+
+impl ContextConfig {
+    pub fn input_budget_tokens(self) -> usize {
+        self.limit_tokens
+            .saturating_sub(self.output_reserve_tokens)
+            .saturating_sub(self.safety_reserve_tokens)
+            .max(1)
+    }
+
+    pub fn trigger_tokens(self) -> usize {
+        ((self.input_budget_tokens() as f64) * self.trigger_ratio) as usize
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -205,13 +232,27 @@ pub fn agent_profile(agent: &str) -> Result<AgentProfile> {
 
 pub fn tool_policy(agent: &str) -> ToolPolicy {
     let profile = agent_profile(agent).ok();
+    let read_only = profile
+        .as_ref()
+        .is_some_and(|p| p.tool_mode == ToolMode::ReadOnly);
+    if read_only {
+        return ToolPolicy::read_only();
+    }
+
     let yolo = yolo_enabled() || profile.as_ref().is_some_and(|p| p.yolo);
     ToolPolicy {
-        read_only: profile
-            .as_ref()
-            .is_some_and(|p| p.tool_mode == ToolMode::ReadOnly),
-        auto_approve_edits: yolo || profile.as_ref().is_some_and(|p| p.auto_approve_edits),
-        auto_approve_bash: yolo || profile.as_ref().is_some_and(|p| p.auto_approve_bash),
+        read_only: false,
+        files_write: if yolo || profile.as_ref().is_some_and(|p| p.auto_approve_edits) {
+            Approval::Auto
+        } else {
+            Approval::Ask
+        },
+        shell: if yolo || profile.as_ref().is_some_and(|p| p.auto_approve_bash) {
+            Approval::Auto
+        } else {
+            Approval::Ask
+        },
+        network: true,
     }
 }
 
@@ -301,6 +342,22 @@ pub fn non_interactive() -> bool {
 
 pub fn can_prompt() -> bool {
     std::io::stdin().is_terminal() && !non_interactive()
+}
+
+pub fn context_config() -> ContextConfig {
+    let limit_tokens = parse_usize_env("OY_CONTEXT_LIMIT", 128_000).max(1_000);
+    let output_reserve_tokens = parse_usize_env("OY_CONTEXT_OUTPUT_RESERVE", 12_000);
+    let safety_reserve_tokens = parse_usize_env("OY_CONTEXT_SAFETY_RESERVE", 4_000);
+    ContextConfig {
+        limit_tokens,
+        output_reserve_tokens,
+        safety_reserve_tokens,
+        auto_compact: env_flag("OY_AUTO_COMPACT", true),
+        trigger_ratio: parse_f64_env("OY_COMPACT_TRIGGER", 0.80).clamp(0.10, 1.0),
+        recent_messages: parse_usize_env("OY_COMPACT_RECENT_MESSAGES", 16).max(1),
+        tool_output_tokens: parse_usize_env("OY_COMPACT_TOOL_OUTPUT_TOKENS", 4_000).max(256),
+        summary_tokens: parse_usize_env("OY_COMPACT_SUMMARY_TOKENS", 8_000).max(512),
+    }
 }
 
 pub fn active_system_prompt(interactive: bool, agent: &str) -> String {
@@ -444,6 +501,21 @@ fn parse_duration_env(name: &str, default: u64) -> u64 {
     parse_duration_seconds(&value).unwrap_or(default)
 }
 
+fn parse_usize_env(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_f64_env(name: &str, default: f64) -> f64 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(default)
+}
+
 pub fn parse_duration_seconds(value: &str) -> Result<u64> {
     let value = value.trim();
     if let Some(num) = value.strip_suffix('h') {
@@ -532,5 +604,17 @@ mod tests {
                 .unwrap()
                 .contains("You are oy")
         );
+    }
+
+    #[test]
+    fn session_file_loads_legacy_without_todos() {
+        let raw = r#"{
+            "model": "gpt-test",
+            "agent": "default",
+            "saved_at": "2026-01-01T00:00:00",
+            "transcript": {"messages": []}
+        }"#;
+        let file: SessionFile = serde_json::from_str(raw).unwrap();
+        assert!(file.todos.is_empty());
     }
 }

@@ -1,8 +1,11 @@
+# Rust build artifacts
+target/
+
 # Python bytecode
 __pycache__/
 *.py[cod]
 
-# Packaging/build artifacts
+# Python packaging/build artifacts
 *.egg-info/
 .eggs/
 dist/
@@ -29,11 +32,16 @@ htmlcov/
 # Logs
 *.log
 
-# Local audit artifacts
-.tmp/
-
-# Rust build artifacts
-target/
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
 
 # Local config/session smoke-test artifacts
 .config/oy-rust/
+
+# Local audit artifacts
+.tmp/

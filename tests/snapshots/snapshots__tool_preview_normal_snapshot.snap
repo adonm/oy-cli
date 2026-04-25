@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: "tools::preview_tool_output(\"search\", &value)"
+---
+2 matches in 2 files for /run_prompt/
+  src/agent.rs:283:1: pub async fn run_prompt(...)

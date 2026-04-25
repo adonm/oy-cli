@@ -1,0 +1,5 @@
+---
+source: tests/snapshots.rs
+expression: "tools::preview_tool_output(\"replace\", &value)"
+---
+2 files changed · 3 replacements · src/lib.rs, src/main.rs

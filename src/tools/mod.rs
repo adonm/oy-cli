@@ -10,6 +10,7 @@ use regex::Regex;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
@@ -64,23 +65,47 @@ pub struct ToolContext {
     pub todos: Vec<TodoItem>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Approval {
+    Deny,
+    Ask,
+    Auto,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ToolPolicy {
     pub read_only: bool,
-    pub auto_approve_edits: bool,
-    pub auto_approve_bash: bool,
+    pub files_write: Approval,
+    pub shell: Approval,
+    pub network: bool,
 }
 
 impl ToolPolicy {
-    pub fn can_mutate(self) -> bool {
-        !self.read_only
+    pub fn read_only() -> Self {
+        Self {
+            read_only: true,
+            files_write: Approval::Deny,
+            shell: Approval::Deny,
+            network: true,
+        }
     }
 
-    fn auto_approves(self, tool: &str) -> bool {
+    pub fn approval(self, tool: &str) -> Approval {
+        if self.read_only && matches!(tool, "replace" | "bash" | "todo") {
+            return Approval::Deny;
+        }
         match tool {
-            "replace" => self.auto_approve_edits,
-            "bash" => self.auto_approve_bash,
-            _ => false,
+            "replace" | "todo" => self.files_write,
+            "bash" => self.shell,
+            _ => Approval::Deny,
+        }
+    }
+
+    fn path_approval(self) -> Approval {
+        if self.files_write == Approval::Auto && self.shell == Approval::Auto {
+            Approval::Auto
+        } else {
+            Approval::Ask
         }
     }
 }
@@ -220,10 +245,107 @@ fn default_todo_status() -> String {
     "pending".to_string()
 }
 
-fn spec(name: &str, schema: Value) -> Tool {
-    Tool::new(name)
-        .with_description(crate::config::tool_description(name))
-        .with_schema(schema)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolGate {
+    Always,
+    Interactive,
+    Network,
+    FilesWrite,
+    Shell,
+}
+
+struct ToolDef {
+    name: &'static str,
+    gate: ToolGate,
+    schema: fn() -> Value,
+    summary: fn(&Value) -> String,
+    preview: fn(&Value) -> String,
+}
+
+const TOOL_DEFS: &[ToolDef] = &[
+    ToolDef {
+        name: "list",
+        gate: ToolGate::Always,
+        schema: schema_list,
+        summary: summary_list,
+        preview: preview_list,
+    },
+    ToolDef {
+        name: "read",
+        gate: ToolGate::Always,
+        schema: schema_read,
+        summary: summary_read,
+        preview: preview_read,
+    },
+    ToolDef {
+        name: "search",
+        gate: ToolGate::Always,
+        schema: schema_search,
+        summary: summary_search,
+        preview: preview_search,
+    },
+    ToolDef {
+        name: "sloc",
+        gate: ToolGate::Always,
+        schema: schema_sloc,
+        summary: summary_sloc,
+        preview: preview_sloc,
+    },
+    ToolDef {
+        name: "todo",
+        gate: ToolGate::Always,
+        schema: schema_todo,
+        summary: summary_todo,
+        preview: preview_todo,
+    },
+    ToolDef {
+        name: "ask",
+        gate: ToolGate::Interactive,
+        schema: schema_ask,
+        summary: summary_ask,
+        preview: preview_ask,
+    },
+    ToolDef {
+        name: "webfetch",
+        gate: ToolGate::Network,
+        schema: schema_webfetch,
+        summary: summary_webfetch,
+        preview: preview_webfetch,
+    },
+    ToolDef {
+        name: "replace",
+        gate: ToolGate::FilesWrite,
+        schema: schema_replace,
+        summary: summary_replace,
+        preview: preview_replace,
+    },
+    ToolDef {
+        name: "bash",
+        gate: ToolGate::Shell,
+        schema: schema_bash,
+        summary: summary_bash,
+        preview: preview_bash,
+    },
+];
+
+fn tool_def(name: &str) -> Option<&'static ToolDef> {
+    TOOL_DEFS.iter().find(|def| def.name == name)
+}
+
+fn tool_enabled(ctx: &ToolContext, def: &ToolDef) -> bool {
+    match def.gate {
+        ToolGate::Always => true,
+        ToolGate::Interactive => ctx.interactive,
+        ToolGate::Network => ctx.policy.network,
+        ToolGate::FilesWrite => !ctx.policy.read_only && ctx.policy.files_write != Approval::Deny,
+        ToolGate::Shell => !ctx.policy.read_only && ctx.policy.shell != Approval::Deny,
+    }
+}
+
+fn spec(def: &ToolDef) -> Tool {
+    Tool::new(def.name)
+        .with_description(crate::config::tool_description(def.name))
+        .with_schema((def.schema)())
 }
 
 fn object(properties: Value, required: &[&str]) -> Value {
@@ -253,102 +375,113 @@ fn todo_item_schema() -> Value {
     )
 }
 
+fn schema_list() -> Value {
+    object(
+        json!({
+            "path": {"type": "string", "default": "*"},
+            "exclude": exclude_schema(),
+            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
+        }),
+        &[],
+    )
+}
+
+fn schema_read() -> Value {
+    object(
+        json!({
+            "path": {"type": "string"},
+            "offset": {"type": "integer", "default": 1},
+            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
+        }),
+        &["path"],
+    )
+}
+
+fn schema_search() -> Value {
+    object(
+        json!({
+            "pattern": {"type": "string"},
+            "path": {"type": "string", "default": "."},
+            "exclude": exclude_schema(),
+            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
+        }),
+        &["pattern"],
+    )
+}
+
+fn schema_sloc() -> Value {
+    object(
+        json!({
+            "path": {"type": "string", "default": "."},
+            "exclude": exclude_schema()
+        }),
+        &[],
+    )
+}
+
+fn schema_todo() -> Value {
+    object(
+        json!({
+            "todos": {"type": "array", "description": "Complete replacement todo list. Alias: items. Omit to return current list.", "items": todo_item_schema()},
+            "items": {"type": "array", "description": "Alias for todos.", "items": todo_item_schema()},
+            "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn."}
+        }),
+        &[],
+    )
+}
+
+fn schema_ask() -> Value {
+    object(
+        json!({
+            "question": {"type": "string"},
+            "choices": {"type": ["array", "null"], "items": {"type": "string"}}
+        }),
+        &["question"],
+    )
+}
+
+fn schema_webfetch() -> Value {
+    object(
+        json!({
+            "url": {"type": "string"},
+            "method": {"type": "string", "default": "GET"},
+            "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+            "follow_redirects": {"type": "boolean", "default": false},
+            "timeout_seconds": {"type": "integer", "default": DEFAULT_WEBFETCH_TIMEOUT_SECONDS}
+        }),
+        &["url"],
+    )
+}
+
+fn schema_replace() -> Value {
+    object(
+        json!({
+            "pattern": {"type": "string"},
+            "replacement": {"type": "string"},
+            "path": {"type": "string", "default": "."},
+            "exclude": exclude_schema(),
+            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
+        }),
+        &["pattern", "replacement"],
+    )
+}
+
+fn schema_bash() -> Value {
+    object(
+        json!({
+            "command": {"type": "string"},
+            "timeout_seconds": {"type": "integer", "default": 120}
+        }),
+        &["command"],
+    )
+}
+
 pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
-    let mut tools = vec![
-        spec(
-            "list",
-            object(
-                json!({
-                    "path": {"type": "string", "default": "*"},
-                    "exclude": exclude_schema(),
-                    "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                }),
-                &[],
-            ),
-        ),
-        spec(
-            "read",
-            object(
-                json!({
-                    "path": {"type": "string"},
-                    "offset": {"type": "integer", "default": 1},
-                    "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                }),
-                &["path"],
-            ),
-        ),
-        spec(
-            "search",
-            object(
-                json!({
-                    "pattern": {"type": "string"},
-                    "path": {"type": "string", "default": "."},
-                    "exclude": exclude_schema(),
-                    "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                }),
-                &["pattern"],
-            ),
-        ),
-        spec(
-            "sloc",
-            object(
-                json!({
-                    "path": {"type": "string", "default": "."},
-                    "exclude": exclude_schema()
-                }),
-                &[],
-            ),
-        ),
-        spec(
-            "todo",
-            object(
-                json!({
-                    "todos": {"type": "array", "description": "Complete replacement todo list. Alias: items. Omit to return current list.", "items": todo_item_schema()},
-                    "items": {"type": "array", "description": "Alias for todos.", "items": todo_item_schema()},
-                    "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn."}
-                }),
-                &[],
-            ),
-        ),
-    ];
-
-    if ctx.interactive {
-        tools.push(spec(
-            "ask",
-            object(
-                json!({
-                    "question": {"type": "string"},
-                    "choices": {"type": ["array", "null"], "items": {"type": "string"}}
-                }),
-                &["question"],
-            ),
-        ));
-    }
-
-    if ctx.policy.can_mutate() {
-        tools.extend([
-            spec("webfetch", object(json!({
-                "url": {"type": "string"},
-                "method": {"type": "string", "default": "GET"},
-                "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
-                "follow_redirects": {"type": "boolean", "default": false},
-                "timeout_seconds": {"type": "integer", "default": DEFAULT_WEBFETCH_TIMEOUT_SECONDS}
-            }), &["url"])),
-            spec("replace", object(json!({
-                "pattern": {"type": "string"},
-                "replacement": {"type": "string"},
-                "path": {"type": "string", "default": "."},
-                "exclude": exclude_schema(),
-                "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-            }), &["pattern", "replacement"])),
-            spec("bash", object(json!({
-                "command": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "default": 120}
-            }), &["command"])),
-        ]);
-    }
-
-    tools
+    TOOL_DEFS
+        .iter()
+        .filter(|def| tool_enabled(ctx, def))
+        .map(spec)
+        .collect()
 }
 
 pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
@@ -385,18 +518,45 @@ fn note_tool(name: &str, args: &Value) {
 }
 
 fn tool_call_summary(name: &str, args: &Value) -> String {
-    match name {
-        "list" => compact_kvs(args, &[("path", 60), ("exclude", 40)]),
-        "read" => compact_kvs(args, &[("path", 70), ("offset", 12), ("limit", 12)]),
-        "search" => compact_kvs(args, &[("pattern", 70), ("path", 50), ("exclude", 35)]),
-        "replace" => compact_kvs(args, &[("path", 45), ("pattern", 45), ("replacement", 45)]),
-        "sloc" => compact_kvs(args, &[("path", 70), ("exclude", 40)]),
-        "bash" => preview_value(args.get("command").unwrap_or(&Value::Null), 100),
-        "webfetch" => compact_kvs(args, &[("method", 8), ("url", 100)]),
-        "ask" => preview_value(args.get("question").unwrap_or(&Value::Null), 100),
-        "todo" => todo_call_summary(args),
-        _ => preview_value(args, 120),
-    }
+    tool_def(name)
+        .map(|def| (def.summary)(args))
+        .unwrap_or_else(|| preview_value(args, 120))
+}
+
+fn summary_list(args: &Value) -> String {
+    compact_kvs(args, &[("path", 60), ("exclude", 40)])
+}
+
+fn summary_read(args: &Value) -> String {
+    compact_kvs(args, &[("path", 70), ("offset", 12), ("limit", 12)])
+}
+
+fn summary_search(args: &Value) -> String {
+    compact_kvs(args, &[("pattern", 70), ("path", 50), ("exclude", 35)])
+}
+
+fn summary_replace(args: &Value) -> String {
+    compact_kvs(args, &[("path", 45), ("pattern", 45), ("replacement", 45)])
+}
+
+fn summary_sloc(args: &Value) -> String {
+    compact_kvs(args, &[("path", 70), ("exclude", 40)])
+}
+
+fn summary_bash(args: &Value) -> String {
+    preview_value(args.get("command").unwrap_or(&Value::Null), 100)
+}
+
+fn summary_webfetch(args: &Value) -> String {
+    compact_kvs(args, &[("method", 8), ("url", 100)])
+}
+
+fn summary_ask(args: &Value) -> String {
+    preview_value(args.get("question").unwrap_or(&Value::Null), 100)
+}
+
+fn summary_todo(args: &Value) -> String {
+    todo_call_summary(args)
 }
 
 fn compact_kvs(args: &Value, keys: &[(&str, usize)]) -> String {
@@ -441,18 +601,9 @@ fn todo_call_summary(args: &Value) -> String {
 }
 
 pub fn preview_tool_output(name: &str, value: &Value) -> String {
-    match name {
-        "list" => preview_list(value),
-        "read" => preview_read(value),
-        "search" => preview_search(value),
-        "replace" => preview_replace(value),
-        "bash" => preview_bash(value),
-        "webfetch" => preview_webfetch(value),
-        "sloc" => preview_sloc(value),
-        "ask" => preview_ask(value),
-        "todo" => preview_todo(value),
-        _ => preview_generic(value),
-    }
+    tool_def(name)
+        .map(|def| (def.preview)(value))
+        .unwrap_or_else(|| preview_generic(value))
 }
 
 fn preview_value(value: &Value, max: usize) -> String {
@@ -475,6 +626,30 @@ fn value_bool(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn verbose_preview(body: impl FnOnce() -> String) -> Option<String> {
+    crate::ui::is_verbose().then(body)
+}
+
+fn with_verbose(summary: String, body: impl FnOnce() -> String) -> String {
+    if let Some(body) = verbose_preview(body).filter(|body| !body.trim().is_empty()) {
+        format!("{summary}\n{body}")
+    } else {
+        summary
+    }
+}
+
+fn count_lines(text: &str) -> usize {
+    text.lines().count()
+}
+
+fn count_files_in_matches(matches: &[Value]) -> usize {
+    matches
+        .iter()
+        .filter_map(|item| item.get("path").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
 fn append_preview_lines(out: &mut String, text: &str, indent: &str) {
     let line_count = text.lines().count();
     for line in text.lines().take(PREVIEW_LINES) {
@@ -494,11 +669,17 @@ fn append_preview_lines(out: &mut String, text: &str, indent: &str) {
 }
 
 fn preview_generic(value: &Value) -> String {
-    crate::ui::clamp_lines(
-        &encode_tool_output(value),
-        PREVIEW_LINES,
-        PREVIEW_LINE_CHARS,
-    )
+    if crate::ui::is_verbose() {
+        crate::ui::clamp_lines(
+            &encode_tool_output(value),
+            PREVIEW_LINES,
+            PREVIEW_LINE_CHARS,
+        )
+    } else if !value_bool(value, "ok") && value.get("ok").is_some() {
+        format!("error: {}", value_str(value, "error"))
+    } else {
+        preview_value(value, crate::ui::terminal_width().saturating_sub(4).max(40))
+    }
 }
 
 fn preview_list(value: &Value) -> String {
@@ -508,27 +689,29 @@ fn preview_list(value: &Value) -> String {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let total = value_usize(value, "count");
-    let mut out = format!(
+    let summary = format!(
         "{} item{} in {}",
         total,
         plural(total),
         value_str(value, "path")
     );
-    for item in items.iter().take(PREVIEW_ITEMS) {
-        let _ = write!(
-            out,
-            "\n  {}",
-            crate::ui::truncate_chars(item.as_str().unwrap_or(""), PREVIEW_LINE_CHARS)
-        );
-    }
-    let shown = items.len().min(PREVIEW_ITEMS);
-    if total > shown || value_bool(value, "truncated") {
-        let remaining = total.saturating_sub(shown);
-        let _ = write!(out, "\n  … {remaining} more item{}", plural(remaining));
-    }
-    out
+    with_verbose(summary, || {
+        let mut out = String::new();
+        for item in items.iter().take(PREVIEW_ITEMS) {
+            let _ = write!(
+                out,
+                "\n  {}",
+                crate::ui::truncate_chars(item.as_str().unwrap_or(""), PREVIEW_LINE_CHARS)
+            );
+        }
+        let shown = items.len().min(PREVIEW_ITEMS);
+        if total > shown || value_bool(value, "truncated") {
+            let remaining = total.saturating_sub(shown);
+            let _ = write!(out, "\n  … {remaining} more item{}", plural(remaining));
+        }
+        out.trim_start().to_string()
+    })
 }
-
 fn preview_read(value: &Value) -> String {
     let path = value_str(value, "path");
     let offset = value_usize(value, "offset");
@@ -536,23 +719,30 @@ fn preview_read(value: &Value) -> String {
     let text = value_str(value, "text");
     let shown = text.lines().count();
     let end = offset.saturating_add(shown).saturating_sub(1);
-    let mut out = format!("{path}:{offset}-{end} ({line_count} lines)");
-    if text.is_empty() {
-        out.push_str("\n  <empty>");
+    let more = if value_bool(value, "truncated") {
+        format!(" · {} more", line_count.saturating_sub(end))
     } else {
-        append_preview_lines(&mut out, text, "  ");
-    }
-    if value_bool(value, "truncated") {
-        let hidden = line_count.saturating_sub(end);
-        let _ = write!(
-            out,
-            "\n  … read truncated: {hidden} more line{} available",
-            plural(hidden)
-        );
-    }
-    out
+        String::new()
+    };
+    let summary = format!("{path}:{offset}-{end} · {shown}/{line_count} lines{more}");
+    with_verbose(summary, || {
+        let mut out = String::new();
+        if text.is_empty() {
+            out.push_str("  <empty>");
+        } else {
+            out.push_str(&crate::ui::code(path, text, offset));
+        }
+        if value_bool(value, "truncated") {
+            let hidden = line_count.saturating_sub(end);
+            let _ = write!(
+                out,
+                "\n  … read truncated: {hidden} more line{} available",
+                plural(hidden)
+            );
+        }
+        out
+    })
 }
-
 fn preview_search(value: &Value) -> String {
     let matches = value
         .get("matches")
@@ -560,93 +750,154 @@ fn preview_search(value: &Value) -> String {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let total = value_usize(value, "match_count");
-    if matches.is_empty() {
-        return format!("0 matches for /{}/", value_str(value, "pattern"));
+    let files = count_files_in_matches(matches);
+    let summary = if total == 0 {
+        format!("0 matches for /{}/", value_str(value, "pattern"))
+    } else {
+        format!(
+            "{} {} in {} file{} for /{}/",
+            total,
+            if total == 1 { "match" } else { "matches" },
+            files,
+            plural(files),
+            value_str(value, "pattern")
+        )
+    };
+    if !crate::ui::is_verbose() {
+        return match matches.first() {
+            Some(item) => format!("{summary}\n  {}", format_search_hit(item)),
+            None => summary,
+        };
     }
-    let mut out = format!(
-        "{} match{} for /{}/",
-        total,
-        plural(total),
-        value_str(value, "pattern")
-    );
-    for item in matches.iter().take(PREVIEW_ITEMS) {
-        let path = value_str(item, "path");
-        let line = value_usize(item, "line_number");
-        let col = value_usize(item, "column");
-        let text = crate::ui::truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
-        let _ = write!(out, "\n  {path}:{line}:{col}: {text}");
-    }
-    if value
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let _ = write!(
-            out,
-            "\n  … {} more matches",
-            total.saturating_sub(matches.len().min(PREVIEW_ITEMS))
-        );
-    }
-    out
+    with_verbose(summary, || {
+        let mut out = String::new();
+        for item in matches.iter().take(PREVIEW_ITEMS) {
+            let _ = write!(out, "\n  {}", format_search_hit(item));
+        }
+        if value_bool(value, "truncated") {
+            let _ = write!(
+                out,
+                "\n  … {} more matches",
+                total.saturating_sub(matches.len().min(PREVIEW_ITEMS))
+            );
+        }
+        out.trim_start().to_string()
+    })
 }
 
+fn format_search_hit(item: &Value) -> String {
+    let path = value_str(item, "path");
+    let line = value_usize(item, "line_number");
+    let col = value_usize(item, "column");
+    let text = crate::ui::truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
+    format!("{path}:{line}:{col}: {text}")
+}
 fn preview_replace(value: &Value) -> String {
     let changed = value
         .get("changed_files")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let total_files = value_usize(value, "changed_file_count");
+    let files = total_files.max(changed.len());
     let replacements = value_usize(value, "replacement_count");
-    let mut out = format!(
+    let mut summary = format!(
         "{} file{} changed · {} replacement{}",
-        changed.len(),
-        plural(changed.len()),
+        files,
+        plural(files),
         replacements,
         plural(replacements)
     );
-    if changed.is_empty() {
-        out.push_str("\n  <no changes>");
-    } else {
-        for item in changed.iter().take(PREVIEW_ITEMS) {
-            let _ = write!(
-                out,
-                "\n  {} · {} repl",
-                value_str(item, "path"),
-                value_usize(item, "replacements")
-            );
-        }
-        if changed.len() > PREVIEW_ITEMS {
-            let _ = write!(out, "\n  … {} more files", changed.len() - PREVIEW_ITEMS);
-        }
+    if !crate::ui::is_verbose() && !changed.is_empty() && changed.len() <= 3 {
+        let names = changed
+            .iter()
+            .map(|item| value_str(item, "path"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push_str(&format!(" · {names}"));
     }
-    out
+    with_verbose(summary, || {
+        let mut out = String::new();
+        if changed.is_empty() {
+            out.push_str("  <no changes>");
+        } else {
+            for item in changed.iter().take(PREVIEW_ITEMS) {
+                let _ = write!(
+                    out,
+                    "\n  {} · {} repl",
+                    value_str(item, "path"),
+                    value_usize(item, "replacements")
+                );
+            }
+            if value_bool(value, "truncated") || files > changed.len() {
+                let _ = write!(
+                    out,
+                    "\n  … {} more files",
+                    files.saturating_sub(changed.len())
+                );
+            }
+        }
+        if let Some(diff) = value
+            .get("diff")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&crate::ui::diff(diff));
+        }
+        out.trim_start().to_string()
+    })
 }
-
 fn preview_bash(value: &Value) -> String {
     let code = value
         .get("returncode")
         .and_then(Value::as_i64)
         .unwrap_or(-1);
-    let mut out = format!("exit {code}");
-    for key in ["stdout", "stderr"] {
-        let text = value_str(value, key);
-        let truncated_key = format!("{key}_truncated");
-        let truncated = value_bool(value, &truncated_key);
-        if text.is_empty() {
-            if truncated {
-                let _ = write!(out, "\n{key}:\n  … {key} truncated");
-            }
-            continue;
-        }
-        let _ = write!(out, "\n{key}:");
-        append_preview_lines(&mut out, text, "  ");
-        if truncated {
-            let _ = write!(out, "\n  … {key} truncated for model context");
+    let stdout = value_str(value, "stdout");
+    let stderr = value_str(value, "stderr");
+    let icon = if code == 0 {
+        crate::ui::paint("32", "✓")
+    } else {
+        crate::ui::paint("31", "✗")
+    };
+    let mut summary = format!(
+        "{icon} exit {code} · stdout {} line{} · stderr {} line{}",
+        count_lines(stdout),
+        plural(count_lines(stdout)),
+        count_lines(stderr),
+        plural(count_lines(stderr))
+    );
+    if code != 0 {
+        if let Some(first_stderr) = stderr.lines().find(|line| !line.trim().is_empty()) {
+            summary.push_str(&format!(
+                " · {}",
+                crate::ui::truncate_chars(first_stderr.trim(), 80)
+            ));
         }
     }
-    out
+    with_verbose(summary, || {
+        let mut out = String::new();
+        for key in ["stdout", "stderr"] {
+            let text = value_str(value, key);
+            let truncated_key = format!("{key}_truncated");
+            let truncated = value_bool(value, &truncated_key);
+            if text.is_empty() {
+                if truncated {
+                    let _ = write!(out, "\n{key}:\n  … {key} truncated");
+                }
+                continue;
+            }
+            let _ = write!(out, "\n{key}:");
+            append_preview_lines(&mut out, text, "  ");
+            if truncated {
+                let _ = write!(out, "\n  … {key} truncated for model context");
+            }
+        }
+        out.trim_start().to_string()
+    })
 }
-
 fn preview_webfetch(value: &Value) -> String {
     let status = value
         .get("status_code")
@@ -659,24 +910,32 @@ fn preview_webfetch(value: &Value) -> String {
         .unwrap_or(false)
     {
         return format!(
-            "HTTP {status} {url}\n  binary · {} bytes",
+            "HTTP {status} · binary · {} bytes · {url}",
             value_usize(value, "content_bytes")
         );
     }
-    let mut out = format!("HTTP {status} {url}");
     let text = value_str(value, "text");
-    if !text.is_empty() {
-        let preview = crate::ui::clamp_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
-        for line in preview.lines() {
-            let _ = write!(out, "\n  {line}");
+    let format = value_str(value, "format");
+    let kind = if format.is_empty() { "text" } else { format };
+    let summary = format!(
+        "HTTP {status} · {kind} · {} line{} · {url}",
+        count_lines(text),
+        plural(count_lines(text))
+    );
+    with_verbose(summary, || {
+        let mut out = String::new();
+        if !text.is_empty() {
+            let preview = crate::ui::clamp_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
+            for line in preview.lines() {
+                let _ = write!(out, "\n  {line}");
+            }
         }
-    }
-    if value_bool(value, "truncated") {
-        out.push_str("\n  … response body truncated for model context");
-    }
-    out
+        if value_bool(value, "truncated") {
+            out.push_str("\n  … response body truncated for model context");
+        }
+        out.trim_start().to_string()
+    })
 }
-
 fn preview_sloc(value: &Value) -> String {
     let total = value
         .pointer("/output/Total/code")
@@ -706,16 +965,18 @@ fn preview_sloc(value: &Value) -> String {
         })
         .unwrap_or_default();
     langs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let mut out = format!(
+    let summary = format!(
         "{}: {total} code · {comments} comments · {blanks} blank",
         value_str(value, "path")
     );
-    for (name, code) in langs.into_iter().take(PREVIEW_ITEMS) {
-        let _ = write!(out, "\n  {name}: {code}");
-    }
-    out
+    with_verbose(summary, || {
+        let mut out = String::new();
+        for (name, code) in langs.into_iter().take(PREVIEW_ITEMS) {
+            let _ = write!(out, "\n  {name}: {code}");
+        }
+        out.trim_start().to_string()
+    })
 }
-
 fn preview_ask(value: &Value) -> String {
     let answer = value.as_str().unwrap_or_default();
     if answer.is_empty() {
@@ -729,14 +990,19 @@ fn preview_ask(value: &Value) -> String {
 }
 
 fn preview_todo(value: &Value) -> String {
-    value_str(value, "preview").to_string().if_empty_then(|| {
+    let preview = value_str(value, "preview").to_string().if_empty_then(|| {
         let items = value
             .get("items")
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         format_todo_preview_from_values(items)
-    })
+    });
+    if crate::ui::is_verbose() {
+        preview
+    } else {
+        preview.lines().next().unwrap_or_default().to_string()
+    }
 }
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
@@ -867,11 +1133,11 @@ fn todos_to_markdown(todos: &[TodoItem]) -> String {
 }
 
 fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
-    validate_pattern(&args.path)?;
+    require_path_pattern_approval(ctx, &args.path)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let shown_limit = args.limit.max(1);
     if args.path.contains("::") {
-        let items = list_archive_virtual(&ctx.root, &args.path, &exclude)?;
+        let items = list_archive_virtual(ctx, &args.path, &exclude)?;
         return Ok(json!({
             "path": args.path,
             "items": items.iter().take(shown_limit).cloned().collect::<Vec<_>>(),
@@ -880,12 +1146,12 @@ fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
             "exclude": args.exclude.as_ref().map(ExcludeArg::patterns)
         }));
     }
-    let target_for_archive = resolve_existing_path(&ctx.root, &args.path).ok();
+    let target_for_archive = resolve_existing_path(ctx, &args.path).ok();
     if target_for_archive
         .as_ref()
         .is_some_and(|path| path.is_file() && is_archive_path(path))
     {
-        let items = list_archive_virtual(&ctx.root, &format!("{}::", args.path), &exclude)?;
+        let items = list_archive_virtual(ctx, &format!("{}::", args.path), &exclude)?;
         return Ok(json!({
             "path": args.path,
             "items": items.iter().take(shown_limit).cloned().collect::<Vec<_>>(),
@@ -907,10 +1173,13 @@ fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
         out.sort();
         out
     } else {
-        let pattern = ctx.root.join(&args.path).to_string_lossy().to_string();
+        let pattern = if Path::new(&args.path).is_absolute() {
+            args.path.clone()
+        } else {
+            ctx.root.join(&args.path).to_string_lossy().to_string()
+        };
         let mut out = glob(&pattern)?
             .filter_map(|entry| entry.ok())
-            .filter(|path| within_root(&ctx.root, path))
             .filter(|path| !exclude.is_match(rel_path(&ctx.root, path).as_str()))
             .map(|path| display_path(&ctx.root, &path))
             .collect::<Vec<_>>();
@@ -928,7 +1197,7 @@ fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
 }
 
 fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
-    let (display_path, text) = read_virtual_text(&ctx.root, &args.path)?;
+    let (display_path, text) = read_virtual_text(ctx, &args.path)?;
     let mut shown = Vec::new();
     let start = args.offset.saturating_sub(1);
     let stop = start + args.limit.max(1);
@@ -960,14 +1229,15 @@ fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
     let column_regex =
         Regex::new(&args.pattern).with_context(|| format!("invalid regex: {}", args.pattern))?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
-    let target = resolve_existing_path(&ctx.root, &args.path)?;
+    let targets = resolve_existing_paths(ctx, &args.path)?;
     let mut matches = Vec::new();
     let mut errors = Vec::new();
-    for path in walk_files(&ctx.root, &target, &exclude)? {
-        match search_file(&ctx.root, &path, &matcher, &column_regex) {
-            Ok(mut found) => matches.append(&mut found),
-            Err(err) => {
-                errors.push(json!({"path": rel_path(&ctx.root, &path), "message": err.to_string()}))
+    for target in &targets {
+        for path in walk_files(&ctx.root, target, &exclude)? {
+            match search_file(&ctx.root, &path, &matcher, &column_regex) {
+                Ok(mut found) => matches.append(&mut found),
+                Err(err) => errors
+                    .push(json!({"path": rel_path(&ctx.root, &path), "message": err.to_string()})),
             }
         }
     }
@@ -983,20 +1253,28 @@ fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
     }))
 }
 fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
-    require_mutation_approval(ctx, "replace")?;
     let regex =
         Regex::new(&args.pattern).with_context(|| format!("invalid regex: {}", args.pattern))?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
-    let target = resolve_existing_path(&ctx.root, &args.path)?;
+    let target = resolve_existing_path(ctx, &args.path)?;
+    let approval_preview = if ctx.policy.approval("replace") == Approval::Ask && ctx.interactive {
+        preview_replace_plan(ctx, &args, &regex, &target, &exclude).ok()
+    } else {
+        None
+    };
+    require_mutation_approval(ctx, "replace", approval_preview.as_deref())?;
     let mut changed_files = Vec::new();
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
     let mut replacement_count = 0usize;
     for path in walk_files(&ctx.root, &target, &exclude)? {
         match replace_file(&path, &regex, &args.replacement) {
-            Ok(ReplaceOutcome::Changed(count)) => {
-                changed_files
-                    .push(json!({"path": rel_path(&ctx.root, &path), "replacements": count}));
+            Ok(ReplaceOutcome::Changed { count, diff }) => {
+                changed_files.push(json!({
+                    "path": rel_path(&ctx.root, &path),
+                    "replacements": count,
+                    "diff": diff
+                }));
                 replacement_count += count;
             }
             Ok(ReplaceOutcome::Unchanged) => {}
@@ -1016,6 +1294,7 @@ fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
         "changed_file_count": changed_files.len(),
         "replacement_count": replacement_count,
         "changed_files": changed_files.iter().take(shown).cloned().collect::<Vec<_>>(),
+        "diff": combined_diff(&changed_files),
         "truncated": changed_files.len() > shown,
         "exclude": args.exclude.as_ref().map(ExcludeArg::patterns),
         "skipped": skipped,
@@ -1024,7 +1303,7 @@ fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
 }
 
 fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
-    let target = resolve_existing_path(&ctx.root, &args.path)?;
+    let target = resolve_existing_path(ctx, &args.path)?;
     let exclude = args
         .exclude
         .as_ref()
@@ -1135,7 +1414,7 @@ fn collect_largest_reports(root: &Path, language: &TokeiLanguage, out: &mut Vec<
     }
 }
 async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
-    require_mutation_approval(ctx, "bash")?;
+    require_mutation_approval(ctx, "bash", None)?;
     if args.command.len() > config::max_bash_cmd_bytes() {
         bail!("command too large ({} bytes)", args.command.len());
     }
@@ -1266,13 +1545,16 @@ fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
     if !ctx.interactive {
         bail!("Cannot ask: interactive prompting is unavailable");
     }
-    Ok(Value::String(crate::ui::ask(
+    Ok(Value::String(crate::chat::ask(
         &args.question,
         args.choices.as_deref(),
     )?))
 }
 
 fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
+    if args.persist {
+        require_mutation_approval(ctx, "todo", None)?;
+    }
     let input_todos = if args.todos.is_empty() {
         ctx.todos.clone()
     } else {
@@ -1323,15 +1605,58 @@ fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
     }))
 }
 
-fn validate_pattern(pattern: &str) -> Result<()> {
-    let path = Path::new(pattern);
-    if path.is_absolute() {
-        bail!("Path traversal denied: '{pattern}'");
+fn path_scope_issue(root: &Path, path: &str, resolved: Option<&Path>) -> Option<String> {
+    let raw = Path::new(path);
+    if raw.is_absolute() {
+        return Some("absolute path".to_string());
     }
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        bail!("Path traversal denied: '{pattern}'");
+    if raw.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Some("parent-directory path".to_string());
+    }
+    if let Some(resolved) = resolved.filter(|resolved| !within_root(root, resolved)) {
+        return Some(format!("outside workspace: {}", resolved.display()));
+    }
+    None
+}
+
+fn require_path_pattern_approval(ctx: &ToolContext, path: &str) -> Result<()> {
+    if let Some(issue) = path_scope_issue(&ctx.root, path, None) {
+        require_path_approval(ctx, path, &issue)?;
     }
     Ok(())
+}
+
+fn require_resolved_path_approval(
+    ctx: &ToolContext,
+    requested: &str,
+    resolved: &Path,
+) -> Result<()> {
+    if let Some(issue) = path_scope_issue(&ctx.root, requested, Some(resolved)) {
+        require_path_approval(ctx, requested, &issue)?;
+    }
+    Ok(())
+}
+
+fn require_path_approval(ctx: &ToolContext, requested: &str, issue: &str) -> Result<()> {
+    match ctx.policy.path_approval() {
+        Approval::Auto => Ok(()),
+        Approval::Deny => bail!("path denied by policy: {requested} ({issue})"),
+        Approval::Ask if !ctx.interactive => bail!(
+            "path requires interactive approval or an auto-approve agent: {requested} ({issue})"
+        ),
+        Approval::Ask => {
+            crate::ui::err_line(format_args!(
+                "approve path outside workspace? {requested} ({issue}) [y/N]"
+            ));
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                Ok(())
+            } else {
+                bail!("path denied by user")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1340,7 +1665,7 @@ struct VirtualPath {
     member: Option<String>,
 }
 
-fn resolve_virtual_path(root: &Path, path: &str) -> Result<VirtualPath> {
+fn resolve_virtual_path(ctx: &ToolContext, path: &str) -> Result<VirtualPath> {
     let (archive_path, member) = path
         .split_once("::")
         .map(|(archive, member)| (archive, Some(member.trim_start_matches('/').to_string())))
@@ -1349,7 +1674,7 @@ fn resolve_virtual_path(root: &Path, path: &str) -> Result<VirtualPath> {
         bail!("invalid archive member path: {path}");
     }
     Ok(VirtualPath {
-        archive: resolve_existing_path(root, archive_path)?,
+        archive: resolve_existing_path(ctx, archive_path)?,
         member,
     })
 }
@@ -1369,16 +1694,37 @@ fn normalize_member(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches('/').to_string()
 }
 
-fn resolve_existing_path(root: &Path, path: &str) -> Result<PathBuf> {
-    validate_pattern(path)?;
-    let joined = root.join(path);
+fn resolve_existing_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
+    require_path_pattern_approval(ctx, path)?;
+    let joined = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        ctx.root.join(path)
+    };
     let resolved = joined
         .canonicalize()
         .with_context(|| format!("path does not exist: {path}"))?;
-    if !within_root(root, &resolved) {
-        bail!("Path traversal denied: '{path}'");
-    }
+    require_resolved_path_approval(ctx, path, &resolved)?;
     Ok(resolved)
+}
+
+fn resolve_existing_paths(ctx: &ToolContext, path: &str) -> Result<Vec<PathBuf>> {
+    match resolve_existing_path(ctx, path) {
+        Ok(path) => Ok(vec![path]),
+        Err(full_path_error) => {
+            let parts = path.split_whitespace().collect::<Vec<_>>();
+            if parts.len() <= 1 {
+                return Err(full_path_error);
+            }
+            let mut out = Vec::new();
+            for part in parts {
+                out.push(resolve_existing_path(ctx, part)?);
+            }
+            out.sort();
+            out.dedup();
+            Ok(out)
+        }
+    }
 }
 
 fn build_exclude_set(exclude: Option<&ExcludeArg>) -> Result<GlobSet> {
@@ -1444,12 +1790,12 @@ struct SearchText {
     text: String,
 }
 
-fn list_archive_virtual(root: &Path, path: &str, exclude: &GlobSet) -> Result<Vec<String>> {
-    let virtual_path = resolve_virtual_path(root, path)?;
+fn list_archive_virtual(ctx: &ToolContext, path: &str, exclude: &GlobSet) -> Result<Vec<String>> {
+    let virtual_path = resolve_virtual_path(ctx, path)?;
     if !is_archive_path(&virtual_path.archive) {
         bail!("list archive path is not an archive: {path}");
     }
-    let rel = rel_path(root, &virtual_path.archive);
+    let rel = rel_path(&ctx.root, &virtual_path.archive);
     let prefix = virtual_path
         .member
         .as_deref()
@@ -1475,19 +1821,19 @@ fn list_archive_virtual(root: &Path, path: &str, exclude: &GlobSet) -> Result<Ve
     Ok(out)
 }
 
-fn read_virtual_text(root: &Path, path: &str) -> Result<(String, String)> {
-    let virtual_path = resolve_virtual_path(root, path)?;
+fn read_virtual_text(ctx: &ToolContext, path: &str) -> Result<(String, String)> {
+    let virtual_path = resolve_virtual_path(ctx, path)?;
     if virtual_path.archive.is_dir() {
         bail!("read path is a directory: {path}");
     }
-    let rel = rel_path(root, &virtual_path.archive);
+    let rel = rel_path(&ctx.root, &virtual_path.archive);
     if let Some(member) = virtual_path.member.as_ref() {
         let member = normalize_member(member);
         let item = archive_member_text(&virtual_path.archive, &rel, &member)?
             .with_context(|| format!("archive member not found: {rel}::{member}"))?;
         return Ok((item.display_path, item.text));
     }
-    let mut texts = file_texts(root, &virtual_path.archive)?;
+    let mut texts = file_texts(&ctx.root, &virtual_path.archive)?;
     if texts.len() == 1 {
         let item = texts.remove(0);
         return Ok((item.display_path, item.text));
@@ -1665,7 +2011,7 @@ fn search_file(
 }
 
 enum ReplaceOutcome {
-    Changed(usize),
+    Changed { count: usize, diff: String },
     Unchanged,
     Skipped(&'static str),
 }
@@ -1688,9 +2034,81 @@ fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<Replace
         return Ok(ReplaceOutcome::Unchanged);
     }
     let updated = regex.replace_all(&text, replacement).into_owned();
+    let diff = unified_diff(&path.to_string_lossy(), &text, &updated);
     fs::write(path, updated)?;
-    Ok(ReplaceOutcome::Changed(count))
+    Ok(ReplaceOutcome::Changed { count, diff })
 }
+
+fn unified_diff(path: &str, old: &str, new: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = String::new();
+    let _ = writeln!(out, "--- {path}");
+    let _ = writeln!(out, "+++ {path}");
+    for group in diff.grouped_ops(3) {
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                let sign = match change.tag() {
+                    ChangeTag::Delete => '-',
+                    ChangeTag::Insert => '+',
+                    ChangeTag::Equal => ' ',
+                };
+                let _ = write!(out, "{sign}{change}");
+            }
+        }
+    }
+    crate::ui::head_tail(&out, 12000).0
+}
+
+fn combined_diff(files: &[Value]) -> String {
+    let text = files
+        .iter()
+        .filter_map(|item| item.get("diff").and_then(Value::as_str))
+        .filter(|diff| !diff.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::ui::head_tail(&text, 12000).0
+}
+
+fn preview_replace_plan(
+    ctx: &ToolContext,
+    args: &ReplaceArgs,
+    regex: &Regex,
+    target: &Path,
+    exclude: &GlobSet,
+) -> Result<String> {
+    let mut changed = Vec::new();
+    for path in walk_files(&ctx.root, target, exclude)? {
+        if path.is_symlink() {
+            continue;
+        }
+        let raw = match fs::read(&path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        if raw.contains(&0) {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(raw) else {
+            continue;
+        };
+        if !regex.is_match(&text) {
+            continue;
+        }
+        let updated = regex
+            .replace_all(&text, args.replacement.as_str())
+            .into_owned();
+        changed.push(json!({
+            "path": rel_path(&ctx.root, &path),
+            "replacements": regex.find_iter(&text).count(),
+            "diff": unified_diff(&rel_path(&ctx.root, &path), &text, &updated)
+        }));
+        if changed.len() >= args.limit.clamp(1, PREVIEW_ITEMS) {
+            break;
+        }
+    }
+    Ok(combined_diff(&changed))
+}
+
 async fn validate_public_url(input: &str) -> Result<Url> {
     let url = Url::parse(input).with_context(|| format!("invalid URL: {input}"))?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -1743,31 +2161,207 @@ fn is_text_content_type(content_type: &str) -> bool {
         || content_type.is_empty()
 }
 
-fn require_mutation_approval(ctx: &ToolContext, tool: &str) -> Result<()> {
-    if auto_approved(ctx, tool) {
-        return Ok(());
+fn require_mutation_approval(ctx: &ToolContext, tool: &str, preview: Option<&str>) -> Result<()> {
+    match ctx.policy.approval(tool) {
+        Approval::Auto => Ok(()),
+        Approval::Deny => bail!("tool denied by policy: {tool}"),
+        Approval::Ask if !ctx.interactive => bail!(
+            "tool denied by policy: {tool} requires interactive approval or an auto-approve agent"
+        ),
+        Approval::Ask => {
+            if let Some(preview) = preview.filter(|s| !s.trim().is_empty()) {
+                crate::ui::err_line(crate::ui::diff(preview).trim_end());
+            }
+            crate::ui::err_line(format_args!("approve {tool}? [y/N]"));
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            let answer = line.trim().to_ascii_lowercase();
+            if matches!(answer.as_str(), "y" | "yes") {
+                Ok(())
+            } else {
+                bail!("tool denied by user")
+            }
+        }
     }
-    if !ctx.interactive {
-        return Ok(());
-    }
-    crate::ui::err_line(format_args!("approve {tool}? [y/N]"));
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let answer = line.trim().to_ascii_lowercase();
-    if matches!(answer.as_str(), "y" | "yes") {
-        Ok(())
-    } else {
-        bail!("tool denied by user")
-    }
-}
-
-fn auto_approved(ctx: &ToolContext, tool: &str) -> bool {
-    ctx.policy.auto_approves(tool)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_context(policy: ToolPolicy, interactive: bool) -> (tempfile::TempDir, ToolContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            root: dir.path().to_path_buf(),
+            interactive,
+            policy,
+            todos: Vec::new(),
+        };
+        (dir, ctx)
+    }
+
+    fn auto_policy() -> ToolPolicy {
+        ToolPolicy {
+            read_only: false,
+            files_write: Approval::Auto,
+            shell: Approval::Auto,
+            network: true,
+        }
+    }
+
+    #[test]
+    fn non_interactive_default_denies_replace() {
+        let (dir, ctx) = test_context(
+            ToolPolicy {
+                read_only: false,
+                files_write: Approval::Ask,
+                shell: Approval::Ask,
+                network: true,
+            },
+            false,
+        );
+        fs::write(dir.path().join("a.txt"), "one").unwrap();
+        let err = tool_replace(
+            &ctx,
+            ReplaceArgs {
+                pattern: "one".into(),
+                replacement: "two".into(),
+                path: "a.txt".into(),
+                exclude: None,
+                limit: 10,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("requires interactive approval"));
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one");
+    }
+
+    #[tokio::test]
+    async fn non_interactive_default_denies_bash() {
+        let (_dir, ctx) = test_context(
+            ToolPolicy {
+                read_only: false,
+                files_write: Approval::Ask,
+                shell: Approval::Ask,
+                network: true,
+            },
+            false,
+        );
+        let err = tool_bash(
+            &ctx,
+            BashArgs {
+                command: "echo nope".into(),
+                timeout_seconds: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("requires interactive approval"));
+    }
+
+    #[test]
+    fn default_non_interactive_denies_out_of_workspace_read() {
+        let (_dir, ctx) = test_context(
+            ToolPolicy {
+                read_only: false,
+                files_write: Approval::Ask,
+                shell: Approval::Ask,
+                network: true,
+            },
+            false,
+        );
+        let err = tool_read(
+            &ctx,
+            ReadArgs {
+                path: "/etc/hosts".into(),
+                offset: 1,
+                limit: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("path requires interactive approval")
+        );
+    }
+
+    #[test]
+    fn auto_policy_allows_out_of_workspace_read() {
+        let (_dir, ctx) = test_context(auto_policy(), false);
+        let value = tool_read(
+            &ctx,
+            ReadArgs {
+                path: "/etc/hosts".into(),
+                offset: 1,
+                limit: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(value["path"], "/etc/hosts");
+    }
+
+    #[test]
+    fn auto_policy_allows_replace() {
+        let (dir, ctx) = test_context(auto_policy(), false);
+        fs::write(dir.path().join("a.txt"), "one").unwrap();
+        let value = tool_replace(
+            &ctx,
+            ReplaceArgs {
+                pattern: "one".into(),
+                replacement: "two".into(),
+                path: "a.txt".into(),
+                exclude: None,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(value["replacement_count"], 1);
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "two");
+    }
+
+    #[test]
+    fn read_only_exposes_read_network_but_not_mutation_tools() {
+        let (_dir, ctx) = test_context(ToolPolicy::read_only(), false);
+        let names = tool_specs(&ctx)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "read"));
+        assert!(names.iter().any(|name| name == "webfetch"));
+        assert!(!names.iter().any(|name| name == "replace"));
+        assert!(!names.iter().any(|name| name == "bash"));
+    }
+
+    #[test]
+    fn search_accepts_space_separated_paths() {
+        let (dir, ctx) = test_context(auto_policy(), false);
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/cli.rs"), "fn cli_hit() {}\n").unwrap();
+        fs::write(dir.path().join("src/ui.rs"), "fn ui_hit() {}\n").unwrap();
+        fs::write(dir.path().join("src/other.rs"), "fn other_hit() {}\n").unwrap();
+
+        let value = tool_search(
+            &ctx,
+            SearchArgs {
+                pattern: "fn (cli|ui)_hit".into(),
+                path: "src/cli.rs src/ui.rs".into(),
+                exclude: None,
+                limit: 10,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(value["match_count"], 2);
+        let paths = value["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["path"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(paths.iter().any(|path| path == "src/cli.rs"));
+        assert!(paths.iter().any(|path| path == "src/ui.rs"));
+        assert!(!paths.iter().any(|path| path == "src/other.rs"));
+    }
 
     #[test]
     fn search_file_reads_zip_members() {
@@ -1818,8 +2412,9 @@ three
                 interactive: false,
                 policy: ToolPolicy {
                     read_only: false,
-                    auto_approve_edits: true,
-                    auto_approve_bash: true,
+                    files_write: Approval::Auto,
+                    shell: Approval::Auto,
+                    network: true,
                 },
                 todos: Vec::new(),
             },
@@ -1856,8 +2451,9 @@ three
                 interactive: false,
                 policy: ToolPolicy {
                     read_only: false,
-                    auto_approve_edits: true,
-                    auto_approve_bash: true,
+                    files_write: Approval::Auto,
+                    shell: Approval::Auto,
+                    network: true,
                 },
                 todos: Vec::new(),
             },
@@ -1881,8 +2477,9 @@ three
             interactive: false,
             policy: ToolPolicy {
                 read_only: false,
-                auto_approve_edits: true,
-                auto_approve_bash: true,
+                files_write: Approval::Auto,
+                shell: Approval::Auto,
+                network: true,
             },
             todos: Vec::new(),
         };

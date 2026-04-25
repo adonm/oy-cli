@@ -85,7 +85,9 @@ pub fn resolve_model(configured: Option<&str>) -> Result<String> {
     if let Some(model) = config::load_model_config()?.model {
         return Ok(canonical_model_spec(&model));
     }
-    bail!("No model configured. Set OY_MODEL or run `oy model <model>` to persist one.")
+    bail!(
+        "No model configured. Try `oy model copilot::gpt-4.1-mini`, `OPENAI_API_KEY=... oy model gpt-4.1-mini`, `oy model local-8080::qwen3.5`, or set OY_MODEL."
+    )
 }
 
 pub fn resolve_shim() -> Result<Option<String>> {
@@ -132,6 +134,7 @@ pub async fn inspect_models() -> Result<ModelListing> {
 fn collect_all_models(dynamic: &[AdapterModels], hints: &[String]) -> Vec<String> {
     let mut items = dynamic
         .iter()
+        .filter(|group| group.ok)
         .flat_map(|group| group.models.iter().cloned())
         .chain(hints.iter().cloned())
         .collect::<Vec<_>>();
@@ -146,6 +149,73 @@ pub fn canonical_model_spec(spec: &str) -> String {
 
 pub fn to_genai_model_spec(spec: &str) -> String {
     canonical_model_spec(spec)
+}
+
+pub fn default_reasoning_effort(model_spec: &str) -> Option<&'static str> {
+    let (_, model) = config::split_model_spec(model_spec);
+    let (inline_effort, _) = split_reasoning_effort_suffix(model);
+    inline_effort.or_else(|| reasoning_effort_option(model_spec))
+}
+
+pub fn reasoning_effort_option(model_spec: &str) -> Option<&'static str> {
+    if env::var("OY_THINKING").is_ok() || env::var("OY_REASONING_EFFORT").is_ok() {
+        return configured_reasoning_effort();
+    }
+    let (_, model) = config::split_model_spec(model_spec);
+    let (inline_effort, base_model) = split_reasoning_effort_suffix(model);
+    if inline_effort.is_some() {
+        return None;
+    }
+    reasoning_capable_model(base_model).then_some("high")
+}
+
+fn configured_reasoning_effort() -> Option<&'static str> {
+    env_value("OY_THINKING")
+        .or_else(|| env_value("OY_REASONING_EFFORT"))
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => None,
+            "off" | "false" | "0" | "none" => Some("none"),
+            "minimal" => Some("minimal"),
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" | "true" | "1" | "on" => Some("high"),
+            _ => None,
+        })
+}
+
+fn split_reasoning_effort_suffix(model: &str) -> (Option<&'static str>, &str) {
+    if let Some((base, suffix)) = model.rsplit_once('-') {
+        let effort = match suffix.to_ascii_lowercase().as_str() {
+            "none" => Some("none"),
+            "minimal" => Some("minimal"),
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" => Some("high"),
+            _ => None,
+        };
+        if let Some(effort) = effort {
+            return (Some(effort), base);
+        }
+    }
+    (None, model)
+}
+
+fn reasoning_capable_model(model: &str) -> bool {
+    let model = model
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    model.starts_with("gpt-5")
+        || model.contains("codex")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.starts_with("claude-3-7")
+        || model.starts_with("claude-4")
+        || model.starts_with("claude-sonnet-4")
+        || model.starts_with("claude-opus-4")
+        || model.starts_with("gemini-3")
 }
 
 pub fn auth_statuses() -> Vec<AuthStatus> {
@@ -227,17 +297,24 @@ fn local_auth_status() -> Option<AuthStatus> {
 async fn inspect_openai_compatible_models() -> Vec<AdapterModels> {
     let mut out = Vec::new();
     for endpoint in openai_compatible_endpoints() {
-        if let Ok(models) = fetch_openai_compatible_models(&endpoint).await {
-            if !models.is_empty() {
-                out.push(AdapterModels {
-                    adapter: endpoint.adapter,
-                    ok: true,
-                    source: endpoint.source,
-                    count: models.len(),
-                    models,
-                    error: None,
-                });
-            }
+        match fetch_openai_compatible_models(&endpoint).await {
+            Ok(models) if !models.is_empty() => out.push(AdapterModels {
+                adapter: endpoint.adapter,
+                ok: true,
+                source: endpoint.source,
+                count: models.len(),
+                models,
+                error: None,
+            }),
+            Ok(_) => {}
+            Err(err) => out.push(AdapterModels {
+                adapter: endpoint.adapter,
+                ok: false,
+                source: endpoint.source,
+                count: 0,
+                models: Vec::new(),
+                error: Some(err.to_string()),
+            }),
         }
     }
     out
@@ -593,7 +670,7 @@ fn openai_compatible_target(
 ) -> Result<Option<ServiceTarget>> {
     let model_name = model.model_name.to_string();
     let (inline_shim, inline_model) = config::split_model_spec(&model_name);
-    let shim = configured_shim.or(inline_shim);
+    let shim = inline_shim.or(configured_shim);
     let Some(shim) = shim.filter(|shim| config::is_routing_shim(shim)) else {
         return Ok(None);
     };
@@ -618,6 +695,9 @@ fn openai_compatible_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn local_shim_endpoint_config_matches_python_defaults() {
@@ -677,6 +757,30 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_defaults_to_high_for_capable_models_and_allows_suffix_override() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        unsafe { std::env::remove_var("OY_THINKING") };
+        unsafe { std::env::remove_var("OY_REASONING_EFFORT") };
+        assert_eq!(default_reasoning_effort("gpt-5.5"), Some("high"));
+        assert_eq!(
+            default_reasoning_effort("copilot::gpt-5.5-low"),
+            Some("low")
+        );
+        assert_eq!(default_reasoning_effort("gpt-4.1-mini"), None);
+    }
+
+    #[test]
+    fn reasoning_env_override_can_disable_or_adjust() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        unsafe { std::env::set_var("OY_THINKING", "off") };
+        assert_eq!(default_reasoning_effort("gpt-5.5"), Some("none"));
+        unsafe { std::env::set_var("OY_THINKING", "medium") };
+        assert_eq!(default_reasoning_effort("gpt-5.5"), Some("medium"));
+        unsafe { std::env::remove_var("OY_THINKING") };
+        unsafe { std::env::remove_var("OY_REASONING_EFFORT") };
+    }
+
+    #[test]
     fn extract_model_ids_handles_openai_shape() {
         let value = serde_json::json!({
             "data": [
@@ -689,5 +793,22 @@ mod tests {
             extract_model_ids(&value),
             vec!["gpt-4.1".to_string(), "gpt-4.1-mini".to_string()]
         );
+    }
+
+
+    #[test]
+    fn inline_routing_shim_overrides_configured_shim() {
+        let target = ModelIden::new(AdapterKind::OpenAI, "local-8088::qwen3.5".to_string());
+        let mapped = openai_compatible_target(&target, Some("openai")).unwrap().unwrap();
+        assert_eq!(mapped.model.model_name, "qwen3.5");
+        assert_eq!(mapped.endpoint.base_url(), "http://127.0.0.1:8088/v1/");
+    }
+
+    #[test]
+    fn configured_shim_still_routes_plain_model() {
+        let target = ModelIden::new(AdapterKind::OpenAI, "qwen3.5".to_string());
+        let mapped = openai_compatible_target(&target, Some("local-8088")).unwrap().unwrap();
+        assert_eq!(mapped.model.model_name, "qwen3.5");
+        assert_eq!(mapped.endpoint.base_url(), "http://127.0.0.1:8088/v1/");
     }
 }

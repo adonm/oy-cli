@@ -19,15 +19,14 @@ cargo run -- --help
 
 ## Repo layout
 
-- `src/main.rs` — process entrypoint plus terminal highlighting print macros
-- `src/cli.rs` — command parsing/orchestration for run, chat, model, audit, Ralph, and Renovate-local flows
+- `src/main.rs` — process entrypoint
+- `src/cli.rs` — command parsing/orchestration for run, chat, model, audit, and Ralph
+- `src/chat.rs` — reedline chat loop, slash commands, prompts, and interactive model picker
 - `src/agent.rs` — session state, transcript serialization, token estimates, and the `genai` tool loop
 - `src/config.rs` — config paths, env flags, agent profiles, prompt loading, model/shim persistence, and saved sessions
 - `src/model.rs` — model-id normalization, routing shim resolution, `genai` client setup, and endpoint model introspection
-- `src/tools.rs` — model-exposed tools for list/read/search/replace/sloc/bash/webfetch/ask/todo with workspace and approval guardrails
-- `src/ui.rs` — reedline chat loop, slash commands, prompts, and interactive model picker
-- `src/highlight.rs` — terminal syntax highlighting via `syntect`
-- `src/text.rs` — shared compacting, truncation, and preview clamping helpers
+- `src/tools/mod.rs` — model-exposed tools for list/read/search/replace/sloc/bash/webfetch/ask/todo with workspace and approval guardrails
+- `src/ui.rs` — terminal output, markdown, highlighting, diffs, and preview clamping helpers
 - `assets/session_text.toml` — system prompts, agent text, audit text, and tool descriptions
 
 Keep implementation architecture here, not in the README. README should stay user-first: install, quick start, commands, config, safety, troubleshooting.
@@ -40,7 +39,7 @@ Keep implementation architecture here, not in the README. README should stay use
 - search/file tools: `ignore`, `glob`, `globset`, `grep-regex`, `grep-searcher`, `regex`, `tokei`
 - network/tools: `reqwest` with rustls/http2, `url`, `html2md`
 - archives/compression: `flate2`, `tar`, `zip`
-- terminal UX: `reedline-repl-rs`, `syntect`
+- terminal UX: `reedline-repl-rs`, `dialoguer`, `console`, `syntect`, `termimad`, `terminal_size`, `textwrap`, `unicode-width`
 
 Prefer adding notes here when a new crate establishes a new subsystem boundary. Keep README crate notes user-facing and this map contributor-facing.
 
