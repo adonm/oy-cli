@@ -24,6 +24,10 @@ pub fn stderr(text: &str) {
     eprint!("{}", for_stderr(text));
 }
 
+pub fn stdout_as(text: &str, syntax_token: &str) {
+    print!("{}", for_stdout_as(text, syntax_token));
+}
+
 pub fn for_stdout(text: &str) -> String {
     if std::io::stdout().is_terminal() {
         highlight(text, None)
@@ -35,6 +39,14 @@ pub fn for_stdout(text: &str) -> String {
 pub fn for_stderr(text: &str) -> String {
     if std::io::stderr().is_terminal() {
         highlight(text, None)
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn for_stdout_as(text: &str, syntax_token: &str) -> String {
+    if std::io::stdout().is_terminal() {
+        highlight(text, syntax_by_token(syntax_token))
     } else {
         text.to_string()
     }
@@ -109,6 +121,12 @@ fn env_contains(name: &str, needle: &str) -> bool {
     std::env::var(name)
         .map(|value| value.to_ascii_lowercase().contains(needle))
         .unwrap_or(false)
+}
+
+fn syntax_by_token(token: &str) -> Option<&'static SyntaxReference> {
+    SYNTAX_SET
+        .find_syntax_by_token(token)
+        .or_else(|| SYNTAX_SET.find_syntax_by_extension(token))
 }
 
 fn syntax_for_text(text: &str) -> &'static SyntaxReference {

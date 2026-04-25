@@ -8,6 +8,8 @@ use crate::agent::{self, Session};
 use crate::config;
 use crate::model;
 
+const MODEL_LIST_LIMIT: usize = 30;
+
 #[derive(Debug, Parser)]
 #[command(name = "oy", version, about = "AI coding assistant for your shell.")]
 struct Cli {
@@ -155,7 +157,7 @@ async fn run_command(args: RunArgs) -> Result<i32> {
     print_session_intro("Run", &session, Some(&task));
     let answer = agent::run_prompt(&mut session, &task).await?;
     if !answer.is_empty() {
-        crate::highlight::stdout(&format!("{answer}\n"));
+        crate::highlight::stdout_as(&format!("{answer}\n"), "Markdown");
     }
     Ok(0)
 }
@@ -258,13 +260,19 @@ fn print_model_listing(listing: &model::ModelListing) {
                 "- {}: {} models via {}",
                 item.adapter, item.count, item.source
             );
-            for model_name in &item.models {
+            for model_name in item.models.iter().take(MODEL_LIST_LIMIT) {
                 let marker = if listing.current.as_deref() == Some(model_name.as_str()) {
                     "*"
                 } else {
                     " "
                 };
                 println!("  {marker} {model_name}");
+            }
+            if item.models.len() > MODEL_LIST_LIMIT {
+                println!(
+                    "  … {} more; use `oy model <filter>` or interactive selection",
+                    item.models.len() - MODEL_LIST_LIMIT
+                );
             }
         }
     } else {
@@ -284,8 +292,11 @@ fn print_model_listing(listing: &model::ModelListing) {
         .collect::<Vec<_>>();
     if !hinted.is_empty() {
         println!("\n### Built-in selectable hints");
-        for hint in hinted {
+        for hint in hinted.iter().take(MODEL_LIST_LIMIT) {
             println!("  - {hint}");
+        }
+        if hinted.len() > MODEL_LIST_LIMIT {
+            println!("  … {} more hints", hinted.len() - MODEL_LIST_LIMIT);
         }
     }
 }
@@ -445,11 +456,16 @@ fn print_session_intro(mode: &str, session: &Session, prompt: Option<&str>) {
 }
 
 fn preview(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        text.to_string()
-    } else {
-        format!("{}...", &text[..max])
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for (idx, ch) in compact.chars().enumerate() {
+        if idx >= max.saturating_sub(3) {
+            out.push_str("...");
+            return out;
+        }
+        out.push(ch);
     }
+    out
 }
 
 fn build_audit_prompt(

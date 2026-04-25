@@ -1,39 +1,80 @@
-name: Release to PyPI
+name: Rust CI and Release
 
 on:
+  push:
+    branches: [rust]
   release:
-    types: [published]
-  workflow_dispatch: # allow manual triggers
+    types: [created]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  ci:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-      - name: Install build
-        run: pip install build
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - name: Build
-        run: python -m build
-      - uses: actions/upload-artifact@v7
-        with:
-          name: dist
-          path: dist/
+        run: cargo build --locked
+      - name: Test
+        run: cargo test --locked
 
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
+  release:
+    if: github.event_name == 'release'
+    name: Release (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     permissions:
-      id-token: write # for trusted publishing
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: zip
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v4
         with:
-          name: dist
-          path: dist/
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          ref: ${{ github.event.release.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/oy dist/oy
+          tar -C dist -czf oy-${{ github.event.release.tag_name }}-${{ matrix.target }}.tar.gz oy
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/oy.exe dist/oy.exe
+          Compress-Archive -Path dist/oy.exe -DestinationPath oy-${{ github.event.release.tag_name }}-${{ matrix.target }}.zip
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: oy-${{ github.event.release.tag_name }}-${{ matrix.target }}.${{ matrix.archive }}

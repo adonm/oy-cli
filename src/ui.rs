@@ -79,7 +79,7 @@ async fn prompt_update_todo_on_quit(session: &mut Session) -> Result<()> {
     )
     .await?;
     if !summary.is_empty() {
-        crate::highlight::stdout(&format!("{summary}\n"));
+        crate::highlight::stdout_as(&format!("{summary}\n"), "Markdown");
     }
     Ok(())
 }
@@ -102,7 +102,7 @@ async fn handle_slash_command(session: &mut Session, command: &str) -> Result<bo
     match name {
         "" => Ok(true),
         "help" => {
-            crate::highlight::stdout(&format!("{}\n", chat_help_text()));
+            crate::highlight::stdout_as(&format!("{}\n", chat_help_text()), "Markdown");
             Ok(true)
         }
         "tokens" => tokens_command(session),
@@ -162,7 +162,7 @@ async fn ask_command(session: &mut Session, prompt: &str) -> Result<bool> {
     }
     let answer = agent::run_prompt(session, &config::ask_system_prompt(prompt)).await?;
     if !answer.is_empty() {
-        crate::highlight::stdout(&format!("{answer}\n"));
+        crate::highlight::stdout_as(&format!("{answer}\n"), "Markdown");
     }
     Ok(true)
 }
@@ -246,7 +246,7 @@ async fn run_prompt_with_model_reselect(session: &mut Session, prompt: &str) -> 
         match agent::run_prompt(session, prompt).await {
             Ok(answer) => {
                 if !answer.is_empty() {
-                    crate::highlight::stdout(&format!("{answer}\n"));
+                    crate::highlight::stdout_as(&format!("{answer}\n"), "Markdown");
                 }
                 return Ok(());
             }
@@ -315,10 +315,11 @@ pub fn choose_model_with_initial_list(
 }
 
 pub fn ask(question: &str, choices: Option<&[String]>) -> Result<String> {
-    if let Some(choices) = choices {
-        print_choices(choices);
-    }
     println!("{question}");
+    if let Some(choices) = choices {
+        print_choices("Choices", choices, "");
+        println!("Enter number, exact text, or filter text (empty cancels):");
+    }
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let input = input.trim();
@@ -327,10 +328,13 @@ pub fn ask(question: &str, choices: Option<&[String]>) -> Result<String> {
             Selection::Selected(value) => Ok(value),
             Selection::Current => Ok(String::new()),
             Selection::Ambiguous(matches) => {
-                print_choices(&matches);
+                print_choices("Choices", &matches, input);
                 Ok(String::new())
             }
-            Selection::Invalid => Ok(String::new()),
+            Selection::Invalid => {
+                println!("No choice matches `{input}`.");
+                Ok(String::new())
+            }
         };
     }
     Ok(input.to_string())
@@ -395,23 +399,47 @@ fn print_model_choices(current: Option<&str>, items: &[String], query: &str) {
     } else {
         format!("Models matching `{query}`")
     };
-    println!("{heading}:");
-    for (idx, item) in items.iter().take(30).enumerate() {
+    print_numbered_items(&heading, items, query, current, 30);
+}
+
+fn print_choices(heading: &str, choices: &[String], query: &str) {
+    if choices.is_empty() {
+        println!("No choices available.");
+        return;
+    }
+    let heading = if query.is_empty() {
+        heading.to_string()
+    } else {
+        format!("{heading} matching `{query}`")
+    };
+    print_numbered_items(&heading, choices, query, None, 30);
+}
+
+fn print_numbered_items(
+    heading: &str,
+    items: &[String],
+    query: &str,
+    current: Option<&str>,
+    limit: usize,
+) {
+    let width = items.len().min(limit).max(1).to_string().len();
+    println!("{heading} ({}):", items.len());
+    for (idx, item) in items.iter().take(limit).enumerate() {
         let marker = if current == Some(item.as_str()) {
             "*"
         } else {
             " "
         };
-        println!("{marker} {:>2}. {item}", idx + 1);
+        println!("{marker} {:>width$}. {item}", idx + 1, width = width);
     }
-    if items.len() > 30 {
-        println!("... {} more; keep filtering", items.len() - 30);
+    if items.len() > limit {
+        println!(
+            "  ... {} more; type more text to filter",
+            items.len() - limit
+        );
     }
-}
-
-fn print_choices(choices: &[String]) {
-    for (idx, choice) in choices.iter().enumerate() {
-        println!("{:>2}. {choice}", idx + 1);
+    if !query.is_empty() {
+        println!("  Enter a number from this filtered list to select.");
     }
 }
 

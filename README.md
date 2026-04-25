@@ -178,6 +178,21 @@ Requirements:
 
 ## Installation
 
+With [mise](https://mise.jdx.dev/) from GitHub releases:
+
+```bash
+mise use -g github:wagov-dtt/oy-cli
+oy --help
+```
+
+Pin a specific release:
+
+```bash
+mise use -g github:wagov-dtt/oy-cli@v0.1.0
+```
+
+Released assets are named `oy-<tag>-<target>.tar.gz` or `.zip` and include Linux, macOS, and Windows builds for x86_64 and arm64.
+
 For local development:
 
 ```bash

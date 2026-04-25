@@ -36,6 +36,9 @@ use crate::config;
 pub const DEFAULT_LIMIT: usize = 910;
 pub const DEFAULT_WEBFETCH_TIMEOUT_SECONDS: u64 = 60;
 const TODO_FILE: &str = "TODO.md";
+const PREVIEW_ITEMS: usize = 20;
+const PREVIEW_LINES: usize = 30;
+const PREVIEW_LINE_CHARS: usize = 180;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
@@ -374,8 +377,10 @@ pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Va
     if let Ok(value) = &result {
         let preview = preview_tool_output(name, value);
         if !preview.trim().is_empty() {
-            eprintln!("{}", preview.trim_end());
+            crate::highlight::stderr(&(preview.trim_end().to_string() + "\n"));
         }
+    } else if let Err(err) = &result {
+        crate::highlight::stderr(&format!("✗ {name}: {err:#}\n"));
     }
     result
 }
@@ -389,9 +394,9 @@ pub fn encode_tool_output(value: &Value) -> String {
 fn note_tool(name: &str, args: &Value) {
     let detail = tool_call_summary(name, args);
     if detail.is_empty() {
-        eprintln!("→ {name}");
+        crate::highlight::stderr(&format!("→ {name}\n"));
     } else {
-        eprintln!("→ {name} {detail}");
+        crate::highlight::stderr(&format!("→ {name} {detail}\n"));
     }
 }
 
@@ -453,12 +458,16 @@ fn todo_call_summary(args: &Value) -> String {
 
 pub fn preview_tool_output(name: &str, value: &Value) -> String {
     match name {
+        "list" => preview_list(value),
         "read" => preview_read(value),
         "search" => preview_search(value),
         "replace" => preview_replace(value),
         "bash" => preview_bash(value),
+        "webfetch" => preview_webfetch(value),
+        "sloc" => preview_sloc(value),
+        "ask" => preview_ask(value),
         "todo" => preview_todo(value),
-        _ => encode_tool_output(value),
+        _ => preview_generic(value),
     }
 }
 
@@ -490,6 +499,46 @@ fn value_usize(value: &Value, key: &str) -> usize {
     value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize
 }
 
+fn value_bool(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn preview_generic(value: &Value) -> String {
+    summarize_preview_lines(
+        &encode_tool_output(value),
+        PREVIEW_LINES,
+        PREVIEW_LINE_CHARS,
+    )
+}
+
+fn preview_list(value: &Value) -> String {
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let total = value_usize(value, "count");
+    let mut out = format!(
+        "{} item{} in {}",
+        total,
+        plural(total),
+        value_str(value, "path")
+    );
+    for item in items.iter().take(PREVIEW_ITEMS) {
+        let _ = write!(
+            out,
+            "\n  {}",
+            truncate_chars(item.as_str().unwrap_or(""), PREVIEW_LINE_CHARS)
+        );
+    }
+    let shown = items.len().min(PREVIEW_ITEMS);
+    if total > shown || value_bool(value, "truncated") {
+        let remaining = total.saturating_sub(shown);
+        let _ = write!(out, "\n  … {remaining} more item{}", plural(remaining));
+    }
+    out
+}
+
 fn preview_read(value: &Value) -> String {
     let path = value_str(value, "path");
     let offset = value_usize(value, "offset");
@@ -501,11 +550,11 @@ fn preview_read(value: &Value) -> String {
     if text.is_empty() {
         out.push_str("\n  <empty>");
     } else {
-        for line in text.lines().take(80) {
-            let _ = write!(out, "\n  {}", truncate_chars(line, 220));
+        for line in text.lines().take(PREVIEW_LINES) {
+            let _ = write!(out, "\n  {}", truncate_chars(line, PREVIEW_LINE_CHARS));
         }
-        if shown > 80 {
-            let _ = write!(out, "\n  … {} more lines", shown - 80);
+        if shown > PREVIEW_LINES {
+            let _ = write!(out, "\n  … {} more lines", shown - PREVIEW_LINES);
         }
     }
     out
@@ -527,11 +576,11 @@ fn preview_search(value: &Value) -> String {
         plural(total),
         value_str(value, "pattern")
     );
-    for item in matches.iter().take(80) {
+    for item in matches.iter().take(PREVIEW_ITEMS) {
         let path = value_str(item, "path");
         let line = value_usize(item, "line_number");
         let col = value_usize(item, "column");
-        let text = truncate_chars(value_str(item, "text"), 220);
+        let text = truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
         let _ = write!(out, "\n  {path}:{line}:{col}: {text}");
     }
     if value
@@ -542,7 +591,7 @@ fn preview_search(value: &Value) -> String {
         let _ = write!(
             out,
             "\n  … {} more matches",
-            total.saturating_sub(matches.len())
+            total.saturating_sub(matches.len().min(PREVIEW_ITEMS))
         );
     }
     out
@@ -565,13 +614,16 @@ fn preview_replace(value: &Value) -> String {
     if changed.is_empty() {
         out.push_str("\n  <no changes>");
     } else {
-        for item in changed.iter().take(80) {
+        for item in changed.iter().take(PREVIEW_ITEMS) {
             let _ = write!(
                 out,
                 "\n  {} · {} repl",
                 value_str(item, "path"),
                 value_usize(item, "replacements")
             );
+        }
+        if changed.len() > PREVIEW_ITEMS {
+            let _ = write!(out, "\n  … {} more files", changed.len() - PREVIEW_ITEMS);
         }
     }
     out
@@ -589,11 +641,89 @@ fn preview_bash(value: &Value) -> String {
             continue;
         }
         let _ = write!(out, "\n{key}:");
-        for line in text.lines().take(80) {
-            let _ = write!(out, "\n  {}", truncate_chars(line, 220));
+        for line in text.lines().take(PREVIEW_LINES) {
+            let _ = write!(out, "\n  {}", truncate_chars(line, PREVIEW_LINE_CHARS));
         }
     }
     out
+}
+
+fn preview_webfetch(value: &Value) -> String {
+    let status = value
+        .get("status_code")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let url = value_str(value, "url");
+    if value
+        .get("binary")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return format!(
+            "HTTP {status} {url}\n  binary · {} bytes",
+            value_usize(value, "content_bytes")
+        );
+    }
+    let mut out = format!("HTTP {status} {url}");
+    let text = value_str(value, "text");
+    if !text.is_empty() {
+        let preview = summarize_preview_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
+        for line in preview.lines() {
+            let _ = write!(out, "\n  {line}");
+        }
+    }
+    if value_bool(value, "truncated") {
+        out.push_str("\n  … response body truncated for model context");
+    }
+    out
+}
+
+fn preview_sloc(value: &Value) -> String {
+    let total = value
+        .pointer("/output/Total/code")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let comments = value
+        .pointer("/output/Total/comments")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let blanks = value
+        .pointer("/output/Total/blanks")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut langs = value
+        .get("output")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter(|(name, _)| name.as_str() != "Total")
+                .filter_map(|(name, stats)| {
+                    stats
+                        .get("code")
+                        .and_then(Value::as_u64)
+                        .map(|code| (name, code))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    langs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let mut out = format!(
+        "{}: {total} code · {comments} comments · {blanks} blank",
+        value_str(value, "path")
+    );
+    for (name, code) in langs.into_iter().take(PREVIEW_ITEMS) {
+        let _ = write!(out, "\n  {name}: {code}");
+    }
+    out
+}
+
+fn preview_ask(value: &Value) -> String {
+    let answer = value.as_str().unwrap_or_default();
+    if answer.is_empty() {
+        "<no selection>".to_string()
+    } else {
+        format!("selected: {}", truncate_chars(answer, PREVIEW_LINE_CHARS))
+    }
 }
 
 fn preview_todo(value: &Value) -> String {
@@ -605,6 +735,24 @@ fn preview_todo(value: &Value) -> String {
             .unwrap_or(&[]);
         format_todo_preview_from_values(items)
     })
+}
+
+fn summarize_preview_lines(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut total = 0usize;
+    for (idx, line) in text.lines().enumerate() {
+        total = idx + 1;
+        if idx < max_lines {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&truncate_chars(line, max_chars));
+        }
+    }
+    if total > max_lines {
+        let _ = write!(out, "\n… {} more lines", total - max_lines);
+    }
+    out
 }
 
 fn plural(count: usize) -> &'static str {
@@ -632,8 +780,13 @@ fn format_todo_preview(todos: &[TodoItem]) -> String {
         active,
         counts.done
     );
-    for line in format_todos(todos).lines() {
+    let lines = format_todos(todos);
+    let total_lines = lines.lines().count();
+    for line in lines.lines().take(PREVIEW_ITEMS) {
         let _ = write!(out, "\n  {line}");
+    }
+    if total_lines > PREVIEW_ITEMS {
+        let _ = write!(out, "\n  … {} more todos", total_lines - PREVIEW_ITEMS);
     }
     out
 }
@@ -1006,7 +1159,6 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
             args.command.as_bytes().len()
         );
     }
-    crate::highlight::stderr(&format!("tool: bash command: {}\n", args.command));
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(&args.command)
@@ -1648,7 +1800,7 @@ fn require_mutation_approval(ctx: &ToolContext, tool: &str) -> Result<()> {
     if !ctx.interactive {
         return Ok(());
     }
-    eprintln!("approve {}? [y/N]", tool);
+    crate::highlight::stderr(&format!("approve {tool}? [y/N]\n"));
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let answer = line.trim().to_ascii_lowercase();
