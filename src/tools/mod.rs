@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
+use futures_util::StreamExt as _;
 use glob::glob;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use grep_regex::RegexMatcher;
@@ -14,7 +15,7 @@ use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write as _};
 use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -36,6 +37,12 @@ use crate::config;
 
 pub const DEFAULT_LIMIT: usize = 910;
 pub const DEFAULT_WEBFETCH_TIMEOUT_SECONDS: u64 = 60;
+const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
+const MAX_WEBFETCH_TIMEOUT_SECONDS: u64 = 120;
+const MAX_WEBFETCH_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ARCHIVE_MEMBERS: usize = 10_000;
+const MAX_ARCHIVE_MEMBER_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_ARCHIVE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const TODO_FILE: &str = "TODO.md";
 const PREVIEW_ITEMS: usize = 20;
 const PREVIEW_LINES: usize = 30;
@@ -1100,7 +1107,7 @@ impl EmptyStringExt for String {
 
 pub fn save_todos_to_file(root: &Path, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(root);
-    fs::write(&path, todos_to_markdown(todos))
+    write_workspace_file(&path, todos_to_markdown(todos).as_bytes())
         .with_context(|| format!("failed to write {}", TODO_FILE))
 }
 
@@ -1425,7 +1432,8 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = timeout(Duration::from_secs(args.timeout_seconds), cmd.output()).await??;
+    let timeout_seconds = args.timeout_seconds.clamp(1, MAX_BASH_TIMEOUT_SECONDS);
+    let output = timeout(Duration::from_secs(timeout_seconds), cmd.output()).await??;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let (stdout, stdout_truncated) = crate::ui::head_tail(&stdout, 6000);
@@ -1453,7 +1461,9 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         } else {
             reqwest::redirect::Policy::none()
         })
-        .timeout(Duration::from_secs(args.timeout_seconds))
+        .timeout(Duration::from_secs(
+            args.timeout_seconds.clamp(1, MAX_WEBFETCH_TIMEOUT_SECONDS),
+        ))
         .build()?;
     let mut request = client.request(method.parse()?, url.clone());
     if let Some(headers) = args.headers.as_ref() {
@@ -1505,8 +1515,9 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         })
         .collect::<Map<String, Value>>();
 
+    let (body, body_capped) = read_limited_response(response, MAX_WEBFETCH_BYTES).await?;
     if is_text_content_type(&content_type) {
-        let text = response.text().await?;
+        let text = String::from_utf8_lossy(&body).to_string();
         let normalized = if content_type.contains("text/html")
             || text.trim_start().starts_with("<!DOCTYPE html")
             || text.trim_start().starts_with("<html")
@@ -1516,6 +1527,7 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
             text
         };
         let (text, truncated) = crate::ui::head_tail(&normalized, 12000);
+        let truncated = truncated || body_capped;
         return Ok(json!({
             "method": method,
             "url": final_url,
@@ -1529,7 +1541,7 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         }));
     }
 
-    let bytes = response.bytes().await?;
+    let bytes = body;
     Ok(json!({
         "method": method,
         "url": final_url,
@@ -1538,9 +1550,31 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         "http_version": format!("{:?}", version),
         "headers": header_map,
         "binary": true,
-        "content_bytes": bytes.len()
+        "content_bytes": bytes.len(),
+        "truncated": body_capped
     }))
 }
+async fn read_limited_response(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool)> {
+    let mut stream = response.bytes_stream();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let remaining = max_bytes.saturating_sub(out.len());
+        if chunk.len() > remaining {
+            out.extend_from_slice(&chunk[..remaining]);
+            return Ok((out, true));
+        }
+        out.extend_from_slice(&chunk);
+        if out.len() >= max_bytes {
+            return Ok((out, true));
+        }
+    }
+    Ok((out, false))
+}
+
 fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
     if !ctx.interactive {
         bail!("Cannot ask: interactive prompting is unavailable");
@@ -1904,11 +1938,23 @@ fn file_texts_for_archive(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
 fn zip_texts(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
     let file = fs::File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
+    if archive.len() > MAX_ARCHIVE_MEMBERS {
+        bail!("archive has too many members: {}", archive.len());
+    }
     let mut out = Vec::new();
+    let mut total_bytes = 0u64;
     for index in 0..archive.len() {
         let mut member = archive.by_index(index)?;
         if member.is_dir() {
             continue;
+        }
+        let size = member.size();
+        if size > MAX_ARCHIVE_MEMBER_BYTES {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(size);
+        if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
+            bail!("archive expanded text exceeds limit");
         }
         let mut bytes = Vec::new();
         member.read_to_end(&mut bytes)?;
@@ -1938,10 +1984,24 @@ fn tar_texts(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
     };
     let mut archive = tar::Archive::new(reader);
     let mut out = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut members = 0usize;
     for entry in archive.entries()? {
         let mut entry = entry?;
         if !entry.header().entry_type().is_file() {
             continue;
+        }
+        members += 1;
+        if members > MAX_ARCHIVE_MEMBERS {
+            bail!("archive has too many members");
+        }
+        let size = entry.header().size().unwrap_or(0);
+        if size > MAX_ARCHIVE_MEMBER_BYTES {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(size);
+        if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
+            bail!("archive expanded text exceeds limit");
         }
         let member = entry.path()?.to_string_lossy().replace('\\', "/");
         let mut bytes = Vec::new();
@@ -2035,8 +2095,35 @@ fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<Replace
     }
     let updated = regex.replace_all(&text, replacement).into_owned();
     let diff = unified_diff(&path.to_string_lossy(), &text, &updated);
-    fs::write(path, updated)?;
+    write_workspace_file(path, updated.as_bytes())?;
     Ok(ReplaceOutcome::Changed { count, diff })
+}
+
+fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mode = fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0o600);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(mode)
+            .open(path)?;
+        file.write_all(bytes)?;
+        let mut perms = file.metadata()?.permissions();
+        perms.set_mode(mode);
+        file.set_permissions(perms)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes)?;
+        Ok(())
+    }
 }
 
 fn unified_diff(path: &str, old: &str, new: &str) -> String {

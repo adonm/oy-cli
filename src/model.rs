@@ -1,5 +1,5 @@
 use crate::config;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
@@ -610,17 +610,16 @@ pub fn build_client() -> Result<Client> {
 }
 
 fn auth_resolver() -> Result<Option<AuthResolver>> {
-    let base_url = env::var("OPENAI_BASE_URL").ok();
-    let api_key = env::var("OPENAI_API_KEY").ok();
-    if base_url.is_none() && api_key.is_none() {
+    let Some(api_key) = env_value("OPENAI_API_KEY") else {
         return Ok(None);
-    }
-    let resolver = AuthResolver::from_resolver_fn(move |_model: ModelIden| {
-        let data = api_key
-            .as_ref()
-            .map(|key| Some(AuthData::from_single(key.clone())))
-            .unwrap_or(None);
-        Ok(data)
+    };
+    let resolver = AuthResolver::from_resolver_fn(move |model: ModelIden| {
+        let model_name = model.model_name.to_string();
+        let (inline_shim, _) = config::split_model_spec(&model_name);
+        if inline_shim.is_some() || env_value("OY_SHIM").is_some() {
+            return Ok(None);
+        }
+        Ok(Some(AuthData::from_single(api_key.clone())))
     });
     Ok(Some(resolver))
 }
@@ -643,7 +642,7 @@ fn is_openai_responses_model(model: &str) -> bool {
 }
 
 fn service_target_resolver() -> Result<Option<ServiceTargetResolver>> {
-    let base_url = env::var("OPENAI_BASE_URL").ok();
+    let base_url = env_value("OPENAI_BASE_URL");
     let configured_shim = resolve_shim()?;
     let resolver = ServiceTargetResolver::from_resolver_fn(move |target: ServiceTarget| {
         let model_name = target.model.model_name.to_string();
@@ -652,12 +651,15 @@ fn service_target_resolver() -> Result<Option<ServiceTargetResolver>> {
         {
             return Ok(mapped);
         }
-        if let Some(url) = base_url.as_ref() {
-            return Ok(ServiceTarget {
-                endpoint: Endpoint::from_owned(url.trim_end_matches('/').to_string() + "/"),
-                auth: target.auth,
-                model: ModelIden::new(openai_adapter_for_model(&model_name), model_name),
-            });
+        if let Some(url) = base_url.as_ref().filter(|_| configured_shim.is_none()) {
+            let (inline_shim, _) = config::split_model_spec(&model_name);
+            if inline_shim.is_none() {
+                return Ok(ServiceTarget {
+                    endpoint: Endpoint::from_owned(normalize_base_url(url) + "/"),
+                    auth: target.auth,
+                    model: ModelIden::new(openai_adapter_for_model(&model_name), model_name),
+                });
+            }
         }
         Ok(target)
     });
@@ -671,9 +673,12 @@ fn openai_compatible_target(
     let model_name = model.model_name.to_string();
     let (inline_shim, inline_model) = config::split_model_spec(&model_name);
     let shim = inline_shim.or(configured_shim);
-    let Some(shim) = shim.filter(|shim| config::is_routing_shim(shim)) else {
+    let Some(shim) = shim else {
         return Ok(None);
     };
+    if !config::is_routing_shim(shim) {
+        bail!("invalid routing shim: {shim}");
+    }
     let target_model = if inline_shim.is_some() {
         ModelIden::new(
             openai_adapter_for_model(inline_model),
@@ -682,14 +687,13 @@ fn openai_compatible_target(
     } else {
         model.clone()
     };
-    if let Some(config) = shim_endpoint_config(shim) {
-        return Ok(Some(ServiceTarget {
-            endpoint: Endpoint::from_owned(normalize_base_url(&config.base_url) + "/"),
-            auth: AuthData::from_single(config.api_key),
-            model: target_model,
-        }));
-    }
-    Ok(None)
+    let config = shim_endpoint_config(shim)
+        .ok_or_else(|| anyhow!("routing shim {shim} is not configured or lacks credentials"))?;
+    Ok(Some(ServiceTarget {
+        endpoint: Endpoint::from_owned(normalize_base_url(&config.base_url) + "/"),
+        auth: AuthData::from_single(config.api_key),
+        model: target_model,
+    }))
 }
 
 #[cfg(test)]
@@ -795,11 +799,12 @@ mod tests {
         );
     }
 
-
     #[test]
     fn inline_routing_shim_overrides_configured_shim() {
         let target = ModelIden::new(AdapterKind::OpenAI, "local-8088::qwen3.5".to_string());
-        let mapped = openai_compatible_target(&target, Some("openai")).unwrap().unwrap();
+        let mapped = openai_compatible_target(&target, Some("openai"))
+            .unwrap()
+            .unwrap();
         assert_eq!(mapped.model.model_name, "qwen3.5");
         assert_eq!(mapped.endpoint.base_url(), "http://127.0.0.1:8088/v1/");
     }
@@ -807,7 +812,9 @@ mod tests {
     #[test]
     fn configured_shim_still_routes_plain_model() {
         let target = ModelIden::new(AdapterKind::OpenAI, "qwen3.5".to_string());
-        let mapped = openai_compatible_target(&target, Some("local-8088")).unwrap().unwrap();
+        let mapped = openai_compatible_target(&target, Some("local-8088"))
+            .unwrap()
+            .unwrap();
         assert_eq!(mapped.model.model_name, "qwen3.5");
         assert_eq!(mapped.endpoint.base_url(), "http://127.0.0.1:8088/v1/");
     }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -130,7 +130,7 @@ pub fn config_dir_path() -> PathBuf {
 
 pub fn sessions_dir() -> Result<PathBuf> {
     let dir = config_dir_path().join("sessions");
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    create_private_dir_all(&dir)?;
     Ok(dir)
 }
 
@@ -271,11 +271,11 @@ pub fn load_model_config() -> Result<SavedModelConfig> {
 pub fn save_model_config(model_spec: &str) -> Result<()> {
     let path = config_root();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        create_private_dir_all(parent)?;
     }
     let payload = saved_model_config_from_selection(model_spec);
     let text = serde_json::to_string_pretty(&payload)?;
-    fs::write(&path, text).with_context(|| format!("failed writing {}", path.display()))?;
+    write_private_file(&path, text.as_bytes())?;
     Ok(())
 }
 
@@ -423,7 +423,7 @@ pub fn save_session_file(name: Option<&str>, file: &SessionFile) -> Result<PathB
         .unwrap_or_else(|| Utc::now().format("%Y%m%d-%H%M%S").to_string());
     let path = sessions.join(format!("{stem}.json"));
     let body = serde_json::to_string_pretty(file)?;
-    fs::write(&path, body).with_context(|| format!("failed writing {}", path.display()))?;
+    write_private_file(&path, body.as_bytes())?;
     Ok(path)
 }
 
@@ -528,6 +528,45 @@ pub fn parse_duration_seconds(value: &str) -> Result<u64> {
         return Ok(num.trim().parse::<u64>()?);
     }
     Ok(value.parse::<u64>()?)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        if let Some(parent) = path.parent() {
+            create_private_dir_all(parent)?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed writing {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed writing {}", path.display()))?;
+        let mut perms = file.metadata()?.permissions();
+        perms.set_mode(0o600);
+        file.set_permissions(perms)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes).with_context(|| format!("failed writing {}", path.display()))
+    }
+}
+
+fn create_private_dir_all(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
 }
 
 fn env_flag(name: &str, default: bool) -> bool {

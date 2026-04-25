@@ -9,7 +9,7 @@ Enter sends; Alt/Shift+Enter inserts newline
 /compact [llm|deterministic] (/k) -- compact old transcript context
 /model [value] (/m) -- show or switch model
 /thinking [auto|off|low|medium|high] -- adjust reasoning effort
-/debug (/d) -- show session debug info
+/status (/s), /debug (/d) -- show session status
 /yolo -- approve all tools for this session
 /ask <question> -- research-only query
 /save [name] -- save session transcript

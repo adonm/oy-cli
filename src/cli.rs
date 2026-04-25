@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use ignore::WalkBuilder;
 use serde::Serialize;
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use tokei::{Config as TokeiConfig, LanguageType};
 
@@ -455,7 +455,10 @@ async fn audit_command(args: AuditArgs) -> Result<i32> {
     validate_audit_coverage(&chunks)?;
     let manifest = audit_manifest(mode, &chunks);
     let manifest_path = root.join("ISSUES.audit-manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    write_bytes_file(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest)?.as_bytes(),
+    )?;
     let draft_path = root.join("ISSUES.draft.md");
     if !crate::ui::is_quiet() {
         crate::ui::kv("mode", mode.label());
@@ -464,13 +467,14 @@ async fn audit_command(args: AuditArgs) -> Result<i32> {
         crate::ui::kv("draft", "ISSUES.draft.md");
         crate::ui::kv("manifest", "ISSUES.audit-manifest.json");
     }
-    std::fs::write(
+    write_bytes_file(
         &draft_path,
         format!(
             "# Audit draft\n\n{sloc}\n\n{} files in {} chunks planned.\nManifest: ISSUES.audit-manifest.json\n\n",
             manifest.file_count,
             chunks.len()
-        ),
+        )
+        .as_bytes(),
     )?;
 
     for (idx, chunk) in chunks.iter().enumerate() {
@@ -762,7 +766,7 @@ fn build_audit_chunk_prompt(
     sloc: &str,
     docs: &str,
     chunk: &AuditChunk,
-    _standards: bool,
+    standards: bool,
     mode: AuditMode,
 ) -> Result<String> {
     let mut parts = vec![
@@ -778,8 +782,11 @@ fn build_audit_chunk_prompt(
         format!("Workspace SLOC/context:\n{sloc}"),
         format_audit_docs(docs),
         format_audit_chunk_content(chunk, mode),
-        config::session_text_value("audit", "return_suffix")?,
     ];
+    if standards {
+        parts.push(config::session_text_value("audit", "standards_context")?);
+    }
+    parts.push(config::session_text_value("audit", "return_suffix")?);
     if mode == AuditMode::LogicOnly {
         parts.push(config::session_text_value("system", "audit_logic_suffix")?);
         parts.push("Logic-only mode: docs and comments were intentionally omitted from pinned source content. Ground findings in executable/runtime logic only.".to_string());
@@ -1061,11 +1068,39 @@ fn write_workspace_file(root: &Path, requested: &Path, body: &str) -> Result<()>
     } else {
         root.join(requested)
     };
+    let mut out = body.trim_end().to_string();
+    out.push('\n');
+    write_bytes_file(&path, out.as_bytes())
+}
+
+fn write_bytes_file(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed creating {}", parent.display()))?;
     }
-    let mut out = body.trim_end().to_string();
-    out.push('\n');
-    std::fs::write(&path, out).with_context(|| format!("failed writing {}", path.display()))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mode = std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0o600);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(mode)
+            .open(path)
+            .with_context(|| format!("failed writing {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed writing {}", path.display()))?;
+        let mut perms = file.metadata()?.permissions();
+        perms.set_mode(mode);
+        file.set_permissions(perms)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes).with_context(|| format!("failed writing {}", path.display()))
+    }
 }

@@ -160,6 +160,17 @@ impl Transcript {
         }
     }
 
+    fn valid_compaction_keep_from(&self, requested: usize) -> usize {
+        let mut keep_from = requested.min(self.messages.len());
+        while matches!(
+            self.messages.get(keep_from),
+            Some(StoredMessage::Tool { .. })
+        ) {
+            keep_from += 1;
+        }
+        keep_from
+    }
+
     pub fn undo_last_turn(&mut self) -> bool {
         for index in (0..self.messages.len()).rev() {
             if matches!(self.messages[index], StoredMessage::User { .. }) {
@@ -244,7 +255,7 @@ impl Transcript {
             return None;
         }
         let protected = recent_messages.max(1).min(self.messages.len() - 1);
-        let keep_from = self.messages.len() - protected;
+        let keep_from = self.valid_compaction_keep_from(self.messages.len() - protected);
         if keep_from == 0 {
             return None;
         }
@@ -264,13 +275,14 @@ impl Transcript {
 
     pub fn to_chat_request(&self, system_prompt: &str, tool_context: &ToolContext) -> ChatRequest {
         let mut req = ChatRequest::default().with_system(system_prompt);
+        let mut pending_tool_call_ids: Vec<String> = Vec::new();
         if let Some(summary) = self.summary.as_ref().filter(|s| !s.trim().is_empty()) {
             req = req.append_message(ChatMessage::user(format!(
                 "[Compacted earlier conversation]\n{}",
                 summary.trim()
             )));
         }
-        for msg in &self.messages {
+        for (index, msg) in self.messages.iter().enumerate() {
             match msg {
                 StoredMessage::User { content } => {
                     req = req.append_message(ChatMessage::user(content.clone()))
@@ -284,20 +296,33 @@ impl Transcript {
                 StoredMessage::AssistantToolCalls { tool_calls } => {
                     let calls = tool_calls
                         .iter()
-                        .map(|call| ToolCall {
-                            call_id: call.call_id.clone(),
-                            fn_name: call.fn_name.clone(),
-                            fn_arguments: call.fn_arguments.clone(),
-                            thought_signatures: None,
+                        .filter(|call| {
+                            has_following_tool_response(&self.messages[index + 1..], &call.call_id)
+                        })
+                        .map(|call| {
+                            pending_tool_call_ids.push(call.call_id.clone());
+                            ToolCall {
+                                call_id: call.call_id.clone(),
+                                fn_name: call.fn_name.clone(),
+                                fn_arguments: call.fn_arguments.clone(),
+                                thought_signatures: None,
+                            }
                         })
                         .collect::<Vec<_>>();
-                    req = req.append_message(ChatMessage::assistant(calls));
+                    if !calls.is_empty() {
+                        req = req.append_message(ChatMessage::assistant(calls));
+                    }
                 }
                 StoredMessage::Tool { call_id, content } => {
-                    req = req.append_message(ChatMessage::from(ToolResponse::new(
-                        call_id.clone(),
-                        content.clone(),
-                    )));
+                    if let Some(position) =
+                        pending_tool_call_ids.iter().position(|id| id == call_id)
+                    {
+                        pending_tool_call_ids.swap_remove(position);
+                        req = req.append_message(ChatMessage::from(ToolResponse::new(
+                            call_id.clone(),
+                            content.clone(),
+                        )));
+                    }
                 }
             }
         }
@@ -534,6 +559,17 @@ fn transcript_for_summary(messages: &[StoredMessage], model: &str, max_tokens: u
     )
 }
 
+fn has_following_tool_response(messages: &[StoredMessage], call_id: &str) -> bool {
+    for message in messages {
+        match message {
+            StoredMessage::Tool { call_id: id, .. } if id == call_id => return true,
+            StoredMessage::Tool { .. } => continue,
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn compaction_prompt(
     existing_summary: Option<&str>,
     messages: &[StoredMessage],
@@ -701,7 +737,9 @@ async fn compact_llm_session_with_client(
         .recent_messages
         .max(1)
         .min(session.transcript.messages.len() - 1);
-    let keep_from = session.transcript.messages.len() - protected;
+    let keep_from = session
+        .transcript
+        .valid_compaction_keep_from(session.transcript.messages.len() - protected);
     if keep_from == 0 {
         return Ok(None);
     }
@@ -898,6 +936,80 @@ mod tests {
         assert!(tx.summary.as_deref().unwrap().contains("old user"));
         assert_eq!(tx.messages.len(), 2);
         assert!(matches!(tx.messages[0], StoredMessage::User { .. }));
+    }
+
+    #[test]
+    fn compaction_does_not_leave_orphan_tool_response() {
+        let mut tx = Transcript {
+            summary: None,
+            messages: vec![
+                StoredMessage::User {
+                    content: "old user".into(),
+                },
+                StoredMessage::AssistantToolCalls {
+                    tool_calls: vec![StoredToolCall {
+                        call_id: "call-1".into(),
+                        fn_name: "read".into(),
+                        fn_arguments: json!({"path": "src/main.rs"}),
+                    }],
+                },
+                StoredMessage::Tool {
+                    call_id: "call-1".into(),
+                    content: "tool result".into(),
+                },
+                StoredMessage::User {
+                    content: "latest user".into(),
+                },
+            ],
+        };
+
+        let stats = tx
+            .deterministic_compact_old_turns("gpt-4o", "system", &[], 1, 2, 1024)
+            .unwrap();
+
+        assert_eq!(stats.removed_messages, 3);
+        assert_eq!(tx.messages.len(), 1);
+        assert!(matches!(tx.messages[0], StoredMessage::User { .. }));
+    }
+
+    #[test]
+    fn chat_request_drops_orphan_tool_messages() {
+        let tx = Transcript {
+            summary: None,
+            messages: vec![
+                StoredMessage::Tool {
+                    call_id: "missing-call".into(),
+                    content: "orphan".into(),
+                },
+                StoredMessage::AssistantToolCalls {
+                    tool_calls: vec![StoredToolCall {
+                        call_id: "no-result".into(),
+                        fn_name: "read".into(),
+                        fn_arguments: json!({"path": "src/main.rs"}),
+                    }],
+                },
+                StoredMessage::User {
+                    content: "continue".into(),
+                },
+            ],
+        };
+        let ctx = ToolContext {
+            root: std::path::PathBuf::new(),
+            interactive: false,
+            policy: ToolPolicy::read_only(),
+            todos: Vec::new(),
+        };
+
+        let req = tx.to_chat_request("system", &ctx);
+
+        assert_eq!(req.messages.len(), 1);
+        assert!(
+            req.messages[0]
+                .content
+                .first_text()
+                .unwrap()
+                .contains("continue")
+        );
     }
 
     #[test]

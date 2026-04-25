@@ -120,7 +120,7 @@ async fn handle_slash_command(session: &mut Session, command: &str) -> Result<bo
         "compact" => compact_command(parts.next(), session).await,
         "model" => model_command(parts.next(), session).await,
         "thinking" => thinking_command(parts.next()),
-        "debug" => debug_command(session),
+        "debug" | "status" => status_command(session),
         "yolo" => yolo_command(session),
         "ask" => {
             let prompt = parts.collect::<Vec<_>>().join(" ");
@@ -145,6 +145,7 @@ fn normalize_chat_command(command: &str) -> &str {
         "k" => "compact",
         "m" => "model",
         "d" => "debug",
+        "s" => "status",
         "u" => "undo",
         "c" => "clear",
         "q" => "quit",
@@ -160,7 +161,7 @@ pub(crate) fn chat_help_text() -> String {
         "/compact [llm|deterministic] (/k) -- compact old transcript context",
         "/model [value] (/m) -- show or switch model",
         "/thinking [auto|off|low|medium|high] -- adjust reasoning effort",
-        "/debug (/d) -- show session debug info",
+        "/status (/s), /debug (/d) -- show session status",
         "/yolo -- approve all tools for this session",
         "/ask <question> -- research-only query",
         "/save [name] -- save session transcript",
@@ -263,8 +264,8 @@ fn thinking_command(value: Option<&str>) -> Result<bool> {
     Ok(true)
 }
 
-fn debug_command(session: &Session) -> Result<bool> {
-    crate::ui::section("Session");
+fn status_command(session: &Session) -> Result<bool> {
+    crate::ui::section("Status");
     crate::ui::kv("workspace", session.root.display());
     crate::ui::kv("model", &session.model);
     crate::ui::kv("genai", model::to_genai_model_spec(&session.model));
@@ -447,6 +448,7 @@ mod tests {
         assert_eq!(normalize_chat_command("q"), "quit");
         assert_eq!(normalize_chat_command("tokens"), "tokens");
         assert_eq!(normalize_chat_command("k"), "compact");
+        assert_eq!(normalize_chat_command("s"), "status");
     }
 
     #[test]
@@ -455,6 +457,7 @@ mod tests {
         assert!(help.contains("/help"));
         assert!(help.contains("/quit"));
         assert!(help.contains("/compact"));
+        assert!(help.contains("/status"));
     }
 
     #[test]

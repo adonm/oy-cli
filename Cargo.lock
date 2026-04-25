@@ -1998,6 +1998,7 @@ dependencies = [
  "dialoguer",
  "dirs",
  "flate2",
+ "futures-util",
  "genai",
  "glob",
  "globset",
