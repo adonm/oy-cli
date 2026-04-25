@@ -188,7 +188,7 @@ oy --help
 Pin a specific release:
 
 ```bash
-mise use -g github:wagov-dtt/oy-cli@v0.1.0
+mise use -g github:wagov-dtt/oy-cli@v0.7.0
 ```
 
 Released assets are named `oy-<tag>-<target>.tar.gz` or `.zip` and include Linux, macOS, and Windows builds for x86_64 and arm64.
