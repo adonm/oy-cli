@@ -41,12 +41,6 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            archive: zip
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,20 +48,12 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
         shell: bash
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/oy dist/oy
           tar -C dist -czf oy-${{ github.ref_name }}-${{ matrix.target }}.tar.gz oy
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/oy.exe dist/oy.exe
-          Compress-Archive -Path dist/oy.exe -DestinationPath oy-${{ github.ref_name }}-${{ matrix.target }}.zip
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -81,13 +67,28 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Create GitHub release
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Create draft GitHub release with assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --target "${{ github.sha }}" --title "${{ github.ref_name }}" --notes "Rust release ${{ github.ref_name }}."
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --draft \
+            --target "${{ github.sha }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "Rust release ${{ github.ref_name }}."
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false

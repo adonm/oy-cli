@@ -51,12 +51,16 @@ pub async fn run_chat(session: &mut Session) -> Result<i32> {
     loop {
         match line_editor.read_line(&prompt)? {
             Signal::Success(line) => {
+                line_editor.sync_history()?;
                 if !handle_chat_line(session, line.trim()).await? {
                     break;
                 }
             }
             Signal::CtrlD => break,
-            Signal::CtrlC => {}
+            Signal::CtrlC => {
+                line_editor.sync_history()?;
+                break;
+            }
         }
     }
     prompt_update_todo_on_quit(session).await?;
