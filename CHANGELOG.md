@@ -8,7 +8,6 @@
 
 ### Added
 - Rust `audit`, `audit-logic`, and `renovate-local` command support.
-- Rust fuzzy search fallback for the `search` tool.
 
 ## [0.6.0] - 2026-04-22
 

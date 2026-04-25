@@ -3,7 +3,6 @@ use anyhow::{Result, bail};
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
-use isahc::{AsyncReadResponseExt, Request, config::Configurable};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -112,7 +111,6 @@ pub fn list_builtin_model_hints() -> Vec<String> {
 }
 
 pub async fn inspect_models() -> Result<ModelListing> {
-    auto_configure_auth()?;
     let current = resolve_model(None).ok();
     let current_shim = resolve_shim().ok().flatten();
     let dynamic = inspect_openai_compatible_models().await;
@@ -409,12 +407,14 @@ async fn fetch_openai_compatible_models(
     endpoint: &OpenAiCompatibleEndpoint,
 ) -> Result<Vec<String>> {
     let url = format!("{}/models", normalize_base_url(&endpoint.base_url));
-    let request = Request::get(&url)
-        .header("Authorization", format!("Bearer {}", endpoint.api_key))
-        .header("Accept", "application/json")
+    let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
-        .body(())?;
-    let mut response = isahc::send_async(request).await?;
+        .build()?
+        .get(&url)
+        .bearer_auth(&endpoint.api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
     if !response.status().is_success() {
         bail!("GET {url} failed with HTTP {}", response.status());
     }
@@ -458,33 +458,26 @@ fn github_status() -> AuthStatus {
     let copilot = env_value("COPILOT_GITHUB_TOKEN");
     let gh = env_value("GH_TOKEN");
     let github = env_value("GITHUB_TOKEN");
-    let auto = env_value("OY_AUTO_GITHUB_TOKEN");
-    let present = copilot.is_some() || gh.is_some() || github.is_some();
-    let detail = match (
-        copilot.as_deref(),
-        gh.as_deref(),
-        github.as_deref(),
-        auto.as_deref(),
-    ) {
+    let auto = github_token_auto_configured();
+    let present = copilot.is_some() || gh.is_some() || github.is_some() || auto;
+    let detail = match (copilot.as_deref(), gh.as_deref(), github.as_deref(), auto) {
         (Some(_), _, _, _) => {
             "COPILOT_GITHUB_TOKEN detected; copilot-compatible auth available.".to_string()
         }
         (None, Some(_), _, _) => {
             "GH_TOKEN detected; copilot-compatible auth available.".to_string()
         }
-        (None, None, Some(_), Some(_)) => {
-            "GITHUB_TOKEN auto-populated from `gh auth token`.".to_string()
-        }
-        (None, None, Some(_), None) => {
+        (None, None, Some(_), _) => {
             "GITHUB_TOKEN detected; copilot-compatible auth available.".to_string()
         }
-        (None, None, None, _) => "No GitHub auth token detected.".to_string(),
+        (None, None, None, true) => "GitHub token available from `gh auth token`.".to_string(),
+        (None, None, None, false) => "No GitHub auth token detected.".to_string(),
     };
     AuthStatus {
         adapter: "github".to_string(),
         env_var: Some("COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN".to_string()),
         present,
-        source: if auto.is_some() {
+        source: if auto {
             "gh"
         } else if copilot.is_some() || gh.is_some() || github.is_some() {
             "env"
@@ -493,10 +486,9 @@ fn github_status() -> AuthStatus {
         }
         .to_string(),
         detail,
-        auto_configured: auto.is_some(),
+        auto_configured: auto,
     }
 }
-
 fn env_value(name: &str) -> Option<String> {
     env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -505,36 +497,27 @@ fn github_token() -> Option<String> {
     env_value("COPILOT_GITHUB_TOKEN")
         .or_else(|| env_value("GH_TOKEN"))
         .or_else(|| env_value("GITHUB_TOKEN"))
+        .or_else(gh_auth_token)
 }
 
-pub fn auto_configure_auth() -> Result<()> {
-    ensure_github_token_from_gh()?;
-    Ok(())
+fn github_token_auto_configured() -> bool {
+    env_value("COPILOT_GITHUB_TOKEN").is_none()
+        && env_value("GH_TOKEN").is_none()
+        && env_value("GITHUB_TOKEN").is_none()
+        && gh_auth_token().is_some()
 }
 
-fn ensure_github_token_from_gh() -> Result<()> {
-    if github_token().is_some() {
-        return Ok(());
-    }
+fn gh_auth_token() -> Option<String> {
     let output = std::process::Command::new("gh")
         .arg("auth")
         .arg("token")
-        .output();
-    let Ok(output) = output else {
-        return Ok(());
-    };
+        .output()
+        .ok()?;
     if !output.status.success() {
-        return Ok(());
+        return None;
     }
     let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if token.is_empty() {
-        return Ok(());
-    }
-    unsafe {
-        env::set_var("GITHUB_TOKEN", token);
-        env::set_var("OY_AUTO_GITHUB_TOKEN", "1");
-    }
-    Ok(())
+    (!token.is_empty()).then_some(token)
 }
 
 pub fn build_client() -> Result<Client> {
@@ -549,7 +532,6 @@ pub fn build_client() -> Result<Client> {
 }
 
 fn auth_resolver() -> Result<Option<AuthResolver>> {
-    auto_configure_auth()?;
     let base_url = env::var("OPENAI_BASE_URL").ok();
     let api_key = env::var("OPENAI_API_KEY").ok();
     if base_url.is_none() && api_key.is_none() {

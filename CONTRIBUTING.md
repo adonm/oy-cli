@@ -13,13 +13,28 @@ cargo run -- --help
 
 ## Repo layout
 
-- `src/main.rs` — process entrypoint
-- `src/cli.rs` — command entrypoints and chat UX
-- `src/agent.rs` — transcript handling and `genai` tool loop
-- `src/config.rs` — config, model persistence, session persistence
-- `src/model.rs` — model-id normalization and `genai` client setup
-- `src/tools.rs` — model-exposed tools plus local file/search/web helpers
+- `src/main.rs` — process entrypoint plus terminal highlighting print macros
+- `src/cli.rs` — command parsing/orchestration for run, chat, model, audit, Ralph, and Renovate-local flows
+- `src/agent.rs` — session state, transcript serialization, token estimates, and the `genai` tool loop
+- `src/config.rs` — config paths, env flags, agent profiles, prompt loading, model/shim persistence, and saved sessions
+- `src/model.rs` — model-id normalization, routing shim resolution, `genai` client setup, and endpoint model introspection
+- `src/tools.rs` — model-exposed tools for list/read/search/replace/sloc/bash/webfetch/ask/todo with workspace and approval guardrails
+- `src/ui.rs` — reedline chat loop, slash commands, prompts, and interactive model picker
+- `src/highlight.rs` — terminal syntax highlighting via `syntect`
+- `assets/session_text.toml` — system prompts, agent text, audit text, and tool descriptions
 - `legacy-python/` — archived Python implementation, packaging, lockfile, and reference tests
+
+## Crate map
+
+- CLI/runtime: `clap`, `tokio`, `anyhow`
+- model/tool loop: `genai`, `toon-format`, `tiktoken-rs`
+- config/persistence/prompts: `serde`, `serde_json`, `toml`, `dirs`, `chrono`
+- search/file tools: `ignore`, `glob`, `globset`, `grep-regex`, `grep-searcher`, `regex`, `tokei`
+- network/tools: `reqwest` with rustls/http2, `url`, `html2md`
+- archives/compression: `flate2`, `tar`, `zip`
+- terminal UX: `reedline-repl-rs`, `syntect`
+
+Prefer adding notes here when a new crate establishes a new subsystem boundary. Keep README crate notes user-facing and this map contributor-facing.
 
 ## Working rules
 

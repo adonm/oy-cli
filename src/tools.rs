@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow, bail};
-use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use glob::glob;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -7,26 +6,24 @@ use grep_regex::RegexMatcher;
 use grep_searcher::SearcherBuilder;
 use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
-use isahc::{AsyncReadResponseExt, Request, ResponseExt, config::Configurable};
 use regex::Regex;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use strsim::levenshtein;
-use tokei::{Config as TokeiConfig, Languages};
+use tokei::{Config as TokeiConfig, Languages as TokeiLanguages, Sort as TokeiSort};
 use tokio::net::lookup_host;
 use tokio::process::Command;
 use tokio::time::timeout;
 use toon_format::encode_default;
-use tree_sitter::{Language, Parser};
 use url::Url;
-use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
 use genai::chat::Tool;
@@ -35,12 +32,22 @@ use crate::config;
 
 pub const DEFAULT_LIMIT: usize = 910;
 pub const DEFAULT_WEBFETCH_TIMEOUT_SECONDS: u64 = 60;
+const TODO_FILE: &str = "TODO.md";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
     pub id: String,
     pub task: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TodoItemInput {
+    #[serde(default)]
+    id: Option<String>,
+    task: String,
+    #[serde(default = "default_todo_status")]
+    status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,12 +109,6 @@ struct SearchArgs {
     #[serde(default = "default_dot")]
     path: String,
     #[serde(default)]
-    fuzzy: Option<String>,
-    #[serde(default)]
-    best_match: bool,
-    #[serde(default)]
-    enhance_match: bool,
-    #[serde(default)]
     exclude: Option<ExcludeArg>,
     #[serde(default = "default_limit")]
     limit: usize,
@@ -131,8 +132,6 @@ struct SlocArgs {
     path: String,
     #[serde(default)]
     exclude: Option<ExcludeArg>,
-    #[serde(default = "default_limit")]
-    limit: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -164,7 +163,8 @@ struct AskArgs {
 
 #[derive(Debug, Clone, Deserialize)]
 struct TodoArgs {
-    todos: Vec<TodoItem>,
+    #[serde(default, alias = "items")]
+    todos: Vec<TodoItemInput>,
 }
 
 fn default_glob() -> String {
@@ -187,6 +187,9 @@ fn default_method() -> String {
 }
 fn default_web_timeout() -> u64 {
     DEFAULT_WEBFETCH_TIMEOUT_SECONDS
+}
+fn default_todo_status() -> String {
+    "pending".to_string()
 }
 
 pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
@@ -221,9 +224,6 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "default": "."},
-                    "fuzzy": {"type": ["string", "null"]},
-                    "best_match": {"type": "boolean", "default": false},
-                    "enhance_match": {"type": "boolean", "default": false},
                     "exclude": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
                     "limit": {"type": "integer", "default": DEFAULT_LIMIT}
                 },
@@ -237,32 +237,46 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
                 "properties": {
                     "path": {"type": "string", "default": "."},
                     "exclude": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
-                    "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-                },
-                "additionalProperties": false
-            })),
-        Tool::new("todo")
-            .with_description(&crate::config::tool_description("todo"))
-            .with_schema(json!({
-                "type": "object",
-                "properties": {
-                    "todos": {
-                        "type": "array",
+                    },
+                    "additionalProperties": false
+                })),
+            Tool::new("todo")
+                .with_description(&crate::config::tool_description("todo"))
+                .with_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "Complete replacement todo list. Alias: items. Omit to load TODO.md.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string", "description": "Stable short id; optional, defaults to 1-based position."},
+                                    "task": {"type": "string"},
+                                    "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "default": "pending"}
+                                },
+                                "required": ["task"],
+                                "additionalProperties": false
+                            }
+                        },
                         "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string"},
-                                "task": {"type": "string"},
-                                "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}
-                            },
-                            "required": ["id", "task", "status"],
-                            "additionalProperties": false
+                            "type": "array",
+                            "description": "Alias for todos.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string", "description": "Stable short id; optional, defaults to 1-based position."},
+                                    "task": {"type": "string"},
+                                    "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "default": "pending"}
+                                },
+                                "required": ["task"],
+                                "additionalProperties": false
+                            }
                         }
-                    }
-                },
-                "required": ["todos"],
-                "additionalProperties": false
-            })),
+                    },
+                    "anyOf": [{"required": ["todos"]}, {"required": ["items"]}],
+                    "additionalProperties": false
+                }))
     ];
 
     if ctx.interactive {
@@ -339,7 +353,8 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
 }
 
 pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
-    match name {
+    note_tool(name, &args);
+    let result = match name {
         "list" => tool_list(ctx, serde_json::from_value(args)?),
         "read" => tool_read(ctx, serde_json::from_value(args)?),
         "search" => tool_search(ctx, serde_json::from_value(args)?),
@@ -350,13 +365,414 @@ pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Va
         "ask" => tool_ask(ctx, serde_json::from_value(args)?),
         "todo" => tool_todo(ctx, serde_json::from_value(args)?),
         other => bail!("unknown tool: {other}"),
+    };
+    if let Ok(value) = &result {
+        let preview = preview_tool_output(name, value);
+        if !preview.trim().is_empty() {
+            eprintln!("{}", preview.trim_end());
+        }
     }
+    result
 }
 
 pub fn encode_tool_output(value: &Value) -> String {
     encode_default(value).unwrap_or_else(|_| {
         serde_json::to_string_pretty(value).unwrap_or_else(|_| String::from("{}"))
     })
+}
+
+fn note_tool(name: &str, args: &Value) {
+    let detail = tool_call_summary(name, args);
+    if detail.is_empty() {
+        eprintln!("→ {name}");
+    } else {
+        eprintln!("→ {name} {detail}");
+    }
+}
+
+fn tool_call_summary(name: &str, args: &Value) -> String {
+    match name {
+        "list" => compact_kvs(args, &[("path", 60), ("exclude", 40)]),
+        "read" => compact_kvs(args, &[("path", 70), ("offset", 12), ("limit", 12)]),
+        "search" => compact_kvs(args, &[("pattern", 70), ("path", 50), ("exclude", 35)]),
+        "replace" => compact_kvs(args, &[("path", 45), ("pattern", 45), ("replacement", 45)]),
+        "sloc" => compact_kvs(args, &[("path", 70), ("exclude", 40)]),
+        "bash" => preview_value(args.get("command").unwrap_or(&Value::Null), 100),
+        "webfetch" => compact_kvs(args, &[("method", 8), ("url", 100)]),
+        "ask" => preview_value(args.get("question").unwrap_or(&Value::Null), 100),
+        "todo" => todo_call_summary(args),
+        _ => preview_value(args, 120),
+    }
+}
+
+fn compact_kvs(args: &Value, keys: &[(&str, usize)]) -> String {
+    keys.iter()
+        .filter_map(|(key, max)| {
+            let value = args.get(*key)?;
+            if value.is_null() || value == false || value == "" {
+                return None;
+            }
+            if *key == "limit" && value.as_u64() == Some(DEFAULT_LIMIT as u64) {
+                return None;
+            }
+            Some(format!(
+                "{}={}",
+                key.replace('_', "-"),
+                preview_value(value, *max)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn todo_call_summary(args: &Value) -> String {
+    let items = args
+        .get("todos")
+        .or_else(|| args.get("items"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if items.is_empty() {
+        return "0 items".to_string();
+    }
+    let first = items
+        .first()
+        .map(|item| preview_value(item.get("task").unwrap_or(item), 56))
+        .unwrap_or_default();
+    if items.len() == 1 {
+        format!("1 item · {first}")
+    } else {
+        format!("{} items · {first}", items.len())
+    }
+}
+
+pub fn preview_tool_output(name: &str, value: &Value) -> String {
+    match name {
+        "read" => preview_read(value),
+        "search" => preview_search(value),
+        "replace" => preview_replace(value),
+        "bash" => preview_bash(value),
+        "todo" => preview_todo(value),
+        _ => encode_tool_output(value),
+    }
+}
+
+fn preview_value(value: &Value, max: usize) -> String {
+    let raw = value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string());
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&compact, max)
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= max.saturating_sub(3) {
+            return format!("{out}...");
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn value_str<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn value_usize(value: &Value, key: &str) -> usize {
+    value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize
+}
+
+fn preview_read(value: &Value) -> String {
+    let path = value_str(value, "path");
+    let offset = value_usize(value, "offset");
+    let line_count = value_usize(value, "line_count");
+    let text = value_str(value, "text");
+    let shown = text.lines().count();
+    let end = offset.saturating_add(shown).saturating_sub(1);
+    let mut out = format!("{path}:{offset}-{end} ({line_count} lines)");
+    if text.is_empty() {
+        out.push_str("\n  <empty>");
+    } else {
+        for line in text.lines().take(80) {
+            let _ = write!(out, "\n  {}", truncate_chars(line, 220));
+        }
+        if shown > 80 {
+            let _ = write!(out, "\n  … {} more lines", shown - 80);
+        }
+    }
+    out
+}
+
+fn preview_search(value: &Value) -> String {
+    let matches = value
+        .get("matches")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let total = value_usize(value, "match_count");
+    if matches.is_empty() {
+        return format!("0 matches for /{}/", value_str(value, "pattern"));
+    }
+    let mut out = format!(
+        "{} match{} for /{}/",
+        total,
+        plural(total),
+        value_str(value, "pattern")
+    );
+    for item in matches.iter().take(80) {
+        let path = value_str(item, "path");
+        let line = value_usize(item, "line_number");
+        let col = value_usize(item, "column");
+        let text = truncate_chars(value_str(item, "text"), 220);
+        let _ = write!(out, "\n  {path}:{line}:{col}: {text}");
+    }
+    if value
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let _ = write!(
+            out,
+            "\n  … {} more matches",
+            total.saturating_sub(matches.len())
+        );
+    }
+    out
+}
+
+fn preview_replace(value: &Value) -> String {
+    let changed = value
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let replacements = value_usize(value, "replacement_count");
+    let mut out = format!(
+        "{} file{} changed · {} replacement{}",
+        changed.len(),
+        plural(changed.len()),
+        replacements,
+        plural(replacements)
+    );
+    if changed.is_empty() {
+        out.push_str("\n  <no changes>");
+    } else {
+        for item in changed.iter().take(80) {
+            let _ = write!(
+                out,
+                "\n  {} · {} repl",
+                value_str(item, "path"),
+                value_usize(item, "replacements")
+            );
+        }
+    }
+    out
+}
+
+fn preview_bash(value: &Value) -> String {
+    let code = value
+        .get("returncode")
+        .and_then(Value::as_i64)
+        .unwrap_or(-1);
+    let mut out = format!("exit {code}");
+    for key in ["stdout", "stderr"] {
+        let text = value_str(value, key);
+        if text.is_empty() {
+            continue;
+        }
+        let _ = write!(out, "\n{key}:");
+        for line in text.lines().take(80) {
+            let _ = write!(out, "\n  {}", truncate_chars(line, 220));
+        }
+    }
+    out
+}
+
+fn preview_todo(value: &Value) -> String {
+    value_str(value, "preview").to_string().if_empty_then(|| {
+        let items = value
+            .get("items")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        format_todo_preview_from_values(items)
+    })
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+pub fn format_todos(todos: &[TodoItem]) -> String {
+    if todos.is_empty() {
+        return "<empty todo list>".to_string();
+    }
+    todos
+        .iter()
+        .map(format_todo_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_todo_preview(todos: &[TodoItem]) -> String {
+    let counts = todo_status_counts(todos);
+    let active = counts.pending + counts.in_progress;
+    let mut out = format!(
+        "{} todo{} · {} active · {} done",
+        todos.len(),
+        plural(todos.len()),
+        active,
+        counts.done
+    );
+    for line in format_todos(todos).lines() {
+        let _ = write!(out, "\n  {line}");
+    }
+    out
+}
+
+fn format_todo_preview_from_values(items: &[Value]) -> String {
+    let todos = items
+        .iter()
+        .map(|item| TodoItem {
+            id: value_str(item, "id").to_string(),
+            task: value_str(item, "task").to_string(),
+            status: value_str(item, "status").to_string(),
+        })
+        .collect::<Vec<_>>();
+    format_todo_preview(&todos)
+}
+
+fn format_todo_line(item: &TodoItem) -> String {
+    let icon = match item.status.as_str() {
+        "done" => "✓",
+        "in_progress" => "…",
+        _ => "·",
+    };
+    if item.task.is_empty() {
+        format!("{icon} {}", item.id)
+    } else {
+        format!("{icon} {} {}", item.id, item.task)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TodoStatusCounts {
+    pending: usize,
+    in_progress: usize,
+    done: usize,
+}
+
+fn todo_status_counts(todos: &[TodoItem]) -> TodoStatusCounts {
+    let mut counts = TodoStatusCounts {
+        pending: 0,
+        in_progress: 0,
+        done: 0,
+    };
+    for item in todos {
+        match item.status.as_str() {
+            "done" => counts.done += 1,
+            "in_progress" => counts.in_progress += 1,
+            _ => counts.pending += 1,
+        }
+    }
+    counts
+}
+
+trait EmptyStringExt {
+    fn if_empty_then<F: FnOnce() -> String>(self, fallback: F) -> String;
+}
+
+impl EmptyStringExt for String {
+    fn if_empty_then<F: FnOnce() -> String>(self, fallback: F) -> String {
+        if self.is_empty() { fallback() } else { self }
+    }
+}
+
+pub fn load_todos_from_file(root: &Path) -> Result<Vec<TodoItem>> {
+    let path = todo_path(root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", TODO_FILE))?;
+    Ok(parse_todo_markdown(&text))
+}
+
+pub fn save_todos_to_file(root: &Path, todos: &[TodoItem]) -> Result<()> {
+    let path = todo_path(root);
+    fs::write(&path, todos_to_markdown(todos))
+        .with_context(|| format!("failed to write {}", TODO_FILE))
+}
+
+fn todo_path(root: &Path) -> PathBuf {
+    root.join(TODO_FILE)
+}
+
+fn todos_to_markdown(todos: &[TodoItem]) -> String {
+    let mut out = String::from(
+        "# todo
+
+",
+    );
+    if todos.is_empty() {
+        out.push_str(
+            "<!-- empty -->
+",
+        );
+        return out;
+    }
+    for item in todos {
+        let box_mark = match item.status.as_str() {
+            "done" => "x",
+            "in_progress" => "~",
+            _ => " ",
+        };
+        let _ = writeln!(out, "- [{box_mark}] {}: {}", item.id, item.task);
+    }
+    out
+}
+
+fn parse_todo_markdown(text: &str) -> Vec<TodoItem> {
+    text.lines()
+        .filter_map(parse_todo_markdown_line)
+        .enumerate()
+        .map(|(idx, mut item)| {
+            if item.id.is_empty() {
+                item.id = (idx + 1).to_string();
+            }
+            item
+        })
+        .collect()
+}
+
+fn parse_todo_markdown_line(line: &str) -> Option<TodoItem> {
+    let line = line.trim_start();
+    let rest = line
+        .strip_prefix("- [")
+        .or_else(|| line.strip_prefix("* ["))?;
+    let (mark, rest) = rest.split_once(']')?;
+    let status = match mark.trim().to_ascii_lowercase().as_str() {
+        "x" | "✓" | "done" => "done",
+        "~" | ">" | "…" | "in_progress" | "in-progress" => "in_progress",
+        "" | " " | "." | "pending" => "pending",
+        _ => "pending",
+    }
+    .to_string();
+    let body = compact_spaces(rest.trim_start());
+    if body.is_empty() {
+        return None;
+    }
+    let (id, task) = body
+        .split_once(':')
+        .map(|(id, task)| (compact_spaces(id), compact_spaces(task)))
+        .unwrap_or_else(|| (String::new(), body));
+    if task.is_empty() {
+        return None;
+    }
+    Some(TodoItem { id, task, status })
 }
 
 fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
@@ -448,43 +864,21 @@ fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
 }
 
 fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
-    let regex = if args.fuzzy.as_deref().is_some_and(|s| !s.trim().is_empty()) {
-        None
-    } else {
-        Some((
-            RegexMatcher::new_line_matcher(&args.pattern)
-                .with_context(|| format!("invalid regex: {}", args.pattern))?,
-            Regex::new(&args.pattern)
-                .with_context(|| format!("invalid regex: {}", args.pattern))?,
-        ))
-    };
-    let fuzzy = args
-        .fuzzy
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .map(parse_fuzzy_distance)
-        .transpose()?;
+    let matcher = RegexMatcher::new_line_matcher(&args.pattern)
+        .with_context(|| format!("invalid regex: {}", args.pattern))?;
+    let column_regex =
+        Regex::new(&args.pattern).with_context(|| format!("invalid regex: {}", args.pattern))?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let target = resolve_existing_path(&ctx.root, &args.path)?;
     let mut matches = Vec::new();
     let mut errors = Vec::new();
     for path in walk_files(&ctx.root, &target, &exclude)? {
-        let outcome = match (regex.as_ref(), fuzzy) {
-            (Some((matcher, column_regex)), None) => {
-                search_file(&ctx.root, &path, matcher, column_regex, args.enhance_match)
-            }
-            (None, Some(distance)) => search_file_fuzzy(&ctx.root, &path, &args.pattern, distance),
-            _ => Ok(Vec::new()),
-        };
-        match outcome {
+        match search_file(&ctx.root, &path, &matcher, &column_regex) {
             Ok(mut found) => matches.append(&mut found),
             Err(err) => {
                 errors.push(json!({"path": rel_path(&ctx.root, &path), "message": err.to_string()}))
             }
         }
-    }
-    if args.best_match {
-        sort_best_matches(&mut matches, &args.pattern);
     }
     let shown = args.limit.max(1);
     Ok(json!({
@@ -493,13 +887,10 @@ fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
         "match_count": matches.len(),
         "matches": matches.iter().take(shown).cloned().collect::<Vec<_>>(),
         "truncated": matches.len() > shown,
-        "best_match": args.best_match,
-        "enhance_match": args.enhance_match,
         "exclude": args.exclude.as_ref().map(ExcludeArg::patterns),
         "errors": if errors.is_empty() { Value::Null } else { Value::Array(errors) }
     }))
 }
-
 fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
     require_mutation_approval(ctx, "replace")?;
     let regex =
@@ -543,80 +934,47 @@ fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
 
 fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
     let target = resolve_existing_path(&ctx.root, &args.path)?;
-    let excludes = args
+    let exclude = args
         .exclude
         .as_ref()
         .map(ExcludeArg::patterns)
         .unwrap_or_default();
-    let exclude_refs = excludes.iter().map(String::as_str).collect::<Vec<_>>();
-    let target_str = target.to_string_lossy().to_string();
-    let targets = [target_str.as_str()];
-    let mut languages = Languages::new();
-    languages.get_statistics(&targets, &exclude_refs, &TokeiConfig::default());
+    let target = target.to_string_lossy().to_string();
+    let excluded = exclude.iter().map(String::as_str).collect::<Vec<_>>();
 
-    let mut total_files = 0usize;
-    let mut total_code = 0usize;
-    let mut total_comments = 0usize;
-    let mut total_blanks = 0usize;
-    let mut top_files = Vec::new();
-    let mut language_rows = Vec::new();
+    let config = TokeiConfig {
+        hidden: Some(false),
+        no_ignore: Some(false),
+        no_ignore_parent: Some(false),
+        no_ignore_dot: Some(false),
+        no_ignore_vcs: Some(false),
+        ..TokeiConfig::default()
+    };
+    let mut languages = TokeiLanguages::new();
+    languages.get_statistics(&[target.as_str()], &excluded, &config);
+    sort_tokei_reports(&mut languages);
 
-    for (language_type, language) in &languages {
-        let file_count = language.reports.len();
-        total_files += file_count;
-        total_code += language.code;
-        total_comments += language.comments;
-        total_blanks += language.blanks;
-        language_rows.push(json!({
-            "language": language_type.to_string(),
-            "file_count": file_count,
-            "code_count": language.code,
-            "documentation_count": language.comments,
-            "empty_count": language.blanks,
-            "string_count": 0
-        }));
-        for report in &language.reports {
-            top_files.push(json!({
-                "path": rel_path(&ctx.root, &report.name),
-                "language": language_type.to_string(),
-                "code_count": report.stats.code,
-                "documentation_count": report.stats.comments,
-                "empty_count": report.stats.blanks,
-                "string_count": 0,
-                "line_count": report.stats.lines()
-            }));
-        }
+    let mut output = serde_json::to_value(&languages)?;
+    if let Value::Object(ref mut map) = output {
+        map.insert(
+            "Total".to_string(),
+            serde_json::to_value(languages.total())?,
+        );
     }
 
-    language_rows.sort_by(|a, b| {
-        b.get("code_count")
-            .and_then(Value::as_u64)
-            .cmp(&a.get("code_count").and_then(Value::as_u64))
-    });
-    top_files.sort_by(|a, b| {
-        b.get("code_count")
-            .and_then(Value::as_u64)
-            .cmp(&a.get("code_count").and_then(Value::as_u64))
-    });
-    let shown = args.limit.max(1);
-    let total_lines = total_code + total_comments + total_blanks;
     Ok(json!({
         "path": args.path,
-        "total_file_count": total_files,
-        "total_code_count": total_code,
-        "total_documentation_count": total_comments,
-        "total_empty_count": total_blanks,
-        "total_string_count": 0,
-        "total_line_count": total_lines,
-        "language_count": language_rows.len(),
-        "languages": language_rows.iter().take(shown).cloned().collect::<Vec<_>>(),
-        "top_file_count": top_files.len(),
-        "top_files": top_files.iter().take(20).cloned().collect::<Vec<_>>(),
-        "truncated": language_rows.len() > shown || top_files.len() > 20,
-        "exclude": if excludes.is_empty() { Value::Null } else { serde_json::to_value(excludes)? }
+        "format": "tokei-json",
+        "output": output,
+        "exclude": if exclude.is_empty() { Value::Null } else { serde_json::to_value(exclude)? }
     }))
 }
 
+fn sort_tokei_reports(languages: &mut TokeiLanguages) {
+    for language in languages.values_mut() {
+        language.sort_by(TokeiSort::Code);
+    }
+}
 async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
     require_mutation_approval(ctx, "bash")?;
     if args.command.as_bytes().len() > config::max_bash_cmd_bytes() {
@@ -625,7 +983,7 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
             args.command.as_bytes().len()
         );
     }
-    eprintln!("tool: bash command: {}", args.command);
+    crate::highlight::stderr(&format!("tool: bash command: {}\n", args.command));
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(&args.command)
@@ -655,15 +1013,15 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         bail!("Only GET/HEAD/OPTIONS are allowed, got {method}");
     }
     let url = validate_public_url(&args.url).await?;
-    let mut builder = Request::builder()
-        .method(method.as_str())
-        .uri(url.as_str())
-        .timeout(Duration::from_secs(args.timeout_seconds))
-        .redirect_policy(if args.follow_redirects {
-            isahc::config::RedirectPolicy::Limit(10)
+    let client = reqwest::Client::builder()
+        .redirect(if args.follow_redirects {
+            reqwest::redirect::Policy::limited(10)
         } else {
-            isahc::config::RedirectPolicy::None
-        });
+            reqwest::redirect::Policy::none()
+        })
+        .timeout(Duration::from_secs(args.timeout_seconds))
+        .build()?;
+    let mut request = client.request(method.parse()?, url.clone());
     if let Some(headers) = args.headers.as_ref() {
         for (key, value) in headers {
             let lower = key.to_ascii_lowercase();
@@ -681,19 +1039,19 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
             if value.contains('\r') || value.contains('\n') {
                 bail!("Header value for {key:?} contains invalid CRLF characters");
             }
-            builder = builder.header(key, value);
+            request = request.header(key, value);
         }
     }
-    let request = builder.body(())?;
-    let mut response = isahc::send_async(request).await?;
+    let response = request.send().await?;
     let status = response.status();
+    let version = response.version();
+    let final_url = response.url().to_string();
+    if final_url != url.as_str() {
+        validate_public_url(&final_url).await?;
+    }
     let headers = response.headers().clone();
-    let final_url = response
-        .effective_uri()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| url.to_string());
     let content_type = headers
-        .get(isahc::http::header::CONTENT_TYPE)
+        .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
@@ -728,8 +1086,8 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
             "method": method,
             "url": final_url,
             "status_code": status.as_u16(),
-            "reason_phrase": status.canonical_reason().unwrap_or(""),
-            "http_version": format!("{:?}", response.version()),
+            "reason_phrase": reason_phrase(status),
+            "http_version": format!("{:?}", version),
             "headers": header_map,
             "text": text,
             "format": if content_type.contains("html") { "markdown" } else { "text" },
@@ -742,14 +1100,13 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         "method": method,
         "url": final_url,
         "status_code": status.as_u16(),
-        "reason_phrase": status.canonical_reason().unwrap_or(""),
-        "http_version": format!("{:?}", response.version()),
+        "reason_phrase": reason_phrase(status),
+        "http_version": format!("{:?}", version),
         "headers": header_map,
         "binary": true,
         "content_bytes": bytes.len()
     }))
 }
-
 fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
     if !ctx.interactive {
         bail!("Cannot ask: interactive prompting is unavailable");
@@ -761,13 +1118,56 @@ fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
 }
 
 fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
-    for item in &args.todos {
+    let input_todos = if args.todos.is_empty() {
+        load_todos_from_file(&ctx.root)?
+    } else {
+        args.todos
+            .into_iter()
+            .map(|item| TodoItem {
+                id: item.id.unwrap_or_default(),
+                task: item.task,
+                status: item.status,
+            })
+            .collect()
+    };
+    let mut todos = Vec::with_capacity(input_todos.len());
+    for (index, item) in input_todos.into_iter().enumerate() {
+        let id = Some(compact_spaces(&item.id))
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| (index + 1).to_string());
+        let task = compact_spaces(&item.task);
+        if task.is_empty() {
+            bail!("todo task cannot be empty");
+        }
         if !matches!(item.status.as_str(), "pending" | "in_progress" | "done") {
             bail!("invalid todo status: {}", item.status);
         }
+        todos.push(TodoItem {
+            id,
+            task,
+            status: item.status,
+        });
     }
-    ctx.todos = args.todos;
-    Ok(json!({"items": ctx.todos, "count": ctx.todos.len()}))
+
+    save_todos_to_file(&ctx.root, &todos)?;
+    ctx.todos = todos;
+    let counts = todo_status_counts(&ctx.todos);
+    let preview = format_todo_preview(&ctx.todos);
+    Ok(json!({
+        "path": TODO_FILE,
+        "items": ctx.todos,
+        "count": ctx.todos.len(),
+        "status_counts": {
+            "pending": counts.pending,
+            "in_progress": counts.in_progress,
+            "done": counts.done
+        },
+        "preview": preview
+    }))
+}
+
+fn compact_spaces(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn validate_pattern(pattern: &str) -> Result<()> {
@@ -985,19 +1385,6 @@ fn decode_compressed(path: &Path, raw: Vec<u8>) -> Result<Vec<u8>> {
         GzDecoder::new(Cursor::new(raw)).read_to_end(&mut out)?;
         return Ok(out);
     }
-    if name.ends_with(".bz2") {
-        let mut out = Vec::new();
-        BzDecoder::new(Cursor::new(raw)).read_to_end(&mut out)?;
-        return Ok(out);
-    }
-    if name.ends_with(".xz") {
-        let mut out = Vec::new();
-        XzDecoder::new(Cursor::new(raw)).read_to_end(&mut out)?;
-        return Ok(out);
-    }
-    if name.ends_with(".zst") {
-        return zstd::decode_all(Cursor::new(raw)).map_err(Into::into);
-    }
     Ok(raw)
 }
 
@@ -1075,25 +1462,17 @@ fn tar_texts(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
 
 fn push_match(
     display_path: &str,
-    text: &str,
     line_number: usize,
     line: &str,
     column: usize,
-    enhance_match: bool,
     out: &mut Vec<Value>,
 ) {
-    let mut item = json!({
+    out.push(json!({
         "path": display_path,
         "line_number": line_number,
         "column": column,
         "text": truncate_long_line(line.trim_end_matches(['\r', '\n']))
-    });
-    if enhance_match {
-        if let Some(context) = syntax_context(display_path, text, line_number) {
-            item["context"] = Value::String(context);
-        }
-    }
-    out.push(item);
+    }));
 }
 
 fn search_text_grep(
@@ -1101,142 +1480,16 @@ fn search_text_grep(
     text: &str,
     matcher: &RegexMatcher,
     column_regex: &Regex,
-    enhance_match: bool,
     out: &mut Vec<Value>,
 ) -> Result<()> {
     let mut searcher = SearcherBuilder::new().line_number(true).build();
     let mut sink = UTF8(|line_number, line: &str| {
         let column = column_regex.find(line).map(|m| m.start() + 1).unwrap_or(1);
-        push_match(
-            display_path,
-            text,
-            line_number as usize,
-            line,
-            column,
-            enhance_match,
-            out,
-        );
+        push_match(display_path, line_number as usize, line, column, out);
         Ok(true)
     });
     searcher.search_reader(matcher, text.as_bytes(), &mut sink)?;
     Ok(())
-}
-
-fn search_text_fuzzy(
-    display_path: &str,
-    text: &str,
-    pattern: &str,
-    max_distance: usize,
-    out: &mut Vec<Value>,
-) {
-    for (index, line) in text.lines().enumerate() {
-        if let Some((column, _distance)) = fuzzy_find_column(line, pattern, max_distance) {
-            out.push(json!({
-                "path": display_path,
-                "line_number": index + 1,
-                "column": column,
-                "text": truncate_long_line(line)
-            }));
-        }
-    }
-}
-
-fn syntax_context(display_path: &str, text: &str, line_number: usize) -> Option<String> {
-    let (language, kinds) = syntax_language(display_path)?;
-    let mut parser = Parser::new();
-    parser.set_language(&language).ok()?;
-    let tree = parser.parse(text, None)?;
-    let target_row = line_number.saturating_sub(1);
-    let mut cursor = tree.walk();
-    let mut stack = vec![tree.root_node()];
-    let mut best = None;
-    while let Some(node) = stack.pop() {
-        let range = node.range();
-        if range.start_point.row <= target_row && target_row <= range.end_point.row {
-            if kinds.contains(&node.kind()) {
-                let line = text
-                    .lines()
-                    .nth(range.start_point.row)
-                    .unwrap_or_default()
-                    .trim();
-                best = Some(format!(
-                    "{} at lines {}-{}: {}",
-                    node.kind(),
-                    range.start_point.row + 1,
-                    range.end_point.row + 1,
-                    truncate_long_line(line)
-                ));
-            }
-            for child in node.children(&mut cursor) {
-                stack.push(child);
-            }
-        }
-    }
-    best
-}
-
-fn syntax_language(display_path: &str) -> Option<(Language, &'static [&'static str])> {
-    const RUST_KINDS: &[&str] = &[
-        "function_item",
-        "impl_item",
-        "struct_item",
-        "enum_item",
-        "trait_item",
-        "mod_item",
-        "macro_definition",
-    ];
-    const PYTHON_KINDS: &[&str] = &["function_definition", "class_definition"];
-    const JS_KINDS: &[&str] = &[
-        "function_declaration",
-        "method_definition",
-        "class_declaration",
-        "generator_function_declaration",
-        "lexical_declaration",
-    ];
-    if display_path.ends_with(".rs") {
-        return Some((tree_sitter_rust::LANGUAGE.into(), RUST_KINDS));
-    }
-    if display_path.ends_with(".py") {
-        return Some((tree_sitter_python::LANGUAGE.into(), PYTHON_KINDS));
-    }
-    if display_path.ends_with(".js")
-        || display_path.ends_with(".jsx")
-        || display_path.ends_with(".mjs")
-    {
-        return Some((tree_sitter_javascript::LANGUAGE.into(), JS_KINDS));
-    }
-    if display_path.ends_with(".ts") || display_path.ends_with(".tsx") {
-        return Some((tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), JS_KINDS));
-    }
-    None
-}
-
-fn sort_best_matches(matches: &mut [Value], pattern: &str) {
-    let needle = pattern.to_ascii_lowercase();
-    matches.sort_by_key(|item| {
-        let text = item["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let path = item["path"]
-            .as_str()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let column = item["column"].as_u64().unwrap_or(u64::MAX) as usize;
-        let line = item["line_number"].as_u64().unwrap_or(u64::MAX) as usize;
-        let exact = if text.trim() == needle { 0 } else { 1 };
-        let word_boundary = text
-            .find(&needle)
-            .map(|idx| idx == 0 || !text.as_bytes()[idx - 1].is_ascii_alphanumeric())
-            .unwrap_or(false);
-        let boundary = if word_boundary { 0 } else { 1 };
-        let filename_bonus = if path.ends_with(&needle) || path.contains(&format!("/{needle}")) {
-            0
-        } else {
-            1
-        };
-        (exact, boundary, filename_bonus, column, line, path)
-    });
 }
 
 fn search_file(
@@ -1244,7 +1497,6 @@ fn search_file(
     path: &Path,
     matcher: &RegexMatcher,
     column_regex: &Regex,
-    enhance_match: bool,
 ) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for item in file_texts(root, path)? {
@@ -1253,83 +1505,20 @@ fn search_file(
             &item.text,
             matcher,
             column_regex,
-            enhance_match,
             &mut out,
         )?;
     }
     Ok(out)
 }
 
-fn search_file_fuzzy(
-    root: &Path,
-    path: &Path,
-    pattern: &str,
-    max_distance: usize,
-) -> Result<Vec<Value>> {
-    if pattern.is_empty() {
-        bail!("fuzzy search pattern must not be empty");
-    }
-    let mut out = Vec::new();
-    for item in file_texts(root, path)? {
-        search_text_fuzzy(
-            &item.display_path,
-            &item.text,
-            pattern,
-            max_distance,
-            &mut out,
-        );
-    }
-    Ok(out)
-}
-
-fn parse_fuzzy_distance(value: &str) -> Result<usize> {
-    let trimmed = value
-        .trim()
-        .trim_start_matches('{')
-        .trim_end_matches('}')
-        .trim();
-    let digits = trimmed
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() {
-        bail!("fuzzy must contain a max edit distance, e.g. `e<=1`");
-    }
-    Ok(digits.parse::<usize>()?)
-}
-
-fn fuzzy_find_column(line: &str, pattern: &str, max_distance: usize) -> Option<(usize, usize)> {
-    let line_chars = line.chars().collect::<Vec<_>>();
-    let pattern_chars = pattern.chars().collect::<Vec<_>>();
-    let target_len = pattern_chars.len();
-    if target_len == 0 {
-        return Some((1, 0));
-    }
-    let min_len = target_len.saturating_sub(max_distance).max(1);
-    let max_len = target_len + max_distance;
-    let mut best: Option<(usize, usize)> = None;
-    for start in 0..line_chars.len() {
-        for length in min_len..=max_len.min(line_chars.len() - start) {
-            let candidate = line_chars[start..start + length].iter().collect::<String>();
-            let distance = levenshtein(candidate.as_str(), pattern);
-            if distance <= max_distance {
-                let column = start + 1;
-                match best {
-                    Some((best_col, best_dist))
-                        if distance > best_dist
-                            || (distance == best_dist && column >= best_col) => {}
-                    _ => best = Some((column, distance)),
-                }
-            }
-        }
-    }
-    best
-}
-
 enum ReplaceOutcome {
     Changed(usize),
     Unchanged,
     Skipped(&'static str),
+}
+
+fn reason_phrase(status: StatusCode) -> &'static str {
+    status.canonical_reason().unwrap_or("")
 }
 
 fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<ReplaceOutcome> {
@@ -1454,18 +1643,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fuzzy_distance_parser_accepts_common_forms() {
-        assert_eq!(parse_fuzzy_distance("1").unwrap(), 1);
-        assert_eq!(parse_fuzzy_distance("{e<=2}").unwrap(), 2);
-    }
-
-    #[test]
-    fn fuzzy_find_column_finds_near_match() {
-        let found = fuzzy_find_column("hello wurld", "world", 1);
-        assert_eq!(found, Some((7, 1)));
-    }
-
-    #[test]
     fn search_file_reads_zip_members() {
         let dir = tempfile::tempdir().unwrap();
         let zip_path = dir.path().join("sample.zip");
@@ -1484,33 +1661,9 @@ mod tests {
         }
         let matcher = RegexMatcher::new_line_matcher("archive_hit").unwrap();
         let column_regex = Regex::new("archive_hit").unwrap();
-        let found = search_file(dir.path(), &zip_path, &matcher, &column_regex, false).unwrap();
+        let found = search_file(dir.path(), &zip_path, &matcher, &column_regex).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0]["path"], "sample.zip::src/lib.rs");
-    }
-
-    #[test]
-    fn enhanced_search_adds_rust_syntax_context() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lib.rs");
-        fs::write(
-            &path,
-            "fn outer() {
-    let needle = 1;
-}
-",
-        )
-        .unwrap();
-        let matcher = RegexMatcher::new_line_matcher("needle").unwrap();
-        let column_regex = Regex::new("needle").unwrap();
-        let found = search_file(dir.path(), &path, &matcher, &column_regex, true).unwrap();
-        assert_eq!(found.len(), 1);
-        assert!(
-            found[0]["context"]
-                .as_str()
-                .unwrap()
-                .contains("function_item")
-        );
     }
 
     #[test]
@@ -1588,37 +1741,31 @@ three
     }
 
     #[test]
-    fn enhanced_search_adds_python_syntax_context() {
+    fn todo_tool_writes_and_loads_markdown() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mod.py");
-        fs::write(
-            &path,
-            "def outer():
-    needle = 1
-",
+        let mut ctx = ToolContext {
+            root: dir.path().to_path_buf(),
+            interactive: false,
+            yolo: false,
+            agent: "default".into(),
+            todos: Vec::new(),
+        };
+        let value = tool_todo(
+            &mut ctx,
+            TodoArgs {
+                todos: vec![TodoItemInput {
+                    id: Some("a".into()),
+                    task: "ship it".into(),
+                    status: "in_progress".into(),
+                }],
+            },
         )
         .unwrap();
-        let matcher = RegexMatcher::new_line_matcher("needle").unwrap();
-        let column_regex = Regex::new("needle").unwrap();
-        let found = search_file(dir.path(), &path, &matcher, &column_regex, true).unwrap();
-        assert_eq!(found.len(), 1);
-        assert!(
-            found[0]["context"]
-                .as_str()
-                .unwrap()
-                .contains("function_definition")
-        );
-    }
-
-    #[test]
-    fn best_match_prefers_boundary_and_early_column() {
-        let mut items = vec![
-            json!({"path":"b.txt","line_number":1,"column":8,"text":"xx needle"}),
-            json!({"path":"a.txt","line_number":1,"column":1,"text":"needle here"}),
-            json!({"path":"c.txt","line_number":1,"column":1,"text":"hayneedle"}),
-        ];
-        sort_best_matches(&mut items, "needle");
-        assert_eq!(items[0]["path"], "a.txt");
-        assert_eq!(items[2]["path"], "c.txt");
+        assert_eq!(value["path"], TODO_FILE);
+        let text = fs::read_to_string(dir.path().join(TODO_FILE)).unwrap();
+        assert!(text.contains("- [~] a: ship it"));
+        let loaded = load_todos_from_file(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].status, "in_progress");
     }
 }

@@ -1,7 +1,6 @@
 use anyhow::Result;
-use reedline::{
-    ColumnarMenu, DefaultCompleter, DefaultPrompt, DefaultPromptSegment, FileBackedHistory,
-    Reedline, ReedlineMenu, Signal,
+use reedline_repl_rs::reedline::{
+    DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal,
 };
 use std::path::PathBuf;
 
@@ -12,30 +11,231 @@ use crate::model;
 const HISTORY_SIZE: usize = 10_000;
 
 pub async fn run_chat(session: &mut Session) -> Result<i32> {
-    print_chat_intro(session);
-    let mut line_editor = reedline("chat", chat_command_completions())?;
-    let prompt = prompt("oy");
+    println!("oy chat — type a prompt to send, /help for commands, /quit to exit");
+    let history_path = history_path("chat")?;
+    let mut line_editor = Reedline::create().with_history(Box::new(FileBackedHistory::with_file(
+        HISTORY_SIZE,
+        history_path,
+    )?));
+    let prompt = DefaultPrompt::new(
+        DefaultPromptSegment::Basic("oy".to_string()),
+        DefaultPromptSegment::Empty,
+    );
+
     loop {
         match line_editor.read_line(&prompt)? {
-            Signal::Success(input) => {
-                let input = input.trim();
-                if input.is_empty() {
-                    continue;
+            Signal::Success(line) => {
+                if !handle_chat_line(session, line.trim()).await? {
+                    break;
                 }
-                if let Some(limit) = parse_history_command(input) {
-                    print_transcript(session, limit);
-                    continue;
-                }
-                if input.starts_with('/') {
-                    if !crate::cli::handle_chat_command(session, input).await? {
-                        return Ok(0);
-                    }
-                    continue;
-                }
-                run_prompt_with_model_reselect(session, input).await?;
             }
-            Signal::CtrlD | Signal::CtrlC => return Ok(0),
-            _ => continue,
+            Signal::CtrlD => break,
+            Signal::CtrlC => {}
+        }
+    }
+    prompt_update_todo_on_quit(session).await?;
+    Ok(0)
+}
+
+async fn prompt_update_todo_on_quit(session: &mut Session) -> Result<()> {
+    if !crate::config::can_prompt() {
+        return Ok(());
+    }
+    let prompt = "Update TODO.md with a concise summary of session actions?";
+    let choices = ["yes".to_string(), "no".to_string()];
+    if crate::ui::ask(prompt, Some(&choices))? != "yes" {
+        return Ok(());
+    }
+
+    let summary = agent::run_prompt(
+        session,
+        "Use the todo tool to update TODO.md with a concise summary of the session actions. Keep it to one done item unless active follow-up work remains.",
+    )
+    .await?;
+    if !summary.is_empty() {
+        crate::highlight::stdout(&format!("{summary}\n"));
+    }
+    Ok(())
+}
+
+async fn handle_chat_line(session: &mut Session, line: &str) -> Result<bool> {
+    if line.is_empty() {
+        return Ok(true);
+    }
+    if let Some(command) = line.strip_prefix('/') {
+        return handle_slash_command(session, command.trim()).await;
+    }
+    run_prompt_with_model_reselect(session, line).await?;
+    Ok(true)
+}
+
+async fn handle_slash_command(session: &mut Session, command: &str) -> Result<bool> {
+    let mut parts = command.split_whitespace();
+    let raw_name = parts.next().unwrap_or_default();
+    let name = normalize_chat_command(raw_name);
+    match name {
+        "" => Ok(true),
+        "help" => {
+            crate::highlight::stdout(&format!("{}\n", chat_help_text()));
+            Ok(true)
+        }
+        "history" => {
+            let limit = parts.next().and_then(|value| value.parse::<usize>().ok());
+            print_history(session, limit);
+            Ok(true)
+        }
+        "tokens" => tokens_command(session),
+        "model" => model_command(parts.next(), session).await,
+        "debug" => debug_command(session),
+        "yolo" => yolo_command(session),
+        "ask" => {
+            let prompt = parts.collect::<Vec<_>>().join(" ");
+            ask_command(session, &prompt).await
+        }
+        "save" => save_command(parts.next(), session),
+        "load" => load_command(parts.next(), session),
+        "undo" => undo_command(session),
+        "clear" => clear_command(session),
+        "quit" | "exit" => Ok(false),
+        other => {
+            println!("Unknown command: /{other}");
+            Ok(true)
+        }
+    }
+}
+
+fn normalize_chat_command(command: &str) -> &str {
+    match command {
+        "h" | "?" => "help",
+        "hist" => "history",
+        "t" => "tokens",
+        "m" => "model",
+        "d" => "debug",
+        "u" => "undo",
+        "c" => "clear",
+        "q" => "quit",
+        other => other,
+    }
+}
+
+fn chat_help_text() -> String {
+    [
+        "/help (/h, /?) -- show command help",
+        "/history [limit] (/hist) -- print transcript in scrollback",
+        "/tokens (/t) -- show approximate context tokens",
+        "/model [value] (/m) -- show or switch model",
+        "/debug (/d) -- show session debug info",
+        "/yolo -- approve all tools for this session",
+        "/ask <question> -- research-only query",
+        "/save [name] -- save session transcript",
+        "/load [name] -- load a saved session",
+        "/undo (/u) -- remove last prompt and follow-ups",
+        "/clear (/c) -- clear conversation",
+        "/quit (/q), /exit -- end session",
+    ]
+    .join("\n")
+}
+
+async fn ask_command(session: &mut Session, prompt: &str) -> Result<bool> {
+    if prompt.is_empty() {
+        anyhow::bail!("Usage: /ask <question>");
+    }
+    let answer = agent::run_prompt(session, &config::ask_system_prompt(prompt)).await?;
+    if !answer.is_empty() {
+        crate::highlight::stdout(&format!("{answer}\n"));
+    }
+    Ok(true)
+}
+
+fn tokens_command(session: &Session) -> Result<bool> {
+    let estimate = session.transcript.token_estimate(
+        &model::to_genai_model_spec(&session.model),
+        &session.system_prompt,
+        &session.todos,
+    );
+    println!("messages: {}", estimate.messages);
+    println!("system tokens: ~{}", estimate.system_tokens);
+    println!("message tokens: ~{}", estimate.message_tokens);
+    println!("total tokens: ~{}", estimate.total_tokens);
+    Ok(true)
+}
+
+async fn model_command(value: Option<&str>, session: &mut Session) -> Result<bool> {
+    if let Some(value) = value {
+        config::save_model_config(value)?;
+        session.model = model::resolve_model(Some(value))?;
+    }
+    crate::highlight::stdout(&format!("model: {}\n", session.model));
+    Ok(true)
+}
+
+fn debug_command(session: &Session) -> Result<bool> {
+    println!("workspace: {}", session.root.display());
+    crate::highlight::stdout(&format!("model: {}\n", session.model));
+    println!(
+        "genai-model: {}",
+        model::to_genai_model_spec(&session.model)
+    );
+    println!("agent: {}", session.agent);
+    println!("interactive: {}", session.interactive);
+    println!("yolo: {}", session.yolo);
+    println!("messages: {}", session.transcript.messages.len());
+    println!("todos: {}", session.todos.len());
+    Ok(true)
+}
+
+fn yolo_command(session: &mut Session) -> Result<bool> {
+    session.yolo = true;
+    println!("yolo enabled");
+    Ok(true)
+}
+
+fn save_command(name: Option<&str>, session: &mut Session) -> Result<bool> {
+    let path = session.save(name)?;
+    println!("saved session: {}", path.display());
+    Ok(true)
+}
+
+fn load_command(name: Option<&str>, session: &mut Session) -> Result<bool> {
+    if let Some(new_session) = agent::load_saved(name, true)? {
+        *session = new_session;
+        println!("loaded session");
+    } else {
+        println!("No saved sessions found.");
+    }
+    Ok(true)
+}
+
+fn undo_command(session: &mut Session) -> Result<bool> {
+    if session.transcript.undo_last_turn() {
+        println!("undid last turn");
+    } else {
+        println!("nothing to undo");
+    }
+    Ok(true)
+}
+
+fn clear_command(session: &mut Session) -> Result<bool> {
+    session.transcript.messages.clear();
+    println!("conversation cleared");
+    Ok(true)
+}
+
+fn print_history(session: &Session, limit: Option<usize>) {
+    let messages = &session.transcript.messages;
+    let start = limit
+        .map(|limit| messages.len().saturating_sub(limit))
+        .unwrap_or(0);
+    for message in &messages[start..] {
+        match message {
+            StoredMessage::User { content } => println!("user: {content}"),
+            StoredMessage::Assistant { content } => println!("assistant: {content}"),
+            StoredMessage::AssistantToolCalls { tool_calls } => {
+                for call in tool_calls {
+                    println!("tool_call: {} {}", call.fn_name, call.fn_arguments);
+                }
+            }
+            StoredMessage::Tool { call_id, content } => println!("tool[{call_id}]: {content}"),
         }
     }
 }
@@ -45,19 +245,19 @@ async fn run_prompt_with_model_reselect(session: &mut Session, prompt: &str) -> 
         match agent::run_prompt(session, prompt).await {
             Ok(answer) => {
                 if !answer.is_empty() {
-                    println!("{answer}");
+                    crate::highlight::stdout(&format!("{answer}\n"));
                 }
                 return Ok(());
             }
             Err(err) if config::can_prompt() => {
-                eprintln!("model call failed: {err:#}");
+                crate::highlight::stderr(&format!("model call failed: {err:#}\n"));
                 session.transcript.undo_last_turn();
                 let Some(model) = choose_replacement_model(session).await? else {
                     return Err(err);
                 };
                 session.model = model;
                 config::save_model_config(&session.model)?;
-                eprintln!("retrying with model: {}", session.model);
+                crate::highlight::stderr(&format!("retrying with model: {}\n", session.model));
             }
             Err(err) => return Err(err),
         }
@@ -86,40 +286,30 @@ fn replacement_model_choices(
 }
 
 pub fn choose_model(current: Option<&str>, items: &[String]) -> Result<Option<String>> {
+    choose_model_with_initial_list(current, items, true)
+}
+
+pub fn choose_model_with_initial_list(
+    current: Option<&str>,
+    items: &[String],
+    print_initial_list: bool,
+) -> Result<Option<String>> {
     if items.is_empty() {
         return Ok(None);
     }
-    print_model_choices(current, items, "");
-    let mut active_items = items.to_vec();
-    let mut line_editor = reedline("model", items.to_vec())?;
-    let prompt = prompt("model/filter");
-    loop {
-        match line_editor.read_line(&prompt)? {
-            Signal::Success(input) => {
-                let input = input.trim();
-                match select_item(input, &active_items) {
-                    Selection::Current => return Ok(current.map(ToOwned::to_owned)),
-                    Selection::Selected(value) => return Ok(Some(value)),
-                    Selection::Ambiguous(matches) => {
-                        print_model_choices(current, &matches, input);
-                        active_items = matches;
-                    }
-                    Selection::Invalid => {
-                        let matches = filter_items(items, input);
-                        if matches.is_empty() {
-                            println!("No model matches `{input}`.");
-                        } else if matches.len() == 1 {
-                            return Ok(Some(matches[0].clone()));
-                        } else {
-                            print_model_choices(current, &matches, input);
-                            active_items = matches;
-                        }
-                    }
-                }
-            }
-            Signal::CtrlD | Signal::CtrlC => return Ok(None),
-            _ => continue,
+    if print_initial_list {
+        print_model_choices(current, items, "");
+    }
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    match select_item(input.trim(), items) {
+        Selection::Current => Ok(current.map(ToOwned::to_owned)),
+        Selection::Selected(value) => Ok(Some(value)),
+        Selection::Ambiguous(matches) => {
+            print_model_choices(current, &matches, input.trim());
+            Ok(None)
         }
+        Selection::Invalid => Ok(None),
     }
 }
 
@@ -127,87 +317,22 @@ pub fn ask(question: &str, choices: Option<&[String]>) -> Result<String> {
     if let Some(choices) = choices {
         print_choices(choices);
     }
-    let mut line_editor = reedline("ask", choices.unwrap_or(&[]).to_vec())?;
-    let prompt = prompt(question);
-    loop {
-        match line_editor.read_line(&prompt)? {
-            Signal::Success(input) => {
-                let input = input.trim();
-                if let Some(choices) = choices {
-                    match select_item(input, choices) {
-                        Selection::Selected(value) => return Ok(value),
-                        Selection::Current => continue,
-                        Selection::Ambiguous(matches) => print_choices(&matches),
-                        Selection::Invalid => {
-                            println!("Enter a number 1-{} or an exact choice.", choices.len())
-                        }
-                    }
-                    continue;
-                }
-                return Ok(input.to_string());
+    println!("{question}");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    if let Some(choices) = choices {
+        return match select_item(input, choices) {
+            Selection::Selected(value) => Ok(value),
+            Selection::Current => Ok(String::new()),
+            Selection::Ambiguous(matches) => {
+                print_choices(&matches);
+                Ok(String::new())
             }
-            Signal::CtrlD | Signal::CtrlC => return Ok(String::new()),
-            _ => continue,
-        }
+            Selection::Invalid => Ok(String::new()),
+        };
     }
-}
-
-fn reedline(name: &str, completions: Vec<String>) -> Result<Reedline> {
-    let history = FileBackedHistory::with_file(HISTORY_SIZE, history_path(name)?)?;
-    let completer = Box::new(DefaultCompleter::new_with_wordlen(completions, 1));
-    Ok(Reedline::create()
-        .with_history(Box::new(history))
-        .with_completer(completer)
-        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
-            ColumnarMenu::default(),
-        )))
-        .with_quick_completions(true)
-        .with_partial_completions(true))
-}
-
-fn prompt(left: &str) -> DefaultPrompt {
-    DefaultPrompt::new(
-        DefaultPromptSegment::Basic(left.to_string()),
-        DefaultPromptSegment::Empty,
-    )
-}
-
-fn history_path(name: &str) -> Result<PathBuf> {
-    history_path_in(config::config_dir_path(), name)
-}
-
-fn history_path_in(config_dir: PathBuf, name: &str) -> Result<PathBuf> {
-    let history = config_dir.join("history");
-    std::fs::create_dir_all(&history)?;
-    Ok(history.join(format!("{name}.txt")))
-}
-
-fn chat_command_completions() -> Vec<String> {
-    let mut completions = crate::cli::CHAT_COMMANDS
-        .iter()
-        .map(|item| command_name(item.command).to_string())
-        .chain(
-            crate::cli::CHAT_COMMAND_ALIASES
-                .iter()
-                .map(|(alias, _)| alias.to_string()),
-        )
-        .collect::<Vec<_>>();
-    completions.sort();
-    completions.dedup();
-    completions
-}
-
-fn command_name(command: &str) -> &str {
-    command.split_whitespace().next().unwrap_or(command)
-}
-
-fn parse_history_command(input: &str) -> Option<Option<usize>> {
-    let mut parts = input.split_whitespace();
-    if parts.next()? != "/history" {
-        return None;
-    }
-    let limit = parts.next().and_then(|value| value.parse::<usize>().ok());
-    Some(limit)
+    Ok(input.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,51 +374,14 @@ fn filter_items(items: &[String], query: &str) -> Vec<String> {
         .collect()
 }
 
-fn print_chat_intro(session: &Session) {
-    println!(
-        "oy chat — model={} agent={}  (/help, /history, Ctrl-D quits)",
-        model::to_genai_model_spec(&session.model),
-        session.agent
-    );
+fn history_path(name: &str) -> Result<PathBuf> {
+    history_path_in(config::config_dir_path(), name)
 }
 
-fn print_transcript(session: &Session, limit: Option<usize>) {
-    if session.transcript.messages.is_empty() {
-        println!("No messages yet.");
-        return;
-    }
-    let start = limit
-        .map(|limit| session.transcript.messages.len().saturating_sub(limit))
-        .unwrap_or(0);
-    for message in session.transcript.messages.iter().skip(start) {
-        match message {
-            StoredMessage::User { content } => print_prefixed("you", content),
-            StoredMessage::Assistant { content } => print_prefixed("oy", content),
-            StoredMessage::AssistantToolCalls { tool_calls } => {
-                for call in tool_calls {
-                    println!(
-                        "tool> {} {}",
-                        call.fn_name,
-                        preview_line(&call.fn_arguments.to_string())
-                    );
-                }
-            }
-            StoredMessage::Tool { content, .. } => {
-                print_prefixed("tool", &preview_block(content, 24))
-            }
-        }
-        println!();
-    }
-}
-
-fn print_prefixed(prefix: &str, content: &str) {
-    let mut lines = content.lines();
-    if let Some(first) = lines.next() {
-        println!("{prefix}> {first}");
-    }
-    for line in lines {
-        println!("    {line}");
-    }
+fn history_path_in(config_dir: PathBuf, name: &str) -> Result<PathBuf> {
+    let history = config_dir.join("history");
+    std::fs::create_dir_all(&history)?;
+    Ok(history.join(format!("{name}.txt")))
 }
 
 fn print_model_choices(current: Option<&str>, items: &[String], query: &str) {
@@ -326,47 +414,30 @@ fn print_choices(choices: &[String]) {
     }
 }
 
-fn preview_line(text: &str) -> String {
-    let out = text.lines().next().unwrap_or_default().trim();
-    if out.is_empty() {
-        "done".to_string()
-    } else {
-        out.chars().take(120).collect()
-    }
-}
-
-fn preview_block(text: &str, max_lines: usize) -> String {
-    let mut lines = text.lines().take(max_lines).collect::<Vec<_>>();
-    if text.lines().count() > max_lines {
-        lines.push("...");
-    }
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chat_command_completions_include_history_command_name() {
-        let completions = chat_command_completions();
-        assert!(completions.contains(&"/history".to_string()));
-        assert!(completions.contains(&"/model".to_string()));
-        assert!(completions.contains(&"/q".to_string()));
-    }
-
-    #[test]
-    fn parse_history_command_accepts_optional_limit() {
-        assert_eq!(parse_history_command("/history"), Some(None));
-        assert_eq!(parse_history_command("/history 5"), Some(Some(5)));
-        assert_eq!(parse_history_command("/help"), None);
-    }
 
     #[test]
     fn history_path_uses_named_history_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = history_path_in(dir.path().to_path_buf(), "chat").unwrap();
         assert!(path.ends_with("history/chat.txt"));
+    }
+
+    #[test]
+    fn normalize_chat_command_maps_slash_aliases() {
+        assert_eq!(normalize_chat_command("q"), "quit");
+        assert_eq!(normalize_chat_command("hist"), "history");
+        assert_eq!(normalize_chat_command("tokens"), "tokens");
+    }
+
+    #[test]
+    fn chat_help_uses_slash_commands() {
+        let help = chat_help_text();
+        assert!(help.contains("/help"));
+        assert!(help.contains("/history [limit]"));
+        assert!(help.contains("/quit"));
     }
 
     #[test]
@@ -409,16 +480,5 @@ mod tests {
             filter_items(&items, "sonnet"),
             vec!["Claude Sonnet".to_string()]
         );
-    }
-
-    #[test]
-    fn preview_block_truncates_long_tool_output() {
-        let out = preview_block("a\nb\nc", 2);
-        assert_eq!(out, "a\nb\n...");
-    }
-
-    #[test]
-    fn preview_line_has_default_for_empty_text() {
-        assert_eq!(preview_line("\n"), "done");
     }
 }

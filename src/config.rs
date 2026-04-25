@@ -339,11 +339,6 @@ pub fn ask_system_prompt(prompt: &str) -> String {
     }
 }
 
-#[allow(dead_code)]
-pub fn unattended_limit_seconds() -> u64 {
-    parse_duration_env("OY_UNATTENDED_LIMIT", 3600)
-}
-
 pub fn ralph_limit_seconds() -> u64 {
     parse_duration_env("OY_RALPH_LIMIT", 3 * 3600)
 }

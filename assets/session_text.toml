@@ -12,7 +12,7 @@ Prefer the cheapest sufficient path:
 5. `bash` only when file tools are insufficient or when you must run/check something.
 Batch independent tool calls. Stop as soon as you have enough evidence or the task is complete.
 Keep edits small, maintainable, grugbrain-simple, OWASP-minded, and performance-aware.
-Use `todo` for 3+ step work, edits, or verification. Keep it current.
+Use `todo` for 3+ step work, edits, or verification. Keep it current. The `todo` tool is the normal path for `TODO.md`; do not read/write it directly unless explicitly asked.
 Use `webfetch` freely for public docs and API research when it helps. Prefer it over guessing.
 Manage context aggressively: keep only key facts and paths. Prefer narrow `path`, `offset`, `limit`, and `exclude`.
 Before mutating files or running commands, state the next action briefly. After finishing, report concrete files or commands changed.
@@ -253,13 +253,13 @@ description = "Read one UTF-8 text file with `pathlib`. Use when you know the pa
 description = "Run a system subprocess with Python `subprocess` in the workspace. Use only when file tools are insufficient or when you must run/check something. Returns `returncode`, summarized `stdout`/`stderr`, and truncation flags."
 
 [tools.search]
-description = "Search text with Python `regex`. Best for finding symbols, strings, TODOs, and candidate edit locations before reading files. Prefer this before `read` when the exact path or region is unknown. Supports `exclude`, fuzzy matching, and returns `match_count`, `matches`, and optional `errors`."
+description = "Search workspace text with ripgrep-style Rust regex. Use for symbols, strings, TODOs, and candidate edit locations before `read`. Supports inline flags like `(?i)`, `.gitignore`, `exclude` globs, binary skipping, readable archive/compressed text, and returns `match_count`, `matches`, `truncated`, and optional `errors`."
 
 [tools.replace]
-description = "Replace text with Python `regex` for surgical edits. Prefer after narrowing targets with `read` or `search`. Respects `.gitignore`, supports `exclude`, skips binaries/archives, and rewrites only changed files. Returns changed files, replacement counts, and skips/errors."
+description = "Replace workspace text with Rust regex and ripgrep-style captures (`$1`, `${name}`, `$$`). Use after narrowing targets with `read` or `search`. Respects `.gitignore`, supports `exclude` globs, skips symlinks/binary/non-UTF-8 files, rewrites only changed files, and returns changed files, replacement counts, skips, and errors."
 
 [tools.sloc]
-description = "Count source lines with `pygount` to size up a repo or subtree. Respects `.gitignore`, supports `exclude`, and returns totals, per-language counts, top filenames, and non-countable files/errors."
+description = "Count source lines with `tokei` to size up a repo or subtree. Respects `.gitignore`, supports `exclude`, and returns tokei-style JSON output under `output` plus the requested path/excludes."
 
 [tools.ask]
 description = "Ask the user in interactive runs. Reserve it for genuine ambiguity or irreversible user-facing choices; provide choices when useful. In non-interactive mode, proceed without `ask`."
@@ -268,4 +268,4 @@ description = "Ask the user in interactive runs. Reserve it for genuine ambiguit
 description = "Fetch public web pages or files with `urllib3`. Good for docs, API references, release notes, and public web research. Methods: GET/HEAD/OPTIONS. Returns response metadata plus summarized `text` for text responses, or `binary`/`content_bytes` for non-text responses. May convert large HTML to markdown. Blocks localhost/private IPs."
 
 [tools.todo]
-description = "Replace the in-memory todo list with `todos` (`{id, task, status}`; status: pending/in_progress/done). Use for multi-step work, especially inspect/edit/verify flows. Every item must include string `id`, string `task`, and a valid `status`. Returns `items` and `count`; the list persists across compaction."
+description = "Load or replace the in-memory todo list and persist it to `TODO.md`. Input is optional `todos` (or alias `items`): array of tasks with required `task`, optional stable `id` (defaults to 1-based position), and optional `status` (`pending` default, `in_progress`, `done`). Use for multi-step work, especially inspect/edit/verify flows. This tool is the only normal path that reads/writes `TODO.md`; returns normalized `items`, `count`, `status_counts`, `path`, and a human-readable `preview`."

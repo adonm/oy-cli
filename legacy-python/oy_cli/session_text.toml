@@ -247,7 +247,7 @@ description = "Read one UTF-8 text file with `pathlib`. Use when you know the pa
 description = "Run a system subprocess with Python `subprocess` in the workspace. Use only when file tools are insufficient or when you must run/check something. Returns `returncode`, summarized `stdout`/`stderr`, and truncation flags."
 
 [tools.search]
-description = "Search text with Python `regex`. Best for finding symbols, strings, TODOs, and candidate edit locations before reading files. Prefer this before `read` when the exact path or region is unknown. Supports `exclude`, fuzzy matching, and returns `match_count`, `matches`, and optional `errors`."
+description = "Search text with Python `regex`. Best for finding symbols, strings, TODOs, and candidate edit locations before reading files. Prefer this before `read` when the exact path or region is unknown. Supports `exclude` and returns `match_count`, `matches`, and optional `errors`."
 
 [tools.replace]
 description = "Replace text with Python `regex` for surgical edits. Prefer after narrowing targets with `read` or `search`. Respects `.gitignore`, supports `exclude`, skips binaries/archives, and rewrites only changed files. Returns changed files, replacement counts, and skips/errors."

@@ -2,12 +2,35 @@
 
 Small local AI coding CLI for your shell. The active implementation is Rust; the old Python package lives under `legacy-python/` for reference only.
 
-It uses:
+Design summary:
 
-- [`genai`](https://crates.io/crates/genai) for model access and tool calls
-- [`reedline`](https://crates.io/crates/reedline) for shell-native chat input, history, and scrollback
-- ripgrep ecosystem crates (`ignore`, `globset`, `regex`) for repo search
-- [`toon-format`](https://crates.io/crates/toon-format) for compact tool payload encoding
+- `src/main.rs` installs syntax-highlighting stdout/stderr wrappers, then enters the async CLI.
+- `src/cli.rs` owns command parsing and orchestration for `run`, `chat`, `ralph`, `model`, `audit`, `audit-logic`, and `renovate-local`.
+- `src/agent.rs` owns session state, transcript persistence, token estimates, and the `genai` request/tool loop.
+- `src/tools.rs` exposes the model tools and enforces workspace bounds, approval gates, public-only fetches, archive reads, and output summarization.
+- `src/config.rs` owns config paths, saved model/shim config, agent profiles, prompts loaded from `assets/session_text.toml`, env flags, and saved sessions.
+- `src/model.rs` normalizes model ids, resolves routing shims, builds `genai` clients, and introspects OpenAI-compatible model endpoints.
+- `src/ui.rs` owns reedline chat, slash commands, prompts, and interactive model selection.
+- `src/highlight.rs` syntax-highlights terminal output with `syntect`.
+
+Crate notes:
+
+- `genai` is the model client and tool-call transport.
+- `tokio` drives async CLI execution, subprocesses, timeouts, DNS, and network operations.
+- `clap` defines the command surface.
+- `serde`, `serde_json`, and `toml` load/save config, sessions, tool args/results, and prompt text.
+- `reqwest` + `url` implement `webfetch` and endpoint model introspection over rustls/http2.
+- `ignore`, `glob`, `globset`, `grep-regex`, `grep-searcher`, and `regex` implement workspace listing/search/replace while respecting gitignore-style filters.
+- `tokei` powers the `sloc` tool.
+- `reedline-repl-rs` provides reedline input/history for chat and selection prompts.
+- `syntect` highlights Markdown/JSON/TOML/shell-ish terminal output.
+- `tiktoken-rs` estimates context size for wait status and `/tokens`.
+- `toon-format` compacts tool outputs before they go back to the model.
+- `html2md` converts fetched HTML pages to Markdown-ish text.
+- `dirs` locates the user config directory.
+- `chrono` stamps sessions, audit reports, and local Renovate reports.
+- `flate2`, `tar`, and `zip` let file tools inspect compressed text and archive members without extracting into the workspace.
+- `anyhow` keeps error paths simple at CLI boundaries.
 
 ## Quick start
 

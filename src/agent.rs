@@ -3,11 +3,13 @@ use chrono::Utc;
 use genai::chat::{ChatMessage, ChatRequest, ToolCall, ToolResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::ffi::OsString;
+use std::path::Path;
 use tiktoken_rs::{bpe_for_model, cl100k_base};
 
 use crate::config::{self, SessionFile};
 use crate::model;
-use crate::tools::{self, TodoItem, ToolContext};
+use crate::tools::{TodoItem, ToolContext};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transcript {
@@ -163,15 +165,7 @@ impl Transcript {
         if !tool_context.todos.is_empty() {
             let header = config::session_text_value("transcript", "todo_system")
                 .unwrap_or_else(|_| String::from("{todos}"));
-            let mut todos = String::new();
-            for item in &tool_context.todos {
-                let icon = match item.status.as_str() {
-                    "done" => "[x]",
-                    "in_progress" => "[~]",
-                    _ => "[ ]",
-                };
-                todos.push_str(&format!("{icon} {}: {}\n", item.id, item.task));
-            }
+            let todos = crate::tools::format_todos(&tool_context.todos);
             prompt.push_str("\n\n");
             prompt.push_str(header.replace("{todos}", todos.trim_end()).trim());
         }
@@ -210,6 +204,27 @@ impl Session {
         }
     }
 
+    fn wait_status(&self, model_spec: &str) -> String {
+        let estimate = self
+            .transcript
+            .token_estimate(model_spec, &self.system_prompt, &self.todos);
+        let mut parts = vec![
+            "oy".to_string(),
+            model_suffix(model_spec).to_string(),
+            format!("{}", format_tokens(estimate.total_tokens)),
+            format!("{} msg", estimate.messages),
+        ];
+        if !self.todos.is_empty() {
+            let active = self
+                .todos
+                .iter()
+                .filter(|item| item.status != "done")
+                .count();
+            parts.push(format!("{active}/{} todo", self.todos.len()));
+        }
+        append_starship_suffix(parts.join(" · "), &self.root)
+    }
+
     pub fn save(&self, name: Option<&str>) -> Result<std::path::PathBuf> {
         let payload = SessionFile {
             model: self.model.clone(),
@@ -241,6 +256,138 @@ pub fn load_saved(name: Option<&str>, interactive: bool) -> Result<Option<Sessio
     }))
 }
 
+fn model_suffix(model_spec: &str) -> &str {
+    model_spec
+        .rsplit_once("::")
+        .map(|(_, model)| model)
+        .unwrap_or(model_spec)
+}
+
+fn format_tokens(count: usize) -> String {
+    if count < 1000 {
+        format!("{count} tok")
+    } else {
+        format!("{:.1}k tok", count as f64 / 1000.0)
+    }
+}
+
+fn append_starship_suffix(status: String, root: &Path) -> String {
+    append_starship_suffix_with_line(status, starship_line(root).as_deref())
+}
+
+fn append_starship_suffix_with_line(status: String, line: Option<&str>) -> String {
+    let Some(line) = line else {
+        return status;
+    };
+    format!("{status} {}", dim(line))
+}
+
+fn starship_line(root: &Path) -> Option<String> {
+    let output = starship_command(root).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let stripped = strip_ansi(line);
+            let line = stripped.trim();
+            (!line.is_empty()).then(|| line.to_string())
+        })
+}
+
+fn starship_command(root: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("starship");
+    command
+        .arg("prompt")
+        .arg("--cmd-duration=0")
+        .arg("--status=0")
+        .current_dir(root)
+        .env("STARSHIP_SHELL", "fish");
+    if let Some(config) = starship_config_with_git_metrics() {
+        command.env("STARSHIP_CONFIG", config);
+    }
+    command
+}
+
+fn starship_config_with_git_metrics() -> Option<OsString> {
+    let existing = std::env::var_os("STARSHIP_CONFIG");
+    let source = existing
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .or_else(default_starship_config);
+    let source = source.as_deref();
+    if starship_git_metrics_configured(source) {
+        return existing;
+    }
+    let mut config = source.unwrap_or_default().trim_end().to_string();
+    if !config.is_empty() {
+        config.push_str("\n\n");
+    }
+    config.push_str("[git_metrics]\ndisabled = false\n");
+    let path = std::env::temp_dir().join(format!("oy-starship-{}.toml", std::process::id()));
+    std::fs::write(&path, config).ok()?;
+    Some(path.into_os_string())
+}
+
+fn default_starship_config() -> Option<String> {
+    let path = dirs::config_dir()?.join("starship.toml");
+    std::fs::read_to_string(path).ok()
+}
+
+fn starship_git_metrics_configured(config: Option<&str>) -> bool {
+    let Some(config) = config else {
+        return false;
+    };
+    let mut in_git_metrics = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_git_metrics = line.trim_matches(['[', ']'].as_ref()).trim() == "git_metrics";
+            continue;
+        }
+        if in_git_metrics && line.starts_with("disabled") && line.contains('=') {
+            return true;
+        }
+    }
+    false
+}
+
+fn dim(text: &str) -> String {
+    format!("\x1b[2m{text}\x1b[0m")
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'[') {
+            chars.next();
+            continue;
+        }
+        if ch == '\\' && chars.peek() == Some(&']') {
+            chars.next();
+            continue;
+        }
+        if ch == '\\' && chars.peek() == Some(&'\\') {
+            chars.next();
+            out.push('\\');
+            continue;
+        }
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for ch in chars.by_ref() {
+                if ('@'..='~').contains(&ch) {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
     let client = model::build_client()?;
     session.transcript.messages.push(StoredMessage::User {
@@ -249,11 +396,13 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
 
     loop {
         let tool_context = session.tool_context();
+        let tool_specs = crate::tools::tool_specs(&tool_context);
         let req = session
             .transcript
             .to_chat_request(&session.system_prompt, &tool_context)
-            .with_tools(tools::tool_specs(&tool_context));
+            .with_tools(tool_specs.clone());
         let model_spec = model::to_genai_model_spec(&session.model);
+        crate::highlight::stderr(&format!("{}\n", session.wait_status(&model_spec)));
         let response = client.exec_chat(&model_spec, req, None).await?;
         let tool_calls = response
             .tool_calls()
@@ -278,12 +427,14 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
             for call in tool_calls {
                 let mut ctx = session.tool_context();
                 let result =
-                    match tools::invoke(&mut ctx, &call.fn_name, call.fn_arguments.clone()).await {
+                    match crate::tools::invoke(&mut ctx, &call.fn_name, call.fn_arguments.clone())
+                        .await
+                    {
                         Ok(value) => value,
                         Err(err) => json!({"ok": false, "error": err.to_string()}),
                     };
                 session.todos = ctx.todos;
-                let content = tools::encode_tool_output(&result);
+                let content = crate::tools::encode_tool_output(&result);
                 session.transcript.messages.push(StoredMessage::Tool {
                     call_id: call.call_id.clone(),
                     content,
@@ -352,5 +503,33 @@ mod tests {
             estimate.total_tokens,
             estimate.system_tokens + estimate.message_tokens
         );
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(strip_ansi("\x1b[32mmain\x1b[0m λ"), "main λ");
+    }
+
+    #[test]
+    fn append_starship_suffix_dims_suffix() {
+        assert_eq!(
+            append_starship_suffix_with_line("oy · model · 1 tok ctx".to_string(), Some("main")),
+            "oy · model · 1 tok ctx \x1b[2mmain\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn starship_git_metrics_configured_detects_explicit_disabled() {
+        assert!(starship_git_metrics_configured(Some(
+            "[git_metrics]
+disabled = true
+"
+        )));
+        assert!(!starship_git_metrics_configured(Some("[git_branch]\n")));
+    }
+
+    #[test]
+    fn strip_ansi_removes_bash_prompt_markers() {
+        assert_eq!(strip_ansi("\\[\x1b[32m\\]main\\[\x1b[0m\\]"), "main");
     }
 }

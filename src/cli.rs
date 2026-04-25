@@ -155,7 +155,7 @@ async fn run_command(args: RunArgs) -> Result<i32> {
     print_session_intro("Run", &session, Some(&task));
     let answer = agent::run_prompt(&mut session, &task).await?;
     if !answer.is_empty() {
-        println!("{answer}");
+        crate::highlight::stdout(&format!("{answer}\n"));
     }
     Ok(0)
 }
@@ -172,215 +172,6 @@ async fn chat_command(args: ChatArgs) -> Result<i32> {
     }
     print_session_intro("Chat", &session, None);
     crate::ui::run_chat(&mut session).await
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ChatCommandInfo {
-    pub command: &'static str,
-    pub description: &'static str,
-}
-
-pub const CHAT_COMMAND_ALIASES: &[(&str, &str)] = &[
-    ("/h", "/help"),
-    ("/?", "/help"),
-    ("/hist", "/history"),
-    ("/t", "/tokens"),
-    ("/m", "/model"),
-    ("/d", "/debug"),
-    ("/u", "/undo"),
-    ("/c", "/clear"),
-    ("/q", "/quit"),
-];
-
-pub const CHAT_COMMANDS: &[ChatCommandInfo] = &[
-    ChatCommandInfo {
-        command: "/help",
-        description: "show command help",
-    },
-    ChatCommandInfo {
-        command: "/history [limit]",
-        description: "print transcript in scrollback",
-    },
-    ChatCommandInfo {
-        command: "/tokens",
-        description: "show approximate context tokens",
-    },
-    ChatCommandInfo {
-        command: "/model [value]",
-        description: "show or switch model",
-    },
-    ChatCommandInfo {
-        command: "/debug",
-        description: "show session debug info",
-    },
-    ChatCommandInfo {
-        command: "/yolo",
-        description: "approve all tools for this session",
-    },
-    ChatCommandInfo {
-        command: "/ask <question>",
-        description: "research-only query",
-    },
-    ChatCommandInfo {
-        command: "/save [name]",
-        description: "save session transcript",
-    },
-    ChatCommandInfo {
-        command: "/load [name]",
-        description: "load a saved session",
-    },
-    ChatCommandInfo {
-        command: "/undo",
-        description: "remove last prompt and follow-ups",
-    },
-    ChatCommandInfo {
-        command: "/clear",
-        description: "clear conversation",
-    },
-    ChatCommandInfo {
-        command: "/quit",
-        description: "end session",
-    },
-    ChatCommandInfo {
-        command: "/exit",
-        description: "end session",
-    },
-];
-
-pub fn normalize_chat_command(command: &str) -> &str {
-    CHAT_COMMAND_ALIASES
-        .iter()
-        .find_map(|(alias, canonical)| (*alias == command).then_some(*canonical))
-        .unwrap_or(command)
-}
-
-fn aliases_for(command: &str) -> String {
-    let aliases = CHAT_COMMAND_ALIASES
-        .iter()
-        .filter_map(|(alias, canonical)| (*canonical == command).then_some(*alias))
-        .collect::<Vec<_>>();
-    if aliases.is_empty() {
-        String::new()
-    } else {
-        format!(" (aliases: {})", aliases.join(", "))
-    }
-}
-
-pub fn chat_help_text() -> String {
-    CHAT_COMMANDS
-        .iter()
-        .map(|item| {
-            let command = item
-                .command
-                .split_whitespace()
-                .next()
-                .unwrap_or(item.command);
-            format!(
-                "{}{} -- {}",
-                item.command,
-                aliases_for(command),
-                item.description
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(
-            "
-",
-        )
-}
-
-pub async fn handle_chat_command(session: &mut Session, input: &str) -> Result<bool> {
-    let mut parts = input.split_whitespace();
-    let raw_cmd = parts.next().unwrap_or_default();
-    let cmd = normalize_chat_command(raw_cmd);
-    match cmd {
-        "/help" => {
-            println!("{}", chat_help_text());
-        }
-        "/history" => {
-            println!("/history is handled by chat and prints the transcript.");
-        }
-        "/tokens" => {
-            let estimate = session.transcript.token_estimate(
-                &model::to_genai_model_spec(&session.model),
-                &session.system_prompt,
-                &session.todos,
-            );
-            println!("messages: {}", estimate.messages);
-            println!("system tokens: ~{}", estimate.system_tokens);
-            println!("message tokens: ~{}", estimate.message_tokens);
-            println!("total tokens: ~{}", estimate.total_tokens);
-        }
-        "/model" => {
-            if let Some(query) = parts.next() {
-                let listing = model::inspect_models().await?;
-                let selected = resolve_model_choice(&listing, query)?;
-                config::save_model_config(&selected)?;
-                session.model = model::resolve_model(Some(&selected))?;
-                println!("model: {}", session.model);
-            } else {
-                println!(
-                    "{}",
-                    current_model_text(&session.model, model::resolve_shim()?.as_deref())
-                );
-            }
-        }
-        "/debug" => {
-            println!("workspace: {}", session.root.display());
-            println!("model: {}", session.model);
-            println!(
-                "genai-model: {}",
-                model::to_genai_model_spec(&session.model)
-            );
-            println!("agent: {}", session.agent);
-            println!("interactive: {}", session.interactive);
-            println!("yolo: {}", session.yolo);
-            println!("messages: {}", session.transcript.messages.len());
-            println!("todos: {}", session.todos.len());
-        }
-        "/yolo" => {
-            session.yolo = true;
-            println!("yolo enabled");
-        }
-        "/ask" => {
-            let prompt = parts.collect::<Vec<_>>().join(" ");
-            if prompt.is_empty() {
-                bail!("Usage: /ask <question>");
-            }
-            let answer = agent::run_prompt(session, &config::ask_system_prompt(&prompt)).await?;
-            if !answer.is_empty() {
-                println!("{answer}");
-            }
-        }
-        "/save" => {
-            let name = parts.next();
-            let path = session.save(name)?;
-            println!("saved session: {}", path.display());
-        }
-        "/load" => {
-            let loaded = agent::load_saved(parts.next(), true)?;
-            if let Some(new_session) = loaded {
-                *session = new_session;
-                println!("loaded session");
-            } else {
-                println!("No saved sessions found.");
-            }
-        }
-        "/undo" => {
-            if session.transcript.undo_last_turn() {
-                println!("undid last turn");
-            } else {
-                println!("nothing to undo");
-            }
-        }
-        "/clear" => {
-            session.transcript.messages.clear();
-            println!("conversation cleared");
-        }
-        "/quit" | "/exit" => return Ok(false),
-        other => println!("Unknown command: {other}"),
-    }
-    Ok(true)
 }
 
 async fn ralph_command(args: RalphArgs) -> Result<i32> {
@@ -424,7 +215,7 @@ async fn model_command(args: ModelArgs) -> Result<i32> {
     print_model_listing(&listing);
 
     if config::can_prompt() && !listing.all_models.is_empty() {
-        if let Some(chosen) = choose_model_interactively(&listing)? {
+        if let Some(chosen) = choose_model_interactively_without_initial_list(&listing)? {
             config::save_model_config(&chosen)?;
             print_saved_model(&chosen);
         }
@@ -543,8 +334,14 @@ fn resolve_model_choice(listing: &model::ModelListing, query: &str) -> Result<St
     choose_from_items(&matches, listing.current.as_deref()).map(|value| value.unwrap_or(normalized))
 }
 
-fn choose_model_interactively(listing: &model::ModelListing) -> Result<Option<String>> {
-    crate::ui::choose_model(listing.current.as_deref(), &listing.all_models)
+fn choose_model_interactively_without_initial_list(
+    listing: &model::ModelListing,
+) -> Result<Option<String>> {
+    crate::ui::choose_model_with_initial_list(
+        listing.current.as_deref(),
+        &listing.all_models,
+        false,
+    )
 }
 
 fn choose_from_items(items: &[String], current: Option<&str>) -> Result<Option<String>> {
@@ -804,25 +601,5 @@ async fn renovate_github_token() -> Result<Option<String>> {
         Ok(None)
     } else {
         Ok(Some(token))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_chat_command_maps_aliases() {
-        assert_eq!(normalize_chat_command("/q"), "/quit");
-        assert_eq!(normalize_chat_command("/hist"), "/history");
-        assert_eq!(normalize_chat_command("/tokens"), "/tokens");
-    }
-
-    #[test]
-    fn chat_help_mentions_aliases() {
-        let help = chat_help_text();
-        assert!(help.contains("/history [limit]"));
-        assert!(help.contains("aliases: /h"));
-        assert!(help.contains("aliases: /q"));
     }
 }
