@@ -3,8 +3,7 @@ name: Rust CI and Release
 on:
   push:
     branches: [rust]
-  release:
-    types: [created]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +11,7 @@ permissions:
 
 jobs:
   ci:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rust')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,11 +22,9 @@ jobs:
         run: cargo test --locked
 
   release:
-    if: github.event_name == 'release'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     name: Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -52,8 +49,6 @@ jobs:
             archive: zip
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -65,16 +60,34 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/oy dist/oy
-          tar -C dist -czf oy-${{ github.event.release.tag_name }}-${{ matrix.target }}.tar.gz oy
+          tar -C dist -czf oy-${{ github.ref_name }}-${{ matrix.target }}.tar.gz oy
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/${{ matrix.target }}/release/oy.exe dist/oy.exe
-          Compress-Archive -Path dist/oy.exe -DestinationPath oy-${{ github.event.release.tag_name }}-${{ matrix.target }}.zip
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+          Compress-Archive -Path dist/oy.exe -DestinationPath oy-${{ github.ref_name }}-${{ matrix.target }}.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: oy-${{ github.event.release.tag_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          name: oy-${{ github.ref_name }}-${{ matrix.target }}
+          path: oy-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --target "${{ github.sha }}" --title "${{ github.ref_name }}" --notes "Rust release ${{ github.ref_name }}."
