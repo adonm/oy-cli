@@ -174,25 +174,131 @@ async fn chat_command(args: ChatArgs) -> Result<i32> {
     crate::ui::run_chat(&mut session).await
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ChatCommandInfo {
+    pub command: &'static str,
+    pub description: &'static str,
+}
+
+pub const CHAT_COMMAND_ALIASES: &[(&str, &str)] = &[
+    ("/h", "/help"),
+    ("/?", "/help"),
+    ("/hist", "/history"),
+    ("/t", "/tokens"),
+    ("/m", "/model"),
+    ("/d", "/debug"),
+    ("/u", "/undo"),
+    ("/c", "/clear"),
+    ("/q", "/quit"),
+];
+
+pub const CHAT_COMMANDS: &[ChatCommandInfo] = &[
+    ChatCommandInfo {
+        command: "/help",
+        description: "show command help",
+    },
+    ChatCommandInfo {
+        command: "/history [limit]",
+        description: "print transcript in scrollback",
+    },
+    ChatCommandInfo {
+        command: "/tokens",
+        description: "show approximate context tokens",
+    },
+    ChatCommandInfo {
+        command: "/model [value]",
+        description: "show or switch model",
+    },
+    ChatCommandInfo {
+        command: "/debug",
+        description: "show session debug info",
+    },
+    ChatCommandInfo {
+        command: "/yolo",
+        description: "approve all tools for this session",
+    },
+    ChatCommandInfo {
+        command: "/ask <question>",
+        description: "research-only query",
+    },
+    ChatCommandInfo {
+        command: "/save [name]",
+        description: "save session transcript",
+    },
+    ChatCommandInfo {
+        command: "/load [name]",
+        description: "load a saved session",
+    },
+    ChatCommandInfo {
+        command: "/undo",
+        description: "remove last prompt and follow-ups",
+    },
+    ChatCommandInfo {
+        command: "/clear",
+        description: "clear conversation",
+    },
+    ChatCommandInfo {
+        command: "/quit",
+        description: "end session",
+    },
+    ChatCommandInfo {
+        command: "/exit",
+        description: "end session",
+    },
+];
+
+pub fn normalize_chat_command(command: &str) -> &str {
+    CHAT_COMMAND_ALIASES
+        .iter()
+        .find_map(|(alias, canonical)| (*alias == command).then_some(*canonical))
+        .unwrap_or(command)
+}
+
+fn aliases_for(command: &str) -> String {
+    let aliases = CHAT_COMMAND_ALIASES
+        .iter()
+        .filter_map(|(alias, canonical)| (*canonical == command).then_some(*alias))
+        .collect::<Vec<_>>();
+    if aliases.is_empty() {
+        String::new()
+    } else {
+        format!(" (aliases: {})", aliases.join(", "))
+    }
+}
+
+pub fn chat_help_text() -> String {
+    CHAT_COMMANDS
+        .iter()
+        .map(|item| {
+            let command = item
+                .command
+                .split_whitespace()
+                .next()
+                .unwrap_or(item.command);
+            format!(
+                "{}{} -- {}",
+                item.command,
+                aliases_for(command),
+                item.description
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
 pub async fn handle_chat_command(session: &mut Session, input: &str) -> Result<bool> {
     let mut parts = input.split_whitespace();
-    let cmd = parts.next().unwrap_or_default();
+    let raw_cmd = parts.next().unwrap_or_default();
+    let cmd = normalize_chat_command(raw_cmd);
     match cmd {
         "/help" => {
-            println!(
-                "/help
-/tokens
-/model [value]
-/debug
-/yolo
-/ask <question>
-/save [name]
-/load [name]
-/undo
-/clear
-/quit
-/exit"
-            );
+            println!("{}", chat_help_text());
+        }
+        "/history" => {
+            println!("/history is handled by chat and prints the transcript.");
         }
         "/tokens" => {
             let estimate = session.transcript.token_estimate(
@@ -206,11 +312,17 @@ pub async fn handle_chat_command(session: &mut Session, input: &str) -> Result<b
             println!("total tokens: ~{}", estimate.total_tokens);
         }
         "/model" => {
-            if let Some(model) = parts.next() {
-                session.model = model.to_string();
+            if let Some(query) = parts.next() {
+                let listing = model::inspect_models().await?;
+                let selected = resolve_model_choice(&listing, query)?;
+                config::save_model_config(&selected)?;
+                session.model = model::resolve_model(Some(&selected))?;
                 println!("model: {}", session.model);
             } else {
-                println!("current model: {}", session.model);
+                println!(
+                    "{}",
+                    current_model_text(&session.model, model::resolve_shim()?.as_deref())
+                );
             }
         }
         "/debug" => {
@@ -305,46 +417,104 @@ async fn model_command(args: ModelArgs) -> Result<i32> {
     if let Some(model_spec) = args.model {
         let normalized = resolve_model_choice(&listing, &model_spec)?;
         config::save_model_config(&normalized)?;
-        println!("saved model: {normalized}");
+        print_saved_model(&normalized);
         return Ok(0);
     }
 
+    print_model_listing(&listing);
+
+    if config::can_prompt() && !listing.all_models.is_empty() {
+        if let Some(chosen) = choose_model_interactively(&listing)? {
+            config::save_model_config(&chosen)?;
+            print_saved_model(&chosen);
+        }
+    }
+    Ok(0)
+}
+
+fn print_model_listing(listing: &model::ModelListing) {
+    println!("## Models");
     println!(
-        "current model: {}",
-        listing
-            .current
-            .clone()
-            .unwrap_or_else(|| "<unset>".to_string())
+        "- current: {}",
+        current_model_text(
+            listing.current.as_deref().unwrap_or("<unset>"),
+            listing.current_shim.as_deref(),
+        )
     );
+    println!("- selectable: {}", listing.all_models.len());
 
     if !listing.auth.is_empty() {
-        println!("auth:");
+        println!("\n### Auth / shims");
         for item in &listing.auth {
             let env_var = item.env_var.as_deref().unwrap_or("-");
-            println!("- {}: {} ({})", item.adapter, env_var, item.source);
+            let configured = if listing.current_shim.as_deref() == Some(item.adapter.as_str()) {
+                " active"
+            } else {
+                ""
+            };
+            println!(
+                "- {}{}: {} ({})",
+                item.adapter, configured, env_var, item.source
+            );
             println!("  {}", item.detail);
         }
     }
 
     if !listing.dynamic.is_empty() {
-        println!("available models:");
+        println!("\n### Introspected endpoint models");
         for item in &listing.dynamic {
-            println!("- {}: {} models", item.adapter, item.count);
+            println!(
+                "- {}: {} models via {}",
+                item.adapter, item.count, item.source
+            );
             for model_name in &item.models {
-                println!("  - {}", model_name);
+                let marker = if listing.current.as_deref() == Some(model_name.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                println!("  {marker} {model_name}");
             }
         }
     } else {
-        println!("available models: none introspected from configured OpenAI-compatible endpoints");
+        println!("\n### Introspected endpoint models");
+        println!("none found from configured OpenAI-compatible endpoints");
     }
 
-    if config::can_prompt() && !listing.all_models.is_empty() {
-        if let Some(chosen) = choose_model_interactively(&listing)? {
-            config::save_model_config(&chosen)?;
-            println!("saved model: {chosen}");
+    let hinted = listing
+        .hints
+        .iter()
+        .filter(|hint| {
+            !listing
+                .dynamic
+                .iter()
+                .any(|group| group.models.iter().any(|model| model == *hint))
+        })
+        .collect::<Vec<_>>();
+    if !hinted.is_empty() {
+        println!("\n### Built-in selectable hints");
+        for hint in hinted {
+            println!("  - {hint}");
         }
     }
-    Ok(0)
+}
+
+fn current_model_text(model_spec: &str, shim: Option<&str>) -> String {
+    match shim.filter(|value| !value.is_empty()) {
+        Some(shim) => format!("{model_spec} (shim: {shim})"),
+        None => model_spec.to_string(),
+    }
+}
+
+fn print_saved_model(selection: &str) {
+    let saved = config::saved_model_config_from_selection(selection);
+    println!(
+        "saved model: {}",
+        saved.model.as_deref().unwrap_or(selection)
+    );
+    if let Some(shim) = saved.shim {
+        println!("shim: {shim}");
+    }
 }
 
 fn resolve_model_choice(listing: &model::ModelListing, query: &str) -> Result<String> {
@@ -634,5 +804,25 @@ async fn renovate_github_token() -> Result<Option<String>> {
         Ok(None)
     } else {
         Ok(Some(token))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_chat_command_maps_aliases() {
+        assert_eq!(normalize_chat_command("/q"), "/quit");
+        assert_eq!(normalize_chat_command("/hist"), "/history");
+        assert_eq!(normalize_chat_command("/tokens"), "/tokens");
+    }
+
+    #[test]
+    fn chat_help_mentions_aliases() {
+        let help = chat_help_text();
+        assert!(help.contains("/history [limit]"));
+        assert!(help.contains("aliases: /h"));
+        assert!(help.contains("aliases: /q"));
     }
 }

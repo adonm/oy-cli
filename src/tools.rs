@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{Cursor, Read};
 use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -24,7 +24,7 @@ use tokio::net::lookup_host;
 use tokio::process::Command;
 use tokio::time::timeout;
 use toon_format::encode_default;
-use tree_sitter::Parser;
+use tree_sitter::{Language, Parser};
 use url::Url;
 use xz2::read::XzDecoder;
 use zip::ZipArchive;
@@ -363,6 +363,30 @@ fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
     validate_pattern(&args.path)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let shown_limit = args.limit.max(1);
+    if args.path.contains("::") {
+        let items = list_archive_virtual(&ctx.root, &args.path, &exclude)?;
+        return Ok(json!({
+            "path": args.path,
+            "items": items.iter().take(shown_limit).cloned().collect::<Vec<_>>(),
+            "count": items.len(),
+            "truncated": items.len() > shown_limit,
+            "exclude": args.exclude.as_ref().map(ExcludeArg::patterns)
+        }));
+    }
+    let target_for_archive = resolve_existing_path(&ctx.root, &args.path).ok();
+    if target_for_archive
+        .as_ref()
+        .is_some_and(|path| path.is_file() && is_archive_path(path))
+    {
+        let items = list_archive_virtual(&ctx.root, &format!("{}::", args.path), &exclude)?;
+        return Ok(json!({
+            "path": args.path,
+            "items": items.iter().take(shown_limit).cloned().collect::<Vec<_>>(),
+            "count": items.len(),
+            "truncated": items.len() > shown_limit,
+            "exclude": args.exclude.as_ref().map(ExcludeArg::patterns)
+        }));
+    }
     let items = if args.path == "." || args.path == "./" {
         let mut out = Vec::new();
         for entry in fs::read_dir(&ctx.root)? {
@@ -397,31 +421,27 @@ fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
 }
 
 fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
-    let target = resolve_existing_path(&ctx.root, &args.path)?;
-    if target.is_dir() {
-        bail!("read path is a directory: {}", args.path);
-    }
+    let (display_path, text) = read_virtual_text(&ctx.root, &args.path)?;
     let mut shown = Vec::new();
-    let mut line_count = 0usize;
     let start = args.offset.saturating_sub(1);
     let stop = start + args.limit.max(1);
-    let file = fs::File::open(&target)?;
-    for (idx, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.unwrap_or_default();
+    let mut line_count = 0usize;
+    for (idx, line) in text.lines().enumerate() {
         line_count = idx + 1;
         if idx < start {
             continue;
         }
         if idx < stop {
-            shown.push(line);
+            shown.push(line.to_string());
         }
     }
     let truncated = line_count > stop;
     Ok(json!({
-        "path": args.path,
+        "path": display_path,
         "offset": args.offset,
         "limit": args.limit,
-        "text": shown.join("\n"),
+        "text": shown.join("
+    "),
         "line_count": line_count,
         "truncated": truncated
     }))
@@ -462,6 +482,9 @@ fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
                 errors.push(json!({"path": rel_path(&ctx.root, &path), "message": err.to_string()}))
             }
         }
+    }
+    if args.best_match {
+        sort_best_matches(&mut matches, &args.pattern);
     }
     let shown = args.limit.max(1);
     Ok(json!({
@@ -758,6 +781,41 @@ fn validate_pattern(pattern: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct VirtualPath {
+    archive: PathBuf,
+    member: Option<String>,
+}
+
+fn resolve_virtual_path(root: &Path, path: &str) -> Result<VirtualPath> {
+    let (archive_path, member) = path
+        .split_once("::")
+        .map(|(archive, member)| (archive, Some(member.trim_start_matches('/').to_string())))
+        .unwrap_or((path, None));
+    if member.as_ref().is_some_and(|m| m.contains("..")) {
+        bail!("invalid archive member path: {path}");
+    }
+    Ok(VirtualPath {
+        archive: resolve_existing_path(root, archive_path)?,
+        member,
+    })
+}
+
+fn is_archive_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    path.extension().and_then(|s| s.to_str()) == Some("zip")
+        || name.ends_with(".tar")
+        || name.ends_with(".tar.gz")
+        || name.ends_with(".tgz")
+}
+
+fn normalize_member(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches('/').to_string()
+}
+
 fn resolve_existing_path(root: &Path, path: &str) -> Result<PathBuf> {
     validate_pattern(path)?;
     let joined = root.join(path);
@@ -833,17 +891,73 @@ struct SearchText {
     text: String,
 }
 
+fn list_archive_virtual(root: &Path, path: &str, exclude: &GlobSet) -> Result<Vec<String>> {
+    let virtual_path = resolve_virtual_path(root, path)?;
+    if !is_archive_path(&virtual_path.archive) {
+        bail!("list archive path is not an archive: {path}");
+    }
+    let rel = rel_path(root, &virtual_path.archive);
+    let prefix = virtual_path
+        .member
+        .as_deref()
+        .map(normalize_member)
+        .unwrap_or_default();
+    let mut out = file_texts_for_archive(&virtual_path.archive, &rel)?
+        .into_iter()
+        .map(|item| item.display_path)
+        .filter(|display| {
+            if prefix.is_empty() {
+                true
+            } else {
+                display
+                    .split_once("::")
+                    .map(|(_, member)| member.starts_with(&prefix))
+                    .unwrap_or(false)
+            }
+        })
+        .filter(|display| !exclude.is_match(display.as_str()))
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+fn read_virtual_text(root: &Path, path: &str) -> Result<(String, String)> {
+    let virtual_path = resolve_virtual_path(root, path)?;
+    if virtual_path.archive.is_dir() {
+        bail!("read path is a directory: {path}");
+    }
+    let rel = rel_path(root, &virtual_path.archive);
+    if let Some(member) = virtual_path.member.as_ref() {
+        let member = normalize_member(member);
+        let item = archive_member_text(&virtual_path.archive, &rel, &member)?
+            .with_context(|| format!("archive member not found: {rel}::{member}"))?;
+        return Ok((item.display_path, item.text));
+    }
+    let mut texts = file_texts(root, &virtual_path.archive)?;
+    if texts.len() == 1 {
+        let item = texts.remove(0);
+        return Ok((item.display_path, item.text));
+    }
+    if is_archive_path(&virtual_path.archive) {
+        bail!("archive path requires a member, e.g. {rel}::path/in/archive");
+    }
+    bail!("read path is not utf-8 text: {path}")
+}
+
+fn archive_member_text(path: &Path, rel: &str, member: &str) -> Result<Option<SearchText>> {
+    for item in file_texts_for_archive(path, rel)? {
+        if item.display_path == format!("{rel}::{member}") {
+            return Ok(Some(item));
+        }
+    }
+    Ok(None)
+}
+
 fn file_texts(root: &Path, path: &Path) -> Result<Vec<SearchText>> {
     let rel = rel_path(root, path);
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    if path.extension().and_then(|s| s.to_str()) == Some("zip") {
-        return zip_texts(path, &rel);
-    }
-    if name.ends_with(".tar") || name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        return tar_texts(path, &rel);
+    if is_archive_path(path) {
+        return file_texts_for_archive(path, &rel);
     }
     let raw = fs::read(path)?;
     if raw.contains(&0) {
@@ -885,6 +999,20 @@ fn decode_compressed(path: &Path, raw: Vec<u8>) -> Result<Vec<u8>> {
         return zstd::decode_all(Cursor::new(raw)).map_err(Into::into);
     }
     Ok(raw)
+}
+
+fn file_texts_for_archive(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if path.extension().and_then(|s| s.to_str()) == Some("zip") {
+        return zip_texts(path, rel);
+    }
+    if name.ends_with(".tar") || name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        return tar_texts(path, rel);
+    }
+    Ok(Vec::new())
 }
 
 fn zip_texts(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
@@ -1014,13 +1142,9 @@ fn search_text_fuzzy(
 }
 
 fn syntax_context(display_path: &str, text: &str, line_number: usize) -> Option<String> {
-    if !display_path.ends_with(".rs") {
-        return None;
-    }
+    let (language, kinds) = syntax_language(display_path)?;
     let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_rust::LANGUAGE.into())
-        .ok()?;
+    parser.set_language(&language).ok()?;
     let tree = parser.parse(text, None)?;
     let target_row = line_number.saturating_sub(1);
     let mut cursor = tree.walk();
@@ -1029,16 +1153,7 @@ fn syntax_context(display_path: &str, text: &str, line_number: usize) -> Option<
     while let Some(node) = stack.pop() {
         let range = node.range();
         if range.start_point.row <= target_row && target_row <= range.end_point.row {
-            if matches!(
-                node.kind(),
-                "function_item"
-                    | "impl_item"
-                    | "struct_item"
-                    | "enum_item"
-                    | "trait_item"
-                    | "mod_item"
-                    | "macro_definition"
-            ) {
+            if kinds.contains(&node.kind()) {
                 let line = text
                     .lines()
                     .nth(range.start_point.row)
@@ -1058,6 +1173,70 @@ fn syntax_context(display_path: &str, text: &str, line_number: usize) -> Option<
         }
     }
     best
+}
+
+fn syntax_language(display_path: &str) -> Option<(Language, &'static [&'static str])> {
+    const RUST_KINDS: &[&str] = &[
+        "function_item",
+        "impl_item",
+        "struct_item",
+        "enum_item",
+        "trait_item",
+        "mod_item",
+        "macro_definition",
+    ];
+    const PYTHON_KINDS: &[&str] = &["function_definition", "class_definition"];
+    const JS_KINDS: &[&str] = &[
+        "function_declaration",
+        "method_definition",
+        "class_declaration",
+        "generator_function_declaration",
+        "lexical_declaration",
+    ];
+    if display_path.ends_with(".rs") {
+        return Some((tree_sitter_rust::LANGUAGE.into(), RUST_KINDS));
+    }
+    if display_path.ends_with(".py") {
+        return Some((tree_sitter_python::LANGUAGE.into(), PYTHON_KINDS));
+    }
+    if display_path.ends_with(".js")
+        || display_path.ends_with(".jsx")
+        || display_path.ends_with(".mjs")
+    {
+        return Some((tree_sitter_javascript::LANGUAGE.into(), JS_KINDS));
+    }
+    if display_path.ends_with(".ts") || display_path.ends_with(".tsx") {
+        return Some((tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), JS_KINDS));
+    }
+    None
+}
+
+fn sort_best_matches(matches: &mut [Value], pattern: &str) {
+    let needle = pattern.to_ascii_lowercase();
+    matches.sort_by_key(|item| {
+        let text = item["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let path = item["path"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let column = item["column"].as_u64().unwrap_or(u64::MAX) as usize;
+        let line = item["line_number"].as_u64().unwrap_or(u64::MAX) as usize;
+        let exact = if text.trim() == needle { 0 } else { 1 };
+        let word_boundary = text
+            .find(&needle)
+            .map(|idx| idx == 0 || !text.as_bytes()[idx - 1].is_ascii_alphanumeric())
+            .unwrap_or(false);
+        let boundary = if word_boundary { 0 } else { 1 };
+        let filename_bonus = if path.ends_with(&needle) || path.contains(&format!("/{needle}")) {
+            0
+        } else {
+            1
+        };
+        (exact, boundary, filename_bonus, column, line, path)
+    });
 }
 
 fn search_file(
@@ -1332,5 +1511,114 @@ mod tests {
                 .unwrap()
                 .contains("function_item")
         );
+    }
+
+    #[test]
+    fn read_supports_zip_virtual_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("sample.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("docs/readme.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(
+                &mut zip,
+                b"one
+two
+three
+",
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let value = tool_read(
+            &ToolContext {
+                root: dir.path().to_path_buf(),
+                interactive: false,
+                yolo: false,
+                agent: "default".into(),
+                todos: Vec::new(),
+            },
+            ReadArgs {
+                path: "sample.zip::docs/readme.txt".into(),
+                offset: 2,
+                limit: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(value["text"], "two");
+        assert_eq!(value["path"], "sample.zip::docs/readme.txt");
+        assert_eq!(value["line_count"], 3);
+    }
+
+    #[test]
+    fn list_shows_zip_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("sample.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("a.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut zip, b"a").unwrap();
+            zip.start_file("nested/b.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut zip, b"b").unwrap();
+            zip.finish().unwrap();
+        }
+        let value = tool_list(
+            &ToolContext {
+                root: dir.path().to_path_buf(),
+                interactive: false,
+                yolo: false,
+                agent: "default".into(),
+                todos: Vec::new(),
+            },
+            ListArgs {
+                path: "sample.zip".into(),
+                exclude: None,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        let items = value["items"].as_array().unwrap();
+        assert!(items.iter().any(|item| item == "sample.zip::a.txt"));
+        assert!(items.iter().any(|item| item == "sample.zip::nested/b.txt"));
+    }
+
+    #[test]
+    fn enhanced_search_adds_python_syntax_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mod.py");
+        fs::write(
+            &path,
+            "def outer():
+    needle = 1
+",
+        )
+        .unwrap();
+        let matcher = RegexMatcher::new_line_matcher("needle").unwrap();
+        let column_regex = Regex::new("needle").unwrap();
+        let found = search_file(dir.path(), &path, &matcher, &column_regex, true).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0]["context"]
+                .as_str()
+                .unwrap()
+                .contains("function_definition")
+        );
+    }
+
+    #[test]
+    fn best_match_prefers_boundary_and_early_column() {
+        let mut items = vec![
+            json!({"path":"b.txt","line_number":1,"column":8,"text":"xx needle"}),
+            json!({"path":"a.txt","line_number":1,"column":1,"text":"needle here"}),
+            json!({"path":"c.txt","line_number":1,"column":1,"text":"hayneedle"}),
+        ];
+        sort_best_matches(&mut items, "needle");
+        assert_eq!(items[0]["path"], "a.txt");
+        assert_eq!(items[2]["path"], "c.txt");
     }
 }

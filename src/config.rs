@@ -68,6 +68,7 @@ struct ToolText {
 }
 
 static SESSION_TEXT: OnceLock<SessionText> = OnceLock::new();
+const DEFAULT_CONFIG_DIR_NAME: &str = "oy-rust";
 
 pub fn config_root() -> PathBuf {
     if let Ok(raw) = env::var("OY_CONFIG") {
@@ -77,7 +78,7 @@ pub fn config_root() -> PathBuf {
     }
     config_dir()
         .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("oy")
+        .join(DEFAULT_CONFIG_DIR_NAME)
         .join("config.json")
 }
 
@@ -98,7 +99,7 @@ pub fn config_dir_path() -> PathBuf {
     config_root()
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(".config/oy"))
+        .unwrap_or_else(|| PathBuf::from(format!(".config/{DEFAULT_CONFIG_DIR_NAME}")))
 }
 
 pub fn sessions_dir() -> Result<PathBuf> {
@@ -223,14 +224,55 @@ pub fn save_model_config(model_spec: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let (shim, model) = split_model_spec(model_spec);
-    let payload = SavedModelConfig {
-        model: Some(model.to_string()),
-        shim: shim.map(ToOwned::to_owned),
-    };
+    let payload = saved_model_config_from_selection(model_spec);
     let text = serde_json::to_string_pretty(&payload)?;
     fs::write(&path, text).with_context(|| format!("failed writing {}", path.display()))?;
     Ok(())
+}
+
+pub fn saved_model_config_from_selection(model_spec: &str) -> SavedModelConfig {
+    let model_spec = model_spec.trim();
+    let (prefix, model) = split_model_spec(model_spec);
+    if let Some(shim) = prefix.filter(|shim| is_routing_shim(shim)) {
+        return SavedModelConfig {
+            model: Some(genai_model_for_shim(shim, model)),
+            shim: Some(shim.to_string()),
+        };
+    }
+    SavedModelConfig {
+        model: Some(model_spec.to_string()),
+        shim: None,
+    }
+}
+
+fn genai_model_for_shim(shim: &str, model: &str) -> String {
+    if is_copilot_shim(shim) && is_openai_responses_model(model) {
+        format!("openai_resp::{model}")
+    } else {
+        model.to_string()
+    }
+}
+
+fn is_openai_responses_model(model: &str) -> bool {
+    let model = model
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(model);
+    model.starts_with("gpt-5.5")
+        || (model.starts_with("gpt") && (model.contains("codex") || model.contains("pro")))
+}
+
+pub fn is_routing_shim(shim: &str) -> bool {
+    matches!(
+        shim,
+        "openai" | "codex" | "bedrock-mantle" | "copilot" | "opencode"
+    ) || shim
+        .strip_prefix("local-")
+        .is_some_and(|port| port.parse::<u16>().is_ok())
+}
+
+fn is_copilot_shim(shim: &str) -> bool {
+    shim == "copilot"
 }
 
 pub fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
@@ -238,33 +280,7 @@ pub fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
         let (left, right) = spec.split_at(index);
         return (Some(left), &right[2..]);
     }
-    if let Some((left, right)) = spec.split_once(':') {
-        if is_known_shim(left) {
-            return (Some(left), right);
-        }
-    }
     (None, spec)
-}
-
-pub fn join_model_spec(shim: &str, model: &str) -> String {
-    format!("{shim}::{model}")
-}
-
-pub fn is_known_shim(shim: &str) -> bool {
-    matches!(
-        shim,
-        "openai"
-            | "copilot"
-            | "github-copilot"
-            | "github_copilot"
-            | "codex"
-            | "opencode"
-            | "bedrock-mantle"
-            | "local-8080"
-            | "local-11434"
-    ) || shim
-        .strip_prefix("local-")
-        .is_some_and(|rest| rest.parse::<u16>().is_ok())
 }
 
 pub fn yolo_enabled() -> bool {
@@ -481,26 +497,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_model_spec_supports_double_colon() {
-        assert_eq!(
-            split_model_spec("github_copilot::openai/gpt-4.1-mini"),
-            (Some("github_copilot"), "openai/gpt-4.1-mini")
-        );
+    fn default_config_dir_name_is_rust_specific() {
+        assert_eq!(DEFAULT_CONFIG_DIR_NAME, "oy-rust");
     }
 
     #[test]
-    fn split_model_spec_supports_single_colon_known_shims() {
+    fn saved_model_config_keeps_exact_genai_model_and_infers_routing_shim() {
+        let saved = saved_model_config_from_selection("copilot::gpt-5.5");
+        assert_eq!(saved.model.as_deref(), Some("openai_resp::gpt-5.5"));
+        assert_eq!(saved.shim.as_deref(), Some("copilot"));
+
+        let saved = saved_model_config_from_selection("openai_resp::gpt-5.5");
+        assert_eq!(saved.model.as_deref(), Some("openai_resp::gpt-5.5"));
+        assert_eq!(saved.shim.as_deref(), None);
+    }
+
+    #[test]
+    fn split_model_spec_supports_double_colon() {
         assert_eq!(
-            split_model_spec("local-8080:qwen3.5"),
-            (Some("local-8080"), "qwen3.5")
-        );
-        assert_eq!(
-            split_model_spec("local-8080::qwen3.5"),
-            (Some("local-8080"), "qwen3.5")
-        );
-        assert_eq!(
-            split_model_spec("copilot:openai/gpt-4.1-mini"),
-            (Some("copilot"), "openai/gpt-4.1-mini")
+            split_model_spec("copilot::gpt-4.1-mini"),
+            (Some("copilot"), "gpt-4.1-mini")
         );
     }
 

@@ -1,274 +1,328 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use std::time::Duration;
-use tui_textarea::TextArea;
+use reedline::{
+    ColumnarMenu, DefaultCompleter, DefaultPrompt, DefaultPromptSegment, FileBackedHistory,
+    Reedline, ReedlineMenu, Signal,
+};
+use std::path::PathBuf;
 
 use crate::agent::{self, Session, StoredMessage};
+use crate::config;
 use crate::model;
 
+const HISTORY_SIZE: usize = 10_000;
+
 pub async fn run_chat(session: &mut Session) -> Result<i32> {
-    let mut terminal = ratatui::init();
-    let mut app = ChatApp::new(session);
+    print_chat_intro(session);
+    let mut line_editor = reedline("chat", chat_command_completions())?;
+    let prompt = prompt("oy");
     loop {
-        terminal.draw(|frame| app.draw(frame, session))?;
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match app.handle_key(key) {
-            ChatAction::None => {}
-            ChatAction::Quit => {
-                ratatui::restore();
-                return Ok(0);
-            }
-            ChatAction::Command(command) => {
-                ratatui::restore();
-                match crate::cli::handle_chat_command(session, &command).await? {
-                    true => terminal = ratatui::init(),
-                    false => return Ok(0),
+        match line_editor.read_line(&prompt)? {
+            Signal::Success(input) => {
+                let input = input.trim();
+                if input.is_empty() {
+                    continue;
                 }
+                if let Some(limit) = parse_history_command(input) {
+                    print_transcript(session, limit);
+                    continue;
+                }
+                if input.starts_with('/') {
+                    if !crate::cli::handle_chat_command(session, input).await? {
+                        return Ok(0);
+                    }
+                    continue;
+                }
+                run_prompt_with_model_reselect(session, input).await?;
             }
-            ChatAction::Submit(prompt) => {
-                ratatui::restore();
-                let answer = agent::run_prompt(session, &prompt).await?;
-                app.status = preview_line(&answer);
-                terminal = ratatui::init();
-                app.scroll_to_bottom(session);
-            }
+            Signal::CtrlD | Signal::CtrlC => return Ok(0),
+            _ => continue,
         }
     }
+}
+
+async fn run_prompt_with_model_reselect(session: &mut Session, prompt: &str) -> Result<()> {
+    loop {
+        match agent::run_prompt(session, prompt).await {
+            Ok(answer) => {
+                if !answer.is_empty() {
+                    println!("{answer}");
+                }
+                return Ok(());
+            }
+            Err(err) if config::can_prompt() => {
+                eprintln!("model call failed: {err:#}");
+                session.transcript.undo_last_turn();
+                let Some(model) = choose_replacement_model(session).await? else {
+                    return Err(err);
+                };
+                session.model = model;
+                config::save_model_config(&session.model)?;
+                eprintln!("retrying with model: {}", session.model);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn choose_replacement_model(session: &Session) -> Result<Option<String>> {
+    let listing = model::inspect_models().await?;
+    let items = replacement_model_choices(&session.model, listing.all_models, listing.hints);
+    if items.is_empty() {
+        return Ok(None);
+    }
+    choose_model(None, &items)
+}
+
+fn replacement_model_choices(
+    current: &str,
+    mut models: Vec<String>,
+    hints: Vec<String>,
+) -> Vec<String> {
+    models.extend(hints);
+    models.retain(|item| item != current);
+    models.sort();
+    models.dedup();
+    models
 }
 
 pub fn choose_model(current: Option<&str>, items: &[String]) -> Result<Option<String>> {
     if items.is_empty() {
         return Ok(None);
     }
-    let mut terminal = ratatui::init();
-    let mut app = ModelPicker::new(current, items);
+    print_model_choices(current, items, "");
+    let mut active_items = items.to_vec();
+    let mut line_editor = reedline("model", items.to_vec())?;
+    let prompt = prompt("model/filter");
     loop {
-        terminal.draw(|frame| app.draw(frame))?;
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match app.handle_key(key) {
-            PickerAction::None => {}
-            PickerAction::Cancel => {
-                ratatui::restore();
-                return Ok(None);
+        match line_editor.read_line(&prompt)? {
+            Signal::Success(input) => {
+                let input = input.trim();
+                match select_item(input, &active_items) {
+                    Selection::Current => return Ok(current.map(ToOwned::to_owned)),
+                    Selection::Selected(value) => return Ok(Some(value)),
+                    Selection::Ambiguous(matches) => {
+                        print_model_choices(current, &matches, input);
+                        active_items = matches;
+                    }
+                    Selection::Invalid => {
+                        let matches = filter_items(items, input);
+                        if matches.is_empty() {
+                            println!("No model matches `{input}`.");
+                        } else if matches.len() == 1 {
+                            return Ok(Some(matches[0].clone()));
+                        } else {
+                            print_model_choices(current, &matches, input);
+                            active_items = matches;
+                        }
+                    }
+                }
             }
-            PickerAction::Select(value) => {
-                ratatui::restore();
-                return Ok(Some(value));
-            }
+            Signal::CtrlD | Signal::CtrlC => return Ok(None),
+            _ => continue,
         }
     }
 }
 
 pub fn ask(question: &str, choices: Option<&[String]>) -> Result<String> {
-    let mut terminal = ratatui::init();
-    let mut app = AskApp::new(question, choices);
+    if let Some(choices) = choices {
+        print_choices(choices);
+    }
+    let mut line_editor = reedline("ask", choices.unwrap_or(&[]).to_vec())?;
+    let prompt = prompt(question);
     loop {
-        terminal.draw(|frame| app.draw(frame))?;
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match app.handle_key(key) {
-            AskAction::None => {}
-            AskAction::Cancel => {
-                ratatui::restore();
-                return Ok(String::new());
-            }
-            AskAction::Submit(value) => {
-                ratatui::restore();
-                return Ok(value);
-            }
-        }
-    }
-}
-
-enum ChatAction {
-    None,
-    Submit(String),
-    Command(String),
-    Quit,
-}
-
-struct ChatApp {
-    input: TextArea<'static>,
-    status: String,
-    scroll: u16,
-}
-
-impl ChatApp {
-    fn new(session: &Session) -> Self {
-        let mut input = TextArea::default();
-        input.set_block(Block::default().borders(Borders::ALL).title("Input"));
-        let mut app = Self {
-            input,
-            status: format!(
-                "model={} agent={} Enter=send Shift+Enter=newline Ctrl+Q=quit",
-                model::to_genai_model_spec(&session.model),
-                session.agent
-            ),
-            scroll: 0,
-        };
-        app.scroll_to_bottom(session);
-        app
-    }
-
-    fn draw(&mut self, frame: &mut Frame, session: &Session) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(8),
-                Constraint::Length(4),
-            ])
-            .split(frame.area());
-        frame.render_widget(
-            Paragraph::new(self.status.clone())
-                .block(Block::default().borders(Borders::ALL).title("oy")),
-            layout[0],
-        );
-        frame.render_widget(
-            Paragraph::new(transcript_text(session))
-                .block(Block::default().borders(Borders::ALL).title("Transcript"))
-                .wrap(Wrap { trim: false })
-                .scroll((self.scroll, 0)),
-            layout[1],
-        );
-        frame.render_widget(&self.input, layout[2]);
-    }
-
-    fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
-            return ChatAction::Quit;
-        }
-        match key.code {
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(5);
-                ChatAction::None
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(5);
-                ChatAction::None
-            }
-            KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                let text = self
-                    .input
-                    .lines()
-                    .join(
-                        "
-",
-                    )
-                    .trim()
-                    .to_string();
-                if text.is_empty() {
-                    return ChatAction::None;
+        match line_editor.read_line(&prompt)? {
+            Signal::Success(input) => {
+                let input = input.trim();
+                if let Some(choices) = choices {
+                    match select_item(input, choices) {
+                        Selection::Selected(value) => return Ok(value),
+                        Selection::Current => continue,
+                        Selection::Ambiguous(matches) => print_choices(&matches),
+                        Selection::Invalid => {
+                            println!("Enter a number 1-{} or an exact choice.", choices.len())
+                        }
+                    }
+                    continue;
                 }
-                self.reset_input();
-                if text.starts_with('/') {
-                    ChatAction::Command(text)
-                } else {
-                    ChatAction::Submit(text)
-                }
+                return Ok(input.to_string());
             }
-            _ => {
-                self.input.input(key);
-                ChatAction::None
-            }
+            Signal::CtrlD | Signal::CtrlC => return Ok(String::new()),
+            _ => continue,
         }
-    }
-
-    fn reset_input(&mut self) {
-        self.input = TextArea::default();
-        self.input
-            .set_block(Block::default().borders(Borders::ALL).title("Input"));
-    }
-
-    fn scroll_to_bottom(&mut self, session: &Session) {
-        let lines = transcript_line_count(session);
-        self.scroll = lines.saturating_sub(10) as u16;
     }
 }
 
-fn transcript_text(session: &Session) -> Text<'static> {
-    let mut lines = Vec::new();
-    for message in &session.transcript.messages {
+fn reedline(name: &str, completions: Vec<String>) -> Result<Reedline> {
+    let history = FileBackedHistory::with_file(HISTORY_SIZE, history_path(name)?)?;
+    let completer = Box::new(DefaultCompleter::new_with_wordlen(completions, 1));
+    Ok(Reedline::create()
+        .with_history(Box::new(history))
+        .with_completer(completer)
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
+            ColumnarMenu::default(),
+        )))
+        .with_quick_completions(true)
+        .with_partial_completions(true))
+}
+
+fn prompt(left: &str) -> DefaultPrompt {
+    DefaultPrompt::new(
+        DefaultPromptSegment::Basic(left.to_string()),
+        DefaultPromptSegment::Empty,
+    )
+}
+
+fn history_path(name: &str) -> Result<PathBuf> {
+    history_path_in(config::config_dir_path(), name)
+}
+
+fn history_path_in(config_dir: PathBuf, name: &str) -> Result<PathBuf> {
+    let history = config_dir.join("history");
+    std::fs::create_dir_all(&history)?;
+    Ok(history.join(format!("{name}.txt")))
+}
+
+fn chat_command_completions() -> Vec<String> {
+    let mut completions = crate::cli::CHAT_COMMANDS
+        .iter()
+        .map(|item| command_name(item.command).to_string())
+        .chain(
+            crate::cli::CHAT_COMMAND_ALIASES
+                .iter()
+                .map(|(alias, _)| alias.to_string()),
+        )
+        .collect::<Vec<_>>();
+    completions.sort();
+    completions.dedup();
+    completions
+}
+
+fn command_name(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or(command)
+}
+
+fn parse_history_command(input: &str) -> Option<Option<usize>> {
+    let mut parts = input.split_whitespace();
+    if parts.next()? != "/history" {
+        return None;
+    }
+    let limit = parts.next().and_then(|value| value.parse::<usize>().ok());
+    Some(limit)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Selection {
+    Current,
+    Selected(String),
+    Ambiguous(Vec<String>),
+    Invalid,
+}
+
+fn select_item(input: &str, items: &[String]) -> Selection {
+    if input.trim().is_empty() {
+        return Selection::Current;
+    }
+    if let Ok(index) = input.parse::<usize>() {
+        return items
+            .get(index.saturating_sub(1))
+            .cloned()
+            .map(Selection::Selected)
+            .unwrap_or(Selection::Invalid);
+    }
+    if let Some(item) = items.iter().find(|item| item.as_str() == input) {
+        return Selection::Selected(item.clone());
+    }
+    let matches = filter_items(items, input);
+    match matches.len() {
+        0 => Selection::Invalid,
+        1 => Selection::Selected(matches[0].clone()),
+        _ => Selection::Ambiguous(matches),
+    }
+}
+
+fn filter_items(items: &[String], query: &str) -> Vec<String> {
+    let needle = query.to_ascii_lowercase();
+    items
+        .iter()
+        .filter(|item| item.to_ascii_lowercase().contains(&needle))
+        .cloned()
+        .collect()
+}
+
+fn print_chat_intro(session: &Session) {
+    println!(
+        "oy chat — model={} agent={}  (/help, /history, Ctrl-D quits)",
+        model::to_genai_model_spec(&session.model),
+        session.agent
+    );
+}
+
+fn print_transcript(session: &Session, limit: Option<usize>) {
+    if session.transcript.messages.is_empty() {
+        println!("No messages yet.");
+        return;
+    }
+    let start = limit
+        .map(|limit| session.transcript.messages.len().saturating_sub(limit))
+        .unwrap_or(0);
+    for message in session.transcript.messages.iter().skip(start) {
         match message {
-            StoredMessage::User { content } => push_prefixed(&mut lines, "you", content),
-            StoredMessage::Assistant { content } => push_prefixed(&mut lines, "oy", content),
+            StoredMessage::User { content } => print_prefixed("you", content),
+            StoredMessage::Assistant { content } => print_prefixed("oy", content),
             StoredMessage::AssistantToolCalls { tool_calls } => {
                 for call in tool_calls {
-                    lines.push(Line::styled(
-                        format!(
-                            "tool> {} {}",
-                            call.fn_name,
-                            preview_line(&call.fn_arguments.to_string())
-                        ),
-                        Style::default().add_modifier(Modifier::DIM),
-                    ));
+                    println!(
+                        "tool> {} {}",
+                        call.fn_name,
+                        preview_line(&call.fn_arguments.to_string())
+                    );
                 }
             }
-            StoredMessage::Tool {
-                call_id: _,
-                content,
-            } => {
-                push_prefixed(&mut lines, "tool", &preview_block(content, 24));
+            StoredMessage::Tool { content, .. } => {
+                print_prefixed("tool", &preview_block(content, 24))
             }
         }
-        lines.push(Line::from(""));
+        println!();
     }
-    if lines.is_empty() {
-        lines.push(Line::from("No messages yet. Type a prompt or /help."));
-    }
-    Text::from(lines)
 }
 
-fn transcript_line_count(session: &Session) -> usize {
-    session
-        .transcript
-        .messages
-        .iter()
-        .map(|message| match message {
-            StoredMessage::User { content } | StoredMessage::Assistant { content } => {
-                content.lines().count().max(1) + 1
-            }
-            StoredMessage::AssistantToolCalls { tool_calls } => tool_calls.len() + 1,
-            StoredMessage::Tool { content, .. } => content.lines().take(24).count().max(1) + 1,
-        })
-        .sum()
+fn print_prefixed(prefix: &str, content: &str) {
+    let mut lines = content.lines();
+    if let Some(first) = lines.next() {
+        println!("{prefix}> {first}");
+    }
+    for line in lines {
+        println!("    {line}");
+    }
 }
 
-fn push_prefixed(lines: &mut Vec<Line<'static>>, prefix: &str, content: &str) {
-    let mut content_lines = content.lines();
-    if let Some(first) = content_lines.next() {
-        lines.push(Line::from(format!("{prefix}> {first}")));
+fn print_model_choices(current: Option<&str>, items: &[String], query: &str) {
+    if items.is_empty() {
+        println!("No model matches for `{query}`.");
+        return;
     }
-    for line in content_lines {
-        lines.push(Line::from(format!("    {line}")));
+    let heading = if query.is_empty() {
+        "Models".to_string()
+    } else {
+        format!("Models matching `{query}`")
+    };
+    println!("{heading}:");
+    for (idx, item) in items.iter().take(30).enumerate() {
+        let marker = if current == Some(item.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        println!("{marker} {:>2}. {item}", idx + 1);
+    }
+    if items.len() > 30 {
+        println!("... {} more; keep filtering", items.len() - 30);
+    }
+}
+
+fn print_choices(choices: &[String]) {
+    for (idx, choice) in choices.iter().enumerate() {
+        println!("{:>2}. {choice}", idx + 1);
     }
 }
 
@@ -286,221 +340,85 @@ fn preview_block(text: &str, max_lines: usize) -> String {
     if text.lines().count() > max_lines {
         lines.push("...");
     }
-    lines.join(
-        "
-",
-    )
+    lines.join("\n")
 }
 
-enum AskAction {
-    None,
-    Submit(String),
-    Cancel,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-struct AskApp {
-    question: String,
-    choices: Vec<String>,
-    selected: usize,
-    input: TextArea<'static>,
-}
-
-impl AskApp {
-    fn new(question: &str, choices: Option<&[String]>) -> Self {
-        let mut input = TextArea::default();
-        input.set_block(Block::default().borders(Borders::ALL).title("Answer"));
-        Self {
-            question: question.to_string(),
-            choices: choices.unwrap_or(&[]).to_vec(),
-            selected: 0,
-            input,
-        }
+    #[test]
+    fn chat_command_completions_include_history_command_name() {
+        let completions = chat_command_completions();
+        assert!(completions.contains(&"/history".to_string()));
+        assert!(completions.contains(&"/model".to_string()));
+        assert!(completions.contains(&"/q".to_string()));
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(5),
-                Constraint::Length(4),
-            ])
-            .split(frame.area());
-        frame.render_widget(
-            Paragraph::new(self.question.clone())
-                .block(Block::default().borders(Borders::ALL).title("Question")),
-            layout[0],
+    #[test]
+    fn parse_history_command_accepts_optional_limit() {
+        assert_eq!(parse_history_command("/history"), Some(None));
+        assert_eq!(parse_history_command("/history 5"), Some(Some(5)));
+        assert_eq!(parse_history_command("/help"), None);
+    }
+
+    #[test]
+    fn history_path_uses_named_history_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = history_path_in(dir.path().to_path_buf(), "chat").unwrap();
+        assert!(path.ends_with("history/chat.txt"));
+    }
+
+    #[test]
+    fn replacement_model_choices_drop_current_and_dedup() {
+        let choices = replacement_model_choices(
+            "broken",
+            vec!["broken".into(), "ok".into()],
+            vec!["ok".into(), "other".into()],
         );
-        let choice_lines = if self.choices.is_empty() {
-            vec![Line::from("Type a response and press Enter. Esc cancels.")]
-        } else {
-            self.choices
-                .iter()
-                .enumerate()
-                .map(|(idx, item)| {
-                    let style = if idx == self.selected {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else {
-                        Style::default()
-                    };
-                    Line::styled(item.clone(), style)
-                })
-                .collect::<Vec<_>>()
-        };
-        frame.render_widget(
-            Paragraph::new(Text::from(choice_lines))
-                .block(Block::default().borders(Borders::ALL).title("Choices"))
-                .wrap(Wrap { trim: false }),
-            layout[1],
+        assert_eq!(choices, vec!["ok".to_string(), "other".to_string()]);
+    }
+
+    #[test]
+    fn select_item_supports_index_exact_filter_and_ambiguity() {
+        let items = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "alphabet".to_string(),
+        ];
+        assert_eq!(
+            select_item("2", &items),
+            Selection::Selected("beta".to_string())
         );
-        frame.render_widget(&self.input, layout[2]);
+        assert_eq!(
+            select_item("alpha", &items),
+            Selection::Selected("alpha".to_string())
+        );
+        assert!(matches!(
+            select_item("alp", &items),
+            Selection::Ambiguous(_)
+        ));
+        assert_eq!(select_item("", &items), Selection::Current);
+        assert_eq!(select_item("9", &items), Selection::Invalid);
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> AskAction {
-        match key.code {
-            KeyCode::Esc => AskAction::Cancel,
-            KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                AskAction::None
-            }
-            KeyCode::Down => {
-                if self.selected + 1 < self.choices.len() {
-                    self.selected += 1;
-                }
-                AskAction::None
-            }
-            KeyCode::Enter if self.choices.is_empty() => AskAction::Submit(
-                self.input
-                    .lines()
-                    .join(
-                        "
-",
-                    )
-                    .trim()
-                    .to_string(),
-            ),
-            KeyCode::Enter => {
-                let typed = self
-                    .input
-                    .lines()
-                    .join(
-                        "
-",
-                    )
-                    .trim()
-                    .to_string();
-                if !typed.is_empty() {
-                    AskAction::Submit(typed)
-                } else {
-                    AskAction::Submit(self.choices.get(self.selected).cloned().unwrap_or_default())
-                }
-            }
-            _ => {
-                self.input.input(key);
-                AskAction::None
-            }
-        }
-    }
-}
-
-enum PickerAction {
-    None,
-    Select(String),
-    Cancel,
-}
-
-struct ModelPicker {
-    items: Vec<String>,
-    filtered: Vec<usize>,
-    selected: usize,
-    query: TextArea<'static>,
-}
-
-impl ModelPicker {
-    fn new(current: Option<&str>, items: &[String]) -> Self {
-        let mut query = TextArea::default();
-        query.set_block(Block::default().borders(Borders::ALL).title("Filter"));
-        let current_idx = current
-            .and_then(|value| items.iter().position(|item| item == value))
-            .unwrap_or(0);
-        Self {
-            items: items.to_vec(),
-            filtered: (0..items.len()).collect(),
-            selected: current_idx.min(items.len().saturating_sub(1)),
-            query,
-        }
-    }
-
-    fn draw(&mut self, frame: &mut Frame) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(10)])
-            .split(frame.area());
-        frame.render_widget(&self.query, layout[0]);
-        let lines = if self.filtered.is_empty() {
-            vec![Line::from("No matches. Edit the filter or press Esc.")]
-        } else {
-            self.filtered
-                .iter()
-                .enumerate()
-                .map(|(row, idx)| {
-                    let style = if row == self.selected {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else {
-                        Style::default()
-                    };
-                    Line::styled(self.items[*idx].clone(), style)
-                })
-                .collect::<Vec<_>>()
-        };
-        frame.render_widget(
-            Paragraph::new(Text::from(lines))
-                .block(Block::default().borders(Borders::ALL).title("Pick a model"))
-                .wrap(Wrap { trim: false }),
-            layout[1],
+    #[test]
+    fn filter_items_is_case_insensitive() {
+        let items = vec!["gpt-4o".to_string(), "Claude Sonnet".to_string()];
+        assert_eq!(
+            filter_items(&items, "sonnet"),
+            vec!["Claude Sonnet".to_string()]
         );
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
-        match key.code {
-            KeyCode::Esc => PickerAction::Cancel,
-            KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                PickerAction::None
-            }
-            KeyCode::Down => {
-                if self.selected + 1 < self.filtered.len() {
-                    self.selected += 1;
-                }
-                PickerAction::None
-            }
-            KeyCode::Enter => self
-                .filtered
-                .get(self.selected)
-                .and_then(|idx| self.items.get(*idx))
-                .cloned()
-                .map(PickerAction::Select)
-                .unwrap_or(PickerAction::None),
-            _ => {
-                self.query.input(key);
-                let needle = self
-                    .query
-                    .lines()
-                    .join(
-                        "
-",
-                    )
-                    .to_ascii_lowercase();
-                self.filtered = self
-                    .items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| item.to_ascii_lowercase().contains(&needle))
-                    .map(|(idx, _)| idx)
-                    .collect();
-                self.selected = 0;
-                PickerAction::None
-            }
-        }
+    #[test]
+    fn preview_block_truncates_long_tool_output() {
+        let out = preview_block("a\nb\nc", 2);
+        assert_eq!(out, "a\nb\n...");
+    }
+
+    #[test]
+    fn preview_line_has_default_for_empty_text() {
+        assert_eq!(preview_line("\n"), "done");
     }
 }

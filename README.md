@@ -1,11 +1,11 @@
 # oy
 
-Small local AI coding CLI for your shell, rewritten in Rust.
+Small local AI coding CLI for your shell. The active implementation is Rust; the old Python package lives under `legacy-python/` for reference only.
 
 It uses:
 
 - [`genai`](https://crates.io/crates/genai) for model access and tool calls
-- [`rustyline`](https://crates.io/crates/rustyline) for chat UX
+- [`reedline`](https://crates.io/crates/reedline) for shell-native chat input, history, and scrollback
 - ripgrep ecosystem crates (`ignore`, `globset`, `regex`) for repo search
 - [`toon-format`](https://crates.io/crates/toon-format) for compact tool payload encoding
 
@@ -31,35 +31,39 @@ cargo run -- chat --agent accept-edits
 cargo run -- chat --continue-session
 cargo run -- ralph "re-run the maintenance prompt every minute"
 cargo run -- model                         # list detected auth/env + available models
-cargo run -- model github_copilot::openai/gpt-4.1-mini
+cargo run -- model copilot::gpt-4.1-mini
 cargo run -- model local-8080::qwen3.5
 ```
 
 In chat, `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed.
+Chat uses reedline prompts, so terminal scrollback/history work normally. Tab completes commands/models/choices. Use `/help` for commands, `/history [limit]` to print the transcript, and short aliases like `/q`, `/h`, `/m`, `/t`, `/u`.
 
 ## Model ids
 
-`oy model` now:
+`oy model`:
 
-- shows the current normalized model id
+- shows the current configured model id and active routing shim
 - introspects relevant auth env vars and auto-populates `GITHUB_TOKEN` from `gh auth token` when missing
 - sends direct `GET /models` requests to configured OpenAI-compatible endpoints
-- covers default OpenAI, `OPENAI_BASE_URL`, GitHub/Copilot-style endpoints, and local `local-<port>` shims
+- covers Python-compatible routing shims: `openai`, `copilot`, `local-<port>`, bearer-token `codex`/`opencode`, and Bedrock-Mantle auth visibility
 - hides missing auth and failed/static provider sections to keep output high-signal
+- includes built-in model hints as selectable choices even when endpoint introspection is unavailable
 - in a TTY, `oy model` can open an interactive fuzzy picker for choosing and saving a model
 
-Use native `genai` model ids in docs, config, and examples:
+Use exact `genai` model ids in config. `oy model` may also show endpoint-qualified choices (`shim::model`) so it can infer routing:
 
 - plain provider-native ids when `genai` can infer the adapter:
   - `gpt-5.4-mini`
   - `gemini-2.0-flash`
   - `claude-3-7-sonnet-latest`
-- explicit adapter-prefixed ids when needed:
-  - `github_copilot::openai/gpt-4.1-mini`
+- explicit genai adapter ids when needed:
+  - `openai_resp::gpt-5.5`
+- endpoint-qualified picker/CLI choices when routing should be inferred:
+  - `copilot::gpt-4.1-mini`
   - `local-8080::qwen3.5`
   - `local-11434::qwen3.5`
 
-Compatibility aliases like `copilot:...` and `local-8080:...` are still accepted, but the Rust CLI normalizes them to native `genai` ids internally.
+Rust config stores the exact `genai` model id in `model`. When you choose from an autodetected endpoint, Rust may also persist a `shim` such as `copilot`, `local-8080`, `codex`, or `opencode`; the shim is only for endpoint/auth routing and does not rewrite the model id.
 
 ## Agent profiles
 
@@ -85,7 +89,7 @@ Saved chat sessions can be resumed:
 - `oy run --resume <name-or-number> "next task"`
 - in chat, `/save [name]` and `/load [name]`
 
-Saved sessions keep the transcript and active agent profile under `~/.config/oy/sessions/`.
+Saved sessions keep the transcript and active agent profile under `~/.config/oy-rust/sessions/`.
 
 ## Audit commands
 
@@ -93,7 +97,7 @@ Saved sessions keep the transcript and active agent profile under `~/.config/oy/
 
 - runs a repo audit with the normal audit prompt
 - writes the final Markdown report to `ISSUES.md`
-- includes a transparency line with the normalized active model id
+- includes a transparency line with the active model id
 
 `oy audit-logic [focus]` is stricter:
 
@@ -124,25 +128,30 @@ Requirements:
 | Variable | Purpose |
 |---|---|
 | `OY_MODEL` | Override the model for this session using a native `genai` model id |
-| `OY_SHIM` | Apply a shim when the model name is bare |
+| `OY_SHIM` | Override routing shim (`openai`, `copilot`, `local-<port>`, `codex`, `opencode`, `bedrock-mantle`) |
 | `OY_NON_INTERACTIVE` | Set to `1` to disable approval and prompt pauses |
 | `OY_UNATTENDED_LIMIT` | Agent deadline window, such as `1h`, `30m`, or `3600s` |
 | `OY_RALPH_LIMIT` | Ralph deadline window, such as `3h`, `90m`, or `3600s` |
 | `OY_ROOT` | Run against a different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
-| `OY_CONFIG` | Override config path (default: `~/.config/oy/config.json`) |
+| `OY_CONFIG` | Override config path (default: `~/.config/oy-rust/config.json`) |
 | `OY_YOLO` | Start with all tool approvals enabled |
 | `OY_MAX_BASH_CMD_BYTES` | Override max accepted bash command size |
 | `OPENAI_API_KEY` | OpenAI-compatible auth, including many local/self-hosted adapters |
 | `OPENAI_BASE_URL` | Override the OpenAI-compatible endpoint |
+| `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | Copilot shim auth, matching Python lookup order |
+| `COPILOT_BASE_URL` | Override Copilot shim endpoint (default `https://api.githubcopilot.com`) |
+| `LOCAL_API_KEY` | Local `local-<port>` shim key; falls back to `OPENAI_API_KEY` then `oy-local` |
+| `OPENCODE_API_KEY` | OpenCode shim key; falls back to `~/.local/share/opencode/auth.json` |
+| `AWS_REGION`, `AWS_DEFAULT_REGION` | Bedrock-Mantle region detection |
 
 ### Config file
 
 ```json
-{"shim": "github_copilot", "model": "openai/gpt-4.1-mini"}
+{"model": "openai_resp::gpt-5.5", "shim": "copilot"}
 ```
 
-Only `model` and `shim` are persisted in config.
+`model` is the exact genai id. `shim`, when present, only selects endpoint/auth routing (for example GitHub Copilot token + base URL).
 
 ## Installation
 
@@ -177,7 +186,7 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 GitHub Copilot via native `genai` id:
 
 ```bash
-cargo run -- model github_copilot::openai/gpt-4.1-mini
+cargo run -- model copilot::gpt-4.1-mini
 ```
 
 Local OpenAI-compatible servers:

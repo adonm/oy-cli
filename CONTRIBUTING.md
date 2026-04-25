@@ -19,8 +19,7 @@ cargo run -- --help
 - `src/config.rs` — config, model persistence, session persistence
 - `src/model.rs` — model-id normalization and `genai` client setup
 - `src/tools.rs` — model-exposed tools plus local file/search/web helpers
-- `tests/` — legacy Python reference tests kept during the migration
-- `oy_cli/` — legacy Python implementation kept as porting reference
+- `legacy-python/` — archived Python implementation, packaging, lockfile, and reference tests
 
 ## Working rules
 

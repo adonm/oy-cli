@@ -36,4 +36,4 @@ htmlcov/
 target/
 
 # Local config/session smoke-test artifacts
-.config/oy/
+.config/oy-rust/
