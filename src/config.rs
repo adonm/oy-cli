@@ -113,10 +113,8 @@ fn session_text() -> &'static SessionText {
 }
 
 fn load_session_text() -> Result<SessionText> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/session_text.toml");
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("failed reading {}", path.display()))?;
-    toml::from_str(&raw).with_context(|| format!("failed parsing {}", path.display()))
+    const RAW: &str = include_str!("../assets/session_text.toml");
+    toml::from_str(RAW).context("failed parsing embedded session_text.toml")
 }
 
 pub fn session_text_value(section: &str, key: &str) -> Result<String> {

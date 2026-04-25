@@ -1,7 +1,7 @@
 use anyhow::Result;
 use reedline_repl_rs::reedline::{
-    DefaultPrompt, DefaultPromptSegment, DefaultValidator, EditCommand, Emacs, FileBackedHistory,
-    KeyCode, KeyModifiers, Reedline, ReedlineEvent, Signal, default_emacs_keybindings,
+    DefaultPrompt, DefaultPromptSegment, EditCommand, Emacs, FileBackedHistory, KeyCode,
+    KeyModifiers, Reedline, ReedlineEvent, Signal, default_emacs_keybindings,
 };
 use std::path::PathBuf;
 
@@ -13,19 +13,10 @@ const HISTORY_SIZE: usize = 10_000;
 
 fn chat_line_editor(history_path: PathBuf) -> Result<Reedline> {
     let mut keybindings = default_emacs_keybindings();
-    keybindings.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Enter,
-        ReedlineEvent::SubmitOrNewline,
-    );
+    keybindings.add_binding(KeyModifiers::NONE, KeyCode::Enter, ReedlineEvent::Submit);
     let insert_newline = ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
     keybindings.add_binding(KeyModifiers::SHIFT, KeyCode::Enter, insert_newline.clone());
     keybindings.add_binding(KeyModifiers::ALT, KeyCode::Enter, insert_newline);
-    keybindings.add_binding(
-        KeyModifiers::CONTROL,
-        KeyCode::Char('j'),
-        ReedlineEvent::Submit,
-    );
 
     Ok(Reedline::create()
         .with_history(Box::new(FileBackedHistory::with_file(
@@ -33,14 +24,11 @@ fn chat_line_editor(history_path: PathBuf) -> Result<Reedline> {
             history_path,
         )?))
         .with_edit_mode(Box::new(Emacs::new(keybindings)))
-        .with_validator(Box::new(DefaultValidator))
         .use_bracketed_paste(true))
 }
 
 pub async fn run_chat(session: &mut Session) -> Result<i32> {
-    println!(
-        "oy chat — Enter sends; Alt/Shift+Enter inserts newline; Ctrl+J force-sends; /help for commands"
-    );
+    println!("oy chat — Enter sends; Alt/Shift+Enter newline; /? help");
     let history_path = history_path("chat")?;
     let mut line_editor = chat_line_editor(history_path)?;
     let prompt = DefaultPrompt::new(
@@ -144,7 +132,7 @@ fn normalize_chat_command(command: &str) -> &str {
 
 fn chat_help_text() -> String {
     [
-        "Enter sends complete input; Alt/Shift+Enter inserts newline; Ctrl+J force-sends",
+        "Enter sends; Alt/Shift+Enter inserts newline",
         "/help (/h, /?) -- show command help",
         "/tokens (/t) -- show approximate context tokens",
         "/model [value] (/m) -- show or switch model",
@@ -291,7 +279,7 @@ fn replacement_model_choices(
 }
 
 pub fn choose_model(current: Option<&str>, items: &[String]) -> Result<Option<String>> {
-    choose_model_with_initial_list(current, items, true)
+    choose_items("Models", current, items, true)
 }
 
 pub fn choose_model_with_initial_list(
@@ -299,49 +287,17 @@ pub fn choose_model_with_initial_list(
     items: &[String],
     print_initial_list: bool,
 ) -> Result<Option<String>> {
-    if items.is_empty() {
-        return Ok(None);
-    }
-    if print_initial_list {
-        print_model_choices(current, items, "");
-    }
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    match select_item(input.trim(), items) {
-        Selection::Current => Ok(current.map(ToOwned::to_owned)),
-        Selection::Selected(value) => Ok(Some(value)),
-        Selection::Ambiguous(matches) => {
-            print_model_choices(current, &matches, input.trim());
-            Ok(None)
-        }
-        Selection::Invalid => Ok(None),
-    }
+    choose_items("Models", current, items, print_initial_list)
 }
 
 pub fn ask(question: &str, choices: Option<&[String]>) -> Result<String> {
     println!("{question}");
-    if let Some(choices) = choices {
-        print_choices("Choices", choices, "");
-        println!("Enter number, exact text, or filter text (empty cancels):");
-    }
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let input = input.trim();
-    if let Some(choices) = choices {
-        return match select_item(input, choices) {
-            Selection::Selected(value) => Ok(value),
-            Selection::Current => Ok(String::new()),
-            Selection::Ambiguous(matches) => {
-                print_choices("Choices", &matches, input);
-                Ok(String::new())
-            }
-            Selection::Invalid => {
-                println!("No choice matches `{input}`.");
-                Ok(String::new())
-            }
-        };
-    }
-    Ok(input.to_string())
+    let Some(choices) = choices else {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        return Ok(input.trim().to_string());
+    };
+    Ok(choose_items("Choices", None, choices, true)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,6 +306,37 @@ enum Selection {
     Selected(String),
     Ambiguous(Vec<String>),
     Invalid,
+}
+
+fn choose_items(
+    heading: &str,
+    current: Option<&str>,
+    items: &[String],
+    print_initial_list: bool,
+) -> Result<Option<String>> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+    if print_initial_list {
+        print_numbered_items(heading, items, "", current, 30);
+    }
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    match select_item(input, items) {
+        Selection::Current => Ok(current.map(ToOwned::to_owned)),
+        Selection::Selected(value) => Ok(Some(value)),
+        Selection::Ambiguous(matches) => {
+            print_numbered_items(heading, &matches, input, current, 30);
+            Ok(None)
+        }
+        Selection::Invalid => {
+            if !input.is_empty() {
+                println!("No {heading} match `{input}`.");
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn select_item(input: &str, items: &[String]) -> Selection {
@@ -393,32 +380,6 @@ fn history_path_in(config_dir: PathBuf, name: &str) -> Result<PathBuf> {
     Ok(history.join(format!("{name}.txt")))
 }
 
-fn print_model_choices(current: Option<&str>, items: &[String], query: &str) {
-    if items.is_empty() {
-        println!("No model matches for `{query}`.");
-        return;
-    }
-    let heading = if query.is_empty() {
-        "Models".to_string()
-    } else {
-        format!("Models matching `{query}`")
-    };
-    print_numbered_items(&heading, items, query, current, 30);
-}
-
-fn print_choices(heading: &str, choices: &[String], query: &str) {
-    if choices.is_empty() {
-        println!("No choices available.");
-        return;
-    }
-    let heading = if query.is_empty() {
-        heading.to_string()
-    } else {
-        format!("{heading} matching `{query}`")
-    };
-    print_numbered_items(&heading, choices, query, None, 30);
-}
-
 fn print_numbered_items(
     heading: &str,
     items: &[String],
@@ -426,8 +387,13 @@ fn print_numbered_items(
     current: Option<&str>,
     limit: usize,
 ) {
+    let title = if query.is_empty() {
+        heading.to_string()
+    } else {
+        format!("{heading} matching `{query}`")
+    };
     let width = items.len().min(limit).max(1).to_string().len();
-    println!("{heading} ({}):", items.len());
+    println!("{title} ({}):", items.len());
     for (idx, item) in items.iter().take(limit).enumerate() {
         let marker = if current == Some(item.as_str()) {
             "*"

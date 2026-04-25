@@ -217,7 +217,11 @@ async fn model_command(args: ModelArgs) -> Result<i32> {
     print_model_listing(&listing);
 
     if config::can_prompt() && !listing.all_models.is_empty() {
-        if let Some(chosen) = choose_model_interactively_without_initial_list(&listing)? {
+        if let Some(chosen) = crate::ui::choose_model_with_initial_list(
+            listing.current.as_deref(),
+            &listing.all_models,
+            false,
+        )? {
             config::save_model_config(&chosen)?;
             print_saved_model(&chosen);
         }
@@ -342,21 +346,8 @@ fn resolve_model_choice(listing: &model::ModelListing, query: &str) -> Result<St
     if matches.is_empty() {
         bail!("No matching model for `{}`", query);
     }
-    choose_from_items(&matches, listing.current.as_deref()).map(|value| value.unwrap_or(normalized))
-}
-
-fn choose_model_interactively_without_initial_list(
-    listing: &model::ModelListing,
-) -> Result<Option<String>> {
-    crate::ui::choose_model_with_initial_list(
-        listing.current.as_deref(),
-        &listing.all_models,
-        false,
-    )
-}
-
-fn choose_from_items(items: &[String], current: Option<&str>) -> Result<Option<String>> {
-    crate::ui::choose_model(current, items)
+    crate::ui::choose_model(listing.current.as_deref(), &matches)
+        .map(|value| value.unwrap_or(normalized))
 }
 
 async fn audit_command(args: AuditArgs, logic: bool) -> Result<i32> {
@@ -451,21 +442,8 @@ fn print_session_intro(mode: &str, session: &Session, prompt: Option<&str>) {
     println!("- model: {}", session.model);
     println!("- agent: {}", session.agent);
     if let Some(prompt) = prompt {
-        println!("- prompt: {}", preview(prompt, 100));
+        println!("- prompt: {}", crate::text::compact_preview(prompt, 100));
     }
-}
-
-fn preview(text: &str, max: usize) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out = String::new();
-    for (idx, ch) in compact.chars().enumerate() {
-        if idx >= max.saturating_sub(3) {
-            out.push_str("...");
-            return out;
-        }
-        out.push(ch);
-    }
-    out
 }
 
 fn build_audit_prompt(

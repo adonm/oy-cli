@@ -476,19 +476,7 @@ fn preview_value(value: &Value, max: usize) -> String {
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| value.to_string());
-    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_chars(&compact, max)
-}
-
-fn truncate_chars(text: &str, max: usize) -> String {
-    let mut out = String::new();
-    for (idx, ch) in text.chars().enumerate() {
-        if idx >= max.saturating_sub(3) {
-            return format!("{out}...");
-        }
-        out.push(ch);
-    }
-    out
+    crate::text::compact_preview(&raw, max)
 }
 
 fn value_str<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -503,8 +491,26 @@ fn value_bool(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn append_preview_lines(out: &mut String, text: &str, indent: &str) {
+    let line_count = text.lines().count();
+    for line in text.lines().take(PREVIEW_LINES) {
+        let _ = write!(
+            out,
+            "\n{indent}{}",
+            crate::text::truncate_chars(line, PREVIEW_LINE_CHARS)
+        );
+    }
+    if line_count > PREVIEW_LINES {
+        let _ = write!(
+            out,
+            "\n{indent}… {} more preview lines",
+            line_count - PREVIEW_LINES
+        );
+    }
+}
+
 fn preview_generic(value: &Value) -> String {
-    summarize_preview_lines(
+    crate::text::clamp_lines(
         &encode_tool_output(value),
         PREVIEW_LINES,
         PREVIEW_LINE_CHARS,
@@ -528,7 +534,7 @@ fn preview_list(value: &Value) -> String {
         let _ = write!(
             out,
             "\n  {}",
-            truncate_chars(item.as_str().unwrap_or(""), PREVIEW_LINE_CHARS)
+            crate::text::truncate_chars(item.as_str().unwrap_or(""), PREVIEW_LINE_CHARS)
         );
     }
     let shown = items.len().min(PREVIEW_ITEMS);
@@ -550,12 +556,15 @@ fn preview_read(value: &Value) -> String {
     if text.is_empty() {
         out.push_str("\n  <empty>");
     } else {
-        for line in text.lines().take(PREVIEW_LINES) {
-            let _ = write!(out, "\n  {}", truncate_chars(line, PREVIEW_LINE_CHARS));
-        }
-        if shown > PREVIEW_LINES {
-            let _ = write!(out, "\n  … {} more lines", shown - PREVIEW_LINES);
-        }
+        append_preview_lines(&mut out, text, "  ");
+    }
+    if value_bool(value, "truncated") {
+        let hidden = line_count.saturating_sub(end);
+        let _ = write!(
+            out,
+            "\n  … read truncated: {hidden} more line{} available",
+            plural(hidden)
+        );
     }
     out
 }
@@ -580,7 +589,7 @@ fn preview_search(value: &Value) -> String {
         let path = value_str(item, "path");
         let line = value_usize(item, "line_number");
         let col = value_usize(item, "column");
-        let text = truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
+        let text = crate::text::truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
         let _ = write!(out, "\n  {path}:{line}:{col}: {text}");
     }
     if value
@@ -637,12 +646,18 @@ fn preview_bash(value: &Value) -> String {
     let mut out = format!("exit {code}");
     for key in ["stdout", "stderr"] {
         let text = value_str(value, key);
+        let truncated_key = format!("{key}_truncated");
+        let truncated = value_bool(value, &truncated_key);
         if text.is_empty() {
+            if truncated {
+                let _ = write!(out, "\n{key}:\n  … {key} truncated");
+            }
             continue;
         }
         let _ = write!(out, "\n{key}:");
-        for line in text.lines().take(PREVIEW_LINES) {
-            let _ = write!(out, "\n  {}", truncate_chars(line, PREVIEW_LINE_CHARS));
+        append_preview_lines(&mut out, text, "  ");
+        if truncated {
+            let _ = write!(out, "\n  … {key} truncated for model context");
         }
     }
     out
@@ -667,7 +682,7 @@ fn preview_webfetch(value: &Value) -> String {
     let mut out = format!("HTTP {status} {url}");
     let text = value_str(value, "text");
     if !text.is_empty() {
-        let preview = summarize_preview_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
+        let preview = crate::text::clamp_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
         for line in preview.lines() {
             let _ = write!(out, "\n  {line}");
         }
@@ -722,7 +737,10 @@ fn preview_ask(value: &Value) -> String {
     if answer.is_empty() {
         "<no selection>".to_string()
     } else {
-        format!("selected: {}", truncate_chars(answer, PREVIEW_LINE_CHARS))
+        format!(
+            "selected: {}",
+            crate::text::truncate_chars(answer, PREVIEW_LINE_CHARS)
+        )
     }
 }
 
@@ -736,25 +754,6 @@ fn preview_todo(value: &Value) -> String {
         format_todo_preview_from_values(items)
     })
 }
-
-fn summarize_preview_lines(text: &str, max_lines: usize, max_chars: usize) -> String {
-    let mut out = String::new();
-    let mut total = 0usize;
-    for (idx, line) in text.lines().enumerate() {
-        total = idx + 1;
-        if idx < max_lines {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&truncate_chars(line, max_chars));
-        }
-    }
-    if total > max_lines {
-        let _ = write!(out, "\n… {} more lines", total - max_lines);
-    }
-    out
-}
-
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
@@ -1169,8 +1168,8 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
     let output = timeout(Duration::from_secs(args.timeout_seconds), cmd.output()).await??;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let (stdout, stdout_truncated) = summarize_text(&stdout, 6000);
-    let (stderr, stderr_truncated) = summarize_text(&stderr, 4000);
+    let (stdout, stdout_truncated) = crate::text::head_tail(&stdout, 6000);
+    let (stderr, stderr_truncated) = crate::text::head_tail(&stderr, 4000);
     Ok(json!({
         "command": args.command,
         "returncode": output.status.code().unwrap_or(-1),
@@ -1256,7 +1255,7 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         } else {
             text
         };
-        let (text, truncated) = summarize_text(&normalized, 12000);
+        let (text, truncated) = crate::text::head_tail(&normalized, 12000);
         return Ok(json!({
             "method": method,
             "url": final_url,
@@ -1307,10 +1306,10 @@ fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
     };
     let mut todos = Vec::with_capacity(input_todos.len());
     for (index, item) in input_todos.into_iter().enumerate() {
-        let id = Some(compact_spaces(&item.id))
+        let id = Some(crate::text::compact_spaces(&item.id))
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| (index + 1).to_string());
-        let task = compact_spaces(&item.task);
+        let task = crate::text::compact_spaces(&item.task);
         if task.is_empty() {
             bail!("todo task cannot be empty");
         }
@@ -1341,10 +1340,6 @@ fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
         },
         "preview": preview
     }))
-}
-
-fn compact_spaces(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn validate_pattern(pattern: &str) -> Result<()> {
@@ -1648,7 +1643,7 @@ fn push_match(
         "path": display_path,
         "line_number": line_number,
         "column": column,
-        "text": truncate_long_line(line.trim_end_matches(['\r', '\n']))
+        "text": crate::text::truncate_chars(line.trim_end_matches(['\r', '\n']), 1000)
     }));
 }
 
@@ -1715,32 +1710,6 @@ fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<Replace
     fs::write(path, updated)?;
     Ok(ReplaceOutcome::Changed(count))
 }
-
-fn truncate_long_line(text: &str) -> String {
-    const MAX: usize = 1000;
-    if text.len() <= MAX {
-        return text.to_string();
-    }
-    format!("{}... [truncated {} chars]", &text[..MAX], text.len() - MAX)
-}
-
-fn summarize_text(text: &str, max_chars: usize) -> (String, bool) {
-    if text.len() <= max_chars {
-        return (text.to_string(), false);
-    }
-    let head_len = max_chars / 2;
-    let tail_len = max_chars.saturating_sub(head_len);
-    let head = &text[..head_len.min(text.len())];
-    let tail = &text[text.len().saturating_sub(tail_len)..];
-    (
-        format!(
-            "{head}\n... [truncated {} chars] ...\n{tail}",
-            text.len() - head.len() - tail.len()
-        ),
-        true,
-    )
-}
-
 async fn validate_public_url(input: &str) -> Result<Url> {
     let url = Url::parse(input).with_context(|| format!("invalid URL: {input}"))?;
     if !matches!(url.scheme(), "http" | "https") {

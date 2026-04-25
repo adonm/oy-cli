@@ -21,6 +21,7 @@ mod cli;
 mod config;
 mod highlight;
 mod model;
+mod text;
 mod tools;
 mod ui;
 
