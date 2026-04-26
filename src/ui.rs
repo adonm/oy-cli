@@ -2,6 +2,7 @@ use std::fmt::{Display, Write as _};
 use std::io::IsTerminal as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use console::style;
@@ -118,6 +119,10 @@ pub fn paint(code: &str, text: impl Display) -> String {
     }
 }
 
+fn foreground_escaped(ranges: &[(syntect::highlighting::Style, &str)]) -> String {
+    as_24_bit_terminal_escaped(ranges, false)
+}
+
 pub fn out(text: &str) {
     print!("{text}");
 }
@@ -159,7 +164,7 @@ pub fn code(path: &str, text: &str, first_line: usize) -> String {
         for (idx, line) in LinesWithEndings::from(text).enumerate() {
             let escaped = highlighter
                 .highlight_line(line, &SYNTAXES)
-                .map(|ranges| as_24_bit_terminal_escaped(&ranges[..], true))
+                .map(|ranges| foreground_escaped(&ranges[..]))
                 .unwrap_or_else(|_| line.to_string());
             let _ = write!(
                 out,
@@ -217,32 +222,69 @@ pub fn warn(text: impl Display) {
     line(format_args!("{} {text}", paint("33", "!")));
 }
 
+pub fn tool_batch(round: usize, count: usize) {
+    if is_quiet() {
+        return;
+    }
+    err_line(format_args!(
+        "{} tools round {round} · {count} call{}",
+        paint("35", "↻"),
+        if count == 1 { "" } else { "s" }
+    ));
+}
+
 pub fn tool_start(name: &str, detail: &str) {
     if is_quiet() {
         return;
     }
     if detail.is_empty() {
-        err_line(format_args!("{} {name}", paint("36", "→")));
+        err_line(format_args!("{} tool {name}", paint("36", "→")));
     } else {
-        err_line(format_args!("{} {name} {detail}", paint("36", "→")));
+        err_line(format_args!("{} tool {name} · {detail}", paint("36", "→")));
     }
 }
 
-pub fn tool_result(preview: &str) {
+pub fn tool_result(name: &str, elapsed: Duration, preview: &str) {
     if is_quiet() {
         return;
     }
     let preview = preview.trim_end();
-    if !preview.is_empty() {
-        err_line(preview);
+    let head = format!(
+        "{} tool {name} {}",
+        paint("32", "←"),
+        format_elapsed(elapsed)
+    );
+    let Some((first, rest)) = preview.split_once('\n') else {
+        if preview.is_empty() {
+            err_line(head);
+        } else {
+            err_line(format_args!("{head} · {preview}"));
+        }
+        return;
+    };
+    err_line(format_args!("{head} · {first}"));
+    for line in rest.lines() {
+        err_line(format_args!("  {line}"));
     }
 }
 
-pub fn tool_error(name: &str, err: impl Display) {
+pub fn tool_error(name: &str, elapsed: Duration, err: impl Display) {
     if is_quiet() {
         return;
     }
-    err_line(format_args!("{} {name}: {err:#}", paint("31", "✗")));
+    err_line(format_args!(
+        "{} tool {name} {} · {err:#}",
+        paint("31", "✗"),
+        format_elapsed(elapsed)
+    ));
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    if elapsed.as_millis() < 1000 {
+        format!("{}ms", elapsed.as_millis())
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    }
 }
 
 pub fn compact_spaces(value: &str) -> String {
@@ -325,4 +367,38 @@ pub fn head_tail(text: &str, max_chars: usize) -> (String, bool) {
         format!("{head}\n… [truncated {hidden} chars] …\n{tail}"),
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syntect::highlighting::{Color, FontStyle, Style};
+
+    #[test]
+    fn syntax_escape_does_not_emit_background_colors() {
+        let style = Style {
+            foreground: Color {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 0xff,
+            },
+            background: Color {
+                r: 4,
+                g: 5,
+                b: 6,
+                a: 0xff,
+            },
+            font_style: FontStyle::empty(),
+        };
+        let escaped = foreground_escaped(&[(style, "let")]);
+        assert!(escaped.contains("38;2;1;2;3"));
+        assert!(!escaped.contains("48;2"));
+    }
+
+    #[test]
+    fn elapsed_format_is_compact() {
+        assert_eq!(format_elapsed(Duration::from_millis(42)), "42ms");
+        assert_eq!(format_elapsed(Duration::from_millis(1250)), "1.2s");
+    }
 }

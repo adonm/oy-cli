@@ -3,10 +3,13 @@ use chrono::Utc;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ReasoningEffort, ToolCall, ToolResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::Path;
 use tiktoken_rs::{bpe_for_model, cl100k_base};
 
 use crate::config::{self, SessionFile};
+
+const MAX_TOOL_ROUNDS: usize = 640;
 use crate::model;
 use crate::tools::{TodoItem, ToolContext, ToolPolicy};
 
@@ -780,13 +783,60 @@ async fn compact_llm_session_with_client(
     }))
 }
 
+#[derive(Default)]
+struct RepeatedNoopTools {
+    seen: BTreeSet<String>,
+}
+
+impl RepeatedNoopTools {
+    fn record(&mut self, name: &str, args: &Value, result: &Value) -> Result<()> {
+        if !is_noop_tool_result(name, result) {
+            self.seen.clear();
+            return Ok(());
+        }
+        let key = format!(
+            "{}:{}",
+            name,
+            serde_json::to_string(args).unwrap_or_default()
+        );
+        if !self.seen.insert(key) {
+            bail!(
+                "tool loop made no progress: repeated no-op {name}; inspect the latest tool output and choose a different action"
+            )
+        }
+        Ok(())
+    }
+}
+
+fn is_noop_tool_result(name: &str, result: &Value) -> bool {
+    match name {
+        "replace" => {
+            result.get("replacement_count").and_then(Value::as_u64) == Some(0)
+                && result
+                    .get("changed_file_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    == 0
+                && result
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
+        }
+        _ => false,
+    }
+}
+
 pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
     let client = model::build_client()?;
     session.transcript.messages.push(StoredMessage::User {
         content: prompt.to_string(),
     });
+    let mut repeated_noop_tools = RepeatedNoopTools::default();
 
-    loop {
+    for tool_round in 0..=MAX_TOOL_ROUNDS {
+        if tool_round == MAX_TOOL_ROUNDS {
+            bail!("tool loop exceeded {MAX_TOOL_ROUNDS} rounds; try a narrower prompt");
+        }
         let tool_context = session.tool_context();
         let tool_specs = crate::tools::tool_specs(&tool_context);
         let model_spec = model::to_genai_model_spec(&session.model);
@@ -806,6 +856,7 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
             .cloned()
             .collect::<Vec<_>>();
         if !tool_calls.is_empty() {
+            crate::ui::tool_batch(tool_round + 1, tool_calls.len());
             session
                 .transcript
                 .messages
@@ -831,6 +882,7 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
                     };
                 session.todos = ctx.todos;
                 let content = crate::tools::encode_tool_output(&result);
+                repeated_noop_tools.record(&call.fn_name, &call.fn_arguments, &result)?;
                 session.transcript.messages.push(StoredMessage::Tool {
                     call_id: call.call_id.clone(),
                     content,
@@ -845,11 +897,49 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
         });
         return Ok(answer);
     }
+    bail!("tool loop exceeded {MAX_TOOL_ROUNDS} rounds; try a narrower prompt")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_noop_tools_rejects_repeated_zero_replace() {
+        let mut guard = RepeatedNoopTools::default();
+        let args = json!({"path": "src/main.rs", "pattern": "missing", "replacement": "x"});
+        let result = json!({
+            "changed_file_count": 0,
+            "replacement_count": 0,
+            "errors": []
+        });
+
+        guard.record("replace", &args, &result).unwrap();
+        let err = guard.record("replace", &args, &result).unwrap_err();
+
+        assert!(err.to_string().contains("repeated no-op replace"));
+    }
+
+    #[test]
+    fn repeated_noop_tools_allows_retry_after_progress() {
+        let mut guard = RepeatedNoopTools::default();
+        let args = json!({"path": "src/main.rs", "pattern": "missing", "replacement": "x"});
+        let noop = json!({
+            "changed_file_count": 0,
+            "replacement_count": 0,
+            "errors": []
+        });
+        let progress = json!({
+            "changed_file_count": 1,
+            "replacement_count": 1,
+            "errors": []
+        });
+
+        guard.record("replace", &args, &noop).unwrap();
+        guard.record("replace", &args, &progress).unwrap();
+
+        assert!(guard.record("replace", &args, &noop).is_ok());
+    }
 
     #[test]
     fn undo_last_turn_removes_user_and_followups() {

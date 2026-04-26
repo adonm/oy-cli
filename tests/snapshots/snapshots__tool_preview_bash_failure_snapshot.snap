@@ -1,5 +1,12 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 84
 expression: "tools::preview_tool_output(\"bash\", &value)"
 ---
-✗ exit 2 · stdout 0 lines · stderr 2 lines · missing file
+✗ exit 2 · stdout 0 lines · stderr 6 lines · stdout-truncated=no · stderr-truncated=no · missing file
+stderr:
+  missing file
+  usage: demo <path>
+  try --help
+  example: demo Cargo.toml
+… 2 more lines

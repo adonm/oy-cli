@@ -41,6 +41,7 @@ oy --help
 | `oy run [--out path] [prompt]` | Explicit one-shot task; also accepts piped stdin |
 | `oy chat` | Interactive session with slash commands and history |
 | `oy model [filter]` | List, choose, and save a model id/routing shim |
+| `oy doctor` | Check model/auth/local-state setup and safety-relevant defaults |
 | `oy audit [focus]` | Multi-pass LLM audit to `ISSUES.md` using docs, SLOC, and pinned workspace chunks |
 | `oy ralph "prompt"` | Re-run a maintenance prompt until the deadline |
 | `oy --help` | Show CLI help |

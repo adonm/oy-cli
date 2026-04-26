@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow, bail};
-use flate2::read::GzDecoder;
 use futures_util::StreamExt as _;
 use glob::glob;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -15,8 +14,8 @@ use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{Cursor, Read, Write as _};
-use std::net::IpAddr;
+use std::io::{ErrorKind, Write as _};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -24,12 +23,12 @@ use tokei::{
     Config as TokeiConfig, Language as TokeiLanguage, Languages as TokeiLanguages,
     Sort as TokeiSort,
 };
+use tokio::io::AsyncReadExt as _;
 use tokio::net::lookup_host;
 use tokio::process::Command;
 use tokio::time::timeout;
 use toon_format::encode_default;
 use url::Url;
-use zip::ZipArchive;
 
 use genai::chat::Tool;
 
@@ -40,12 +39,10 @@ pub const DEFAULT_WEBFETCH_TIMEOUT_SECONDS: u64 = 60;
 const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
 const MAX_WEBFETCH_TIMEOUT_SECONDS: u64 = 120;
 const MAX_WEBFETCH_BYTES: usize = 2 * 1024 * 1024;
-const MAX_ARCHIVE_MEMBERS: usize = 10_000;
-const MAX_ARCHIVE_MEMBER_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_ARCHIVE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const TODO_FILE: &str = "TODO.md";
 const PREVIEW_ITEMS: usize = 20;
-const PREVIEW_LINES: usize = 30;
+const NORMAL_PREVIEW_LINES: usize = 5;
+const VERBOSE_PREVIEW_LINES: usize = 30;
 const PREVIEW_LINE_CHARS: usize = 180;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,130 +352,189 @@ fn spec(def: &ToolDef) -> Tool {
         .with_schema((def.schema)())
 }
 
-fn object(properties: Value, required: &[&str]) -> Value {
-    let mut schema = json!({
-        "type": "object",
-        "properties": properties,
-        "additionalProperties": false
-    });
-    if !required.is_empty() {
-        schema["required"] = json!(required);
+fn object<const N: usize>(properties: [(&str, Value); N], required: &[&str]) -> Value {
+    let mut props = Map::new();
+    for (name, schema) in properties {
+        props.insert(name.to_string(), schema);
     }
+
+    let mut schema = Map::new();
+    schema.insert("type".to_string(), json!("object"));
+    schema.insert("properties".to_string(), Value::Object(props));
+    schema.insert("additionalProperties".to_string(), json!(false));
+    if !required.is_empty() {
+        schema.insert("required".to_string(), json!(required));
+    }
+    Value::Object(schema)
+}
+
+fn string() -> Value {
+    json!({"type": "string"})
+}
+
+fn string_default(default: &str) -> Value {
+    json!({"type": "string", "default": default})
+}
+
+fn string_enum(values: &[&str], default: &str) -> Value {
+    json!({"type": "string", "enum": values, "default": default})
+}
+
+fn integer_default(default: impl Serialize) -> Value {
+    json!({"type": "integer", "default": default})
+}
+
+fn bool_default(default: bool) -> Value {
+    json!({"type": "boolean", "default": default})
+}
+
+fn array_of(items: Value) -> Value {
+    json!({"type": "array", "items": items})
+}
+
+fn nullable_string_array() -> Value {
+    json!({"type": ["array", "null"], "items": string()})
+}
+
+fn describe(mut schema: Value, description: &str) -> Value {
+    schema["description"] = json!(description);
     schema
 }
 
 fn exclude_schema() -> Value {
-    json!({"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]})
+    json!({"anyOf": [string(), array_of(string()), {"type": "null"}]})
 }
 
 fn todo_item_schema() -> Value {
     object(
-        json!({
-            "id": {"type": "string", "description": "Stable short id; optional, defaults to 1-based position."},
-            "task": {"type": "string"},
-            "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "default": "pending"}
-        }),
+        [
+            (
+                "id",
+                describe(
+                    string(),
+                    "Stable short id; optional, defaults to 1-based position.",
+                ),
+            ),
+            ("task", string()),
+            (
+                "status",
+                string_enum(&["pending", "in_progress", "done"], "pending"),
+            ),
+        ],
         &["task"],
     )
 }
 
 fn schema_list() -> Value {
     object(
-        json!({
-            "path": {"type": "string", "default": "*"},
-            "exclude": exclude_schema(),
-            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-        }),
+        [
+            ("path", string_default("*")),
+            ("exclude", exclude_schema()),
+            ("limit", integer_default(DEFAULT_LIMIT)),
+        ],
         &[],
     )
 }
 
 fn schema_read() -> Value {
     object(
-        json!({
-            "path": {"type": "string"},
-            "offset": {"type": "integer", "default": 1},
-            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-        }),
+        [
+            ("path", string()),
+            ("offset", integer_default(1)),
+            ("limit", integer_default(DEFAULT_LIMIT)),
+        ],
         &["path"],
     )
 }
 
 fn schema_search() -> Value {
     object(
-        json!({
-            "pattern": {"type": "string"},
-            "path": {"type": "string", "default": "."},
-            "exclude": exclude_schema(),
-            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-        }),
+        [
+            ("pattern", string()),
+            ("path", string_default(".")),
+            ("exclude", exclude_schema()),
+            ("limit", integer_default(DEFAULT_LIMIT)),
+        ],
         &["pattern"],
     )
 }
 
 fn schema_sloc() -> Value {
     object(
-        json!({
-            "path": {"type": "string", "default": "."},
-            "exclude": exclude_schema()
-        }),
+        [("path", string_default(".")), ("exclude", exclude_schema())],
         &[],
     )
 }
 
 fn schema_todo() -> Value {
+    let item = todo_item_schema();
     object(
-        json!({
-            "todos": {"type": "array", "description": "Complete replacement todo list. Alias: items. Omit to return current list.", "items": todo_item_schema()},
-            "items": {"type": "array", "description": "Alias for todos.", "items": todo_item_schema()},
-            "persist": {"type": "boolean", "default": false, "description": "Write to TODO.md; default false avoids git churn."}
-        }),
+        [
+            (
+                "todos",
+                describe(
+                    array_of(item.clone()),
+                    "Complete replacement todo list. Alias: items. Omit to return current list.",
+                ),
+            ),
+            ("items", describe(array_of(item), "Alias for todos.")),
+            (
+                "persist",
+                describe(
+                    bool_default(false),
+                    "Write to TODO.md; default false avoids git churn.",
+                ),
+            ),
+        ],
         &[],
     )
 }
 
 fn schema_ask() -> Value {
     object(
-        json!({
-            "question": {"type": "string"},
-            "choices": {"type": ["array", "null"], "items": {"type": "string"}}
-        }),
+        [("question", string()), ("choices", nullable_string_array())],
         &["question"],
     )
 }
 
 fn schema_webfetch() -> Value {
     object(
-        json!({
-            "url": {"type": "string"},
-            "method": {"type": "string", "default": "GET"},
-            "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
-            "follow_redirects": {"type": "boolean", "default": false},
-            "timeout_seconds": {"type": "integer", "default": DEFAULT_WEBFETCH_TIMEOUT_SECONDS}
-        }),
+        [
+            ("url", string()),
+            ("method", string_default("GET")),
+            (
+                "headers",
+                json!({"type": ["object", "null"], "additionalProperties": string()}),
+            ),
+            ("follow_redirects", bool_default(false)),
+            (
+                "timeout_seconds",
+                integer_default(DEFAULT_WEBFETCH_TIMEOUT_SECONDS),
+            ),
+        ],
         &["url"],
     )
 }
 
 fn schema_replace() -> Value {
     object(
-        json!({
-            "pattern": {"type": "string"},
-            "replacement": {"type": "string"},
-            "path": {"type": "string", "default": "."},
-            "exclude": exclude_schema(),
-            "limit": {"type": "integer", "default": DEFAULT_LIMIT}
-        }),
+        [
+            ("pattern", string()),
+            ("replacement", string()),
+            ("path", string_default(".")),
+            ("exclude", exclude_schema()),
+            ("limit", integer_default(DEFAULT_LIMIT)),
+        ],
         &["pattern", "replacement"],
     )
 }
 
 fn schema_bash() -> Value {
     object(
-        json!({
-            "command": {"type": "string"},
-            "timeout_seconds": {"type": "integer", "default": 120}
-        }),
+        [
+            ("command", string()),
+            ("timeout_seconds", integer_default(120)),
+        ],
         &["command"],
     )
 }
@@ -493,6 +549,7 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
 
 pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
     note_tool(name, &args);
+    let started = std::time::Instant::now();
     let result = match name {
         "list" => tool_list(ctx, serde_json::from_value(args)?),
         "read" => tool_read(ctx, serde_json::from_value(args)?),
@@ -506,9 +563,9 @@ pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Va
         other => bail!("unknown tool: {other}"),
     };
     if let Ok(value) = &result {
-        crate::ui::tool_result(&preview_tool_output(name, value));
+        crate::ui::tool_result(name, started.elapsed(), &preview_tool_output(name, value));
     } else if let Err(err) = &result {
-        crate::ui::tool_error(name, err);
+        crate::ui::tool_error(name, started.elapsed(), err);
     }
     result
 }
@@ -633,16 +690,32 @@ fn value_bool(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn bool_marker(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn truncation_flag(value: &Value) -> &'static str {
+    bool_marker(value_bool(value, "truncated"))
+}
+
 fn verbose_preview(body: impl FnOnce() -> String) -> Option<String> {
-    crate::ui::is_verbose().then(body)
+    (!crate::ui::is_quiet()).then(body)
 }
 
 fn with_verbose(summary: String, body: impl FnOnce() -> String) -> String {
-    if let Some(body) = verbose_preview(body).filter(|body| !body.trim().is_empty()) {
-        format!("{summary}\n{body}")
+    let Some(body) = verbose_preview(body).filter(|body| !body.trim().is_empty()) else {
+        return summary;
+    };
+    format!("{}\n{}", summary, limited_preview_body(&body))
+}
+
+fn limited_preview_body(body: &str) -> String {
+    let max_lines = if crate::ui::is_verbose() {
+        VERBOSE_PREVIEW_LINES
     } else {
-        summary
-    }
+        NORMAL_PREVIEW_LINES
+    };
+    crate::ui::clamp_lines(body, max_lines, PREVIEW_LINE_CHARS)
 }
 
 fn count_lines(text: &str) -> usize {
@@ -658,19 +731,24 @@ fn count_files_in_matches(matches: &[Value]) -> usize {
 }
 
 fn append_preview_lines(out: &mut String, text: &str, indent: &str) {
+    let max_lines = if crate::ui::is_verbose() {
+        VERBOSE_PREVIEW_LINES
+    } else {
+        NORMAL_PREVIEW_LINES
+    };
     let line_count = text.lines().count();
-    for line in text.lines().take(PREVIEW_LINES) {
+    for line in text.lines().take(max_lines) {
         let _ = write!(
             out,
             "\n{indent}{}",
             crate::ui::truncate_chars(line, PREVIEW_LINE_CHARS)
         );
     }
-    if line_count > PREVIEW_LINES {
+    if line_count > max_lines {
         let _ = write!(
             out,
             "\n{indent}… {} more preview lines",
-            line_count - PREVIEW_LINES
+            line_count - max_lines
         );
     }
 }
@@ -679,7 +757,7 @@ fn preview_generic(value: &Value) -> String {
     if crate::ui::is_verbose() {
         crate::ui::clamp_lines(
             &encode_tool_output(value),
-            PREVIEW_LINES,
+            VERBOSE_PREVIEW_LINES,
             PREVIEW_LINE_CHARS,
         )
     } else if !value_bool(value, "ok") && value.get("ok").is_some() {
@@ -697,10 +775,12 @@ fn preview_list(value: &Value) -> String {
         .unwrap_or(&[]);
     let total = value_usize(value, "count");
     let summary = format!(
-        "{} item{} in {}",
+        "path={} · {} item{} · shown={} · truncated={}",
+        value_str(value, "path"),
         total,
         plural(total),
-        value_str(value, "path")
+        items.len().min(PREVIEW_ITEMS),
+        truncation_flag(value)
     );
     with_verbose(summary, || {
         let mut out = String::new();
@@ -731,7 +811,10 @@ fn preview_read(value: &Value) -> String {
     } else {
         String::new()
     };
-    let summary = format!("{path}:{offset}-{end} · {shown}/{line_count} lines{more}");
+    let summary = format!(
+        "path={path} · lines {offset}-{end}/{line_count} · returned={shown}{more} · truncated={}",
+        truncation_flag(value)
+    );
     with_verbose(summary, || {
         let mut out = String::new();
         if text.is_empty() {
@@ -759,23 +842,25 @@ fn preview_search(value: &Value) -> String {
     let total = value_usize(value, "match_count");
     let files = count_files_in_matches(matches);
     let summary = if total == 0 {
-        format!("0 matches for /{}/", value_str(value, "pattern"))
+        format!(
+            "pattern=/{}/ · path={} · 0 matches · truncated={}",
+            value_str(value, "pattern"),
+            value_str(value, "path"),
+            truncation_flag(value)
+        )
     } else {
         format!(
-            "{} {} in {} file{} for /{}/",
+            "pattern=/{}/ · path={} · {} {} · {} file{} · returned={} · truncated={}",
+            value_str(value, "pattern"),
+            value_str(value, "path"),
             total,
             if total == 1 { "match" } else { "matches" },
             files,
             plural(files),
-            value_str(value, "pattern")
+            matches.len(),
+            truncation_flag(value)
         )
     };
-    if !crate::ui::is_verbose() {
-        return match matches.first() {
-            Some(item) => format!("{summary}\n  {}", format_search_hit(item)),
-            None => summary,
-        };
-    }
     with_verbose(summary, || {
         let mut out = String::new();
         for item in matches.iter().take(PREVIEW_ITEMS) {
@@ -808,21 +893,15 @@ fn preview_replace(value: &Value) -> String {
     let total_files = value_usize(value, "changed_file_count");
     let files = total_files.max(changed.len());
     let replacements = value_usize(value, "replacement_count");
-    let mut summary = format!(
-        "{} file{} changed · {} replacement{}",
+    let summary = format!(
+        "{} file{} changed · {} replacement{} · returned={} · truncated={}",
         files,
         plural(files),
         replacements,
-        plural(replacements)
+        plural(replacements),
+        changed.len(),
+        truncation_flag(value)
     );
-    if !crate::ui::is_verbose() && !changed.is_empty() && changed.len() <= 3 {
-        let names = changed
-            .iter()
-            .map(|item| value_str(item, "path"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        summary.push_str(&format!(" · {names}"));
-    }
     with_verbose(summary, || {
         let mut out = String::new();
         if changed.is_empty() {
@@ -870,11 +949,13 @@ fn preview_bash(value: &Value) -> String {
         crate::ui::paint("31", "✗")
     };
     let mut summary = format!(
-        "{icon} exit {code} · stdout {} line{} · stderr {} line{}",
+        "{icon} exit {code} · stdout {} line{} · stderr {} line{} · stdout-truncated={} · stderr-truncated={}",
         count_lines(stdout),
         plural(count_lines(stdout)),
         count_lines(stderr),
-        plural(count_lines(stderr))
+        plural(count_lines(stderr)),
+        bool_marker(value_bool(value, "stdout_truncated")),
+        bool_marker(value_bool(value, "stderr_truncated"))
     );
     if code != 0 {
         if let Some(first_stderr) = stderr.lines().find(|line| !line.trim().is_empty()) {
@@ -925,14 +1006,15 @@ fn preview_webfetch(value: &Value) -> String {
     let format = value_str(value, "format");
     let kind = if format.is_empty() { "text" } else { format };
     let summary = format!(
-        "HTTP {status} · {kind} · {} line{} · {url}",
+        "HTTP {status} · {kind} · {} line{} · truncated={} · {url}",
         count_lines(text),
-        plural(count_lines(text))
+        plural(count_lines(text)),
+        truncation_flag(value)
     );
     with_verbose(summary, || {
         let mut out = String::new();
         if !text.is_empty() {
-            let preview = crate::ui::clamp_lines(text, PREVIEW_LINES, PREVIEW_LINE_CHARS);
+            let preview = limited_preview_body(text);
             for line in preview.lines() {
                 let _ = write!(out, "\n  {line}");
             }
@@ -1005,11 +1087,7 @@ fn preview_todo(value: &Value) -> String {
             .unwrap_or(&[]);
         format_todo_preview_from_values(items)
     });
-    if crate::ui::is_verbose() {
-        preview
-    } else {
-        preview.lines().next().unwrap_or_default().to_string()
-    }
+    limited_preview_body(&preview)
 }
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
@@ -1143,30 +1221,6 @@ fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
     require_path_pattern_approval(ctx, &args.path)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let shown_limit = args.limit.max(1);
-    if args.path.contains("::") {
-        let items = list_archive_virtual(ctx, &args.path, &exclude)?;
-        return Ok(json!({
-            "path": args.path,
-            "items": items.iter().take(shown_limit).cloned().collect::<Vec<_>>(),
-            "count": items.len(),
-            "truncated": items.len() > shown_limit,
-            "exclude": args.exclude.as_ref().map(ExcludeArg::patterns)
-        }));
-    }
-    let target_for_archive = resolve_existing_path(ctx, &args.path).ok();
-    if target_for_archive
-        .as_ref()
-        .is_some_and(|path| path.is_file() && is_archive_path(path))
-    {
-        let items = list_archive_virtual(ctx, &format!("{}::", args.path), &exclude)?;
-        return Ok(json!({
-            "path": args.path,
-            "items": items.iter().take(shown_limit).cloned().collect::<Vec<_>>(),
-            "count": items.len(),
-            "truncated": items.len() > shown_limit,
-            "exclude": args.exclude.as_ref().map(ExcludeArg::patterns)
-        }));
-    }
     let items = if args.path == "." || args.path == "./" {
         let mut out = Vec::new();
         for entry in fs::read_dir(&ctx.root)? {
@@ -1204,7 +1258,15 @@ fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
 }
 
 fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
-    let (display_path, text) = read_virtual_text(ctx, &args.path)?;
+    let path = resolve_existing_path(ctx, &args.path)?;
+    if path.is_dir() {
+        bail!("read path is a directory: {}", args.path);
+    }
+    let Some(item) = read_text_file(&ctx.root, &path)? else {
+        bail!("read path is not utf-8 text: {}", args.path);
+    };
+    let display_path = item.display_path;
+    let text = item.text;
     let mut shown = Vec::new();
     let start = args.offset.saturating_sub(1);
     let stop = start + args.limit.max(1);
@@ -1425,27 +1487,63 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
     if args.command.len() > config::max_bash_cmd_bytes() {
         bail!("command too large ({} bytes)", args.command.len());
     }
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c")
+    let timeout_seconds = args.timeout_seconds.clamp(1, MAX_BASH_TIMEOUT_SECONDS);
+    let mut child = Command::new("bash")
+        .arg("-c")
         .arg(&args.command)
         .current_dir(&ctx.root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let timeout_seconds = args.timeout_seconds.clamp(1, MAX_BASH_TIMEOUT_SECONDS);
-    let output = timeout(Duration::from_secs(timeout_seconds), cmd.output()).await??;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let (stdout, stdout_truncated) = crate::ui::head_tail(&stdout, 6000);
-    let (stderr, stderr_truncated) = crate::ui::head_tail(&stderr, 4000);
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdout = child.stdout.take().context("failed to capture stdout")?;
+    let stderr = child.stderr.take().context("failed to capture stderr")?;
+    let stdout_task = tokio::spawn(read_child_output(stdout, 6000));
+    let stderr_task = tokio::spawn(read_child_output(stderr, 4000));
+    let status = match timeout(Duration::from_secs(timeout_seconds), child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            bail!("bash timed out after {timeout_seconds}s");
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_task.await??;
+    let (stderr, stderr_truncated) = stderr_task.await??;
     Ok(json!({
         "command": args.command,
-        "returncode": output.status.code().unwrap_or(-1),
+        "returncode": status.code().unwrap_or(-1),
         "stdout": stdout,
         "stderr": stderr,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated
     }))
+}
+
+async fn read_child_output<R>(mut reader: R, max_bytes: usize) -> Result<(String, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut out = Vec::new();
+    let mut truncated = false;
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(out.len());
+        if n > remaining {
+            out.extend_from_slice(&buf[..remaining]);
+            truncated = true;
+        } else if remaining > 0 {
+            out.extend_from_slice(&buf[..n]);
+        } else {
+            truncated = true;
+        }
+    }
+    Ok((String::from_utf8_lossy(&out).to_string(), truncated))
 }
 
 async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
@@ -1455,16 +1553,8 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         bail!("Only GET/HEAD/OPTIONS are allowed, got {method}");
     }
     let url = validate_public_url(&args.url).await?;
-    let client = reqwest::Client::builder()
-        .redirect(if args.follow_redirects {
-            reqwest::redirect::Policy::limited(10)
-        } else {
-            reqwest::redirect::Policy::none()
-        })
-        .timeout(Duration::from_secs(
-            args.timeout_seconds.clamp(1, MAX_WEBFETCH_TIMEOUT_SECONDS),
-        ))
-        .build()?;
+    let resolved = public_socket_addrs(&url).await?;
+    let client = webfetch_client(&url, &resolved, args.timeout_seconds)?;
     let mut request = client.request(method.parse()?, url.clone());
     if let Some(headers) = args.headers.as_ref() {
         for (key, value) in headers {
@@ -1486,7 +1576,10 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
             request = request.header(key, value);
         }
     }
-    let response = request.send().await?;
+    let mut response = request.send().await?;
+    if args.follow_redirects {
+        response = follow_public_redirects(&client, response, &method).await?;
+    }
     let status = response.status();
     let version = response.version();
     let final_url = response.url().to_string();
@@ -1678,54 +1771,21 @@ fn require_path_approval(ctx: &ToolContext, requested: &str, issue: &str) -> Res
         Approval::Ask if !ctx.interactive => bail!(
             "path requires interactive approval or an auto-approve agent: {requested} ({issue})"
         ),
-        Approval::Ask => {
-            crate::ui::err_line(format_args!(
-                "approve path outside workspace? {requested} ({issue}) [y/N]"
-            ));
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
-            if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                Ok(())
-            } else {
-                bail!("path denied by user")
-            }
-        }
+        Approval::Ask => approve_path(requested, issue),
     }
 }
 
-#[derive(Debug, Clone)]
-struct VirtualPath {
-    archive: PathBuf,
-    member: Option<String>,
-}
-
-fn resolve_virtual_path(ctx: &ToolContext, path: &str) -> Result<VirtualPath> {
-    let (archive_path, member) = path
-        .split_once("::")
-        .map(|(archive, member)| (archive, Some(member.trim_start_matches('/').to_string())))
-        .unwrap_or((path, None));
-    if member.as_ref().is_some_and(|m| m.contains("..")) {
-        bail!("invalid archive member path: {path}");
+fn approve_path(requested: &str, issue: &str) -> Result<()> {
+    crate::ui::section("Path approval required");
+    crate::ui::kv("path", requested);
+    crate::ui::kv("reason", issue);
+    crate::ui::kv("default", "deny");
+    let choices = ["no".to_string(), "yes".to_string()];
+    if crate::chat::ask("Allow path outside workspace?", Some(&choices))? == "yes" {
+        Ok(())
+    } else {
+        bail!("path denied by user")
     }
-    Ok(VirtualPath {
-        archive: resolve_existing_path(ctx, archive_path)?,
-        member,
-    })
-}
-
-fn is_archive_path(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    path.extension().and_then(|s| s.to_str()) == Some("zip")
-        || name.ends_with(".tar")
-        || name.ends_with(".tar.gz")
-        || name.ends_with(".tgz")
-}
-
-fn normalize_member(path: &str) -> String {
-    path.replace('\\', "/").trim_start_matches('/').to_string()
 }
 
 fn resolve_existing_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
@@ -1824,199 +1884,16 @@ struct SearchText {
     text: String,
 }
 
-fn list_archive_virtual(ctx: &ToolContext, path: &str, exclude: &GlobSet) -> Result<Vec<String>> {
-    let virtual_path = resolve_virtual_path(ctx, path)?;
-    if !is_archive_path(&virtual_path.archive) {
-        bail!("list archive path is not an archive: {path}");
-    }
-    let rel = rel_path(&ctx.root, &virtual_path.archive);
-    let prefix = virtual_path
-        .member
-        .as_deref()
-        .map(normalize_member)
-        .unwrap_or_default();
-    let mut out = file_texts_for_archive(&virtual_path.archive, &rel)?
-        .into_iter()
-        .map(|item| item.display_path)
-        .filter(|display| {
-            if prefix.is_empty() {
-                true
-            } else {
-                display
-                    .split_once("::")
-                    .map(|(_, member)| member.starts_with(&prefix))
-                    .unwrap_or(false)
-            }
-        })
-        .filter(|display| !exclude.is_match(display.as_str()))
-        .collect::<Vec<_>>();
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
-fn read_virtual_text(ctx: &ToolContext, path: &str) -> Result<(String, String)> {
-    let virtual_path = resolve_virtual_path(ctx, path)?;
-    if virtual_path.archive.is_dir() {
-        bail!("read path is a directory: {path}");
-    }
-    let rel = rel_path(&ctx.root, &virtual_path.archive);
-    if let Some(member) = virtual_path.member.as_ref() {
-        let member = normalize_member(member);
-        let item = archive_member_text(&virtual_path.archive, &rel, &member)?
-            .with_context(|| format!("archive member not found: {rel}::{member}"))?;
-        return Ok((item.display_path, item.text));
-    }
-    let mut texts = file_texts(&ctx.root, &virtual_path.archive)?;
-    if texts.len() == 1 {
-        let item = texts.remove(0);
-        return Ok((item.display_path, item.text));
-    }
-    if is_archive_path(&virtual_path.archive) {
-        bail!("archive path requires a member, e.g. {rel}::path/in/archive");
-    }
-    bail!("read path is not utf-8 text: {path}")
-}
-
-fn archive_member_text(path: &Path, rel: &str, member: &str) -> Result<Option<SearchText>> {
-    for item in file_texts_for_archive(path, rel)? {
-        if item.display_path == format!("{rel}::{member}") {
-            return Ok(Some(item));
-        }
-    }
-    Ok(None)
-}
-
-fn file_texts(root: &Path, path: &Path) -> Result<Vec<SearchText>> {
+fn read_text_file(root: &Path, path: &Path) -> Result<Option<SearchText>> {
     let rel = rel_path(root, path);
-    if is_archive_path(path) {
-        return file_texts_for_archive(path, &rel);
-    }
     let raw = fs::read(path)?;
     if raw.contains(&0) {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    let bytes = decode_compressed(path, raw)?;
-    Ok(String::from_utf8(bytes)
-        .ok()
-        .map(|text| {
-            vec![SearchText {
-                display_path: rel,
-                text,
-            }]
-        })
-        .unwrap_or_default())
-}
-
-fn decode_compressed(path: &Path, raw: Vec<u8>) -> Result<Vec<u8>> {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    if name.ends_with(".gz") && !name.ends_with(".tar.gz") {
-        let mut out = Vec::new();
-        GzDecoder::new(Cursor::new(raw)).read_to_end(&mut out)?;
-        return Ok(out);
-    }
-    Ok(raw)
-}
-
-fn file_texts_for_archive(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    if path.extension().and_then(|s| s.to_str()) == Some("zip") {
-        return zip_texts(path, rel);
-    }
-    if name.ends_with(".tar") || name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        return tar_texts(path, rel);
-    }
-    Ok(Vec::new())
-}
-
-fn zip_texts(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
-    let file = fs::File::open(path)?;
-    let mut archive = ZipArchive::new(file)?;
-    if archive.len() > MAX_ARCHIVE_MEMBERS {
-        bail!("archive has too many members: {}", archive.len());
-    }
-    let mut out = Vec::new();
-    let mut total_bytes = 0u64;
-    for index in 0..archive.len() {
-        let mut member = archive.by_index(index)?;
-        if member.is_dir() {
-            continue;
-        }
-        let size = member.size();
-        if size > MAX_ARCHIVE_MEMBER_BYTES {
-            continue;
-        }
-        total_bytes = total_bytes.saturating_add(size);
-        if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
-            bail!("archive expanded text exceeds limit");
-        }
-        let mut bytes = Vec::new();
-        member.read_to_end(&mut bytes)?;
-        if bytes.contains(&0) {
-            continue;
-        }
-        if let Ok(text) = String::from_utf8(bytes) {
-            out.push(SearchText {
-                display_path: format!("{rel}::{}", member.name()),
-                text,
-            });
-        }
-    }
-    Ok(out)
-}
-
-fn tar_texts(path: &Path, rel: &str) -> Result<Vec<SearchText>> {
-    let file = fs::File::open(path)?;
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    let reader: Box<dyn Read> = if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        Box::new(GzDecoder::new(file))
-    } else {
-        Box::new(file)
-    };
-    let mut archive = tar::Archive::new(reader);
-    let mut out = Vec::new();
-    let mut total_bytes = 0u64;
-    let mut members = 0usize;
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        members += 1;
-        if members > MAX_ARCHIVE_MEMBERS {
-            bail!("archive has too many members");
-        }
-        let size = entry.header().size().unwrap_or(0);
-        if size > MAX_ARCHIVE_MEMBER_BYTES {
-            continue;
-        }
-        total_bytes = total_bytes.saturating_add(size);
-        if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
-            bail!("archive expanded text exceeds limit");
-        }
-        let member = entry.path()?.to_string_lossy().replace('\\', "/");
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        if bytes.contains(&0) {
-            continue;
-        }
-        if let Ok(text) = String::from_utf8(bytes) {
-            out.push(SearchText {
-                display_path: format!("{rel}::{member}"),
-                text,
-            });
-        }
-    }
-    Ok(out)
+    Ok(String::from_utf8(raw).ok().map(|text| SearchText {
+        display_path: rel,
+        text,
+    }))
 }
 
 fn push_match(
@@ -2058,7 +1935,7 @@ fn search_file(
     column_regex: &Regex,
 ) -> Result<Vec<Value>> {
     let mut out = Vec::new();
-    for item in file_texts(root, path)? {
+    if let Some(item) = read_text_file(root, path)? {
         search_text_grep(
             &item.display_path,
             &item.text,
@@ -2100,6 +1977,7 @@ fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<Replace
 }
 
 fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    reject_symlink_destination(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -2123,6 +2001,17 @@ fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         fs::write(path, bytes)?;
         Ok(())
+    }
+}
+
+fn reject_symlink_destination(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("refusing to write symlink: {}", path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed checking {}", path.display())),
     }
 }
 
@@ -2196,8 +2085,52 @@ fn preview_replace_plan(
     Ok(combined_diff(&changed))
 }
 
+async fn follow_public_redirects(
+    initial_client: &reqwest::Client,
+    mut response: reqwest::Response,
+    method: &str,
+) -> Result<reqwest::Response> {
+    let _ = initial_client;
+    for _ in 0..10 {
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .context("redirect missing valid Location header")?;
+        let next_url = response.url().join(location)?;
+        validate_public_url_parts(&next_url)?;
+        let resolved = public_socket_addrs(&next_url).await?;
+        let client = webfetch_client(&next_url, &resolved, MAX_WEBFETCH_TIMEOUT_SECONDS)?;
+        response = client.request(method.parse()?, next_url).send().await?;
+    }
+    bail!("too many redirects")
+}
+
+fn webfetch_client(
+    url: &Url,
+    resolved: &[SocketAddr],
+    timeout_seconds: u64,
+) -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(
+            timeout_seconds.clamp(1, MAX_WEBFETCH_TIMEOUT_SECONDS),
+        ))
+        .resolve_to_addrs(url.host_str().context("missing hostname")?, resolved)
+        .build()?)
+}
+
 async fn validate_public_url(input: &str) -> Result<Url> {
     let url = Url::parse(input).with_context(|| format!("invalid URL: {input}"))?;
+    validate_public_url_parts(&url)?;
+    let _ = public_socket_addrs(&url).await?;
+    Ok(url)
+}
+
+fn validate_public_url_parts(url: &Url) -> Result<()> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("Only http/https URLs are allowed, got {:?}", url.scheme());
     }
@@ -2209,15 +2142,32 @@ async fn validate_public_url(input: &str) -> Result<Url> {
     ) {
         bail!("Local addresses are not allowed: {host}");
     }
-    let port = url.port_or_known_default().unwrap_or(80);
-    let addrs = lookup_host((host, port)).await?;
-    for addr in addrs {
-        let ip = addr.ip();
-        if !is_public_ip(ip) {
-            bail!("URL resolves to non-public address ({ip})");
-        }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        ensure_public_ip(ip)?;
     }
-    Ok(url)
+    Ok(())
+}
+
+async fn public_socket_addrs(url: &Url) -> Result<Vec<SocketAddr>> {
+    validate_public_url_parts(url)?;
+    let host = url.host_str().context("missing hostname")?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addrs = lookup_host((host, port)).await?.collect::<Vec<_>>();
+    if addrs.is_empty() {
+        bail!("URL host resolved to no addresses: {host}");
+    }
+    for addr in &addrs {
+        ensure_public_ip(addr.ip())?;
+    }
+    Ok(addrs)
+}
+
+fn ensure_public_ip(ip: IpAddr) -> Result<()> {
+    if is_public_ip(ip) {
+        Ok(())
+    } else {
+        bail!("URL resolves to non-public address ({ip})")
+    }
 }
 
 fn is_public_ip(ip: IpAddr) -> bool {
@@ -2255,20 +2205,25 @@ fn require_mutation_approval(ctx: &ToolContext, tool: &str, preview: Option<&str
         Approval::Ask if !ctx.interactive => bail!(
             "tool denied by policy: {tool} requires interactive approval or an auto-approve agent"
         ),
-        Approval::Ask => {
-            if let Some(preview) = preview.filter(|s| !s.trim().is_empty()) {
-                crate::ui::err_line(crate::ui::diff(preview).trim_end());
-            }
-            crate::ui::err_line(format_args!("approve {tool}? [y/N]"));
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
-            let answer = line.trim().to_ascii_lowercase();
-            if matches!(answer.as_str(), "y" | "yes") {
-                Ok(())
-            } else {
-                bail!("tool denied by user")
-            }
-        }
+        Approval::Ask => approve_tool(tool, preview),
+    }
+}
+
+fn approve_tool(tool: &str, preview: Option<&str>) -> Result<()> {
+    if let Some(preview) = preview.filter(|s| !s.trim().is_empty()) {
+        crate::ui::err_line(crate::ui::diff(preview).trim_end());
+    }
+    crate::ui::section("Approval required");
+    crate::ui::kv("tool", tool);
+    crate::ui::kv("default", "deny");
+    if tool == "bash" {
+        crate::ui::warn("shell commands run with your user permissions and inherited environment");
+    }
+    let choices = ["no".to_string(), "yes".to_string()];
+    if crate::chat::ask(&format!("Approve {tool}?"), Some(&choices))? == "yes" {
+        Ok(())
+    } else {
+        bail!("tool denied by user")
     }
 }
 
@@ -2294,6 +2249,69 @@ mod tests {
             shell: Approval::Auto,
             network: true,
         }
+    }
+
+    fn schema_for(name: &str) -> Value {
+        let (_dir, ctx) = test_context(auto_policy(), true);
+        tool_specs(&ctx)
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.schema)
+            .unwrap_or_else(|| panic!("missing schema for {name}"))
+    }
+
+    #[test]
+    fn tool_schemas_are_closed_objects_with_valid_required_fields() {
+        let (_dir, ctx) = test_context(auto_policy(), true);
+        for tool in tool_specs(&ctx) {
+            let schema = tool
+                .schema
+                .unwrap_or_else(|| panic!("missing schema for {}", tool.name));
+            assert_eq!(schema["type"], "object", "{} type", tool.name);
+            assert_eq!(
+                schema["additionalProperties"], false,
+                "{} additionalProperties",
+                tool.name
+            );
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("missing properties for {}", tool.name));
+            if let Some(required) = schema.get("required").and_then(Value::as_array) {
+                for field in required {
+                    let field = field.as_str().unwrap();
+                    assert!(
+                        props.contains_key(field),
+                        "{} requires unknown {field}",
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_schema_helpers_preserve_aliases_defaults_and_nullable_shapes() {
+        let todo = schema_for("todo");
+        assert_eq!(todo["properties"]["persist"]["default"], false);
+        assert_eq!(
+            todo["properties"]["items"]["items"]["required"],
+            json!(["task"])
+        );
+        assert_eq!(
+            todo["properties"]["todos"]["description"],
+            "Complete replacement todo list. Alias: items. Omit to return current list."
+        );
+
+        let list = schema_for("list");
+        assert_eq!(list["properties"]["path"]["default"], "*");
+        assert_eq!(list["properties"]["exclude"]["anyOf"][1]["items"], string());
+
+        let webfetch = schema_for("webfetch");
+        assert_eq!(webfetch["required"], json!(["url"]));
+        assert_eq!(
+            webfetch["properties"]["headers"]["type"],
+            json!(["object", "null"])
+        );
     }
 
     #[test]
@@ -2451,99 +2469,38 @@ mod tests {
     }
 
     #[test]
-    fn search_file_reads_zip_members() {
+    fn search_file_treats_zip_as_binary_file() {
         let dir = tempfile::tempdir().unwrap();
         let zip_path = dir.path().join("sample.zip");
-        {
-            let file = fs::File::create(&zip_path).unwrap();
-            let mut zip = zip::ZipWriter::new(file);
-            let options = zip::write::SimpleFileOptions::default();
-            zip.start_file("src/lib.rs", options).unwrap();
-            std::io::Write::write_all(
-                &mut zip,
-                b"fn archive_hit() {}
-",
-            )
-            .unwrap();
-            zip.finish().unwrap();
-        }
-        let matcher = RegexMatcher::new_line_matcher("archive_hit").unwrap();
-        let column_regex = Regex::new("archive_hit").unwrap();
+        fs::write(&zip_path, b"PK  not searched").unwrap();
+        let matcher = RegexMatcher::new_line_matcher("not searched").unwrap();
+        let column_regex = Regex::new("not searched").unwrap();
         let found = search_file(dir.path(), &zip_path, &matcher, &column_regex).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0]["path"], "sample.zip::src/lib.rs");
+        assert!(found.is_empty());
     }
 
     #[test]
-    fn read_supports_zip_virtual_member() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip_path = dir.path().join("sample.zip");
-        {
-            let file = fs::File::create(&zip_path).unwrap();
-            let mut zip = zip::ZipWriter::new(file);
-            zip.start_file("docs/readme.txt", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            std::io::Write::write_all(
-                &mut zip,
-                b"one
-two
-three
-",
-            )
-            .unwrap();
-            zip.finish().unwrap();
-        }
-        let value = tool_read(
-            &ToolContext {
-                root: dir.path().to_path_buf(),
-                interactive: false,
-                policy: ToolPolicy {
-                    read_only: false,
-                    files_write: Approval::Auto,
-                    shell: Approval::Auto,
-                    network: true,
-                },
-                todos: Vec::new(),
-            },
+    fn read_rejects_zip_virtual_member() {
+        let (dir, ctx) = test_context(auto_policy(), false);
+        fs::write(dir.path().join("sample.zip"), b"PK  ").unwrap();
+        let err = tool_read(
+            &ctx,
             ReadArgs {
                 path: "sample.zip::docs/readme.txt".into(),
-                offset: 2,
-                limit: 1,
+                offset: 1,
+                limit: 10,
             },
         )
-        .unwrap();
-        assert_eq!(value["text"], "two");
-        assert_eq!(value["path"], "sample.zip::docs/readme.txt");
-        assert_eq!(value["line_count"], 3);
+        .unwrap_err();
+        assert!(err.to_string().contains("path does not exist"));
     }
 
     #[test]
-    fn list_shows_zip_members() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip_path = dir.path().join("sample.zip");
-        {
-            let file = fs::File::create(&zip_path).unwrap();
-            let mut zip = zip::ZipWriter::new(file);
-            zip.start_file("a.txt", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            std::io::Write::write_all(&mut zip, b"a").unwrap();
-            zip.start_file("nested/b.txt", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            std::io::Write::write_all(&mut zip, b"b").unwrap();
-            zip.finish().unwrap();
-        }
+    fn list_does_not_expand_zip_members() {
+        let (dir, ctx) = test_context(auto_policy(), false);
+        fs::write(dir.path().join("sample.zip"), b"PK  ").unwrap();
         let value = tool_list(
-            &ToolContext {
-                root: dir.path().to_path_buf(),
-                interactive: false,
-                policy: ToolPolicy {
-                    read_only: false,
-                    files_write: Approval::Auto,
-                    shell: Approval::Auto,
-                    network: true,
-                },
-                todos: Vec::new(),
-            },
+            &ctx,
             ListArgs {
                 path: "sample.zip".into(),
                 exclude: None,
@@ -2551,9 +2508,9 @@ three
             },
         )
         .unwrap();
+        assert_eq!(value["count"], 1);
         let items = value["items"].as_array().unwrap();
-        assert!(items.iter().any(|item| item == "sample.zip::a.txt"));
-        assert!(items.iter().any(|item| item == "sample.zip::nested/b.txt"));
+        assert_eq!(items, &vec![json!("sample.zip")]);
     }
 
     #[test]

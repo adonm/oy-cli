@@ -38,7 +38,6 @@ Keep implementation architecture here, not in the README. README should stay use
 - config/persistence/prompts: `serde`, `serde_json`, `toml`, `dirs`, `chrono`
 - search/file tools: `ignore`, `glob`, `globset`, `grep-regex`, `grep-searcher`, `regex`, `tokei`
 - network/tools: `reqwest` with rustls/http2, `url`, `html2md`
-- archives/compression: `flate2`, `tar`, `zip`
 - terminal UX: `reedline-repl-rs`, `dialoguer`, `console`, `syntect`, `termimad`, `terminal_size`, `textwrap`, `unicode-width`
 
 Prefer adding notes here when a new crate establishes a new subsystem boundary. Keep README crate notes user-facing and this map contributor-facing.

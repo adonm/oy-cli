@@ -1,6 +1,12 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 49
 expression: "tools::preview_tool_output(\"search\", &value)"
 ---
-2 matches in 2 files for /run_prompt/
-  src/agent.rs:283:1: pub async fn run_prompt(...)
+pattern=/run_prompt/ · path=src · 6 matches · 6 files · returned=6 · truncated=no
+src/agent.rs:283:1: pub async fn run_prompt(...)
+  src/cli.rs:40:9: Run(RunArgs),
+  src/chat.rs:110:18: run_prompt from chat
+  src/model.rs:88:5: resolve model before run_prompt
+  src/tools/mod.rs:500:13: tool output for run_prompt
+… 1 more lines

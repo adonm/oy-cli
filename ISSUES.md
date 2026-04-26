@@ -6,163 +6,74 @@ Scope: full audit of Rust CLI workspace from collected audit draft and spot-chec
 
 ## 1. High — Workspace output writes follow symlinks, enabling arbitrary file overwrite
 
-- **Location:** `src/cli.rs:460-462`, `src/cli.rs:520`, `src/cli.rs:1061-1079`
+- **Location:** `src/cli.rs`, `src/tools/mod.rs`
 - **Category:** Security
-- **Status:** Open
-- **Evidence:**
-  - `audit_command()` writes fixed workspace paths with `std::fs::write`: `ISSUES.audit-manifest.json` and `ISSUES.draft.md`.
-  - Final audit output is written through `write_workspace_file(&root, Path::new("ISSUES.md"), ...)`.
-  - `write_workspace_file()` rejects absolute paths and `..`, then does `let path = root.join(requested)` and `std::fs::write(&path, out)`.
-  - Existing symlinks at the destination, or in parent components, are not rejected.
-- **Attack path / preconditions:** A user runs `oy audit` or `oy run --out <path>` inside a malicious or untrusted workspace containing `ISSUES.md`, `ISSUES.draft.md`, `ISSUES.audit-manifest.json`, or the chosen output path as a symlink to a writable file outside the workspace.
-- **Trust boundary → sink:** Workspace-controlled filesystem object → `std::fs::write()` follows symlink → outside-workspace file overwrite.
-- **Impact:** Arbitrary overwrite of files writable by the `oy` user. The fixed audit filenames make this triggerable without requiring the user to choose a dangerous output path.
-- **Fix:**
-  - Canonicalize and validate the workspace root and destination parent.
-  - Reject symlinks in destination parent components.
-  - Refuse to overwrite an existing symlink destination.
-  - Prefer no-follow/openat-style APIs where available.
-  - If atomic writes are needed, create the temp file inside a validated directory and rename only after re-validating the destination.
+- **Status:** Mitigated in current tree; keep covered by tests before closing.
+- **Resolution evidence:** Workspace output helpers now canonicalize the workspace root, reject absolute/`..` output paths, validate existing destination parents stay under the workspace, and refuse existing symlink destinations before writes/appends. Tool replacement writes also refuse symlink destinations.
+- **Residual risk / follow-up:** Parent symlink traversal is rejected when the parent exists and canonicalizes outside the workspace. For stronger TOCTOU protection, consider platform-specific no-follow/openat-style writes.
 - **Refs:** ASVS 5.0 lookup: V5 File Handling / path traversal; grugbrain: local reasoning.
 
 ## 2. High — Model routing and auth collapse provider boundaries
 
-- **Location:** `src/model.rs:610-623`, `src/model.rs:643-685`, `src/config.rs:257-266`
+- **Location:** `src/model.rs`
 - **Category:** Security
-- **Status:** Open
-- **Evidence:**
-  - `auth_resolver()` installs an auth resolver whenever `OPENAI_API_KEY` or `OPENAI_BASE_URL` is present.
-  - The resolver ignores the requested model/provider and returns `AuthData::from_single(key.clone())` for every `_model`.
-  - `openai_compatible_target()` chooses `let shim = configured_shim.or(inline_shim);`, so a saved or environment shim overrides an explicit inline model prefix.
-  - `saved_model_config_from_selection()` persists routing shims separately, allowing stale saved shims to affect later model selections.
-- **Attack path / preconditions:** A user has `OPENAI_API_KEY` configured and selects a non-OpenAI model, or has a saved/`OY_SHIM` route and later runs an explicit inline model such as `local-8080::...` expecting a local/private trust boundary.
-- **Trust boundary → sink:** User model selection + persisted/env routing state → `AuthResolver` / `ServiceTargetResolver` → unintended provider endpoint with bearer auth and workspace prompt.
-- **Impact:** Workspace code, prompts, tool output, and possibly secrets can be sent to the wrong backend. OpenAI API keys can also be supplied to unrelated adapters/endpoints.
-- **Fix:**
-  - Scope auth by adapter/provider.
-  - Only return `OPENAI_API_KEY` for OpenAI/OpenAI-compatible targets that explicitly need it.
-  - Make inline routing override saved routing: `inline_shim.or(configured_shim)`.
-  - Fail closed on inline/saved routing conflicts unless the user explicitly confirms.
-  - Add tests for `OY_MODEL=local-*::...` with a saved cloud shim, and for non-OpenAI models when `OPENAI_API_KEY` is set.
+- **Status:** Mitigated in current tree.
+- **Resolution evidence:** Inline routing shims now override saved/configured routing, native adapter namespaces are not treated as routing shims, and the `OPENAI_API_KEY` auth resolver declines to attach generic OpenAI auth when an inline routing shim or `OY_SHIM` is active. Focused tests cover inline-vs-configured routing and native adapter namespace behavior.
+- **Residual risk / follow-up:** Keep provider/routing decisions visible in `oy doctor` and model-selection UX; avoid adding new provider aliases that silently reuse unrelated credentials.
 - **Refs:** ASVS 5.0 lookup: V12 Secure Communication, V14 Data Protection; grugbrain: avoid wrong abstraction.
 
 ## 3. High — Public-only `webfetch` can be bypassed by DNS rebinding
 
-- **Location:** `src/tools/mod.rs:1432-1475`, `src/tools/mod.rs:2056-2077`
+- **Location:** `src/tools/mod.rs`
 - **Category:** Security
-- **Status:** Open
-- **Evidence:**
-  - `tool_webfetch()` accepts model/user-controlled `args.url`.
-  - `validate_public_url()` performs preflight DNS resolution using `lookup_host((host, port))` and rejects non-public IPs.
-  - The real HTTP request is later sent by `reqwest`, which performs its own DNS resolution.
-  - If `final_url == url.as_str()`, no post-request URL validation runs.
-- **Attack path / preconditions:** An attacker controls DNS for a hostname. The validation lookup returns a public IP, but the subsequent `reqwest` connection resolves the same hostname to `127.0.0.1`, RFC1918, link-local, or cloud metadata IP.
-- **Trust boundary → sink:** Model/user-controlled public-looking URL → second DNS resolution → internal HTTP service → response body returned to model/user.
-- **Impact:** Bypasses the advertised public-only network boundary. Internal services reachable from the host can be queried and their responses exfiltrated into the tool result.
-- **Fix:**
-  - Enforce public-IP validation at connection time, not only as preflight.
-  - Use a custom resolver/connector that rejects loopback/private/link-local/metadata IPs for every connect.
-  - Or pin the validated IP set and force the request to use only those IPs.
-  - Manually follow redirects and validate each hop before connecting.
+- **Status:** Mitigated in current tree.
+- **Resolution evidence:** `webfetch` resolves the target host, rejects non-public addresses, pins the validated socket addresses into the reqwest client with `resolve_to_addrs`, disables automatic redirects, and manually follows redirects only after validating and pinning each hop.
+- **Residual risk / follow-up:** This is still not a sandbox; keep `webfetch` public-only, avoid adding proxy support without equivalent connect-time validation, and prefer running untrusted work in a container/VM.
 - **Refs:** ASVS 5.0 lookup: V12 Secure Communication / outbound trust boundaries.
 
 ## 4. High — Devcontainer mounts the host Docker socket by default
 
-- **Location:** `.devcontainer/devcontainer.json:4-6`
+- **Location:** `.devcontainer/devcontainer.json`
 - **Category:** Security
-- **Status:** Open
-- **Evidence:** The devcontainer configuration includes:
-
-  ```json
-  "mounts": [
-    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
-  ]
-  ```
-
-- **Attack path / preconditions:** A developer opens the repository in the devcontainer. Any process inside the container, including build hooks, dependencies, shell commands, or AI-invoked commands, can access the host Docker daemon.
-- **Trust boundary → sink:** Container process → host Docker daemon socket.
-- **Impact:** Docker socket access is typically host-root-equivalent. An attacker can start privileged containers, mount host filesystems, read/write host files, and alter host state.
-- **Fix:**
-  - Remove the Docker socket mount by default.
-  - If Docker access is required, make it explicit opt-in.
-  - Prefer rootless Docker or a constrained Docker socket proxy with least-privilege API filtering.
+- **Status:** Mitigated in current tree.
+- **Resolution evidence:** The devcontainer no longer mounts `/var/run/docker.sock` by default. README/doctor safety text now explicitly warns that mounting the host Docker socket into AI-assisted containers is usually host-root-equivalent.
+- **Residual risk / follow-up:** Keep Docker access opt-in only; if needed, prefer rootless Docker or a constrained Docker socket proxy with least-privilege API filtering.
 - **Refs:** ASVS 5.0 lookup: V13 Configuration; grugbrain: boring code.
 
 ## 5. Medium — `webfetch` buffers full response bodies before truncation
 
-- **Location:** `src/tools/mod.rs:1496-1521`
+- **Location:** `src/tools/mod.rs`
 - **Category:** Performance / Security DoS
-- **Status:** Open
-- **Evidence:**
-  - Text responses call `response.text().await?` before truncating with `head_tail(..., 12000)`.
-  - Binary responses call `response.bytes().await?` and only report `bytes.len()`.
-  - There is no explicit maximum response byte budget.
-- **Attack path / preconditions:** A model/user-approved `webfetch` points to an attacker-controlled or unexpectedly large public URL.
-- **Impact:** The process can allocate memory proportional to the full response size before truncation, causing stalls or OOM in chat/audit runs.
-- **Fix:**
-  - Stream response bodies in chunks.
-  - Enforce a hard maximum byte count before allocation.
-  - Abort once the cap is reached and mark the result as truncated.
-  - Clamp `timeout_seconds` to a safe maximum.
+- **Status:** Mitigated in current tree.
+- **Resolution evidence:** `webfetch` now streams response bodies with an explicit byte cap before text/binary formatting and marks capped responses as truncated.
+- **Residual risk / follow-up:** DNS-rebinding/connect-time validation remains separate finding #3.
 - **Refs:** ASVS 5.0 lookup: V12 Secure Communication; grugbrain: local reasoning.
 
 ## 6. Medium — Archive and gzip handling can trigger decompression/read bombs
 
-- **Location:** `src/tools/mod.rs:1737-1759`, `src/tools/mod.rs:1800-1830`, `src/tools/mod.rs:1834-1899`
+- **Location:** `src/tools/mod.rs`, `Cargo.toml`
 - **Category:** Performance / Security DoS
-- **Status:** Open
-- **Evidence:**
-  - `list_archive_virtual()` calls `file_texts_for_archive()` and therefore reads archive member contents even when only listing names.
-  - `.gz` files are decompressed with `read_to_end()`.
-  - Zip and tar members are read into memory with `member.read_to_end(&mut bytes)` / `entry.read_to_end(&mut bytes)`.
-  - There are no caps for compressed bytes, decompressed bytes, member count, or total archive output.
-- **Attack path / preconditions:** An untrusted workspace contains a zip/tar/tgz/gz bomb. A normal `list`, `read`, or `search` over that file triggers full extraction/decompression.
-- **Impact:** Repository-controlled files can cause high CPU use or OOM. `list` is especially surprising because users expect metadata-only behavior.
-- **Fix:**
-  - For archive listing, read names/metadata only.
-  - For read/search, enforce maximum archive entries, compressed bytes, decompressed bytes per member, and total decompressed bytes.
-  - Stream members instead of collecting all `SearchText` values.
-  - Clearly mark skipped/truncated archive members.
-- **Refs:** grugbrain: avoid wrong abstraction.
+- **Status:** Mitigated in current tree.
+- **Resolution evidence:** Archive/compressed virtual read/search/list support was removed. File tools now treat archives as ordinary files: `list` reports the archive path only, and `read`/`search` skip binary/non-UTF-8 bytes instead of extracting or decompressing. The `flate2`, `tar`, and `zip` dependencies were removed from `Cargo.toml`, and focused tests cover no archive expansion.
+- **Residual risk / follow-up:** Users who need archive inspection should extract archives explicitly in a disposable container/VM, then run `oy` against the extracted workspace.
+- **Refs:** grugbrain: avoid wrong abstraction; fail closed at file parsing boundaries.
 
 ## 7. Medium — `bash` timeout does not reliably terminate processes and buffers output unbounded
 
-- **Location:** `src/tools/mod.rs:1405-1428`
+- **Location:** `src/tools/mod.rs`
 - **Category:** Performance / Operational reliability
-- **Status:** Open
-- **Evidence:**
-  - `tool_bash()` runs `bash -c` via `Command::new("bash")`.
-  - It wraps `cmd.output()` in `tokio::time::timeout(...)`.
-  - There is no `kill_on_drop(true)`, explicit kill on timeout, or process-group cleanup.
-  - `output()` fully buffers stdout/stderr before `head_tail()` truncation.
-- **Attack path / preconditions:** Bash is approved or auto-approved. A command runs longer than its timeout, spawns descendants, or emits huge output, e.g. `yes`, noisy tests, or a long-running build script.
-- **Impact:** Timed-out commands or child processes can continue running after the tool returns an error. Large stdout/stderr can exhaust memory before preview truncation.
-- **Fix:**
-  - Spawn explicitly rather than using `output()`.
-  - Set `kill_on_drop(true)`.
-  - Kill on timeout.
-  - Use a process group/session so descendants are terminated.
-  - Stream stdout/stderr with byte caps.
+- **Status:** Partially mitigated in current tree.
+- **Resolution evidence:** `tool_bash()` now spawns explicitly, sets `kill_on_drop(true)`, kills/waits on timeout, and streams stdout/stderr with preview byte caps.
+- **Residual risk / follow-up:** Descendant processes may survive without process-group/session cleanup. Add platform-specific process group termination if this becomes a real operational issue.
 - **Refs:** grugbrain: local reasoning; grugbrain: boring code.
 
 ## 8. Medium — Audit mode reads and embeds full files with only line-based chunking
 
-- **Location:** `src/cli.rs:587-609`, `src/cli.rs:627-656`, `src/cli.rs:808-822`
+- **Location:** `src/cli.rs`
 - **Category:** Performance / Cost control
-- **Status:** Open
-- **Evidence:**
-  - `workspace_audit_files()` reads each selected file fully using `std::fs::read(path)`.
-  - `audit_chunks()` chunks by `file.lines` and `max_lines`.
-  - `format_audit_chunk_content()` embeds file text in prompts.
-  - A huge one-line minified/generated UTF-8 file counts as one line and can bypass `--chunk-lines`.
-- **Attack path / preconditions:** The workspace contains a large text file recognized by `tokei` and not ignored by gitignore.
-- **Impact:** Excess memory use, huge prompt construction, slow or failed model calls, and high provider cost. The `--chunk-lines` control gives a false sense of safety.
-- **Fix:**
-  - Enforce byte budgets per file and per chunk.
-  - Count both bytes and lines.
-  - Skip generated/minified paths by default.
-  - Truncate large files with explicit markers.
-  - Record skipped/truncated files in the manifest.
+- **Status:** Mitigated in current tree.
+- **Resolution evidence:** `oy audit` now enforces per-file and per-chunk byte budgets (`--file-bytes`, `--chunk-bytes`) in addition to line budgets, truncates oversized files with an explicit marker, includes byte/truncation metadata in prompts, and records budgets/truncated files in the manifest/transparency line.
+- **Residual risk / follow-up:** Generated/minified path heuristics could still reduce audit cost, but byte caps now fail bounded.
 - **Refs:** grugbrain: complexity; grugbrain: local reasoning.
 
 ## Other findings summarized

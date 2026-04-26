@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use ignore::WalkBuilder;
 use serde::Serialize;
-use std::io::{IsTerminal as _, Write as _};
+use std::io::{ErrorKind, IsTerminal as _, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use tokei::{Config as TokeiConfig, LanguageType};
 
@@ -11,15 +11,26 @@ use crate::config;
 use crate::model;
 
 const MODEL_LIST_LIMIT: usize = 30;
+const DEFAULT_AUDIT_CHUNK_LINES: usize = 6000;
+const MIN_AUDIT_CHUNK_LINES: usize = 500;
+const DEFAULT_AUDIT_CHUNK_BYTES: usize = 768 * 1024;
+const MIN_AUDIT_CHUNK_BYTES: usize = 64 * 1024;
+const DEFAULT_AUDIT_FILE_BYTES: usize = 256 * 1024;
+const MIN_AUDIT_FILE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Parser)]
-#[command(name = "oy", version, about = "AI coding assistant for your shell.")]
+#[command(
+    name = "oy",
+    version,
+    about = "Small local AI coding assistant for your shell.",
+    after_help = "Examples:\n  oy \"inspect this repo and summarize risks\"\n  oy chat --agent plan\n  oy run --out plan.md \"write a migration plan\"\n  oy model copilot::gpt-4.1-mini\n\nSafety: oy is not a sandbox. Use --agent plan or a container/VM for untrusted repos."
+)]
 struct Cli {
-    #[arg(long, global = true, conflicts_with_all = ["verbose", "json"])]
+    #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Suppress normal progress output")]
     quiet: bool,
-    #[arg(long, global = true, conflicts_with_all = ["quiet", "json"])]
+    #[arg(long, global = true, conflicts_with_all = ["quiet", "json"], help = "Show fuller tool previews")]
     verbose: bool,
-    #[arg(long, global = true, conflicts_with_all = ["quiet", "verbose"])]
+    #[arg(long, global = true, conflicts_with_all = ["quiet", "verbose"], help = "Print machine-readable JSON where supported")]
     json: bool,
     #[command(subcommand)]
     command: Option<Command>,
@@ -27,20 +38,40 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run one task in the current workspace; prompt can be args or stdin.
     Run(RunArgs),
+    /// Start an interactive chat session with slash commands and history.
     Chat(ChatArgs),
+    /// Re-run a maintenance prompt until the configured deadline.
     Ralph(RalphArgs),
+    /// List, choose, and save model ids/routing shims.
     Model(ModelArgs),
+    /// Check setup, auth, paths, and safety-relevant defaults.
+    Doctor(DoctorArgs),
+    /// Multi-pass repository audit to ISSUES.md.
     Audit(AuditArgs),
 }
 
 #[derive(Debug, Args, Clone)]
 struct SharedAgentArgs {
-    #[arg(long, default_value = "default")]
+    #[arg(
+        long,
+        default_value = "default",
+        help = "Agent profile: default, plan, accept-edits, or auto-approve"
+    )]
     agent: String,
-    #[arg(long = "continue-session", default_value_t = false)]
+    #[arg(
+        long = "continue-session",
+        default_value_t = false,
+        help = "Resume the most recent saved session"
+    )]
     continue_session: bool,
-    #[arg(long, default_value = "")]
+    #[arg(
+        long,
+        default_value = "",
+        value_name = "NAME_OR_NUMBER",
+        help = "Resume a named or numbered saved session"
+    )]
     resume: String,
 }
 
@@ -48,14 +79,26 @@ struct SharedAgentArgs {
 struct RunArgs {
     #[command(flatten)]
     shared: SharedAgentArgs,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write the final answer to a workspace file"
+    )]
     out: Option<PathBuf>,
+    #[arg(
+        value_name = "PROMPT",
+        help = "Task prompt; omitted means read stdin or start chat in a TTY"
+    )]
     task: Vec<String>,
 }
 
 #[derive(Debug, Args, Clone)]
 struct ChatArgs {
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Approve file edits and shell commands for this session; high risk"
+    )]
     yolo: bool,
     #[command(flatten)]
     shared: SharedAgentArgs,
@@ -63,25 +106,55 @@ struct ChatArgs {
 
 #[derive(Debug, Args, Clone)]
 struct RalphArgs {
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value = "default", help = "Agent profile to use")]
     agent: String,
+    #[arg(value_name = "PROMPT", help = "Maintenance prompt to repeat")]
     task: Vec<String>,
 }
 
 #[derive(Debug, Args, Clone)]
 struct ModelArgs {
+    #[arg(
+        value_name = "MODEL",
+        help = "Model id or routing shim selection, e.g. copilot::gpt-4.1-mini"
+    )]
     model: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
+struct DoctorArgs {
+    #[arg(long, default_value = "default", help = "Agent profile to inspect")]
+    agent: String,
+}
+
+#[derive(Debug, Args, Clone)]
 struct AuditArgs {
+    #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
     focus: Vec<String>,
-    #[arg(long, default_value_t = 6000)]
+    #[arg(long, default_value_t = DEFAULT_AUDIT_CHUNK_LINES, help = "Approximate maximum source lines per audit chunk")]
     chunk_lines: usize,
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = DEFAULT_AUDIT_CHUNK_BYTES, help = "Approximate maximum source bytes per audit chunk")]
+    chunk_bytes: usize,
+    #[arg(long, default_value_t = DEFAULT_AUDIT_FILE_BYTES, help = "Maximum source bytes read per audit file")]
+    file_bytes: usize,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Include standards context where useful"
+    )]
     standards: bool,
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Focus on executable/runtime logic; omit docs/comments"
+    )]
     logic_only: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Plan chunks and print/write the manifest without model calls or ISSUES.md changes"
+    )]
+    dry_run: bool,
 }
 
 pub async fn run(argv: Vec<String>) -> Result<i32> {
@@ -101,6 +174,7 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
         Command::Chat(args) => chat_command(args).await,
         Command::Ralph(args) => ralph_command(args).await,
         Command::Model(args) => model_command(args).await,
+        Command::Doctor(args) => doctor_command(args).await,
         Command::Audit(args) => audit_command(args).await,
     }
 }
@@ -137,7 +211,9 @@ fn normalize_args(mut args: Vec<String>) -> Vec<String> {
     if args.first().map(String::as_str) == Some("--resume") {
         return std::iter::once("run".to_string()).chain(args).collect();
     }
-    let commands = ["run", "chat", "ralph", "model", "audit", "-h", "--help"];
+    let commands = [
+        "run", "chat", "ralph", "model", "doctor", "audit", "-h", "--help",
+    ];
     if args
         .first()
         .is_some_and(|arg| !arg.starts_with('-') && !commands.contains(&arg.as_str()))
@@ -422,15 +498,182 @@ fn resolve_model_choice(listing: &model::ModelListing, query: &str) -> Result<St
         .map(|value| value.unwrap_or(normalized))
 }
 
+async fn doctor_command(args: DoctorArgs) -> Result<i32> {
+    let root = config::oy_root()?;
+    let listing = model::inspect_models().await?;
+    let profile = config::agent_profile(&args.agent)?;
+    let policy = config::tool_policy(&profile.name);
+    let config_file = config::config_root();
+    let config_dir = config::config_dir_path();
+    let sessions_dir = config::sessions_dir().unwrap_or_else(|_| config_dir.join("sessions"));
+    let history_dir = config_dir.join("history");
+    let bash_ok = std::process::Command::new("bash")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+
+    if crate::ui::is_json() {
+        let payload = serde_json::json!({
+            "workspace": root,
+            "model": listing.current,
+            "shim": listing.current_shim,
+            "auth": listing.auth,
+            "agent": profile.name,
+            "policy": policy,
+            "interactive": config::can_prompt(),
+            "non_interactive": config::non_interactive(),
+            "config_file": config_file,
+            "config_dir": config_dir,
+            "sessions_dir": sessions_dir,
+            "history_dir": history_dir,
+            "bash": bash_ok,
+        });
+        crate::ui::line(serde_json::to_string_pretty(&payload)?);
+        return Ok(0);
+    }
+
+    crate::ui::section("Doctor");
+    crate::ui::kv("workspace", root.display());
+    crate::ui::kv("model", listing.current.as_deref().unwrap_or("<unset>"));
+    crate::ui::kv("shim", listing.current_shim.as_deref().unwrap_or("<none>"));
+    crate::ui::kv("agent", &profile.name);
+    crate::ui::kv("files-write", format_args!("{:?}", policy.files_write));
+    crate::ui::kv("shell", format_args!("{:?}", policy.shell));
+    crate::ui::kv("network", policy.network);
+    crate::ui::kv("risk", policy_risk_label(&policy));
+    crate::ui::kv("interactive", config::can_prompt());
+    crate::ui::kv("bash", if bash_ok { "ok" } else { "missing" });
+    crate::ui::line("");
+    crate::ui::section("Local state");
+    crate::ui::kv("config", config_file.display());
+    crate::ui::kv("sessions", sessions_dir.display());
+    crate::ui::kv("history", history_dir.display());
+    crate::ui::line(
+        "  Treat local state as sensitive: prompts, source snippets, tool output, and command output may be saved.",
+    );
+    crate::ui::line("");
+    crate::ui::section("Auth / shims");
+    if listing.auth.is_empty() {
+        crate::ui::warn("no provider auth detected");
+    } else {
+        for item in &listing.auth {
+            crate::ui::line(format_args!(
+                "  {}  {} ({})",
+                item.adapter,
+                item.env_var.as_deref().unwrap_or("-"),
+                item.source
+            ));
+            crate::ui::line(format_args!("    {}", item.detail));
+        }
+    }
+    if listing.current.is_none() {
+        crate::ui::line("");
+        crate::ui::warn("no model configured");
+        crate::ui::line("  Try: oy model copilot::gpt-4.1-mini");
+        crate::ui::line("  Or:  OPENAI_API_KEY=... oy model gpt-4.1-mini");
+        crate::ui::line("  Or:  oy model local-8080::qwen3.5");
+    }
+    crate::ui::line("");
+    crate::ui::section("Recommended next steps");
+    if listing.current.is_none() {
+        crate::ui::line(
+            "  1. Configure a model with `oy model copilot::gpt-4.1-mini` or a local shim.",
+        );
+    }
+    crate::ui::line("  • For untrusted repos: `oy chat --agent plan`");
+    crate::ui::line(format_args!(
+        "  • Read-only container: {}",
+        safe_container_command(&root, true)
+    ));
+    crate::ui::line("");
+    crate::ui::section("Safety");
+    crate::ui::line(
+        "  oy is not a sandbox. Use `oy chat --agent plan` or a disposable container/VM for untrusted repos.",
+    );
+    crate::ui::line(
+        "  Mount only needed credentials/env vars. Do not mount the host Docker socket into AI-assisted containers.",
+    );
+    crate::ui::line(
+        "  Ralph is intentionally unattended and auto-approves edits and shell commands; use it only in trusted workspaces.",
+    );
+    Ok(0)
+}
+
+fn policy_risk_label(policy: &crate::tools::ToolPolicy) -> &'static str {
+    use crate::tools::Approval;
+    if policy.read_only {
+        "read-only"
+    } else if policy.shell == Approval::Auto {
+        "high: auto shell"
+    } else if policy.files_write == Approval::Auto {
+        "medium: auto edits"
+    } else {
+        "normal: asks before edits/shell"
+    }
+}
+
+fn safe_container_command(root: &Path, read_only: bool) -> String {
+    let mode = if read_only { "ro" } else { "rw" };
+    format!(
+        "docker run --rm -it -v \"{}:/workspace:{mode}\" -w /workspace oy-image oy chat --agent plan",
+        root.display()
+    )
+}
+
 async fn audit_command(args: AuditArgs) -> Result<i32> {
     let root = config::oy_root()?;
-    let model = model::resolve_model(None)?;
     let focus = args.focus.join(" ");
     let mode = if args.logic_only {
         AuditMode::LogicOnly
     } else {
         AuditMode::Full
     };
+
+    let chunk_lines = args.chunk_lines.max(MIN_AUDIT_CHUNK_LINES);
+    let file_bytes = args.file_bytes.max(MIN_AUDIT_FILE_BYTES);
+    let chunk_bytes = args.chunk_bytes.max(MIN_AUDIT_CHUNK_BYTES).max(file_bytes);
+    let sloc = crate::tools::compact_workspace_snapshot(&root).unwrap_or_default();
+    let docs = if mode == AuditMode::LogicOnly {
+        String::new()
+    } else {
+        audit_docs(&root)?
+    };
+    let files = workspace_audit_files(&root, mode, file_bytes)?;
+    let chunks = audit_chunks(files, chunk_lines, chunk_bytes);
+    validate_audit_coverage(&chunks)?;
+    let manifest = audit_manifest(mode, &chunks, chunk_lines, chunk_bytes, file_bytes);
+    let manifest_rel = Path::new("ISSUES.audit-manifest.json");
+    let manifest_path = resolve_workspace_output_path(&root, manifest_rel)?;
+    write_workspace_file(
+        &root,
+        manifest_rel,
+        &serde_json::to_string_pretty(&manifest)?,
+    )?;
+
+    if args.dry_run {
+        if crate::ui::is_json() {
+            let payload = serde_json::json!({
+                "dry_run": true,
+                "workspace": root,
+                "focus": focus,
+                "manifest_path": manifest_path,
+                "manifest": manifest,
+            });
+            crate::ui::line(serde_json::to_string_pretty(&payload)?);
+        } else if !crate::ui::is_quiet() {
+            crate::ui::section("audit dry-run");
+            crate::ui::kv("workspace", root.display());
+            print_audit_plan(mode, &manifest, chunk_bytes, file_bytes, None);
+            crate::ui::success("wrote ISSUES.audit-manifest.json");
+            crate::ui::line("No model calls made and ISSUES.md left unchanged.");
+        }
+        return Ok(0);
+    }
+
+    let model = model::resolve_model(None)?;
     let session = Session::new(
         root.clone(),
         model,
@@ -443,38 +686,24 @@ async fn audit_command(args: AuditArgs) -> Result<i32> {
         &session,
         (!focus.is_empty()).then_some(focus.as_str()),
     );
-
-    let sloc = crate::tools::compact_workspace_snapshot(&root).unwrap_or_default();
-    let docs = if mode == AuditMode::LogicOnly {
-        String::new()
-    } else {
-        audit_docs(&root)?
-    };
-    let files = workspace_audit_files(&root, mode)?;
-    let chunks = audit_chunks(files, args.chunk_lines.max(500));
-    validate_audit_coverage(&chunks)?;
-    let manifest = audit_manifest(mode, &chunks);
-    let manifest_path = root.join("ISSUES.audit-manifest.json");
-    write_bytes_file(
-        &manifest_path,
-        serde_json::to_string_pretty(&manifest)?.as_bytes(),
-    )?;
-    let draft_path = root.join("ISSUES.draft.md");
+    let draft_path = resolve_workspace_output_path(&root, Path::new("ISSUES.draft.md"))?;
     if !crate::ui::is_quiet() {
-        crate::ui::kv("mode", mode.label());
-        crate::ui::kv("files", manifest.file_count);
-        crate::ui::kv("chunks", chunks.len());
-        crate::ui::kv("draft", "ISSUES.draft.md");
-        crate::ui::kv("manifest", "ISSUES.audit-manifest.json");
+        print_audit_plan(
+            mode,
+            &manifest,
+            chunk_bytes,
+            file_bytes,
+            Some("ISSUES.draft.md"),
+        );
     }
-    write_bytes_file(
-        &draft_path,
-        format!(
+    write_workspace_file(
+        &root,
+        Path::new("ISSUES.draft.md"),
+        &format!(
             "# Audit draft\n\n{sloc}\n\n{} files in {} chunks planned.\nManifest: ISSUES.audit-manifest.json\n\n",
             manifest.file_count,
             chunks.len()
-        )
-        .as_bytes(),
+        ),
     )?;
 
     for (idx, chunk) in chunks.iter().enumerate() {
@@ -512,9 +741,11 @@ async fn audit_command(args: AuditArgs) -> Result<i32> {
         audit_transparency_line(
             &session,
             mode,
-            args.chunk_lines.max(500),
+            chunk_lines,
+            chunk_bytes,
+            file_bytes,
             args.standards,
-            &manifest
+            &manifest,
         ),
         final_report.trim_start()
     );
@@ -522,6 +753,24 @@ async fn audit_command(args: AuditArgs) -> Result<i32> {
     cleanup_audit_temp_files(&[&draft_path, &manifest_path])?;
     crate::ui::success("wrote ISSUES.md");
     Ok(0)
+}
+
+fn print_audit_plan(
+    mode: AuditMode,
+    manifest: &AuditManifest,
+    chunk_bytes: usize,
+    file_bytes: usize,
+    draft: Option<&str>,
+) {
+    crate::ui::kv("mode", mode.label());
+    crate::ui::kv("files", manifest.file_count);
+    crate::ui::kv("chunks", manifest.chunk_count);
+    crate::ui::kv("chunk-bytes", chunk_bytes);
+    crate::ui::kv("file-bytes", file_bytes);
+    if let Some(draft) = draft {
+        crate::ui::kv("draft", draft);
+    }
+    crate::ui::kv("manifest", "ISSUES.audit-manifest.json");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -546,6 +795,8 @@ struct AuditFile {
     language: String,
     lines: usize,
     bytes: usize,
+    original_bytes: usize,
+    truncated: bool,
     text: String,
 }
 
@@ -564,6 +815,10 @@ struct AuditManifest {
     chunk_count: usize,
     total_lines: usize,
     total_bytes: usize,
+    truncated_files: usize,
+    max_chunk_lines: usize,
+    max_chunk_bytes: usize,
+    max_file_bytes: usize,
     chunks: Vec<AuditManifestChunk>,
 }
 
@@ -583,9 +838,11 @@ struct AuditManifestFile {
     language: String,
     lines: usize,
     bytes: usize,
+    original_bytes: usize,
+    truncated: bool,
 }
 
-fn audit_chunks(files: Vec<AuditFile>, max_lines: usize) -> Vec<AuditChunk> {
+fn audit_chunks(files: Vec<AuditFile>, max_lines: usize, max_bytes: usize) -> Vec<AuditChunk> {
     let mut chunks = Vec::new();
     let mut current = AuditChunk {
         label: String::new(),
@@ -594,7 +851,9 @@ fn audit_chunks(files: Vec<AuditFile>, max_lines: usize) -> Vec<AuditChunk> {
         bytes: 0,
     };
     for file in files {
-        if !current.files.is_empty() && current.lines + file.lines > max_lines {
+        let would_exceed_lines = current.lines + file.lines > max_lines;
+        let would_exceed_bytes = current.bytes + file.bytes > max_bytes;
+        if !current.files.is_empty() && (would_exceed_lines || would_exceed_bytes) {
             current.label = chunk_label(&current.files);
             chunks.push(current);
             current = AuditChunk {
@@ -625,7 +884,11 @@ fn chunk_label(files: &[AuditFile]) -> String {
     }
 }
 
-fn workspace_audit_files(root: &Path, mode: AuditMode) -> Result<Vec<AuditFile>> {
+fn workspace_audit_files(
+    root: &Path,
+    mode: AuditMode,
+    max_file_bytes: usize,
+) -> Result<Vec<AuditFile>> {
     let mut files = Vec::new();
     let tokei_config = TokeiConfig::default();
     for entry in WalkBuilder::new(root)
@@ -653,7 +916,10 @@ fn workspace_audit_files(root: &Path, mode: AuditMode) -> Result<Vec<AuditFile>>
         if mode == AuditMode::LogicOnly && !logic_language(language) {
             continue;
         }
-        let raw = std::fs::read(path).with_context(|| format!("failed reading {rel}"))?;
+        let meta = std::fs::metadata(path).with_context(|| format!("failed stating {rel}"))?;
+        let original_bytes = meta.len().try_into().unwrap_or(usize::MAX);
+        let (raw, truncated) = read_audit_file_prefix(path, max_file_bytes)
+            .with_context(|| format!("failed reading {rel}"))?;
         if raw.contains(&0) {
             continue;
         }
@@ -669,11 +935,32 @@ fn workspace_audit_files(root: &Path, mode: AuditMode) -> Result<Vec<AuditFile>>
             language: language.name().to_string(),
             lines: text.lines().count().max(1),
             bytes: text.len(),
+            original_bytes,
+            truncated,
             text,
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+fn read_audit_file_prefix(path: &Path, max_bytes: usize) -> Result<(Vec<u8>, bool)> {
+    let mut file = std::fs::File::open(path)?;
+    let mut raw = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut limited = (&mut file).take((max_bytes + 1) as u64);
+    limited.read_to_end(&mut raw)?;
+    let truncated = raw.len() > max_bytes;
+    if truncated {
+        raw.truncate(max_bytes);
+        while std::str::from_utf8(&raw).is_err() && raw.pop().is_some() {}
+        raw.extend_from_slice(
+            b"
+
+[oy audit: file truncated at byte budget]
+",
+        );
+    }
+    Ok((raw, truncated))
 }
 
 fn logic_language(language: LanguageType) -> bool {
@@ -729,13 +1016,27 @@ fn validate_audit_coverage(chunks: &[AuditChunk]) -> Result<()> {
     Ok(())
 }
 
-fn audit_manifest(mode: AuditMode, chunks: &[AuditChunk]) -> AuditManifest {
+fn audit_manifest(
+    mode: AuditMode,
+    chunks: &[AuditChunk],
+    max_chunk_lines: usize,
+    max_chunk_bytes: usize,
+    max_file_bytes: usize,
+) -> AuditManifest {
     AuditManifest {
         mode,
         file_count: chunks.iter().map(|chunk| chunk.files.len()).sum(),
         chunk_count: chunks.len(),
         total_lines: chunks.iter().map(|chunk| chunk.lines).sum(),
         total_bytes: chunks.iter().map(|chunk| chunk.bytes).sum(),
+        truncated_files: chunks
+            .iter()
+            .flat_map(|chunk| &chunk.files)
+            .filter(|file| file.truncated)
+            .count(),
+        max_chunk_lines,
+        max_chunk_bytes,
+        max_file_bytes,
         chunks: chunks
             .iter()
             .enumerate()
@@ -753,6 +1054,8 @@ fn audit_manifest(mode: AuditMode, chunks: &[AuditChunk]) -> AuditManifest {
                         language: file.language.clone(),
                         lines: file.lines,
                         bytes: file.bytes,
+                        original_bytes: file.original_bytes,
+                        truncated: file.truncated,
                     })
                     .collect(),
             })
@@ -811,17 +1114,25 @@ fn format_audit_docs(docs: &str) -> String {
 
 fn format_audit_chunk_content(chunk: &AuditChunk, mode: AuditMode) -> String {
     let mut out = format!(
-        "Pinned source content ({} files, {} lines, mode={}):",
+        "Pinned source content ({} files, {} lines, {} bytes, mode={}):",
         chunk.files.len(),
         chunk.lines,
+        chunk.bytes,
         mode.label()
     );
     for file in &chunk.files {
+        let truncated = if file.truncated {
+            format!(", truncated from {} bytes", file.original_bytes)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "\n\n## File: {} ({}, {} lines)\n```{}\n{}\n```",
+            "\n\n## File: {} ({}, {} lines, {} bytes{})\n```{}\n{}\n```",
             file.path,
             file.language,
             file.lines,
+            file.bytes,
+            truncated,
             language_fence(&file.path),
             file.text.trim_end()
         ));
@@ -978,19 +1289,24 @@ fn audit_transparency_line(
     session: &Session,
     mode: AuditMode,
     chunk_lines: usize,
+    chunk_bytes: usize,
+    file_bytes: usize,
     standards: bool,
     manifest: &AuditManifest,
 ) -> String {
     format!(
-        "<!-- Generated by oy {} audit mode={} model={} agent={} chunk_lines={} standards={} files={} chunks={} -->",
+        "<!-- Generated by oy {} audit mode={} model={} agent={} chunk_lines={} chunk_bytes={} file_bytes={} standards={} files={} chunks={} truncated_files={} -->",
         env!("CARGO_PKG_VERSION"),
         mode.label(),
         session.model,
         session.agent,
         chunk_lines,
+        chunk_bytes,
+        file_bytes,
         standards,
         manifest.file_count,
-        manifest.chunk_count
+        manifest.chunk_count,
+        manifest.truncated_files
     )
 }
 
@@ -1008,6 +1324,7 @@ fn cleanup_audit_temp_files(paths: &[&Path]) -> Result<()> {
 }
 
 fn append_audit_section(path: &Path, heading: &str, body: &str) -> Result<()> {
+    reject_symlink_destination(path)?;
     use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -1057,20 +1374,56 @@ fn print_session_intro(mode: &str, session: &Session, prompt: Option<&str>) {
     crate::ui::kv("workspace", session.root.display());
     crate::ui::kv("model", &session.model);
     crate::ui::kv("agent", &session.agent);
+    crate::ui::kv("risk", policy_risk_label(&session.policy));
     if let Some(prompt) = prompt {
         crate::ui::kv("prompt", crate::ui::compact_preview(prompt, 100));
     }
 }
 
 fn write_workspace_file(root: &Path, requested: &Path, body: &str) -> Result<()> {
-    let path = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        root.join(requested)
-    };
+    let path = resolve_workspace_output_path(root, requested)?;
     let mut out = body.trim_end().to_string();
     out.push('\n');
     write_bytes_file(&path, out.as_bytes())
+}
+
+fn resolve_workspace_output_path(root: &Path, requested: &Path) -> Result<PathBuf> {
+    if requested.is_absolute()
+        || requested
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!(
+            "output path must stay inside workspace: {}",
+            requested.display()
+        );
+    }
+    let root = root
+        .canonicalize()
+        .context("failed to resolve workspace root")?;
+    let path = root.join(requested);
+    let parent = path.parent().unwrap_or(&root);
+    if parent.exists() {
+        let resolved_parent = parent
+            .canonicalize()
+            .with_context(|| format!("failed resolving {}", parent.display()))?;
+        if !resolved_parent.starts_with(&root) {
+            bail!("output path escapes workspace: {}", requested.display());
+        }
+    }
+    reject_symlink_destination(&path)?;
+    Ok(path)
+}
+
+fn reject_symlink_destination(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("refusing to write symlink: {}", path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed checking {}", path.display())),
+    }
 }
 
 fn write_bytes_file(path: &Path, bytes: &[u8]) -> Result<()> {

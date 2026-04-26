@@ -281,6 +281,7 @@ fn status_command(session: &Session) -> Result<bool> {
     );
     crate::ui::kv("shell", format_args!("{:?}", session.policy.shell));
     crate::ui::kv("network", session.policy.network);
+    crate::ui::kv("risk", policy_risk_label(session));
     crate::ui::kv("messages", session.transcript.messages.len());
     crate::ui::kv("todos", session.todos.len());
     let status = session.context_status();
@@ -296,10 +297,24 @@ fn status_command(session: &Session) -> Result<bool> {
     Ok(true)
 }
 
+fn policy_risk_label(session: &Session) -> &'static str {
+    use crate::tools::Approval;
+    if session.policy.read_only {
+        "read-only"
+    } else if session.policy.shell == Approval::Auto {
+        "high: auto shell"
+    } else if session.policy.files_write == Approval::Auto {
+        "medium: auto edits"
+    } else {
+        "normal: asks before edits/shell"
+    }
+}
+
 fn yolo_command(session: &mut Session) -> Result<bool> {
     session.policy.files_write = crate::tools::Approval::Auto;
     session.policy.shell = crate::tools::Approval::Auto;
-    crate::ui::success("yolo enabled");
+    crate::ui::success("yolo enabled: auto-approving file edits and shell commands");
+    crate::ui::warn("oy is not a sandbox; use only in trusted workspaces");
     Ok(true)
 }
 
