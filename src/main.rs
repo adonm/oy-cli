@@ -1,17 +1,11 @@
-mod agent;
-mod chat;
-mod cli;
-mod config;
-mod model;
-mod tools;
-mod ui;
+#![recursion_limit = "256"]
 
 #[tokio::main]
 async fn main() {
-    let code = match cli::run(std::env::args().skip(1).collect()).await {
+    let code = match oy::run(std::env::args().skip(1).collect()).await {
         Ok(code) => code,
         Err(err) => {
-            crate::ui::err_line(format_args!("error: {err:#}"));
+            oy::err_line(format_args!("error: {err:#}"));
             1
         }
     };

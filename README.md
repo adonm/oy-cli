@@ -5,12 +5,11 @@ Small local AI coding CLI for your shell. It can inspect files, search content, 
 ## Quick start
 
 ```bash
+oy doctor                         # check setup and see the next step
+oy model                          # list detected/recommended model choices
 oy "inspect this repo and summarize the main risks"
-oy audit "focus on security and complexity"
-oy chat
-oy chat --agent plan
-oy chat --continue-session
-oy run --resume 20260325 "finish the refactor"
+oy chat                           # interactive mode
+oy chat --mode plan               # read-only mode for untrusted repos
 ```
 
 When developing from source, replace `oy` with `cargo run --`:
@@ -42,34 +41,34 @@ oy --help
 | `oy chat` | Interactive session with slash commands and history |
 | `oy model [filter]` | List, choose, and save a model id/routing shim |
 | `oy doctor` | Check model/auth/local-state setup and safety-relevant defaults |
-| `oy audit [focus]` | Multi-pass LLM audit to `ISSUES.md` using docs, SLOC, and pinned workspace chunks |
-| `oy ralph "prompt"` | Re-run a maintenance prompt until the deadline |
+| `oy audit [focus]` | Read-only repository review with concise findings |
 | `oy --help` | Show CLI help |
 
 ## Common tasks
 
 ```bash
 oy "inspect the main module and suggest improvements"
+oy audit "security, complexity, and performance"
+oy run --out docs/plan.md "write a migration plan"
+oy chat --continue-session
+oy run --resume 20260325 "finish the refactor"
 OY_ROOT=./my-project oy "fix the failing tests"
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy run
-oy run --out docs/plan.md "write a migration plan"
-oy audit "security, complexity, and performance"
-oy chat --agent accept-edits
-oy model copilot::gpt-4.1-mini
-oy model local-8080::qwen3.5
 ```
 
 ## Audit
 
-`oy audit [focus]` plans chunks from workspace text files, includes docs and SLOC context, asks the model to inspect each pinned chunk, appends draft findings to `ISSUES.md`, then runs a final reduction pass. The final report keeps up to 20 detailed high-priority findings and summarizes the rest. Use `--chunk-lines` to control chunk size.
+`oy audit [focus]` runs a read-only review using the same read-only workspace tools as `oy chat --mode plan`. It asks for concise, evidence-first findings with severity, file/symbol evidence, impact, and a simple fix.
 
 ```bash
 oy audit
-oy audit auth --chunk-lines 4000
-oy audit --standards "auth and storage"
+oy audit "security and complexity"
+oy audit "auth paths" --out ISSUES.md
 ```
 
 ## Model setup
+
+Start with `oy doctor` and `oy model`; both show recommendations based on detected credentials. You can also save an exact model id directly, for example `oy model copilot::gpt-4.1-mini` or `oy model local-8080::qwen3.5`.
 
 OpenAI-compatible endpoint:
 
@@ -84,6 +83,33 @@ GitHub Copilot:
 ```bash
 gh auth login
 oy model copilot::gpt-4.1-mini
+```
+
+AWS Bedrock Converse:
+
+```bash
+aws configure sso        # one-time setup, or use normal AWS env credentials
+export AWS_PROFILE=my-sso
+export AWS_REGION=ap-southeast-2
+oy model bedrock::global.amazon.nova-2-lite-v1:0
+```
+
+For SSO profiles, `oy` uses the AWS SDK default credential chain and runs `aws sso login [--profile ...]` when SDK credential loading reports expired/missing SSO credentials. Non-interactive runs fail closed and tell you to run `aws sso login` yourself.
+
+Bedrock Mantle (OpenAI-compatible API):
+
+```bash
+export AWS_BEARER_TOKEN_BEDROCK=...  # or BEDROCK_MANTLE_API_KEY
+export AWS_REGION=us-east-1          # base URL defaults from AWS/BEDROCK region
+oy model bedrock-mantle::moonshotai.kimi-k2.5
+```
+
+OpenCode Zen / Go (OpenAI-compatible APIs):
+
+```bash
+opencode auth login                  # or export OPENCODE_API_KEY=...
+oy model opencode::gpt-5.1-codex-max
+oy model opencode-go::kimi-k2.5
 ```
 
 Local OpenAI-compatible server:
@@ -101,6 +127,7 @@ oy chat
 - `/help` lists commands
 - `/status` shows model, workspace, approvals, context, and todos
 - short aliases include `/q`, `/h`, `/m`, `/t`, `/u`
+- for 3+ step work, oy keeps an in-memory todo; `TODO.md` is written only when explicitly requested and allowed by the current mode
 
 `/ask <question>` is research-only: no `bash`, no file changes, but public `webfetch` is still allowed.
 
@@ -111,50 +138,70 @@ oy chat
 For untrusted repositories, start read-only and contained:
 
 ```bash
-oy chat --agent plan
-docker run --rm -it -v "$PWD:/workspace:ro" -w /workspace oy-image oy chat --agent plan
+oy chat --mode plan
+docker run --rm -it -v "$PWD:/workspace:ro" -w /workspace oy-image oy chat --mode plan
 docker run --rm -it -v "$PWD:/workspace:rw" -w /workspace -e OPENAI_API_KEY oy-image oy chat
 ```
 
-Avoid mounting the host Docker socket into AI-assisted containers; it is usually host-root-equivalent. Avoid `auto-approve` and `OY_YOLO` unless the workspace, model, and requested task are trusted.
+Avoid mounting the host Docker socket into AI-assisted containers; it is usually host-root-equivalent. Avoid `auto-approve` unless the workspace, model, and requested task are trusted.
 
 | Mode | File edits | Bash | Notes |
 |---|---:|---:|---|
-| `default` | asks | asks | Normal interactive mode |
-| `plan` | unavailable | unavailable | Read-only exploration and planning |
-| `accept-edits` | auto | asks | Useful for trusted mechanical edits |
-| `auto-approve` | auto | auto | Highest-risk unattended mode |
+| `default` (`ask`) | asks | asks | Normal balanced mode |
+| `plan` (`read`) | unavailable | unavailable | Read-only exploration and planning |
+| `accept-edits` (`edit`, `write`) | auto | asks | Useful for trusted mechanical edits |
+| `auto-approve` (`auto`) | auto | auto | Highest-risk unattended mode; file tools remain workspace-bound |
 | `/ask` | unavailable | unavailable | No-write research; public `webfetch` allowed |
-| `OY_YOLO=1` | auto | auto | Legacy environment override for approvals |
 
-Non-interactive mode cannot pause for approval or questions. Use explicit agents/env only in workspaces and automation contexts you trust.
+Non-interactive mode cannot pause for approval or questions. Use explicit modes/env only in workspaces and automation contexts you trust.
 
-Protections include workspace-bound file tools, public-only `webfetch`, read-only agent profiles, explicit approval modes, and clamped terminal previews.
+Protections include workspace-bound file tools (even in auto modes), public-only `webfetch`, read-only modes, explicit approval modes, and clamped terminal previews.
+
+## Tool round budget
+
+A tool round is one model response that requests one or more tool calls. Long coding runs commonly use hundreds of rounds because the model should inspect, edit, and verify in small steps.
+
+Default: `512` tool rounds per prompt. If that is too low for a trusted long-running task, set:
+
+```bash
+OY_MAX_TOOL_ROUNDS=2048 oy "finish the migration"
+OY_MAX_TOOL_ROUNDS=unlimited oy "large trusted cleanup"
+```
+
+`OY_MAX_TOOL_ROUNDS=0`, `unlimited`, `none`, and `off` all mean unlimited. Use unlimited only when the workspace, model, and command are trusted; approval policy, repeated no-op detection, deterministic context compaction, provider limits, and normal process interruption still apply, but an unlimited run can consume substantial time/tokens.
 
 ## Preview and truncation behavior
 
-Tool output shown in the terminal is a preview, not always the full tool result.
+Tool output shown in the terminal is a preview, not always the full tool result. Tool progress is grouped by model round and kept dense:
 
-- `read` returns line slices; use `offset` and `limit` to fetch more.
+```text
+↻ tools r2 ×3
+  → read · path=src/main.rs
+  ✓ read 12ms · path=src/main.rs · lines 1-40/80
+```
+
+Text previews use bat-like defaults: a small title bar, line numbers, a gutter, and color when the terminal supports it. `OY_COLOR=always` forces ANSI color, while `OY_COLOR=never`, `OY_COLOR=off`, or `NO_COLOR` disables it.
+
+- `read` returns line slices rendered with file name and source line numbers; use `offset` and `limit` to fetch more.
 - `search`, `list`, and `replace` previews show bounded item lists and say when more exist.
-- `bash` and `webfetch` summarize long output before it goes back to the model and mark truncated stdout/stderr/body text.
+- `bash` and `webfetch` summarize long output before it goes back to the model and render stdout/stderr/body snippets as numbered blocks.
 - Preview lines are clamped so terminal output remains scannable.
 
 ## Model ids and routing shims
 
 `oy model`:
 
-- shows the current configured model id and active routing shim
+- shows the current configured model id, active routing shim, and recommended next choices
 - introspects relevant auth env vars and auto-populates `GITHUB_TOKEN` from `gh auth token` when missing
 - sends direct `GET /models` requests to configured OpenAI-compatible endpoints
 - includes built-in model hints as selectable choices even when endpoint introspection is unavailable
 - in a TTY, can prompt for choosing and saving a model
 
-Use exact `genai` model ids in config. Endpoint-qualified choices such as `copilot::gpt-4.1-mini` or `local-8080::qwen3.5` infer routing.
+Use exact model ids in config. Endpoint-qualified choices such as `copilot::gpt-4.1-mini`, `bedrock::global.amazon.nova-2-lite-v1:0`, `bedrock-mantle::moonshotai.kimi-k2.5`, `opencode::gpt-5.1-codex-max`, `opencode-go::kimi-k2.5`, or `local-8080::qwen3.5` infer routing.
 
 ## Sessions and local files
 
-Saved chat sessions can be resumed:
+Saved chat sessions can be resumed in the same workspace they were saved from:
 
 - `oy chat --continue-session`
 - `oy run --continue-session "next task"`
@@ -176,27 +223,30 @@ Override the config file path with `OY_CONFIG` and workspace with `OY_ROOT`.
 | Variable | Purpose |
 |---|---|
 | `OY_MODEL` | Override model for this session |
-| `OY_SHIM` | Override routing shim (`openai`, `copilot`, `local-<port>`, `codex`, `opencode`, `bedrock-mantle`) |
+| `OY_SHIM` | Override routing shim (`openai`, `copilot`, `bedrock-mantle`, `opencode`, `opencode-go`, `local-<port>`) |
 | `OY_NON_INTERACTIVE` | Disable interactive approval/question pauses |
-| `OY_RALPH_LIMIT` | Ralph deadline window, such as `3h`, `90m`, or `3600s` |
 | `OY_ROOT` | Run against a different workspace |
 | `OY_SYSTEM_FILE` | Append extra system instructions |
 | `OY_CONFIG` | Override config path |
-| `OY_YOLO` | Start with all tool approvals enabled |
-| `OY_COLOR` | `auto`, `always`, or `never`; `NO_COLOR` disables color |
+| `OY_COLOR` | `auto`, `always`, or `never`; boolean aliases accepted; `NO_COLOR` disables color |
 | `OY_MAX_BASH_CMD_BYTES` | Override max accepted bash command size |
-| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible auth/endpoint |
+| `OY_MAX_TOOL_ROUNDS` | Tool-round budget per prompt; default `512`; set a number, `0`, or `unlimited` |
+| `OY_CONTEXT_LIMIT` | Approximate context-token limit; deterministic compaction starts near 80% |
+| `OY_COMPACT_RECENT_MESSAGES` | Recent transcript messages to keep during deterministic compaction |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible auth/endpoint; also fallback for Bedrock Mantle |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION` | AWS Bedrock auth/region; SSO profiles use AWS CLI export/login |
+| `BEDROCK_REGION`, `BEDROCK_RUNTIME_ENDPOINT` | Override Bedrock region/runtime endpoint |
+| `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_MANTLE_API_KEY`, `BEDROCK_MANTLE_BASE_URL` | Bedrock Mantle OpenAI-compatible auth/endpoint |
+| `OPENCODE_API_KEY`, `OPENCODE_BASE_URL`, `OPENCODE_GO_BASE_URL` | OpenCode Zen/Go auth/endpoint; falls back to `~/.local/share/opencode/auth.json` |
 | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | Copilot shim auth |
 | `LOCAL_API_KEY` | Local `local-<port>` shim key; falls back to `OPENAI_API_KEY` then `oy-local` |
-| `OPENCODE_API_KEY` | OpenCode shim key; falls back to `~/.local/share/opencode/auth.json` |
-| `AWS_REGION`, `AWS_DEFAULT_REGION` | Bedrock-Mantle region detection |
 
 ## Troubleshooting
 
 - No model configured: run `oy model copilot::gpt-4.1-mini`, set `OPENAI_API_KEY` and run `oy model gpt-4.1-mini`, or use `oy model local-8080::qwen3.5`.
-- Tool denied: switch agent mode only if trusted, for example `oy chat --agent accept-edits` for automatic file edits.
+- Tool denied: switch mode only if trusted, for example `oy chat --mode accept-edits` for automatic file edits.
 - Model call failed: check `oy model`, provider credentials, routing shim, and local server availability.
-- Untrusted repo: use `oy chat --agent plan` first, preferably inside a container or VM.
+- Untrusted repo: use `oy chat --mode plan` first, preferably inside a container or VM.
 
 ## Development
 

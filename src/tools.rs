@@ -8,21 +8,17 @@ use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
 use regex::Regex;
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{ErrorKind, Write as _};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokei::{
-    Config as TokeiConfig, Language as TokeiLanguage, Languages as TokeiLanguages,
-    Sort as TokeiSort,
-};
+use tokei::{Config as TokeiConfig, Languages as TokeiLanguages, Sort as TokeiSort};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::lookup_host;
 use tokio::process::Command;
@@ -38,10 +34,11 @@ pub const DEFAULT_LIMIT: usize = 910;
 pub const DEFAULT_WEBFETCH_TIMEOUT_SECONDS: u64 = 60;
 const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
 const MAX_WEBFETCH_TIMEOUT_SECONDS: u64 = 120;
+const MAX_BASH_OUTPUT_BYTES: usize = 200_000;
 const MAX_WEBFETCH_BYTES: usize = 2 * 1024 * 1024;
 const TODO_FILE: &str = "TODO.md";
 const PREVIEW_ITEMS: usize = 20;
-const NORMAL_PREVIEW_LINES: usize = 5;
+const NORMAL_PREVIEW_LINES: usize = 8;
 const VERBOSE_PREVIEW_LINES: usize = 30;
 const PREVIEW_LINE_CHARS: usize = 180;
 
@@ -95,21 +92,14 @@ impl ToolPolicy {
     }
 
     pub fn approval(self, tool: &str) -> Approval {
-        if self.read_only && matches!(tool, "replace" | "bash" | "todo") {
+        if self.read_only && matches!(tool, "replace" | "bash" | "todo_persist") {
             return Approval::Deny;
         }
         match tool {
-            "replace" | "todo" => self.files_write,
+            "todo" => Approval::Auto,
+            "replace" | "todo_persist" => self.files_write,
             "bash" => self.shell,
             _ => Approval::Deny,
-        }
-    }
-
-    fn path_approval(self) -> Approval {
-        if self.files_write == Approval::Auto && self.shell == Approval::Auto {
-            Approval::Auto
-        } else {
-            Approval::Ask
         }
     }
 }
@@ -139,51 +129,124 @@ impl ExcludeArg {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SearchMode {
+    Auto,
+    Regex,
+    Literal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReplaceMode {
+    Regex,
+    Literal,
+}
+
+fn default_search_mode() -> SearchMode {
+    SearchMode::Auto
+}
+
+fn default_replace_mode() -> ReplaceMode {
+    ReplaceMode::Regex
+}
+
+fn deserialize_usize<'de, D>(deserializer: D) -> std::result::Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Integer(usize),
+        String(String),
+    }
+    match Number::deserialize(deserializer)? {
+        Number::Integer(value) => Ok(value),
+        Number::String(value) => value.trim().parse::<usize>().map_err(|_| {
+            serde::de::Error::custom(format!("expected unsigned integer, got {value:?}"))
+        }),
+    }
+}
+
+fn deserialize_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Integer(u64),
+        String(String),
+    }
+    match Number::deserialize(deserializer)? {
+        Number::Integer(value) => Ok(value),
+        Number::String(value) => value.trim().parse::<u64>().map_err(|_| {
+            serde::de::Error::custom(format!("expected unsigned integer, got {value:?}"))
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ListArgs {
-    #[serde(default = "default_glob")]
+    #[serde(default = "default_glob", alias = "root")]
     path: String,
     #[serde(default)]
     exclude: Option<ExcludeArg>,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_limit", deserialize_with = "deserialize_usize")]
     limit: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct ReadArgs {
+    #[serde(alias = "file")]
     path: String,
-    #[serde(default = "default_offset")]
+    #[serde(
+        default = "default_offset",
+        alias = "start",
+        deserialize_with = "deserialize_usize"
+    )]
     offset: usize,
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        alias = "lines",
+        deserialize_with = "deserialize_usize"
+    )]
     limit: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct SearchArgs {
+    #[serde(alias = "query", alias = "regex")]
     pattern: String,
-    #[serde(default = "default_dot")]
+    #[serde(default = "default_dot", alias = "root")]
     path: String,
     #[serde(default)]
     exclude: Option<ExcludeArg>,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_limit", deserialize_with = "deserialize_usize")]
     limit: usize,
+    #[serde(default = "default_search_mode")]
+    mode: SearchMode,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct ReplaceArgs {
     pattern: String,
     replacement: String,
-    #[serde(default = "default_dot")]
+    #[serde(default = "default_dot", alias = "root")]
     path: String,
     #[serde(default)]
     exclude: Option<ExcludeArg>,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_limit", deserialize_with = "deserialize_usize")]
     limit: usize,
+    #[serde(default = "default_replace_mode")]
+    mode: ReplaceMode,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct SlocArgs {
-    #[serde(default = "default_dot")]
+    #[serde(default = "default_dot", alias = "root")]
     path: String,
     #[serde(default)]
     exclude: Option<ExcludeArg>,
@@ -191,8 +254,9 @@ struct SlocArgs {
 
 #[derive(Debug, Clone, Deserialize)]
 struct BashArgs {
+    #[serde(alias = "cmd")]
     command: String,
-    #[serde(default = "default_bash_timeout")]
+    #[serde(default = "default_bash_timeout", deserialize_with = "deserialize_u64")]
     timeout_seconds: u64,
 }
 
@@ -205,7 +269,7 @@ struct WebfetchArgs {
     headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
     follow_redirects: bool,
-    #[serde(default = "default_web_timeout")]
+    #[serde(default = "default_web_timeout", deserialize_with = "deserialize_u64")]
     timeout_seconds: u64,
 }
 
@@ -381,7 +445,7 @@ fn string_enum(values: &[&str], default: &str) -> Value {
 }
 
 fn integer_default(default: impl Serialize) -> Value {
-    json!({"type": "integer", "default": default})
+    json!({"type": ["integer", "string"], "default": default})
 }
 
 fn bool_default(default: bool) -> Value {
@@ -454,6 +518,7 @@ fn schema_search() -> Value {
             ("path", string_default(".")),
             ("exclude", exclude_schema()),
             ("limit", integer_default(DEFAULT_LIMIT)),
+            ("mode", string_enum(&["auto", "regex", "literal"], "auto")),
         ],
         &["pattern"],
     )
@@ -461,7 +526,16 @@ fn schema_search() -> Value {
 
 fn schema_sloc() -> Value {
     object(
-        [("path", string_default(".")), ("exclude", exclude_schema())],
+        [
+            (
+                "path",
+                describe(
+                    string_default("."),
+                    "Workspace path or whitespace-separated paths to count.",
+                ),
+            ),
+            ("exclude", exclude_schema()),
+        ],
         &[],
     )
 }
@@ -524,6 +598,7 @@ fn schema_replace() -> Value {
             ("path", string_default(".")),
             ("exclude", exclude_schema()),
             ("limit", integer_default(DEFAULT_LIMIT)),
+            ("mode", string_enum(&["regex", "literal"], "regex")),
         ],
         &["pattern", "replacement"],
     )
@@ -547,19 +622,31 @@ pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
         .collect()
 }
 
+fn parse_tool_args<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T> {
+    serde_json::from_value(args).with_context(|| {
+        "invalid tool arguments; use the documented argument names/types; numeric fields may be numbers or numeric strings"
+    })
+}
+
 pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
     note_tool(name, &args);
     let started = std::time::Instant::now();
     let result = match name {
-        "list" => tool_list(ctx, serde_json::from_value(args)?),
-        "read" => tool_read(ctx, serde_json::from_value(args)?),
-        "search" => tool_search(ctx, serde_json::from_value(args)?),
-        "replace" => tool_replace(ctx, serde_json::from_value(args)?),
-        "sloc" => tool_sloc(ctx, serde_json::from_value(args)?),
-        "bash" => tool_bash(ctx, serde_json::from_value(args)?).await,
-        "webfetch" => tool_webfetch(ctx, serde_json::from_value(args)?).await,
-        "ask" => tool_ask(ctx, serde_json::from_value(args)?),
-        "todo" => tool_todo(ctx, serde_json::from_value(args)?),
+        "list" => parse_tool_args(args).and_then(|args| tool_list(ctx, args)),
+        "read" => parse_tool_args(args).and_then(|args| tool_read(ctx, args)),
+        "search" => parse_tool_args(args).and_then(|args| tool_search(ctx, args)),
+        "replace" => parse_tool_args(args).and_then(|args| tool_replace(ctx, args)),
+        "sloc" => parse_tool_args(args).and_then(|args| tool_sloc(ctx, args)),
+        "bash" => match parse_tool_args(args) {
+            Ok(args) => tool_bash(ctx, args).await,
+            Err(err) => Err(err),
+        },
+        "webfetch" => match parse_tool_args(args) {
+            Ok(args) => tool_webfetch(ctx, args).await,
+            Err(err) => Err(err),
+        },
+        "ask" => parse_tool_args(args).and_then(|args| tool_ask(ctx, args)),
+        "todo" => parse_tool_args(args).and_then(|args| tool_todo(ctx, args)),
         other => bail!("unknown tool: {other}"),
     };
     if let Ok(value) = &result {
@@ -596,11 +683,22 @@ fn summary_read(args: &Value) -> String {
 }
 
 fn summary_search(args: &Value) -> String {
-    compact_kvs(args, &[("pattern", 70), ("path", 50), ("exclude", 35)])
+    compact_kvs(
+        args,
+        &[("pattern", 70), ("path", 50), ("mode", 12), ("exclude", 35)],
+    )
 }
 
 fn summary_replace(args: &Value) -> String {
-    compact_kvs(args, &[("path", 45), ("pattern", 45), ("replacement", 45)])
+    compact_kvs(
+        args,
+        &[
+            ("path", 45),
+            ("mode", 12),
+            ("pattern", 45),
+            ("replacement", 45),
+        ],
+    )
 }
 
 fn summary_sloc(args: &Value) -> String {
@@ -730,26 +828,23 @@ fn count_files_in_matches(matches: &[Value]) -> usize {
         .len()
 }
 
-fn append_preview_lines(out: &mut String, text: &str, indent: &str) {
+fn append_preview_lines(out: &mut String, text: &str, title: &str) {
     let max_lines = if crate::ui::is_verbose() {
         VERBOSE_PREVIEW_LINES
     } else {
         NORMAL_PREVIEW_LINES
     };
     let line_count = text.lines().count();
-    for line in text.lines().take(max_lines) {
-        let _ = write!(
-            out,
-            "\n{indent}{}",
-            crate::ui::truncate_chars(line, PREVIEW_LINE_CHARS)
-        );
+    let preview = text.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    if preview.is_empty() {
+        return;
+    }
+    let block = crate::ui::text_block(title, &preview);
+    for line in block.lines() {
+        let _ = write!(out, "\n{line}");
     }
     if line_count > max_lines {
-        let _ = write!(
-            out,
-            "\n{indent}… {} more preview lines",
-            line_count - max_lines
-        );
+        let _ = write!(out, "\n  … {} more preview lines", line_count - max_lines);
     }
 }
 
@@ -882,7 +977,13 @@ fn format_search_hit(item: &Value) -> String {
     let line = value_usize(item, "line_number");
     let col = value_usize(item, "column");
     let text = crate::ui::truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
-    format!("{path}:{line}:{col}: {text}")
+    format!(
+        "{}:{}:{} {}",
+        crate::ui::path(path),
+        crate::ui::faint(line),
+        crate::ui::faint(col),
+        text
+    )
 }
 fn preview_replace(value: &Value) -> String {
     let changed = value
@@ -941,12 +1042,18 @@ fn preview_bash(value: &Value) -> String {
         .get("returncode")
         .and_then(Value::as_i64)
         .unwrap_or(-1);
-    let stdout = value_str(value, "stdout");
-    let stderr = value_str(value, "stderr");
+    let stdout = value
+        .get("stdout_preview")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| value_str(value, "stdout"));
+    let stderr = value
+        .get("stderr_preview")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| value_str(value, "stderr"));
     let icon = if code == 0 {
-        crate::ui::paint("32", "✓")
+        crate::ui::green("✓")
     } else {
-        crate::ui::paint("31", "✗")
+        crate::ui::red("✗")
     };
     let mut summary = format!(
         "{icon} exit {code} · stdout {} line{} · stderr {} line{} · stdout-truncated={} · stderr-truncated={}",
@@ -957,13 +1064,13 @@ fn preview_bash(value: &Value) -> String {
         bool_marker(value_bool(value, "stdout_truncated")),
         bool_marker(value_bool(value, "stderr_truncated"))
     );
-    if code != 0 {
-        if let Some(first_stderr) = stderr.lines().find(|line| !line.trim().is_empty()) {
-            summary.push_str(&format!(
-                " · {}",
-                crate::ui::truncate_chars(first_stderr.trim(), 80)
-            ));
-        }
+    if code != 0
+        && let Some(first_stderr) = stderr.lines().find(|line| !line.trim().is_empty())
+    {
+        summary.push_str(&format!(
+            " · {}",
+            crate::ui::truncate_chars(first_stderr.trim(), 80)
+        ));
     }
     with_verbose(summary, || {
         let mut out = String::new();
@@ -973,12 +1080,15 @@ fn preview_bash(value: &Value) -> String {
             let truncated = value_bool(value, &truncated_key);
             if text.is_empty() {
                 if truncated {
-                    let _ = write!(out, "\n{key}:\n  … {key} truncated");
+                    let _ = write!(
+                        out,
+                        "\n{}\n  … {key} truncated",
+                        crate::ui::block_title(key)
+                    );
                 }
                 continue;
             }
-            let _ = write!(out, "\n{key}:");
-            append_preview_lines(&mut out, text, "  ");
+            append_preview_lines(&mut out, text, key);
             if truncated {
                 let _ = write!(out, "\n  … {key} truncated for model context");
             }
@@ -1002,7 +1112,10 @@ fn preview_webfetch(value: &Value) -> String {
             value_usize(value, "content_bytes")
         );
     }
-    let text = value_str(value, "text");
+    let text = value
+        .get("text_preview")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| value_str(value, "text"));
     let format = value_str(value, "format");
     let kind = if format.is_empty() { "text" } else { format };
     let summary = format!(
@@ -1014,10 +1127,7 @@ fn preview_webfetch(value: &Value) -> String {
     with_verbose(summary, || {
         let mut out = String::new();
         if !text.is_empty() {
-            let preview = limited_preview_body(text);
-            for line in preview.lines() {
-                let _ = write!(out, "\n  {line}");
-            }
+            append_preview_lines(&mut out, text, kind);
         }
         if value_bool(value, "truncated") {
             out.push_str("\n  … response body truncated for model context");
@@ -1185,7 +1295,7 @@ impl EmptyStringExt for String {
 
 pub fn save_todos_to_file(root: &Path, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(root);
-    write_workspace_file(&path, todos_to_markdown(todos).as_bytes())
+    config::write_workspace_file(&path, todos_to_markdown(todos).as_bytes())
         .with_context(|| format!("failed to write {}", TODO_FILE))
 }
 
@@ -1218,7 +1328,7 @@ fn todos_to_markdown(todos: &[TodoItem]) -> String {
 }
 
 fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
-    require_path_pattern_approval(ctx, &args.path)?;
+    reject_out_of_workspace_path(&ctx.root, &args.path, None)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let shown_limit = args.limit.max(1);
     let items = if args.path == "." || args.path == "./" {
@@ -1285,18 +1395,74 @@ fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
         "path": display_path,
         "offset": args.offset,
         "limit": args.limit,
-        "text": shown.join("
-    "),
+        "text": shown.join("\n"),
         "line_count": line_count,
         "truncated": truncated
     }))
 }
 
+fn search_matchers(
+    pattern: &str,
+    mode: SearchMode,
+) -> Result<(RegexMatcher, Regex, &'static str, Value)> {
+    match mode {
+        SearchMode::Regex => Ok((
+            RegexMatcher::new_line_matcher(pattern)
+                .with_context(|| format!("invalid regex: {pattern}"))?,
+            Regex::new(pattern).with_context(|| format!("invalid regex: {pattern}"))?,
+            "regex",
+            Value::Null,
+        )),
+        SearchMode::Literal => {
+            let escaped = regex::escape(pattern);
+            Ok((
+                RegexMatcher::new_line_matcher(&escaped)?,
+                Regex::new(&escaped)?,
+                "literal",
+                Value::Null,
+            ))
+        }
+        SearchMode::Auto => match Regex::new(pattern) {
+            Ok(regex) => Ok((
+                RegexMatcher::new_line_matcher(pattern)
+                    .with_context(|| format!("invalid regex: {pattern}"))?,
+                regex,
+                "regex",
+                Value::Null,
+            )),
+            Err(err) => {
+                let escaped = regex::escape(pattern);
+                Ok((
+                    RegexMatcher::new_line_matcher(&escaped)?,
+                    Regex::new(&escaped)?,
+                    "literal",
+                    json!(format!(
+                        "pattern was not valid regex; searched literally: {err}"
+                    )),
+                ))
+            }
+        },
+    }
+}
+
+fn replace_matcher_and_replacement(args: &ReplaceArgs) -> Result<(Regex, String, &'static str)> {
+    match args.mode {
+        ReplaceMode::Regex => Ok((
+            Regex::new(&args.pattern)
+                .with_context(|| format!("invalid regex: {}", args.pattern))?,
+            args.replacement.clone(),
+            "regex",
+        )),
+        ReplaceMode::Literal => Ok((
+            Regex::new(&regex::escape(&args.pattern))?,
+            args.replacement.replace('$', "$$"),
+            "literal",
+        )),
+    }
+}
+
 fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
-    let matcher = RegexMatcher::new_line_matcher(&args.pattern)
-        .with_context(|| format!("invalid regex: {}", args.pattern))?;
-    let column_regex =
-        Regex::new(&args.pattern).with_context(|| format!("invalid regex: {}", args.pattern))?;
+    let (matcher, column_regex, mode, warning) = search_matchers(&args.pattern, args.mode)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let targets = resolve_existing_paths(ctx, &args.path)?;
     let mut matches = Vec::new();
@@ -1313,6 +1479,8 @@ fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
     let shown = args.limit.max(1);
     Ok(json!({
         "pattern": args.pattern,
+        "mode": mode,
+        "warning": warning,
         "path": args.path,
         "match_count": matches.len(),
         "matches": matches.iter().take(shown).cloned().collect::<Vec<_>>(),
@@ -1322,12 +1490,11 @@ fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
     }))
 }
 fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
-    let regex =
-        Regex::new(&args.pattern).with_context(|| format!("invalid regex: {}", args.pattern))?;
+    let (regex, replacement, mode) = replace_matcher_and_replacement(&args)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let target = resolve_existing_path(ctx, &args.path)?;
     let approval_preview = if ctx.policy.approval("replace") == Approval::Ask && ctx.interactive {
-        preview_replace_plan(ctx, &args, &regex, &target, &exclude).ok()
+        preview_replace_plan(ctx, &args, &regex, &replacement, &target, &exclude).ok()
     } else {
         None
     };
@@ -1337,7 +1504,7 @@ fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
     let mut errors = Vec::new();
     let mut replacement_count = 0usize;
     for path in walk_files(&ctx.root, &target, &exclude)? {
-        match replace_file(&path, &regex, &args.replacement) {
+        match replace_file(&path, &regex, &replacement) {
             Ok(ReplaceOutcome::Changed { count, diff }) => {
                 changed_files.push(json!({
                     "path": rel_path(&ctx.root, &path),
@@ -1359,6 +1526,7 @@ fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
     Ok(json!({
         "pattern": args.pattern,
         "replacement": args.replacement,
+        "mode": mode,
         "path": args.path,
         "changed_file_count": changed_files.len(),
         "replacement_count": replacement_count,
@@ -1372,13 +1540,17 @@ fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
 }
 
 fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
-    let target = resolve_existing_path(ctx, &args.path)?;
+    let targets = resolve_existing_paths(ctx, &args.path)?;
     let exclude = args
         .exclude
         .as_ref()
         .map(ExcludeArg::patterns)
         .unwrap_or_default();
-    let target = target.to_string_lossy().to_string();
+    let targets = targets
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let target_refs = targets.iter().map(String::as_str).collect::<Vec<_>>();
     let excluded = exclude.iter().map(String::as_str).collect::<Vec<_>>();
 
     let config = TokeiConfig {
@@ -1390,7 +1562,7 @@ fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
         ..TokeiConfig::default()
     };
     let mut languages = TokeiLanguages::new();
-    languages.get_statistics(&[target.as_str()], &excluded, &config);
+    languages.get_statistics(&target_refs, &excluded, &config);
     sort_tokei_reports(&mut languages);
 
     let mut output = serde_json::to_value(&languages)?;
@@ -1415,79 +1587,17 @@ fn sort_tokei_reports(languages: &mut TokeiLanguages) {
     }
 }
 
-pub fn compact_workspace_snapshot(root: &Path) -> Option<String> {
-    let config = TokeiConfig {
-        hidden: Some(false),
-        no_ignore: Some(false),
-        no_ignore_parent: Some(false),
-        no_ignore_dot: Some(false),
-        no_ignore_vcs: Some(false),
-        ..TokeiConfig::default()
-    };
-    let target = root.to_string_lossy().to_string();
-    let mut languages = TokeiLanguages::new();
-    languages.get_statistics(&[target.as_str()], &[] as &[&str], &config);
-    if languages.is_empty() {
-        return None;
-    }
-    sort_tokei_reports(&mut languages);
-    Some(format_workspace_snapshot(root, &languages))
-}
-
-fn format_workspace_snapshot(root: &Path, languages: &TokeiLanguages) -> String {
-    let total = languages.total();
-    let mut language_parts = languages
-        .iter()
-        .filter(|(_, language)| language.code > 0 || language.comments > 0)
-        .map(|(name, language)| (name.to_string(), language.code, language.reports.len()))
-        .collect::<Vec<_>>();
-    language_parts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    let mut largest = Vec::new();
-    collect_largest_reports(root, &total, &mut largest);
-    largest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let largest = largest
-        .into_iter()
-        .take(5)
-        .map(|(path, code)| format!("{path} {code}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let mut out = format!(
-        "Workspace size snapshot: total {} code LOC, {} comment lines, {} blank lines.",
-        total.code, total.comments, total.blanks
-    );
-    if !language_parts.is_empty() {
-        let shown = language_parts
-            .into_iter()
-            .take(8)
-            .map(|(name, code, files)| format!("{name}: {code} LOC/{files} files"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        out.push_str(&format!(" Languages: {shown}."));
-    }
-    if !largest.is_empty() {
-        out.push_str(&format!(" Largest files: {largest}."));
-    }
-    out
-}
-
-fn collect_largest_reports(root: &Path, language: &TokeiLanguage, out: &mut Vec<(String, usize)>) {
-    for report in &language.reports {
-        out.push((rel_path(root, &report.name), report.stats.code));
-    }
-    for reports in language.children.values() {
-        for report in reports {
-            out.push((rel_path(root, &report.name), report.stats.code));
-        }
-    }
-}
 async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
-    require_mutation_approval(ctx, "bash", None)?;
     if args.command.len() > config::max_bash_cmd_bytes() {
         bail!("command too large ({} bytes)", args.command.len());
     }
     let timeout_seconds = args.timeout_seconds.clamp(1, MAX_BASH_TIMEOUT_SECONDS);
+    let approval_preview = format!(
+        "workspace: {}\ntimeout: {timeout_seconds}s\ncommand:\n{}",
+        ctx.root.display(),
+        args.command.trim()
+    );
+    require_mutation_approval(ctx, "bash", Some(&approval_preview))?;
     let mut child = Command::new("bash")
         .arg("-c")
         .arg(&args.command)
@@ -1499,8 +1609,8 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
         .spawn()?;
     let stdout = child.stdout.take().context("failed to capture stdout")?;
     let stderr = child.stderr.take().context("failed to capture stderr")?;
-    let stdout_task = tokio::spawn(read_child_output(stdout, 6000));
-    let stderr_task = tokio::spawn(read_child_output(stderr, 4000));
+    let stdout_task = tokio::spawn(read_child_output(stdout, MAX_BASH_OUTPUT_BYTES));
+    let stderr_task = tokio::spawn(read_child_output(stderr, MAX_BASH_OUTPUT_BYTES));
     let status = match timeout(Duration::from_secs(timeout_seconds), child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
@@ -1511,13 +1621,19 @@ async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
     };
     let (stdout, stdout_truncated) = stdout_task.await??;
     let (stderr, stderr_truncated) = stderr_task.await??;
+    let (stdout_preview, stdout_preview_truncated) = crate::ui::head_tail(&stdout, 12_000);
+    let (stderr_preview, stderr_preview_truncated) = crate::ui::head_tail(&stderr, 8_000);
     Ok(json!({
         "command": args.command,
         "returncode": status.code().unwrap_or(-1),
         "stdout": stdout,
         "stderr": stderr,
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated
+        "stdout_preview": stdout_preview,
+        "stderr_preview": stderr_preview,
+        "stdout_truncated": stdout_truncated || stdout_preview_truncated,
+        "stderr_truncated": stderr_truncated || stderr_preview_truncated,
+        "stdout_capped": stdout_truncated,
+        "stderr_capped": stderr_truncated
     }))
 }
 
@@ -1619,8 +1735,8 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
         } else {
             text
         };
-        let (text, truncated) = crate::ui::head_tail(&normalized, 12000);
-        let truncated = truncated || body_capped;
+        let (text_preview, preview_truncated) = crate::ui::head_tail(&normalized, 12_000);
+        let truncated = preview_truncated || body_capped;
         return Ok(json!({
             "method": method,
             "url": final_url,
@@ -1628,9 +1744,11 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
             "reason_phrase": reason_phrase(status),
             "http_version": format!("{:?}", version),
             "headers": header_map,
-            "text": text,
+            "text": normalized,
+            "text_preview": text_preview,
             "format": if content_type.contains("html") { "markdown" } else { "text" },
-            "truncated": truncated
+            "truncated": truncated,
+            "body_capped": body_capped
         }));
     }
 
@@ -1679,8 +1797,11 @@ fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
 }
 
 fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
+    if !args.todos.is_empty() {
+        require_mutation_approval(ctx, "todo", Some("update the in-memory todo list"))?;
+    }
     if args.persist {
-        require_mutation_approval(ctx, "todo", None)?;
+        require_mutation_approval(ctx, "todo_persist", Some("write TODO.md in the workspace"))?;
     }
     let input_todos = if args.todos.is_empty() {
         ctx.todos.clone()
@@ -1732,73 +1853,30 @@ fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
     }))
 }
 
-fn path_scope_issue(root: &Path, path: &str, resolved: Option<&Path>) -> Option<String> {
+fn reject_out_of_workspace_path(root: &Path, path: &str, resolved: Option<&Path>) -> Result<()> {
     let raw = Path::new(path);
     if raw.is_absolute() {
-        return Some("absolute path".to_string());
+        bail!("path outside workspace is not allowed: {path} (absolute path)");
     }
     if raw.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Some("parent-directory path".to_string());
+        bail!("path outside workspace is not allowed: {path} (parent-directory path)");
     }
     if let Some(resolved) = resolved.filter(|resolved| !within_root(root, resolved)) {
-        return Some(format!("outside workspace: {}", resolved.display()));
-    }
-    None
-}
-
-fn require_path_pattern_approval(ctx: &ToolContext, path: &str) -> Result<()> {
-    if let Some(issue) = path_scope_issue(&ctx.root, path, None) {
-        require_path_approval(ctx, path, &issue)?;
+        bail!(
+            "path outside workspace is not allowed: {path} -> {}",
+            resolved.display()
+        );
     }
     Ok(())
-}
-
-fn require_resolved_path_approval(
-    ctx: &ToolContext,
-    requested: &str,
-    resolved: &Path,
-) -> Result<()> {
-    if let Some(issue) = path_scope_issue(&ctx.root, requested, Some(resolved)) {
-        require_path_approval(ctx, requested, &issue)?;
-    }
-    Ok(())
-}
-
-fn require_path_approval(ctx: &ToolContext, requested: &str, issue: &str) -> Result<()> {
-    match ctx.policy.path_approval() {
-        Approval::Auto => Ok(()),
-        Approval::Deny => bail!("path denied by policy: {requested} ({issue})"),
-        Approval::Ask if !ctx.interactive => bail!(
-            "path requires interactive approval or an auto-approve agent: {requested} ({issue})"
-        ),
-        Approval::Ask => approve_path(requested, issue),
-    }
-}
-
-fn approve_path(requested: &str, issue: &str) -> Result<()> {
-    crate::ui::section("Path approval required");
-    crate::ui::kv("path", requested);
-    crate::ui::kv("reason", issue);
-    crate::ui::kv("default", "deny");
-    let choices = ["no".to_string(), "yes".to_string()];
-    if crate::chat::ask("Allow path outside workspace?", Some(&choices))? == "yes" {
-        Ok(())
-    } else {
-        bail!("path denied by user")
-    }
 }
 
 fn resolve_existing_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
-    require_path_pattern_approval(ctx, path)?;
-    let joined = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        ctx.root.join(path)
-    };
+    reject_out_of_workspace_path(&ctx.root, path, None)?;
+    let joined = ctx.root.join(path);
     let resolved = joined
         .canonicalize()
         .with_context(|| format!("path does not exist: {path}"))?;
-    require_resolved_path_approval(ctx, path, &resolved)?;
+    reject_out_of_workspace_path(&ctx.root, path, Some(&resolved))?;
     Ok(resolved)
 }
 
@@ -1972,47 +2050,8 @@ fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<Replace
     }
     let updated = regex.replace_all(&text, replacement).into_owned();
     let diff = unified_diff(&path.to_string_lossy(), &text, &updated);
-    write_workspace_file(path, updated.as_bytes())?;
+    config::write_workspace_file(path, updated.as_bytes())?;
     Ok(ReplaceOutcome::Changed { count, diff })
-}
-
-fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    reject_symlink_destination(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        let mode = fs::metadata(path)
-            .ok()
-            .map(|m| m.permissions().mode() & 0o777)
-            .unwrap_or(0o600);
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(mode)
-            .open(path)?;
-        file.write_all(bytes)?;
-        let mut perms = file.metadata()?.permissions();
-        perms.set_mode(mode);
-        file.set_permissions(perms)?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, bytes)?;
-        Ok(())
-    }
-}
-
-fn reject_symlink_destination(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            bail!("refusing to write symlink: {}", path.display())
-        }
-        Ok(_) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("failed checking {}", path.display())),
-    }
 }
 
 fn unified_diff(path: &str, old: &str, new: &str) -> String {
@@ -2049,6 +2088,7 @@ fn preview_replace_plan(
     ctx: &ToolContext,
     args: &ReplaceArgs,
     regex: &Regex,
+    replacement: &str,
     target: &Path,
     exclude: &GlobSet,
 ) -> Result<String> {
@@ -2070,9 +2110,7 @@ fn preview_replace_plan(
         if !regex.is_match(&text) {
             continue;
         }
-        let updated = regex
-            .replace_all(&text, args.replacement.as_str())
-            .into_owned();
+        let updated = regex.replace_all(&text, replacement).into_owned();
         changed.push(json!({
             "path": rel_path(&ctx.root, &path),
             "replacements": regex.find_iter(&text).count(),
@@ -2203,24 +2241,32 @@ fn require_mutation_approval(ctx: &ToolContext, tool: &str, preview: Option<&str
         Approval::Auto => Ok(()),
         Approval::Deny => bail!("tool denied by policy: {tool}"),
         Approval::Ask if !ctx.interactive => bail!(
-            "tool denied by policy: {tool} requires interactive approval or an auto-approve agent"
+            "tool denied by policy: {tool} requires interactive approval or an auto-approve mode"
         ),
         Approval::Ask => approve_tool(tool, preview),
     }
 }
 
+fn approval_display_name(tool: &str) -> &str {
+    match tool {
+        "todo_persist" => "todo",
+        other => other,
+    }
+}
+
 fn approve_tool(tool: &str, preview: Option<&str>) -> Result<()> {
+    let display_tool = approval_display_name(tool);
     if let Some(preview) = preview.filter(|s| !s.trim().is_empty()) {
         crate::ui::err_line(crate::ui::diff(preview).trim_end());
     }
     crate::ui::section("Approval required");
-    crate::ui::kv("tool", tool);
+    crate::ui::kv("tool", display_tool);
     crate::ui::kv("default", "deny");
     if tool == "bash" {
         crate::ui::warn("shell commands run with your user permissions and inherited environment");
     }
     let choices = ["no".to_string(), "yes".to_string()];
-    if crate::chat::ask(&format!("Approve {tool}?"), Some(&choices))? == "yes" {
+    if crate::chat::ask(&format!("Approve {display_tool}?"), Some(&choices))? == "yes" {
         Ok(())
     } else {
         bail!("tool denied by user")
@@ -2255,7 +2301,7 @@ mod tests {
         let (_dir, ctx) = test_context(auto_policy(), true);
         tool_specs(&ctx)
             .into_iter()
-            .find(|tool| tool.name == name)
+            .find(|tool| tool.name.as_str() == name)
             .and_then(|tool| tool.schema)
             .unwrap_or_else(|| panic!("missing schema for {name}"))
     }
@@ -2315,6 +2361,31 @@ mod tests {
     }
 
     #[test]
+    fn schemas_document_lenient_numbers_and_match_modes() {
+        let search = schema_for("search");
+        assert_eq!(
+            search["properties"]["limit"]["type"],
+            json!(["integer", "string"])
+        );
+        assert_eq!(
+            search["properties"]["mode"]["enum"],
+            json!(["auto", "regex", "literal"])
+        );
+
+        let replace = schema_for("replace");
+        assert_eq!(
+            replace["properties"]["mode"]["enum"],
+            json!(["regex", "literal"])
+        );
+
+        let bash = schema_for("bash");
+        assert_eq!(
+            bash["properties"]["timeout_seconds"]["type"],
+            json!(["integer", "string"])
+        );
+    }
+
+    #[test]
     fn non_interactive_default_denies_replace() {
         let (dir, ctx) = test_context(
             ToolPolicy {
@@ -2334,11 +2405,41 @@ mod tests {
                 path: "a.txt".into(),
                 exclude: None,
                 limit: 10,
+                mode: ReplaceMode::Regex,
             },
         )
         .unwrap_err();
         assert!(err.to_string().contains("requires interactive approval"));
         assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one");
+    }
+
+    #[test]
+    fn read_only_allows_todo_memory_but_denies_persistence() {
+        let (_dir, mut ctx) = test_context(ToolPolicy::read_only(), false);
+        let value = tool_todo(
+            &mut ctx,
+            TodoArgs {
+                todos: vec![TodoItemInput {
+                    id: None,
+                    task: "plan work".into(),
+                    status: "pending".into(),
+                }],
+                persist: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(value["count"], 1);
+        assert_eq!(ctx.todos[0].task, "plan work");
+
+        let err = tool_todo(
+            &mut ctx,
+            TodoArgs {
+                todos: Vec::new(),
+                persist: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("tool denied by policy"));
     }
 
     #[tokio::test]
@@ -2365,44 +2466,29 @@ mod tests {
     }
 
     #[test]
-    fn default_non_interactive_denies_out_of_workspace_read() {
-        let (_dir, ctx) = test_context(
+    fn file_tools_deny_out_of_workspace_paths_in_all_modes() {
+        for policy in [
             ToolPolicy {
                 read_only: false,
                 files_write: Approval::Ask,
                 shell: Approval::Ask,
                 network: true,
             },
-            false,
-        );
-        let err = tool_read(
-            &ctx,
-            ReadArgs {
-                path: "/etc/hosts".into(),
-                offset: 1,
-                limit: 1,
-            },
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("path requires interactive approval")
-        );
-    }
-
-    #[test]
-    fn auto_policy_allows_out_of_workspace_read() {
-        let (_dir, ctx) = test_context(auto_policy(), false);
-        let value = tool_read(
-            &ctx,
-            ReadArgs {
-                path: "/etc/hosts".into(),
-                offset: 1,
-                limit: 1,
-            },
-        )
-        .unwrap();
-        assert_eq!(value["path"], "/etc/hosts");
+            auto_policy(),
+            ToolPolicy::read_only(),
+        ] {
+            let (_dir, ctx) = test_context(policy, false);
+            let err = tool_read(
+                &ctx,
+                ReadArgs {
+                    path: "/etc/hosts".into(),
+                    offset: 1,
+                    limit: 1,
+                },
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("path outside workspace"));
+        }
     }
 
     #[test]
@@ -2417,6 +2503,7 @@ mod tests {
                 path: "a.txt".into(),
                 exclude: None,
                 limit: 10,
+                mode: ReplaceMode::Regex,
             },
         )
         .unwrap();
@@ -2425,33 +2512,65 @@ mod tests {
     }
 
     #[test]
-    fn read_only_exposes_read_network_but_not_mutation_tools() {
+    fn read_only_exposes_research_tools_but_not_mutation_tools() {
         let (_dir, ctx) = test_context(ToolPolicy::read_only(), false);
         let names = tool_specs(&ctx)
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
-        assert!(names.iter().any(|name| name == "read"));
-        assert!(names.iter().any(|name| name == "webfetch"));
-        assert!(!names.iter().any(|name| name == "replace"));
-        assert!(!names.iter().any(|name| name == "bash"));
+        for expected in ["list", "read", "search", "sloc", "webfetch", "todo"] {
+            assert!(
+                names.iter().any(|name| name.as_str() == expected),
+                "missing {expected}"
+            );
+        }
+        for denied in ["replace", "bash"] {
+            assert!(
+                !names.iter().any(|name| name.as_str() == denied),
+                "exposed {denied}"
+            );
+        }
+    }
+
+    #[test]
+    fn sloc_accepts_space_separated_paths() {
+        let (dir, ctx) = test_context(auto_policy(), false);
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/app.rs"), "fn app() {}\n").unwrap();
+        fs::write(dir.path().join("README.md"), "# docs\n").unwrap();
+        fs::write(dir.path().join("ignored.rs"), "fn ignored() {}\n").unwrap();
+
+        let value = tool_sloc(
+            &ctx,
+            SlocArgs {
+                path: "src README.md".into(),
+                exclude: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(value["path"], "src README.md");
+        assert_eq!(value["output"]["Rust"]["code"], 1);
+        assert_eq!(value["output"]["Markdown"]["comments"], 1);
+        assert!(value["output"]["Total"].is_object());
     }
 
     #[test]
     fn search_accepts_space_separated_paths() {
         let (dir, ctx) = test_context(auto_policy(), false);
         fs::create_dir(dir.path().join("src")).unwrap();
-        fs::write(dir.path().join("src/cli.rs"), "fn cli_hit() {}\n").unwrap();
+        fs::write(dir.path().join("src/app.rs"), "fn app_hit() {}\n").unwrap();
         fs::write(dir.path().join("src/ui.rs"), "fn ui_hit() {}\n").unwrap();
         fs::write(dir.path().join("src/other.rs"), "fn other_hit() {}\n").unwrap();
 
         let value = tool_search(
             &ctx,
             SearchArgs {
-                pattern: "fn (cli|ui)_hit".into(),
-                path: "src/cli.rs src/ui.rs".into(),
+                pattern: "fn (app|ui)_hit".into(),
+                path: "src/app.rs src/ui.rs".into(),
                 exclude: None,
                 limit: 10,
+                mode: SearchMode::Regex,
             },
         )
         .unwrap();
@@ -2463,16 +2582,131 @@ mod tests {
             .iter()
             .map(|item| item["path"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
-        assert!(paths.iter().any(|path| path == "src/cli.rs"));
+        assert!(paths.iter().any(|path| path == "src/app.rs"));
         assert!(paths.iter().any(|path| path == "src/ui.rs"));
         assert!(!paths.iter().any(|path| path == "src/other.rs"));
+    }
+
+    #[test]
+    fn search_auto_falls_back_to_literal_for_invalid_regex() {
+        let (dir, ctx) = test_context(auto_policy(), false);
+        fs::write(
+            dir.path().join("notes.txt"),
+            "literal [text
+",
+        )
+        .unwrap();
+
+        let value = tool_search(
+            &ctx,
+            SearchArgs {
+                pattern: "[text".into(),
+                path: "notes.txt".into(),
+                exclude: None,
+                limit: 10,
+                mode: SearchMode::Auto,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(value["mode"], "literal");
+        assert_eq!(value["match_count"], 1);
+        assert!(
+            value["warning"]
+                .as_str()
+                .unwrap()
+                .contains("searched literally")
+        );
+    }
+
+    #[test]
+    fn replace_literal_treats_pattern_and_dollars_as_plain_text() {
+        let (dir, ctx) = test_context(auto_policy(), false);
+        fs::write(
+            dir.path().join("a.txt"),
+            "a+b $1
+",
+        )
+        .unwrap();
+
+        let value = tool_replace(
+            &ctx,
+            ReplaceArgs {
+                pattern: "a+b".into(),
+                replacement: "$1".into(),
+                path: "a.txt".into(),
+                exclude: None,
+                limit: 10,
+                mode: ReplaceMode::Literal,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(value["mode"], "literal");
+        assert_eq!(value["replacement_count"], 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "$1 $1
+"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_accepts_numeric_strings_and_aliases() {
+        let (dir, mut ctx) = test_context(auto_policy(), false);
+        fs::write(
+            dir.path().join("a.txt"),
+            "one
+two
+three
+",
+        )
+        .unwrap();
+
+        let value = invoke(
+            &mut ctx,
+            "read",
+            json!({"file": "a.txt", "start": "2", "lines": "1"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value["offset"], 2);
+        assert_eq!(value["limit"], 1);
+        assert_eq!(value["text"], "two");
+    }
+
+    #[tokio::test]
+    async fn bash_returns_full_output_and_bounded_preview() {
+        let (_dir, ctx) = test_context(auto_policy(), false);
+        let value = tool_bash(
+            &ctx,
+            BashArgs {
+                command: "python3 - <<'PY'
+print('x' * 13000)
+PY"
+                .into(),
+                timeout_seconds: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value["returncode"], 0);
+        assert!(value["stdout"].as_str().unwrap().len() > 12_000);
+        assert!(
+            value["stdout_preview"].as_str().unwrap().len()
+                < value["stdout"].as_str().unwrap().len()
+        );
+        assert_eq!(value["stdout_truncated"], true);
+        assert_eq!(value["stdout_capped"], false);
     }
 
     #[test]
     fn search_file_treats_zip_as_binary_file() {
         let dir = tempfile::tempdir().unwrap();
         let zip_path = dir.path().join("sample.zip");
-        fs::write(&zip_path, b"PK  not searched").unwrap();
+        fs::write(&zip_path, b"PK\0\0not searched").unwrap();
         let matcher = RegexMatcher::new_line_matcher("not searched").unwrap();
         let column_regex = Regex::new("not searched").unwrap();
         let found = search_file(dir.path(), &zip_path, &matcher, &column_regex).unwrap();
@@ -2482,7 +2716,7 @@ mod tests {
     #[test]
     fn read_rejects_zip_virtual_member() {
         let (dir, ctx) = test_context(auto_policy(), false);
-        fs::write(dir.path().join("sample.zip"), b"PK  ").unwrap();
+        fs::write(dir.path().join("sample.zip"), b"PK\0\0").unwrap();
         let err = tool_read(
             &ctx,
             ReadArgs {
@@ -2498,7 +2732,7 @@ mod tests {
     #[test]
     fn list_does_not_expand_zip_members() {
         let (dir, ctx) = test_context(auto_policy(), false);
-        fs::write(dir.path().join("sample.zip"), b"PK  ").unwrap();
+        fs::write(dir.path().join("sample.zip"), b"PK\0\0").unwrap();
         let value = tool_list(
             &ctx,
             ListArgs {

@@ -4,9 +4,10 @@ assertion_line: 124
 expression: "tools::preview_tool_output(\"webfetch\", &value)"
 ---
 HTTP 200 · markdown · 6 lines · truncated=no · https://example.com/docs
-# docs
-  hello
-  install
-  configure
-  run
-… 1 more lines
+── markdown
+1 │ # docs
+2 │ hello
+3 │ install
+4 │ configure
+5 │ run
+6 │ extra

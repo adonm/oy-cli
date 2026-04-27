@@ -8,9 +8,9 @@ use reedline_repl_rs::reedline::{
 };
 use std::path::PathBuf;
 
-use crate::agent::{self, Session};
 use crate::config;
 use crate::model;
+use crate::session::{self, Session};
 
 const HISTORY_SIZE: usize = 10_000;
 
@@ -65,7 +65,7 @@ pub async fn run_chat(session: &mut Session) -> Result<i32> {
             }
         }
     }
-    prompt_update_todo_on_quit(session).await?;
+    prompt_update_todo_on_quit(session);
     Ok(0)
 }
 
@@ -74,25 +74,18 @@ fn is_cursor_position_timeout(err: &impl Display) -> bool {
     text.contains("cursor position") && text.contains("could not be read")
 }
 
-async fn prompt_update_todo_on_quit(session: &mut Session) -> Result<()> {
-    if !crate::config::can_prompt() {
-        return Ok(());
+fn prompt_update_todo_on_quit(session: &Session) {
+    if crate::config::can_prompt() && !session.todos.is_empty() {
+        let active = session
+            .todos
+            .iter()
+            .filter(|item| item.status != "done")
+            .count();
+        crate::ui::line(format_args!(
+            "todo summary: {active}/{} active in memory; use the todo tool with persist=true to write TODO.md",
+            session.todos.len()
+        ));
     }
-    let prompt = "Update TODO.md with a concise summary of session actions?";
-    let choices = ["yes".to_string(), "no".to_string()];
-    if ask(prompt, Some(&choices))? != "yes" {
-        return Ok(());
-    }
-
-    let summary = agent::run_prompt(
-        session,
-        "Update TODO.md with a concise summary of the session actions. If TODO.md already exists, read it first and merge its still-relevant items with the session summary before calling the todo tool with persist=true; do not blindly overwrite existing project todos. Keep the session summary to one done item unless active follow-up work remains.",
-    )
-    .await?;
-    if !summary.is_empty() {
-        crate::ui::markdown(&format!("{summary}\n"));
-    }
-    Ok(())
 }
 
 async fn handle_chat_line(session: &mut Session, line: &str) -> Result<bool> {
@@ -121,7 +114,6 @@ async fn handle_slash_command(session: &mut Session, command: &str) -> Result<bo
         "model" => model_command(parts.next(), session).await,
         "thinking" => thinking_command(parts.next()),
         "debug" | "status" => status_command(session),
-        "yolo" => yolo_command(session),
         "ask" => {
             let prompt = parts.collect::<Vec<_>>().join(" ");
             ask_command(session, &prompt).await
@@ -156,19 +148,14 @@ fn normalize_chat_command(command: &str) -> &str {
 pub(crate) fn chat_help_text() -> String {
     [
         "Enter sends; Alt/Shift+Enter inserts newline",
-        "/help (/h, /?) -- show command help",
-        "/tokens (/t) -- show approximate context tokens",
-        "/compact [llm|deterministic] (/k) -- compact old transcript context",
+        "/help (/h, /?) -- show help",
+        "/status (/s), /debug (/d) -- show model, mode, context, and todos",
         "/model [value] (/m) -- show or switch model",
-        "/thinking [auto|off|low|medium|high] -- adjust reasoning effort",
-        "/status (/s), /debug (/d) -- show session status",
-        "/yolo -- approve all tools for this session",
         "/ask <question> -- research-only query",
-        "/save [name] -- save session transcript",
-        "/load [name] -- load a saved session",
-        "/undo (/u) -- remove last prompt and follow-ups",
-        "/clear (/c) -- clear conversation",
+        "/save [name], /load [name] -- save or load a session",
+        "/undo (/u), /clear (/c) -- repair conversation state",
         "/quit (/q), /exit -- end session",
+        "Advanced: /tokens, /compact [llm|deterministic], /thinking [auto|off|low|medium|high]",
     ]
     .join("\n")
 }
@@ -177,7 +164,7 @@ async fn ask_command(session: &mut Session, prompt: &str) -> Result<bool> {
     if prompt.is_empty() {
         anyhow::bail!("Usage: /ask <question>");
     }
-    let answer = agent::run_prompt(session, &config::ask_system_prompt(prompt)).await?;
+    let answer = session::run_prompt_read_only(session, &config::ask_system_prompt(prompt)).await?;
     if !answer.is_empty() {
         crate::ui::markdown(&format!("{answer}\n"));
     }
@@ -206,8 +193,7 @@ fn tokens_command(session: &Session) -> Result<bool> {
         format_args!("{} tokens", status.input_budget_tokens),
     );
     crate::ui::kv("trigger", format_args!("{} tokens", status.trigger_tokens));
-    crate::ui::kv("auto compact", status.auto_compact);
-    crate::ui::kv("summary", status.summary_present);
+    crate::ui::kv("summary", crate::ui::bool_text(status.summary_present));
     Ok(true)
 }
 
@@ -273,15 +259,15 @@ fn status_command(session: &Session) -> Result<bool> {
         "thinking",
         model::default_reasoning_effort(&session.model).unwrap_or("auto/off"),
     );
-    crate::ui::kv("agent", &session.agent);
-    crate::ui::kv("interactive", session.interactive);
+    crate::ui::kv("mode", &session.mode);
+    crate::ui::kv("interactive", crate::ui::bool_text(session.interactive));
     crate::ui::kv(
         "files-write",
         format_args!("{:?}", session.policy.files_write),
     );
     crate::ui::kv("shell", format_args!("{:?}", session.policy.shell));
-    crate::ui::kv("network", session.policy.network);
-    crate::ui::kv("risk", policy_risk_label(session));
+    crate::ui::kv("network", crate::ui::bool_text(session.policy.network));
+    crate::ui::kv("risk", config::policy_risk_label(&session.policy));
     crate::ui::kv("messages", session.transcript.messages.len());
     crate::ui::kv("todos", session.todos.len());
     let status = session.context_status();
@@ -292,29 +278,7 @@ fn status_command(session: &Session) -> Result<bool> {
             status.estimate.total_tokens, status.input_budget_tokens
         ),
     );
-    crate::ui::kv("auto compact", status.auto_compact);
-    crate::ui::kv("summary", status.summary_present);
-    Ok(true)
-}
-
-fn policy_risk_label(session: &Session) -> &'static str {
-    use crate::tools::Approval;
-    if session.policy.read_only {
-        "read-only"
-    } else if session.policy.shell == Approval::Auto {
-        "high: auto shell"
-    } else if session.policy.files_write == Approval::Auto {
-        "medium: auto edits"
-    } else {
-        "normal: asks before edits/shell"
-    }
-}
-
-fn yolo_command(session: &mut Session) -> Result<bool> {
-    session.policy.files_write = crate::tools::Approval::Auto;
-    session.policy.shell = crate::tools::Approval::Auto;
-    crate::ui::success("yolo enabled: auto-approving file edits and shell commands");
-    crate::ui::warn("oy is not a sandbox; use only in trusted workspaces");
+    crate::ui::kv("summary", crate::ui::bool_text(status.summary_present));
     Ok(true)
 }
 
@@ -325,7 +289,7 @@ fn save_command(name: Option<&str>, session: &mut Session) -> Result<bool> {
 }
 
 fn load_command(name: Option<&str>, session: &mut Session) -> Result<bool> {
-    if let Some(new_session) = agent::load_saved(name, true)? {
+    if let Some(new_session) = session::load_saved(name, true)? {
         *session = new_session;
         crate::ui::success("loaded session");
     } else {
@@ -351,7 +315,7 @@ fn clear_command(session: &mut Session) -> Result<bool> {
 
 async fn run_prompt_with_model_reselect(session: &mut Session, prompt: &str) -> Result<()> {
     loop {
-        match agent::run_prompt(session, prompt).await {
+        match session::run_prompt(session, prompt).await {
             Ok(answer) => {
                 if !answer.is_empty() {
                     crate::ui::markdown(&format!("{answer}\n"));
@@ -443,8 +407,12 @@ fn history_path(name: &str) -> Result<PathBuf> {
 
 fn history_path_in(config_dir: PathBuf, name: &str) -> Result<PathBuf> {
     let history = config_dir.join("history");
-    std::fs::create_dir_all(&history)?;
-    Ok(history.join(format!("{name}.txt")))
+    config::create_private_dir_all(&history)?;
+    let path = history.join(format!("{name}.txt"));
+    if !path.exists() {
+        config::write_private_file(&path, b"")?;
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -452,10 +420,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn history_path_uses_named_history_file() {
+    fn history_path_uses_named_private_history_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = history_path_in(dir.path().to_path_buf(), "chat").unwrap();
         assert!(path.ends_with("history/chat.txt"));
+        assert!(path.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let history_dir_mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(history_dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
     }
 
     #[test]

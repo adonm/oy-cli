@@ -1,17 +1,13 @@
 use std::fmt::{Display, Write as _};
 use std::io::IsTerminal as _;
-use std::path::Path;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-use console::style;
-use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
-use syntect::util::{LinesWithEndings, as_24_bit_terminal_escaped};
-use termimad::MadSkin;
+use syntect::util::as_24_bit_terminal_escaped;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -23,16 +19,14 @@ pub enum OutputMode {
 
 static OUTPUT_MODE: AtomicU8 = AtomicU8::new(OutputMode::Normal as u8);
 
-static COLOR: LazyLock<bool> = LazyLock::new(|| {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    match std::env::var("OY_COLOR").ok().as_deref() {
-        Some("always") => true,
-        Some("never") => false,
-        _ => std::io::stdout().is_terminal(),
-    }
-});
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+static COLOR_MODE: LazyLock<ColorMode> = LazyLock::new(color_mode_from_env);
 
 pub fn init_output_mode(mode: Option<OutputMode>) {
     let mode = mode
@@ -93,6 +87,40 @@ fn truthy_env(name: &str) -> bool {
     )
 }
 
+fn color_mode_from_env() -> ColorMode {
+    color_mode_from_values(
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("OY_COLOR").ok().as_deref(),
+    )
+}
+
+fn color_mode_from_values(no_color: bool, oy_color: Option<&str>) -> ColorMode {
+    if no_color {
+        return ColorMode::Never;
+    }
+    match oy_color.map(str::to_ascii_lowercase).as_deref() {
+        Some("always" | "1" | "true" | "yes" | "on") => ColorMode::Always,
+        Some("never" | "0" | "false" | "no" | "off") => ColorMode::Never,
+        _ => ColorMode::Auto,
+    }
+}
+
+pub fn color_enabled() -> bool {
+    color_enabled_for_stdout(std::io::stdout().is_terminal())
+}
+
+fn color_enabled_for_stdout(stdout_is_terminal: bool) -> bool {
+    color_enabled_for_mode(*COLOR_MODE, stdout_is_terminal)
+}
+
+fn color_enabled_for_mode(mode: ColorMode, stdout_is_terminal: bool) -> bool {
+    match mode {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => stdout_is_terminal,
+    }
+}
+
 pub fn terminal_width() -> usize {
     terminal_size::terminal_size()
         .map(|(terminal_size::Width(width), _)| width as usize)
@@ -100,27 +128,52 @@ pub fn terminal_width() -> usize {
         .unwrap_or(100)
 }
 
-static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static THEME: LazyLock<Theme> = LazyLock::new(|| {
-    let themes = ThemeSet::load_defaults();
-    themes
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| themes.themes.values().next())
-        .cloned()
-        .unwrap_or_default()
-});
-
 pub fn paint(code: &str, text: impl Display) -> String {
-    if *COLOR {
+    if color_enabled() {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
         text.to_string()
     }
 }
 
-fn foreground_escaped(ranges: &[(syntect::highlighting::Style, &str)]) -> String {
-    as_24_bit_terminal_escaped(ranges, false)
+pub fn faint(text: impl Display) -> String {
+    paint("2", text)
+}
+
+pub fn bold(text: impl Display) -> String {
+    paint("1", text)
+}
+
+pub fn cyan(text: impl Display) -> String {
+    paint("36", text)
+}
+
+pub fn green(text: impl Display) -> String {
+    paint("32", text)
+}
+
+pub fn yellow(text: impl Display) -> String {
+    paint("33", text)
+}
+
+pub fn red(text: impl Display) -> String {
+    paint("31", text)
+}
+
+pub fn magenta(text: impl Display) -> String {
+    paint("35", text)
+}
+
+pub fn status_text(ok: bool, text: impl Display) -> String {
+    if ok { green(text) } else { red(text) }
+}
+
+pub fn bool_text(value: bool) -> String {
+    status_text(value, value)
+}
+
+pub fn path(text: impl Display) -> String {
+    paint("1;36", text)
 }
 
 pub fn out(text: &str) {
@@ -140,108 +193,178 @@ pub fn err_line(text: impl Display) {
 }
 
 pub fn markdown(text: &str) {
-    if *COLOR {
-        MadSkin::default().print_text(text);
+    out(&render_markdown(text));
+}
+
+fn render_markdown(text: &str) -> String {
+    if !color_enabled() {
+        return text.to_string();
+    }
+    let mut in_fence = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let rendered = if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            faint(line)
+        } else if in_fence {
+            cyan(line)
+        } else if trimmed.starts_with('#') {
+            paint("1;35", line)
+        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            cyan(line)
+        } else {
+            line.to_string()
+        };
+        let _ = writeln!(out, "{rendered}");
+    }
+    if text.ends_with('\n') {
+        out
     } else {
-        out(text);
+        out.trim_end_matches('\n').to_string()
     }
 }
 
 pub fn code(path: &str, text: &str, first_line: usize) -> String {
-    let mut out = String::new();
-    let syntax = Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(|ext| SYNTAXES.find_syntax_by_extension(ext))
-        .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
+    numbered_block(path, text, first_line)
+}
+
+pub fn text_block(title: &str, text: &str) -> String {
+    numbered_block(title, text, 1)
+}
+
+pub fn block_title(title: &str) -> String {
+    path(format_args!("── {title}"))
+}
+
+pub fn numbered_line(line_number: usize, width: usize, text: &str) -> String {
+    format!(
+        "{} {} {}",
+        faint(format_args!("{line_number:>width$}")),
+        faint("│"),
+        text
+    )
+}
+
+fn numbered_block(title: &str, text: &str, first_line: usize) -> String {
+    let title = if title.is_empty() { "text" } else { title };
+    let line_count = text.lines().count().max(1);
     let width = first_line
-        .saturating_add(text.lines().count())
+        .saturating_add(line_count.saturating_sub(1))
         .max(1)
         .to_string()
         .len();
-    if *COLOR {
-        let mut highlighter = HighlightLines::new(syntax, &THEME);
-        for (idx, line) in LinesWithEndings::from(text).enumerate() {
-            let escaped = highlighter
-                .highlight_line(line, &SYNTAXES)
-                .map(|ranges| foreground_escaped(&ranges[..]))
-                .unwrap_or_else(|_| line.to_string());
-            let _ = write!(
-                out,
-                "{} │ {}",
-                style(format!("{:>width$}", first_line + idx)).dim(),
-                escaped
-            );
-        }
+    let highlighted = highlighted_block(title, text);
+    let mut out = String::new();
+    let _ = writeln!(out, "{}", block_title(title));
+    if text.is_empty() {
+        let _ = writeln!(out, "{}", numbered_line(first_line, width, ""));
     } else {
-        for (idx, line) in text.lines().enumerate() {
-            let _ = writeln!(out, "{:>width$} │ {line}", first_line + idx);
+        let lines = highlighted.as_deref().unwrap_or(text).lines();
+        for (idx, line) in lines.enumerate() {
+            let _ = writeln!(out, "{}", numbered_line(first_line + idx, width, line));
         }
     }
     out.trim_end().to_string()
 }
 
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+fn highlighted_block(title: &str, text: &str) -> Option<String> {
+    if !color_enabled() {
+        return None;
+    }
+    let syntax = syntax_for_title(title)?;
+    let theme = terminal_theme()?;
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut out = String::new();
+    for line in text.lines() {
+        let ranges = highlighter.highlight_line(line, &SYNTAX_SET).ok()?;
+        let _ = writeln!(out, "{}", as_24_bit_terminal_escaped(&ranges, false));
+    }
+    Some(if text.ends_with('\n') {
+        out
+    } else {
+        out.trim_end_matches('\n').to_string()
+    })
+}
+
+fn syntax_for_title(title: &str) -> Option<&'static syntect::parsing::SyntaxReference> {
+    let syntaxes = &*SYNTAX_SET;
+    let name = title.rsplit('/').next().unwrap_or(title);
+    if let Some(ext) = name.rsplit_once('.').map(|(_, ext)| ext) {
+        syntaxes.find_syntax_by_extension(ext)
+    } else {
+        syntaxes.find_syntax_by_token(name)
+    }
+    .or_else(|| syntaxes.find_syntax_by_name(title))
+}
+
+fn terminal_theme() -> Option<&'static Theme> {
+    THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.values().next())
+}
+
 pub fn diff(text: &str) -> String {
-    if !*COLOR {
+    if !color_enabled() {
         return text.to_string();
     }
     let mut out = String::new();
     for line in text.lines() {
-        let styled = if line.starts_with("+++") || line.starts_with("---") {
-            style(line).bold().to_string()
-        } else if line.starts_with('+') {
-            style(line).green().to_string()
-        } else if line.starts_with('-') {
-            style(line).red().to_string()
+        let rendered = if line.starts_with("+++") || line.starts_with("---") {
+            bold(line)
         } else if line.starts_with("@@") {
-            style(line).cyan().to_string()
+            cyan(line)
+        } else if line.starts_with('+') {
+            green(line)
+        } else if line.starts_with('-') {
+            red(line)
         } else {
             line.to_string()
         };
-        let _ = writeln!(out, "{styled}");
+        let _ = writeln!(out, "{rendered}");
     }
-    out.trim_end().to_string()
+    if text.ends_with('\n') {
+        out
+    } else {
+        out.trim_end_matches('\n').to_string()
+    }
 }
 
 pub fn section(title: &str) {
-    line(paint("1", title));
+    line(bold(title));
 }
 
 pub fn kv(key: &str, value: impl Display) {
     line(format_args!(
         "  {} {value}",
-        paint("2", format_args!("{key:<11}"))
+        faint(format_args!("{key:<11}"))
     ));
 }
 
 pub fn success(text: impl Display) {
-    line(format_args!("{} {text}", paint("32", "✓")));
+    line(format_args!("{} {text}", green("✓")));
 }
 
 pub fn warn(text: impl Display) {
-    line(format_args!("{} {text}", paint("33", "!")));
+    line(format_args!("{} {text}", yellow("!")));
 }
 
 pub fn tool_batch(round: usize, count: usize) {
     if is_quiet() {
         return;
     }
-    err_line(format_args!(
-        "{} tools round {round} · {count} call{}",
-        paint("35", "↻"),
-        if count == 1 { "" } else { "s" }
-    ));
+    err_line(tool_batch_line(round, count));
 }
 
 pub fn tool_start(name: &str, detail: &str) {
     if is_quiet() {
         return;
     }
-    if detail.is_empty() {
-        err_line(format_args!("{} tool {name}", paint("36", "→")));
-    } else {
-        err_line(format_args!("{} tool {name} · {detail}", paint("36", "→")));
-    }
+    err_line(tool_start_line(name, detail));
 }
 
 pub fn tool_result(name: &str, elapsed: Duration, preview: &str) {
@@ -249,22 +372,18 @@ pub fn tool_result(name: &str, elapsed: Duration, preview: &str) {
         return;
     }
     let preview = preview.trim_end();
-    let head = format!(
-        "{} tool {name} {}",
-        paint("32", "←"),
-        format_elapsed(elapsed)
-    );
+    let head = tool_result_head(name, elapsed);
     let Some((first, rest)) = preview.split_once('\n') else {
         if preview.is_empty() {
             err_line(head);
         } else {
-            err_line(format_args!("{head} · {preview}"));
+            err_line(format_args!("{head} · {first}", first = preview));
         }
         return;
     };
     err_line(format_args!("{head} · {first}"));
     for line in rest.lines() {
-        err_line(format_args!("  {line}"));
+        err_line(format_args!("    {line}"));
     }
 }
 
@@ -273,8 +392,8 @@ pub fn tool_error(name: &str, elapsed: Duration, err: impl Display) {
         return;
     }
     err_line(format_args!(
-        "{} tool {name} {} · {err:#}",
-        paint("31", "✗"),
+        "  {} {name} {} · {err:#}",
+        red("✗"),
         format_elapsed(elapsed)
     ));
 }
@@ -285,6 +404,22 @@ fn format_elapsed(elapsed: Duration) -> String {
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
     }
+}
+
+fn tool_batch_line(round: usize, count: usize) -> String {
+    format!("{} tools r{round} ×{count}", magenta("↻"))
+}
+
+fn tool_start_line(name: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        format!("  {} {name}", cyan("→"))
+    } else {
+        format!("  {} {name} · {detail}", cyan("→"))
+    }
+}
+
+fn tool_result_head(name: &str, elapsed: Duration) -> String {
+    format!("  {} {name} {}", green("✓"), format_elapsed(elapsed))
 }
 
 pub fn compact_spaces(value: &str) -> String {
@@ -372,33 +507,61 @@ pub fn head_tail(text: &str, max_chars: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syntect::highlighting::{Color, FontStyle, Style};
+
+    fn color_mode_name(mode: ColorMode) -> &'static str {
+        match mode {
+            ColorMode::Auto => "auto",
+            ColorMode::Always => "always",
+            ColorMode::Never => "never",
+        }
+    }
 
     #[test]
-    fn syntax_escape_does_not_emit_background_colors() {
-        let style = Style {
-            foreground: Color {
-                r: 1,
-                g: 2,
-                b: 3,
-                a: 0xff,
-            },
-            background: Color {
-                r: 4,
-                g: 5,
-                b: 6,
-                a: 0xff,
-            },
-            font_style: FontStyle::empty(),
-        };
-        let escaped = foreground_escaped(&[(style, "let")]);
-        assert!(escaped.contains("38;2;1;2;3"));
-        assert!(!escaped.contains("48;2"));
+    fn color_mode_env_parsing() {
+        assert_eq!(color_mode_name(color_mode_from_values(false, None)), "auto");
+        assert_eq!(
+            color_mode_name(color_mode_from_values(false, Some("always"))),
+            "always"
+        );
+        assert_eq!(
+            color_mode_name(color_mode_from_values(false, Some("on"))),
+            "always"
+        );
+        assert_eq!(
+            color_mode_name(color_mode_from_values(false, Some("off"))),
+            "never"
+        );
+        assert_eq!(
+            color_mode_name(color_mode_from_values(true, Some("always"))),
+            "never"
+        );
+    }
+
+    #[test]
+    fn color_auto_requires_terminal() {
+        assert!(!color_enabled_for_mode(ColorMode::Auto, false));
+        assert!(color_enabled_for_mode(ColorMode::Auto, true));
+        assert!(color_enabled_for_mode(ColorMode::Always, false));
+        assert!(!color_enabled_for_mode(ColorMode::Never, true));
     }
 
     #[test]
     fn elapsed_format_is_compact() {
         assert_eq!(format_elapsed(Duration::from_millis(42)), "42ms");
         assert_eq!(format_elapsed(Duration::from_millis(1250)), "1.2s");
+    }
+
+    #[test]
+    fn tool_progress_lines_are_dense() {
+        set_output_mode(OutputMode::Normal);
+        assert_eq!(tool_batch_line(2, 3), "↻ tools r2 ×3");
+        assert_eq!(
+            tool_start_line("read", "path=src/main.rs"),
+            "  → read · path=src/main.rs"
+        );
+        assert_eq!(
+            tool_result_head("read", Duration::from_millis(42)),
+            "  ✓ read 42ms"
+        );
     }
 }

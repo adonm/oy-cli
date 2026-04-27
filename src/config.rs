@@ -3,12 +3,10 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SavedModelConfig {
@@ -19,8 +17,11 @@ pub struct SavedModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionFile {
     pub model: String,
-    pub agent: String,
+    #[serde(default, alias = "agent")]
+    pub mode: String,
     pub saved_at: String,
+    #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
     pub transcript: serde_json::Value,
     #[serde(default)]
     pub todos: Vec<crate::tools::TodoItem>,
@@ -31,7 +32,6 @@ pub struct ContextConfig {
     pub limit_tokens: usize,
     pub output_reserve_tokens: usize,
     pub safety_reserve_tokens: usize,
-    pub auto_compact: bool,
     pub trigger_ratio: f64,
     pub recent_messages: usize,
     pub tool_output_tokens: usize,
@@ -51,50 +51,136 @@ impl ContextConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentProfile {
-    pub name: String,
-    pub system_prompt_suffix: String,
-    pub tool_mode: ToolMode,
-    pub auto_approve_edits: bool,
-    pub auto_approve_bash: bool,
-    pub yolo: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolMode {
-    Normal,
-    ReadOnly,
+pub enum SafetyMode {
+    Default,
+    Plan,
+    AutoEdits,
+    AutoAll,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct SessionText {
-    #[serde(default)]
-    system: BTreeMap<String, String>,
-    #[serde(default)]
-    agents: BTreeMap<String, AgentText>,
-    #[serde(default)]
-    transcript: BTreeMap<String, String>,
-    #[serde(default)]
-    audit: BTreeMap<String, String>,
-    #[serde(default)]
-    tools: BTreeMap<String, ToolText>,
+impl SafetyMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "" | "default" | "ask" => Ok(Self::Default),
+            "plan" | "read-only" | "readonly" | "read" => Ok(Self::Plan),
+            "accept-edits" | "edit" | "edits" | "auto-edits" | "write" => Ok(Self::AutoEdits),
+            "auto-approve" | "auto" | "yolo" => Ok(Self::AutoAll),
+            other => bail!("Unknown mode `{other}`. Available: plan, ask, edit, auto"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+            Self::AutoEdits => "accept-edits",
+            Self::AutoAll => "auto-approve",
+        }
+    }
+
+    fn system_prompt_suffix(self) -> &'static str {
+        match self {
+            Self::Default => "",
+            Self::Plan => PLAN_SYSTEM,
+            Self::AutoEdits => ACCEPT_EDITS_SYSTEM,
+            Self::AutoAll => AUTO_APPROVE_SYSTEM,
+        }
+    }
+
+    fn policy(self) -> ToolPolicy {
+        match self {
+            Self::Plan => ToolPolicy::read_only(),
+            Self::Default => ToolPolicy {
+                read_only: false,
+                files_write: Approval::Ask,
+                shell: Approval::Ask,
+                network: true,
+            },
+            Self::AutoEdits => ToolPolicy {
+                read_only: false,
+                files_write: Approval::Auto,
+                shell: Approval::Ask,
+                network: true,
+            },
+            Self::AutoAll => ToolPolicy {
+                read_only: false,
+                files_write: Approval::Auto,
+                shell: Approval::Auto,
+                network: true,
+            },
+        }
+    }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct AgentText {
-    #[serde(default)]
-    system: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct ToolText {
-    #[serde(default)]
-    description: String,
-}
-
-static SESSION_TEXT: OnceLock<SessionText> = OnceLock::new();
 const DEFAULT_CONFIG_DIR_NAME: &str = "oy-rust";
+
+const BASE_SYSTEM: &str = r#"You are oy, a coding CLI with tools.
+Optimize for the human reviewing your work: be terse, evidence-first, and explicit about changed files/commands.
+Follow the user's output constraints exactly.
+Work inspect → edit → verify. Use the cheapest sufficient tool:
+1. `list` for discovery.
+2. `search` for symbols, paths, and strings.
+3. `read` only narrow file slices you need.
+4. `replace` for surgical edits.
+5. `bash` only when file tools are insufficient or when you must run/check something.
+Batch independent reads/searches. Stop when enough evidence exists.
+Prefer small, boring, idiomatic, functional, testable code with explicit data flow.
+For security-sensitive work, name the trust boundary, validate near it, fail closed, and add focused tests.
+Do not add file, process, network, credential, or persistence capability unless necessary.
+For 3+ step work, keep a short in-memory todo; persist `TODO.md` only on explicit request or quit prompt.
+Use `webfetch` for public docs/API research when useful; prefer it over guessing.
+Tool arguments are schemas, not prose: use documented names, numeric `limit`/`offset`/timeouts, and `mode=literal` for exact search/replace when regex metacharacters are not intended.
+Manage context aggressively: keep only key facts and paths. Prefer narrow `path`, `offset`, `limit`, and `exclude`; use `sloc` if you need a repo-size snapshot.
+Before mutating files or running commands, state the next action briefly. After finishing, report changed files and checks.
+When context gets long, compress to the plan, key evidence, and next action. If blocked, say what you tried and the next step."#;
+
+const INTERACTIVE_SUFFIX: &str =
+    "Use `ask` only for genuine ambiguity or irreversible user-facing choices. Batch prompts.";
+const NONINTERACTIVE_SUFFIX: &str = "Non-interactive mode: stay unblocked without questions. Choose the safest reasonable path, state brief assumptions, and finish the inspect/edit/verify flow.";
+const ASK_SUFFIX: &str = r#"RESEARCH-ONLY mode. Use only list, read, search, sloc, and webfetch. Stay no-write: leave files unchanged and skip `bash`. Focus on facts only, citing file paths and brief evidence."#;
+const PLAN_SYSTEM: &str = r#"PLAN mode. Stay read-only. Use only list, read, search, sloc, todo for in-memory planning, ask when interactive, and webfetch when available. Keep files unchanged, skip shell commands, and describe changes as proposed rather than applied."#;
+const ACCEPT_EDITS_SYSTEM: &str = r#"ACCEPT-EDITS mode. File edits may run without asking. Keep edits small and targeted, inspect before changing, and reach for `bash` only when genuinely necessary."#;
+const AUTO_APPROVE_SYSTEM: &str = r#"AUTO-APPROVE mode. Tools may run without asking. Still avoid destructive commands, broad rewrites, credential exposure, persistence changes, and network/file/process expansion unless clearly needed. Treat shell and replacement tools as strict side effects: inspect first, then run the smallest command/edit."#;
+const TODO_SYSTEM: &str = r#"Current in-memory todo:
+{todos}"#;
+
+pub fn session_text_value(section: &str, key: &str) -> Result<String> {
+    let value = match (section, key) {
+        ("system", "base") => BASE_SYSTEM,
+        ("system", "interactive_suffix") => INTERACTIVE_SUFFIX,
+        ("system", "noninteractive_suffix") => NONINTERACTIVE_SUFFIX,
+        ("system", "ask_suffix") => ASK_SUFFIX,
+        ("transcript", "todo_system") => TODO_SYSTEM,
+        _ => bail!("missing session text key: {section}.{key}"),
+    };
+    Ok(value.to_string())
+}
+
+pub fn tool_description(name: &str) -> String {
+    match name {
+        "list" => "List workspace paths. Use first for discovery. `path` is a workspace-relative glob and defaults to `*`. Returns items, count, and truncation state.",
+        "read" => "Read one UTF-8 text file. Prefer narrow `offset`/`limit` slices over full-file reads.",
+        "search" => "Search workspace text with ripgrep-style Rust regex. Use `mode=literal` for exact strings.",
+        "replace" => "Replace workspace text with Rust regex captures, or exact text with `mode=literal`. Inspect/search before changing.",
+        "sloc" => "Count source lines with tokei for repository sizing. `path` may be one path or whitespace-separated paths.",
+        "bash" => "Run a shell command in the workspace. Use only when file tools are insufficient or when you must run/check something.",
+        "ask" => "Ask the user in interactive runs. Reserve for genuine ambiguity or irreversible choices.",
+        "webfetch" => "Fetch public web pages/files. Blocks localhost/private IPs and sensitive headers.",
+        "todo" => "Manage the in-memory todo list. Available in read-only modes; persistence to TODO.md is opt-in and requires write approval.",
+        other => other,
+    }
+    .to_string()
+}
+
+pub fn safety_mode(mode: &str) -> Result<SafetyMode> {
+    SafetyMode::parse(mode)
+}
+
+pub fn tool_policy(mode: &str) -> ToolPolicy {
+    let mode = SafetyMode::parse(mode).unwrap_or(SafetyMode::Default);
+    mode.policy()
+}
 
 pub fn config_root() -> PathBuf {
     if let Ok(raw) = env::var("OY_CONFIG") {
@@ -132,128 +218,6 @@ pub fn sessions_dir() -> Result<PathBuf> {
     let dir = config_dir_path().join("sessions");
     create_private_dir_all(&dir)?;
     Ok(dir)
-}
-
-fn session_text() -> &'static SessionText {
-    SESSION_TEXT.get_or_init(|| load_session_text().expect("session_text.toml must load"))
-}
-
-fn load_session_text() -> Result<SessionText> {
-    const RAW: &str = include_str!("../assets/session_text.toml");
-    toml::from_str(RAW).context("failed parsing embedded session_text.toml")
-}
-
-pub fn session_text_value(section: &str, key: &str) -> Result<String> {
-    let value = match section {
-        "system" => session_text().system.get(key),
-        "transcript" => session_text().transcript.get(key),
-        "audit" => session_text().audit.get(key),
-        _ => None,
-    };
-    value
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("missing session text key: {section}.{key}"))
-}
-
-pub fn session_text_format(section: &str, key: &str, values: &[(&str, String)]) -> Result<String> {
-    let mut text = session_text_value(section, key)?;
-    for (name, value) in values {
-        text = text.replace(&format!("{{{name}}}"), value);
-    }
-    Ok(text)
-}
-
-pub fn tool_description(name: &str) -> String {
-    session_text()
-        .tools
-        .get(name)
-        .map(|tool| tool.description.clone())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| name.to_string())
-}
-
-pub fn list_agent_profiles() -> Vec<String> {
-    let mut items = session_text()
-        .agents
-        .keys()
-        .map(|name| name.replace('_', "-"))
-        .collect::<Vec<_>>();
-    if items.is_empty() {
-        items.push("default".to_string());
-    }
-    items.sort();
-    items
-}
-
-pub fn normalize_agent_profile(agent: &str) -> Result<String> {
-    let value = if agent.trim().is_empty() {
-        "default".to_string()
-    } else {
-        agent.trim().to_ascii_lowercase().replace('_', "-")
-    };
-    let available = list_agent_profiles();
-    if available.iter().any(|item| item == &value) {
-        return Ok(value);
-    }
-    bail!(
-        "Unknown agent profile `{}`. Available: {}",
-        value,
-        available.join(", ")
-    )
-}
-
-pub fn agent_profile(agent: &str) -> Result<AgentProfile> {
-    let name = normalize_agent_profile(agent)?;
-    let raw = session_text()
-        .agents
-        .get(&name.replace('-', "_"))
-        .cloned()
-        .unwrap_or_default();
-    let mut profile = AgentProfile {
-        name: name.clone(),
-        system_prompt_suffix: raw.system.trim().to_string(),
-        tool_mode: ToolMode::Normal,
-        auto_approve_edits: false,
-        auto_approve_bash: false,
-        yolo: false,
-    };
-    match name.as_str() {
-        "plan" => profile.tool_mode = ToolMode::ReadOnly,
-        "accept-edits" => profile.auto_approve_edits = true,
-        "auto-approve" => {
-            profile.yolo = true;
-            profile.auto_approve_edits = true;
-            profile.auto_approve_bash = true;
-        }
-        _ => {}
-    }
-    Ok(profile)
-}
-
-pub fn tool_policy(agent: &str) -> ToolPolicy {
-    let profile = agent_profile(agent).ok();
-    let read_only = profile
-        .as_ref()
-        .is_some_and(|p| p.tool_mode == ToolMode::ReadOnly);
-    if read_only {
-        return ToolPolicy::read_only();
-    }
-
-    let yolo = yolo_enabled() || profile.as_ref().is_some_and(|p| p.yolo);
-    ToolPolicy {
-        read_only: false,
-        files_write: if yolo || profile.as_ref().is_some_and(|p| p.auto_approve_edits) {
-            Approval::Auto
-        } else {
-            Approval::Ask
-        },
-        shell: if yolo || profile.as_ref().is_some_and(|p| p.auto_approve_bash) {
-            Approval::Auto
-        } else {
-            Approval::Ask
-        },
-        network: true,
-    }
 }
 
 pub fn load_model_config() -> Result<SavedModelConfig> {
@@ -302,7 +266,20 @@ fn genai_model_for_shim(shim: &str, model: &str) -> String {
     }
 }
 
-fn is_openai_responses_model(model: &str) -> bool {
+pub fn policy_risk_label(policy: &ToolPolicy) -> &'static str {
+    if policy.read_only {
+        "read-only: no file edits or shell"
+    } else if policy.shell == Approval::Auto {
+        "high: auto shell"
+    } else if policy.files_write == Approval::Auto {
+        "medium: auto edits"
+    } else {
+        "normal: asks before edits/shell"
+    }
+}
+
+pub fn is_openai_responses_model(model: &str) -> bool {
+    let (_, model) = split_model_spec(model);
     let model = model
         .rsplit_once('/')
         .map(|(_, name)| name)
@@ -314,7 +291,7 @@ fn is_openai_responses_model(model: &str) -> bool {
 pub fn is_routing_shim(shim: &str) -> bool {
     matches!(
         shim,
-        "openai" | "codex" | "bedrock-mantle" | "copilot" | "opencode"
+        "openai" | "copilot" | "bedrock-mantle" | "opencode" | "opencode-go"
     ) || shim
         .strip_prefix("local-")
         .is_some_and(|port| port.parse::<u16>().is_ok())
@@ -330,10 +307,6 @@ pub fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
         return (Some(left), &right[2..]);
     }
     (None, spec)
-}
-
-pub fn yolo_enabled() -> bool {
-    env_flag("OY_YOLO", false)
 }
 
 pub fn non_interactive() -> bool {
@@ -352,7 +325,6 @@ pub fn context_config() -> ContextConfig {
         limit_tokens,
         output_reserve_tokens,
         safety_reserve_tokens,
-        auto_compact: env_flag("OY_AUTO_COMPACT", true),
         trigger_ratio: parse_f64_env("OY_COMPACT_TRIGGER", 0.80).clamp(0.10, 1.0),
         recent_messages: parse_usize_env("OY_COMPACT_RECENT_MESSAGES", 16).max(1),
         tool_output_tokens: parse_usize_env("OY_COMPACT_TOOL_OUTPUT_TOKENS", 4_000).max(256),
@@ -360,52 +332,38 @@ pub fn context_config() -> ContextConfig {
     }
 }
 
-pub fn active_system_prompt(interactive: bool, agent: &str) -> String {
-    let mut prompt = session_text_value("system", "base").unwrap_or_default();
-    let suffix_key = if interactive {
-        "interactive_suffix"
+pub fn system_prompt(interactive: bool, mode: &str) -> String {
+    let mut prompt = BASE_SYSTEM.to_string();
+    prompt.push('\n');
+    prompt.push_str(if interactive {
+        INTERACTIVE_SUFFIX
     } else {
-        "noninteractive_suffix"
-    };
-    if let Ok(suffix) = session_text_value("system", suffix_key) {
-        if !suffix.trim().is_empty() {
-            prompt.push('\n');
-            prompt.push_str(suffix.trim());
-        }
-    }
-    if let Ok(profile) = agent_profile(agent) {
-        if !profile.system_prompt_suffix.trim().is_empty() {
+        NONINTERACTIVE_SUFFIX
+    });
+    if let Ok(mode) = safety_mode(mode) {
+        let suffix = mode.system_prompt_suffix().trim();
+        if !suffix.is_empty() {
             prompt.push_str("\n\n");
-            prompt.push_str(profile.system_prompt_suffix.trim());
+            prompt.push_str(suffix);
         }
     }
     if let Ok(raw) = env::var("OY_SYSTEM_FILE") {
         let path = PathBuf::from(&raw)
             .expand_home()
             .unwrap_or_else(|_| PathBuf::from(raw));
-        if path.is_file() {
-            if let Ok(extra) = fs::read_to_string(path) {
-                if !extra.trim().is_empty() {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(extra.trim());
-                }
-            }
+        if path.is_file()
+            && let Ok(extra) = fs::read_to_string(path)
+            && !extra.trim().is_empty()
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(extra.trim());
         }
     }
     prompt
 }
 
 pub fn ask_system_prompt(prompt: &str) -> String {
-    let suffix = session_text_value("system", "ask_suffix").unwrap_or_default();
-    if suffix.trim().is_empty() {
-        prompt.to_string()
-    } else {
-        format!("{}\n\n{}", prompt.trim_end(), suffix.trim())
-    }
-}
-
-pub fn ralph_limit_seconds() -> u64 {
-    parse_duration_env("OY_RALPH_LIMIT", 3 * 3600)
+    format!("{}\n\n{}", prompt.trim_end(), ASK_SUFFIX)
 }
 
 pub fn max_bash_cmd_bytes() -> usize {
@@ -413,6 +371,29 @@ pub fn max_bash_cmd_bytes() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(16 * 1024)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRoundLimit {
+    Limited(usize),
+    Unlimited,
+}
+
+impl ToolRoundLimit {
+    pub fn exceeded(self, completed_rounds: usize) -> bool {
+        matches!(self, Self::Limited(max) if completed_rounds > max)
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Limited(max) => max.to_string(),
+            Self::Unlimited => "unlimited".to_string(),
+        }
+    }
+}
+
+pub fn max_tool_rounds(default: usize) -> ToolRoundLimit {
+    parse_tool_round_limit(env::var("OY_MAX_TOOL_ROUNDS").ok().as_deref(), default)
 }
 
 pub fn save_session_file(name: Option<&str>, file: &SessionFile) -> Result<PathBuf> {
@@ -450,10 +431,11 @@ pub fn resolve_saved_session(name: Option<&str>) -> Result<Option<PathBuf>> {
     let Some(name) = name else {
         return Ok(sessions.first().cloned());
     };
-    if let Ok(index) = name.parse::<usize>() {
-        if index >= 1 && index <= sessions.len() {
-            return Ok(Some(sessions[index - 1].clone()));
-        }
+    if let Ok(index) = name.parse::<usize>()
+        && index >= 1
+        && index <= sessions.len()
+    {
+        return Ok(Some(sessions[index - 1].clone()));
     }
     if let Some(exact) = sessions
         .iter()
@@ -494,18 +476,28 @@ pub fn sanitize_session_name(name: &str) -> String {
     }
 }
 
-fn parse_duration_env(name: &str, default: u64) -> u64 {
-    let Some(value) = env::var(name).ok() else {
-        return default;
-    };
-    parse_duration_seconds(&value).unwrap_or(default)
-}
-
 fn parse_usize_env(name: &str, default: usize) -> usize {
     env::var(name)
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn parse_tool_round_limit(value: Option<&str>, default: usize) -> ToolRoundLimit {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ToolRoundLimit::Limited(default.max(1));
+    };
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "unlimited" | "none" | "off"
+    ) {
+        return ToolRoundLimit::Unlimited;
+    }
+    match value.parse::<usize>() {
+        Ok(0) => ToolRoundLimit::Unlimited,
+        Ok(max) => ToolRoundLimit::Limited(max),
+        Err(_) => ToolRoundLimit::Limited(default.max(1)),
+    }
 }
 
 fn parse_f64_env(name: &str, default: f64) -> f64 {
@@ -516,21 +508,79 @@ fn parse_f64_env(name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-pub fn parse_duration_seconds(value: &str) -> Result<u64> {
-    let value = value.trim();
-    if let Some(num) = value.strip_suffix('h') {
-        return Ok(num.trim().parse::<u64>()? * 3600);
+pub fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    reject_symlink_destination(path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
     }
-    if let Some(num) = value.strip_suffix('m') {
-        return Ok(num.trim().parse::<u64>()? * 60);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mode = fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0o600);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(mode)
+            .open(path)
+            .with_context(|| format!("failed writing {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed writing {}", path.display()))?;
+        let mut perms = file.metadata()?.permissions();
+        perms.set_mode(mode);
+        file.set_permissions(perms)?;
+        Ok(())
     }
-    if let Some(num) = value.strip_suffix('s') {
-        return Ok(num.trim().parse::<u64>()?);
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes).with_context(|| format!("failed writing {}", path.display()))
     }
-    Ok(value.parse::<u64>()?)
 }
 
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn resolve_workspace_output_path(root: &Path, requested: &Path) -> Result<PathBuf> {
+    if requested.is_absolute()
+        || requested
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!(
+            "output path must stay inside workspace: {}",
+            requested.display()
+        );
+    }
+    let root = root
+        .canonicalize()
+        .context("failed to resolve workspace root")?;
+    let path = root.join(requested);
+    let parent = path.parent().unwrap_or(&root);
+    if parent.exists() {
+        let resolved_parent = parent
+            .canonicalize()
+            .with_context(|| format!("failed resolving {}", parent.display()))?;
+        if !resolved_parent.starts_with(&root) {
+            bail!("output path escapes workspace: {}", requested.display());
+        }
+    }
+    reject_symlink_destination(&path)?;
+    Ok(path)
+}
+
+pub fn reject_symlink_destination(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("refusing to write symlink: {}", path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed checking {}", path.display())),
+    }
+}
+
+pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -557,7 +607,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     }
 }
 
-fn create_private_dir_all(path: &Path) -> Result<()> {
+pub fn create_private_dir_all(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
     #[cfg(unix)]
     {
@@ -608,6 +658,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mode_policy_and_risk_labels_are_centralized() {
+        let plan = tool_policy("plan");
+        assert_eq!(safety_mode("ask").unwrap().name(), "default");
+        assert_eq!(safety_mode("read_only").unwrap().name(), "plan");
+        assert_eq!(safety_mode("edit").unwrap().name(), "accept-edits");
+        assert_eq!(safety_mode("yolo").unwrap().name(), "auto-approve");
+        assert!(plan.read_only);
+        assert_eq!(
+            policy_risk_label(&plan),
+            "read-only: no file edits or shell"
+        );
+        assert_eq!(
+            policy_risk_label(&tool_policy("accept-edits")),
+            "medium: auto edits"
+        );
+        assert_eq!(
+            policy_risk_label(&tool_policy("auto-approve")),
+            "high: auto shell"
+        );
+    }
+
+    #[test]
+    fn output_paths_stay_in_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_workspace_output_path(dir.path(), Path::new("notes/out.md")).is_ok());
+        assert!(resolve_workspace_output_path(dir.path(), Path::new("../out.md")).is_err());
+        assert!(resolve_workspace_output_path(dir.path(), Path::new("/tmp/out.md")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_paths_reject_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        fs::write(&target, "safe").unwrap();
+        symlink(&target, dir.path().join("link.md")).unwrap();
+        let err = resolve_workspace_output_path(dir.path(), Path::new("link.md")).unwrap_err();
+        assert!(err.to_string().contains("refusing to write symlink"));
+    }
+
+    #[test]
     fn default_config_dir_name_is_rust_specific() {
         assert_eq!(DEFAULT_CONFIG_DIR_NAME, "oy-rust");
     }
@@ -655,5 +747,32 @@ mod tests {
         }"#;
         let file: SessionFile = serde_json::from_str(raw).unwrap();
         assert!(file.todos.is_empty());
+        assert!(file.workspace_root.is_none());
+    }
+
+    #[test]
+    fn tool_round_limit_supports_high_and_unlimited_values() {
+        assert_eq!(
+            parse_tool_round_limit(None, 512),
+            ToolRoundLimit::Limited(512)
+        );
+        assert_eq!(
+            parse_tool_round_limit(Some("2048"), 512),
+            ToolRoundLimit::Limited(2048)
+        );
+        assert_eq!(
+            parse_tool_round_limit(Some("0"), 512),
+            ToolRoundLimit::Unlimited
+        );
+        assert_eq!(
+            parse_tool_round_limit(Some("unlimited"), 512),
+            ToolRoundLimit::Unlimited
+        );
+        assert_eq!(
+            parse_tool_round_limit(Some("bad"), 512),
+            ToolRoundLimit::Limited(512)
+        );
+        assert!(ToolRoundLimit::Limited(2).exceeded(3));
+        assert!(!ToolRoundLimit::Unlimited.exceeded(usize::MAX));
     }
 }

@@ -1,19 +1,14 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 26
-expression: "chat::chat_help_text()"
+assertion_line: 12
+expression: chat_help_text()
 ---
 Enter sends; Alt/Shift+Enter inserts newline
-/help (/h, /?) -- show command help
-/tokens (/t) -- show approximate context tokens
-/compact [llm|deterministic] (/k) -- compact old transcript context
+/help (/h, /?) -- show help
+/status (/s), /debug (/d) -- show model, mode, context, and todos
 /model [value] (/m) -- show or switch model
-/thinking [auto|off|low|medium|high] -- adjust reasoning effort
-/status (/s), /debug (/d) -- show session status
-/yolo -- approve all tools for this session
 /ask <question> -- research-only query
-/save [name] -- save session transcript
-/load [name] -- load a saved session
-/undo (/u) -- remove last prompt and follow-ups
-/clear (/c) -- clear conversation
+/save [name], /load [name] -- save or load a session
+/undo (/u), /clear (/c) -- repair conversation state
 /quit (/q), /exit -- end session
+Advanced: /tokens, /compact [llm|deterministic], /thinking [auto|off|low|medium|high]

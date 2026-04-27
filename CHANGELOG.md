@@ -2,12 +2,20 @@
 
 ## [Unreleased]
 
-### Changed
-- Rewrote the CLI in Rust around `genai`, `rustyline`, ripgrep ecosystem crates, and `toon-format`.
-- Updated docs and examples to prefer native `genai` model ids such as `github_copilot::openai/gpt-4.1-mini` and `local-8080::qwen3.5`.
+## [0.7.6] - 2026-04-27
+
+Consolidated changes since `v0.7.5`.
 
 ### Added
-- Rust `audit`, `audit-logic`, and `renovate-local` command support.
+- Native AWS Bedrock Converse support with AWS SDK credential loading, SSO-expiry detection, `aws sso login` retry, and tool-use conversion.
+- Bedrock Mantle routing via Bedrock API bearer tokens, `AWS_BEARER_TOKEN_BEDROCK`, and contemporary Moonshot/Kimi model hints.
+- OpenCode Zen/Go routing shims (`opencode::`, `opencode-go::`) with `OPENCODE_API_KEY`, endpoint overrides, and fallback to `~/.local/share/opencode/auth.json`.
+
+### Changed
+- Tightened terminal UX with dense grouped tool-call progress, bat-like text previews, color-aware markdown/diff rendering, and clearer truncation.
+- Simplified docs and examples around `--mode`, `copilot::`, OpenAI, AWS Bedrock, OpenCode, and local OpenAI-compatible defaults.
+- Moved built-in prompts/tool descriptions into Rust, removed the TOML prompt asset, and trimmed terminal rendering dependencies.
+- Refreshed the Rust toolchain/dependency baseline, including AWS SDK-backed Bedrock integration.
 
 ## [0.6.0] - 2026-04-22
 
@@ -40,7 +48,7 @@ Major changes since `v0.4.6`.
 ### Added
 - `oy audit-logic [focus]`, a logic-focused audit mode that skips docs and lockfiles, strips comments/docstrings where possible, and concentrates review on executable behaviour.
 - Session continuation and resume for `oy chat` and `oy run` via `--continue-session` and `--resume <name-or-number>`.
-- Built-in agent profiles for common approval modes: `plan`, `accept-edits`, and `auto-approve`.
+- Built-in modes for common approval policies: `plan`, `accept-edits`, and `auto-approve`.
 - `oy renovate-local` for running Renovate locally and writing lookup reports to `.tmp/renovate-<date>.json`.
 - An audit transparency snippet in generated `ISSUES.md` reports showing the `oy` command used.
 

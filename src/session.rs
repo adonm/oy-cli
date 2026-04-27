@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ReasoningEffort, ToolCall, ToolResponse};
+use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ChatResponse, ToolCall, ToolResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -9,7 +9,7 @@ use tiktoken_rs::{bpe_for_model, cl100k_base};
 
 use crate::config::{self, SessionFile};
 
-const MAX_TOOL_ROUNDS: usize = 640;
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 512;
 use crate::model;
 use crate::tools::{TodoItem, ToolContext, ToolPolicy};
 
@@ -65,7 +65,6 @@ pub struct ContextStatus {
     pub limit_tokens: usize,
     pub input_budget_tokens: usize,
     pub trigger_tokens: usize,
-    pub auto_compact: bool,
     pub summary_present: bool,
 }
 
@@ -150,7 +149,7 @@ pub struct Session {
     pub system_prompt: String,
     pub interactive: bool,
     pub policy: ToolPolicy,
-    pub agent: String,
+    pub mode: String,
     pub transcript: Transcript,
     pub todos: Vec<TodoItem>,
 }
@@ -347,17 +346,17 @@ impl Session {
         root: std::path::PathBuf,
         model: String,
         interactive: bool,
-        agent: String,
+        mode: String,
         policy: ToolPolicy,
     ) -> Self {
-        let system_prompt = session_system_prompt(&root, interactive, &agent);
+        let system_prompt = config::system_prompt(interactive, &mode);
         Self {
             root,
             model,
             system_prompt,
             interactive,
             policy,
-            agent,
+            mode,
             transcript: Transcript::new(),
             todos: Vec::new(),
         }
@@ -374,7 +373,8 @@ impl Session {
 
     fn chat_options(&self) -> Option<ChatOptions> {
         model::reasoning_effort_option(&self.model)
-            .map(|effort| ChatOptions::default().with_reasoning_effort(reasoning_effort(effort)))
+            .and_then(|effort| effort.parse().ok())
+            .map(|effort| ChatOptions::default().with_reasoning_effort(effort))
     }
 
     fn wait_status(&self, model_spec: &str) -> String {
@@ -383,8 +383,8 @@ impl Session {
             .token_estimate(model_spec, &self.system_prompt, &self.todos);
         let mut parts = vec![
             "oy".to_string(),
-            model_suffix(model_spec).to_string(),
-            format!("{}", format_tokens(estimate.total_tokens)),
+            display_model(model_spec).to_string(),
+            token_count_text(estimate.total_tokens),
             format!("{} msg", estimate.messages),
         ];
         if let Some(effort) = model::default_reasoning_effort(model_spec) {
@@ -411,7 +411,6 @@ impl Session {
             limit_tokens: config.limit_tokens,
             input_budget_tokens: config.input_budget_tokens(),
             trigger_tokens: config.trigger_tokens(),
-            auto_compact: config.auto_compact,
             summary_present: self.transcript.summary.is_some(),
         }
     }
@@ -460,8 +459,9 @@ impl Session {
     pub fn save(&self, name: Option<&str>) -> Result<std::path::PathBuf> {
         let payload = SessionFile {
             model: self.model.clone(),
-            agent: self.agent.clone(),
+            mode: self.mode.clone(),
             saved_at: Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            workspace_root: Some(self.root.clone()),
             transcript: serde_json::to_value(&self.transcript)?,
             todos: self.todos.clone(),
         };
@@ -477,17 +477,37 @@ pub fn load_saved(name: Option<&str>, interactive: bool) -> Result<Option<Sessio
     let transcript: Transcript = serde_json::from_value(saved.transcript)
         .with_context(|| format!("invalid saved transcript in {}", path.display()))?;
     let root = config::oy_root()?;
-    let system_prompt = session_system_prompt(&root, interactive, &saved.agent);
+    ensure_saved_workspace_matches(&path, saved.workspace_root.as_deref(), &root)?;
+    let system_prompt = config::system_prompt(interactive, &saved.mode);
     Ok(Some(Session {
         root,
         model: saved.model,
         system_prompt,
         interactive,
-        policy: config::tool_policy(&saved.agent),
-        agent: saved.agent,
+        policy: config::tool_policy(&saved.mode),
+        mode: saved.mode,
         transcript,
         todos: saved.todos,
     }))
+}
+
+fn ensure_saved_workspace_matches(
+    session_path: &Path,
+    saved_root: Option<&Path>,
+    current_root: &Path,
+) -> Result<()> {
+    let Some(saved_root) = saved_root else {
+        return Ok(());
+    };
+    if saved_root == current_root {
+        return Ok(());
+    }
+    bail!(
+        "saved session {} belongs to workspace {}; current workspace is {}",
+        session_path.display(),
+        saved_root.display(),
+        current_root.display()
+    )
 }
 
 fn deterministic_summary(messages: &[StoredMessage], model: &str, max_tokens: usize) -> String {
@@ -611,29 +631,14 @@ Transcript to compact:
     )
 }
 
-fn session_system_prompt(root: &Path, interactive: bool, agent: &str) -> String {
-    let mut prompt = config::active_system_prompt(interactive, agent);
-    if let Some(snapshot) = crate::tools::compact_workspace_snapshot(root) {
-        prompt.push_str("\n\n");
-        prompt.push_str(&snapshot);
-    }
-    prompt
-}
-
-fn model_suffix(model_spec: &str) -> &str {
+fn display_model(model_spec: &str) -> &str {
     model_spec
         .rsplit_once("::")
         .map(|(_, model)| model)
         .unwrap_or(model_spec)
 }
 
-fn reasoning_effort(value: &str) -> ReasoningEffort {
-    value
-        .parse::<ReasoningEffort>()
-        .unwrap_or(ReasoningEffort::High)
-}
-
-fn format_tokens(count: usize) -> String {
+fn token_count_text(count: usize) -> String {
     if count < 1000 {
         format!("{count} tok")
     } else {
@@ -641,11 +646,7 @@ fn format_tokens(count: usize) -> String {
     }
 }
 
-async fn ensure_context_budget(
-    session: &mut Session,
-    client: &genai::Client,
-    model_spec: &str,
-) -> Result<()> {
+async fn ensure_context_budget(session: &mut Session, model_spec: &str) -> Result<()> {
     let config = config::context_config();
     let estimate =
         session
@@ -654,45 +655,14 @@ async fn ensure_context_budget(
     if estimate.total_tokens <= config.trigger_tokens() {
         return Ok(());
     }
-    if !config.auto_compact {
-        if estimate.total_tokens > config.input_budget_tokens() {
-            bail!(
-                "context estimate {} exceeds input budget {}; enable OY_AUTO_COMPACT or use /compact",
-                estimate.total_tokens,
-                config.input_budget_tokens()
-            );
-        }
-        return Ok(());
-    }
 
-    if let Some(stats) = session.compact_deterministic() {
-        if !crate::ui::is_quiet() {
-            crate::ui::err_line(format_args!(
-                "compacted context: {} -> {} tokens ({} old messages, {} tool outputs)",
-                stats.before_tokens,
-                stats.after_tokens,
-                stats.removed_messages,
-                stats.compacted_tools
-            ));
-        }
-    }
-
-    let estimate =
-        session
-            .transcript
-            .token_estimate(model_spec, &session.system_prompt, &session.todos);
-    if estimate.total_tokens <= config.input_budget_tokens() {
-        return Ok(());
-    }
-
-    if let Some(stats) = compact_llm_session_with_client(session, client, model_spec, false).await?
+    if let Some(stats) = session.compact_deterministic()
+        && !crate::ui::is_quiet()
     {
-        if !crate::ui::is_quiet() {
-            crate::ui::err_line(format_args!(
-                "summarized context: {} -> {} tokens ({} old messages)",
-                stats.before_tokens, stats.after_tokens, stats.removed_messages
-            ));
-        }
+        crate::ui::err_line(format_args!(
+            "compacted context: {} -> {} tokens ({} old messages, {} tool outputs)",
+            stats.before_tokens, stats.after_tokens, stats.removed_messages, stats.compacted_tools
+        ));
     }
 
     let estimate =
@@ -701,7 +671,7 @@ async fn ensure_context_budget(
             .token_estimate(model_spec, &session.system_prompt, &session.todos);
     if estimate.total_tokens > config.input_budget_tokens() {
         bail!(
-            "context estimate {} still exceeds input budget {} after compaction; current prompt/system may be too large",
+            "context estimate {} exceeds input budget {}; use /compact to summarize older messages",
             estimate.total_tokens,
             config.input_budget_tokens()
         );
@@ -716,6 +686,19 @@ async fn compact_llm_session(
     let client = model::build_client()?;
     let model_spec = model::to_genai_model_spec(&session.model);
     compact_llm_session_with_client(session, &client, &model_spec, force).await
+}
+
+async fn exec_chat(
+    model_spec: &str,
+    client: &genai::Client,
+    req: ChatRequest,
+    options: Option<&ChatOptions>,
+) -> Result<ChatResponse> {
+    if crate::bedrock::is_bedrock_model(model_spec) {
+        crate::bedrock::exec_chat(model_spec, req, options).await
+    } else {
+        Ok(client.exec_chat(model_spec, req, options).await?)
+    }
 }
 
 async fn compact_llm_session_with_client(
@@ -755,7 +738,7 @@ async fn compact_llm_session_with_client(
         )
         .append_message(ChatMessage::user(prompt));
     let options = session.chat_options();
-    let response = client.exec_chat(model_spec, req, options.as_ref()).await?;
+    let response = exec_chat(model_spec, client, req, options.as_ref()).await?;
     let mut summary = response.into_first_text().unwrap_or_default();
     if summary.trim().is_empty() {
         summary = deterministic_summary(&removed, model_spec, config.summary_tokens);
@@ -827,20 +810,35 @@ fn is_noop_tool_result(name: &str, result: &Value) -> bool {
 }
 
 pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
+    run_prompt_with_policy(session, prompt, None).await
+}
+
+pub async fn run_prompt_read_only(session: &mut Session, prompt: &str) -> Result<String> {
+    run_prompt_with_policy(session, prompt, Some(ToolPolicy::read_only())).await
+}
+
+async fn run_prompt_with_policy(
+    session: &mut Session,
+    prompt: &str,
+    policy_override: Option<ToolPolicy>,
+) -> Result<String> {
     let client = model::build_client()?;
     session.transcript.messages.push(StoredMessage::User {
         content: prompt.to_string(),
     });
     let mut repeated_noop_tools = RepeatedNoopTools::default();
+    let tool_round_limit = config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS);
+    let mut tool_round_count = 0usize;
+    let mut tool_call_count = 0usize;
 
-    for tool_round in 0..=MAX_TOOL_ROUNDS {
-        if tool_round == MAX_TOOL_ROUNDS {
-            bail!("tool loop exceeded {MAX_TOOL_ROUNDS} rounds; try a narrower prompt");
+    loop {
+        let mut tool_context = session.tool_context();
+        if let Some(policy) = policy_override {
+            tool_context.policy = policy;
         }
-        let tool_context = session.tool_context();
         let tool_specs = crate::tools::tool_specs(&tool_context);
         let model_spec = model::to_genai_model_spec(&session.model);
-        ensure_context_budget(session, &client, &model_spec).await?;
+        ensure_context_budget(session, &model_spec).await?;
         let req = session
             .transcript
             .to_chat_request(&session.system_prompt, &tool_context)
@@ -849,14 +847,22 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
             crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
         }
         let options = session.chat_options();
-        let response = client.exec_chat(&model_spec, req, options.as_ref()).await?;
+        let response = exec_chat(&model_spec, &client, req, options.as_ref()).await?;
         let tool_calls = response
             .tool_calls()
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
         if !tool_calls.is_empty() {
-            crate::ui::tool_batch(tool_round + 1, tool_calls.len());
+            let next_tool_round = tool_round_count + 1;
+            if tool_round_limit.exceeded(next_tool_round) {
+                let limit = tool_round_limit.label();
+                bail!(
+                    "tool loop exceeded {limit} tool rounds ({tool_call_count} tool calls completed); set OY_MAX_TOOL_ROUNDS=<number> or OY_MAX_TOOL_ROUNDS=unlimited for trusted long runs"
+                );
+            }
+            tool_round_count = next_tool_round;
+            crate::ui::tool_batch(tool_round_count, tool_calls.len());
             session
                 .transcript
                 .messages
@@ -872,7 +878,11 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
                 });
 
             for call in tool_calls {
+                tool_call_count += 1;
                 let mut ctx = session.tool_context();
+                if let Some(policy) = policy_override {
+                    ctx.policy = policy;
+                }
                 let result =
                     match crate::tools::invoke(&mut ctx, &call.fn_name, call.fn_arguments.clone())
                         .await
@@ -897,12 +907,33 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
         });
         return Ok(answer);
     }
-    bail!("tool loop exceeded {MAX_TOOL_ROUNDS} rounds; try a narrower prompt")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_workspace_mismatch_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.json");
+        let saved_root = dir.path().to_path_buf();
+
+        let err = ensure_saved_workspace_matches(&session_path, Some(&saved_root), current.path())
+            .unwrap_err();
+
+        assert!(err.to_string().contains("belongs to workspace"));
+    }
+
+    #[test]
+    fn saved_workspace_allows_legacy_without_root() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            ensure_saved_workspace_matches(&dir.path().join("session.json"), None, dir.path())
+                .is_ok()
+        );
+    }
 
     #[test]
     fn repeated_noop_tools_rejects_repeated_zero_replace() {
