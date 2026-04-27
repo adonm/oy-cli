@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::{Display, Write as _};
 use std::io::IsTerminal as _;
 use std::sync::LazyLock;
@@ -226,7 +227,7 @@ fn render_markdown(text: &str) -> String {
 }
 
 pub fn code(path: &str, text: &str, first_line: usize) -> String {
-    numbered_block(path, text, first_line)
+    numbered_block(path, &normalize_code_preview_text(text), first_line)
 }
 
 pub fn text_block(title: &str, text: &str) -> String {
@@ -237,13 +238,55 @@ pub fn block_title(title: &str) -> String {
     path(format_args!("── {title}"))
 }
 
-pub fn numbered_line(line_number: usize, width: usize, text: &str) -> String {
-    format!(
-        "{} {} {}",
+#[cfg(test)]
+fn numbered_line(line_number: usize, width: usize, text: &str) -> String {
+    numbered_line_with_max_width(line_number, width, text, usize::MAX)
+}
+
+fn numbered_line_with_max_width(
+    line_number: usize,
+    width: usize,
+    text: &str,
+    max_width: usize,
+) -> String {
+    let text = normalize_code_preview_text(text);
+    let prefix = format!(
+        "{} {} ",
         faint(format_args!("{line_number:>width$}")),
-        faint("│"),
-        text
-    )
+        faint("│")
+    );
+    let available = max_width
+        .saturating_sub(ansi_stripped_width(&prefix))
+        .max(1);
+    format!("{prefix}{}", truncate_width(&text, available))
+}
+
+fn normalize_code_preview_text(text: &str) -> Cow<'_, str> {
+    const TAB_WIDTH: usize = 4;
+    if !text.contains('\t') {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut column = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '\t' => {
+                let spaces = TAB_WIDTH - (column % TAB_WIDTH);
+                out.extend(std::iter::repeat_n(' ', spaces));
+                column += spaces;
+            }
+            '\n' | '\r' => {
+                out.push(ch);
+                column = 0;
+            }
+            _ => {
+                out.push(ch);
+                column += UnicodeWidthChar::width(ch).unwrap_or(0);
+            }
+        }
+    }
+    Cow::Owned(out)
 }
 
 fn numbered_block(title: &str, text: &str, first_line: usize) -> String {
@@ -254,15 +297,30 @@ fn numbered_block(title: &str, text: &str, first_line: usize) -> String {
         .max(1)
         .to_string()
         .len();
-    let highlighted = highlighted_block(title, text);
+    let max_width = terminal_width().saturating_sub(4).max(40);
+    let code_width = max_width.saturating_sub(width + 3).max(1);
     let mut out = String::new();
-    let _ = writeln!(out, "{}", block_title(title));
+    let _ = writeln!(out, "{}", truncate_width(&block_title(title), max_width));
     if text.is_empty() {
-        let _ = writeln!(out, "{}", numbered_line(first_line, width, ""));
+        let _ = writeln!(
+            out,
+            "{}",
+            numbered_line_with_max_width(first_line, width, "", max_width)
+        );
     } else {
-        let lines = highlighted.as_deref().unwrap_or(text).lines();
+        let display_text = text
+            .lines()
+            .map(|line| truncate_width(line, code_width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let highlighted = highlighted_block(title, &display_text);
+        let lines = highlighted.as_deref().unwrap_or(&display_text).lines();
         for (idx, line) in lines.enumerate() {
-            let _ = writeln!(out, "{}", numbered_line(first_line + idx, width, line));
+            let _ = writeln!(
+                out,
+                "{}",
+                numbered_line_with_max_width(first_line + idx, width, line, max_width)
+            );
         }
     }
     out.trim_end().to_string()
@@ -431,6 +489,13 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
 }
 
 pub fn truncate_width(text: &str, max_width: usize) -> String {
+    if ansi_stripped_width(text) <= max_width {
+        return text.to_string();
+    }
+    truncate_plain_width(text, max_width)
+}
+
+fn truncate_plain_width(text: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(text) <= max_width {
         return text.to_string();
     }
@@ -448,6 +513,24 @@ pub fn truncate_width(text: &str, max_width: usize) -> String {
     }
     out.push_str(ellipsis);
     out
+}
+
+fn ansi_stripped_width(text: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            width += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    width
 }
 
 pub fn compact_preview(text: &str, max: usize) -> String {
@@ -563,5 +646,49 @@ mod tests {
             tool_result_head("read", Duration::from_millis(42)),
             "  ✓ read 42ms"
         );
+    }
+
+    #[test]
+    fn numbered_line_expands_tabs_to_stable_columns() {
+        set_output_mode(OutputMode::Normal);
+        assert_eq!(numbered_line(7, 1, "\tlet x = 1;"), "7 │     let x = 1;");
+        assert_eq!(numbered_line(8, 1, "ab\tcd"), "8 │ ab  cd");
+        assert_eq!(
+            code("demo.rs", "\tfn main() {}\n\t\tprintln!(\"hi\");", 1),
+            "── demo.rs\n1 │     fn main() {}\n2 │         println!(\"hi\");"
+        );
+    }
+
+    #[test]
+    fn numbered_line_clamps_long_read_lines_to_preview_width() {
+        set_output_mode(OutputMode::Normal);
+        let line = numbered_line_with_max_width(
+            394,
+            3,
+            r#"        .filter(|line| !line.starts_with(&format!("> {}", prompts::AUDIT_TRANSPARENCY_PREFIX)))"#,
+            40,
+        );
+        assert!(UnicodeWidthStr::width(line.as_str()) <= 40, "{line}");
+        assert!(line.starts_with("394 │ "));
+        assert!(line.ends_with('…'));
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn code_preview_lines_fit_tool_result_indent_width() {
+        set_output_mode(OutputMode::Normal);
+        let preview = code(
+            "src/audit.rs",
+            r#"pub(crate) fn with_transparency_line(report: &str, snippet: &str) -> String {
+        .filter(|line| !line.starts_with(&format!("> {}", prompts::AUDIT_TRANSPARENCY_PREFIX)))"#,
+            390,
+        );
+        let max_width = terminal_width().saturating_sub(4).max(40);
+        for line in preview.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= max_width,
+                "line exceeded {max_width}: {line}"
+            );
+        }
     }
 }

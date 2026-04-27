@@ -13,11 +13,17 @@ Shell commands inherit your environment. Credentials available to your shell, su
 Prefer a disposable container or VM. Start read-only, then opt into writes only when you trust the workspace and proposed changes.
 
 ```bash
-# Read-only inspection
+# Deterministic no-tools audit; writes ISSUES.md inside the mounted workspace
+docker run --rm -it \
+  -v "$PWD:/workspace:rw" \
+  -w /workspace \
+  oy-image oy audit
+
+# Exploratory read-only agent mode
 docker run --rm -it \
   -v "$PWD:/workspace:ro" \
   -w /workspace \
-  oy-image oy chat --agent plan
+  oy-image oy chat --mode plan
 
 # Writable but contained workspace
 docker run --rm -it \
@@ -29,7 +35,7 @@ docker run --rm -it \
 
 Avoid mounting the host Docker socket into AI-assisted development containers. Docker socket access is usually host-root-equivalent.
 
-Use `oy chat --agent plan` for read-only exploration, avoid `auto-approve`/`OY_YOLO` for untrusted work, and prefer throwaway provider credentials where practical.
+`oy audit` does not give tools to the model, but it still sends collected repository text to the configured model provider. Use `oy chat --mode plan` for exploratory read-only work, avoid `auto-approve`/`OY_YOLO` for untrusted work, and prefer throwaway provider credentials where practical.
 
 ## Reporting a Vulnerability
 

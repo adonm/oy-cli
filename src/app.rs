@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
+use crate::audit;
 use crate::config;
 use crate::model;
 use crate::session::{self, Session};
@@ -37,7 +38,7 @@ enum Command {
     Model(ModelArgs),
     /// Check setup, auth, paths, and safety-relevant defaults.
     Doctor(DoctorArgs),
-    /// Run a read-only audit prompt and print concise findings.
+    /// Audit the current workspace and write markdown findings.
     Audit(AuditArgs),
 }
 
@@ -115,9 +116,10 @@ struct AuditArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write findings to a workspace file instead of stdout"
+        default_value = "ISSUES.md",
+        help = "Write findings to a workspace file (default: ISSUES.md)"
     )]
-    out: Option<PathBuf>,
+    out: PathBuf,
 }
 
 pub async fn run(argv: Vec<String>) -> Result<i32> {
@@ -576,32 +578,41 @@ fn safe_container_command(root: &Path, read_only: bool) -> String {
 
 async fn audit_command(args: AuditArgs) -> Result<i32> {
     let focus = args.focus.join(" ");
-    let mut session = load_or_new(false, "plan", false, "")?;
-    let prompt = build_audit_prompt(&focus);
-    print_session_intro(
-        "audit",
-        &session,
-        (!focus.is_empty()).then_some(focus.as_str()),
-    );
-    let answer = session::run_prompt_read_only(&mut session, &prompt).await?;
-    if let Some(path) = args.out {
-        write_workspace_file(&session.root, &path, &answer)?;
-        crate::ui::success(format_args!("wrote {}", path.display()));
-    } else if !answer.is_empty() {
-        crate::ui::markdown(&format!("{answer}\n"));
+    let root = config::oy_root()?;
+    let model = model::resolve_model(None)?;
+    if !crate::ui::is_quiet() {
+        crate::ui::section("audit");
+        crate::ui::kv("workspace", root.display());
+        crate::ui::kv("model", &model);
+        crate::ui::kv("mode", "no-tools");
+        crate::ui::kv("out", args.out.display());
+        if !focus.trim().is_empty() {
+            crate::ui::kv("focus", crate::ui::compact_preview(&focus, 100));
+        }
+    }
+    let result = audit::run(audit::AuditOptions {
+        root,
+        model,
+        focus,
+        out: args.out,
+    })
+    .await?;
+    if crate::ui::is_json() {
+        let payload = serde_json::json!({
+            "output": result.output_path,
+            "files": result.file_count,
+            "chunks": result.chunk_count,
+        });
+        crate::ui::line(serde_json::to_string_pretty(&payload)?);
+    } else {
+        crate::ui::success(format_args!(
+            "wrote {} ({} files, {} chunks)",
+            result.output_path.display(),
+            result.file_count,
+            result.chunk_count
+        ));
     }
     Ok(0)
-}
-
-fn build_audit_prompt(focus: &str) -> String {
-    let mut prompt = String::from(
-        "Audit this repository for security issues, unnecessary complexity, and material usability or performance problems. Use read-only tools only. Be concise and evidence-first. For each concrete finding include severity, file/symbol evidence, impact, and a simple fix. Avoid generic best-practice advice.",
-    );
-    if !focus.trim().is_empty() {
-        prompt.push_str("\n\nFocus: ");
-        prompt.push_str(focus.trim());
-    }
-    prompt
 }
 
 fn load_or_new(
@@ -676,18 +687,5 @@ mod audit_tests {
         ));
         assert!(!is_exact_model_spec("gpt"));
         assert!(!is_exact_model_spec("nova"));
-    }
-
-    #[test]
-    fn audit_prompt_includes_focus_when_provided() {
-        let prompt = build_audit_prompt("auth paths");
-        assert!(prompt.contains("Audit this repository"));
-        assert!(prompt.contains("Focus: auth paths"));
-    }
-
-    #[test]
-    fn audit_prompt_omits_empty_focus() {
-        let prompt = build_audit_prompt("   ");
-        assert!(!prompt.contains("Focus:"));
     }
 }

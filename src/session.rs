@@ -75,7 +75,7 @@ fn model_tokenizer_name(model: &str) -> &str {
         .unwrap_or(model)
 }
 
-fn count_tokens(model: &str, text: &str) -> usize {
+pub(crate) fn count_tokens(model: &str, text: &str) -> usize {
     let model_name = model_tokenizer_name(model);
     if let Ok(bpe) = bpe_for_model(model_name) {
         return bpe.encode_with_special_tokens(text).len();
@@ -815,6 +815,31 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
 
 pub async fn run_prompt_read_only(session: &mut Session, prompt: &str) -> Result<String> {
     run_prompt_with_policy(session, prompt, Some(ToolPolicy::read_only())).await
+}
+
+pub async fn run_prompt_once_no_tools(
+    model: &str,
+    system_prompt: &str,
+    prompt: &str,
+) -> Result<String> {
+    let client = model::build_client()?;
+    let model_spec = model::to_genai_model_spec(model);
+    let req = ChatRequest::default()
+        .with_system(system_prompt)
+        .append_message(ChatMessage::user(prompt.to_string()));
+    if !crate::ui::is_quiet() {
+        let tokens = count_tokens(&model_spec, system_prompt) + count_tokens(&model_spec, prompt);
+        crate::ui::err_line(format_args!(
+            "oy · {} · {} · no tools",
+            display_model(&model_spec),
+            token_count_text(tokens)
+        ));
+    }
+    let options = model::reasoning_effort_option(model)
+        .and_then(|effort| effort.parse().ok())
+        .map(|effort| ChatOptions::default().with_reasoning_effort(effort));
+    let response = exec_chat(&model_spec, &client, req, options.as_ref()).await?;
+    Ok(response.into_first_text().unwrap_or_default())
 }
 
 async fn run_prompt_with_policy(

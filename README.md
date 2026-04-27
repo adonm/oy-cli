@@ -41,14 +41,14 @@ oy --help
 | `oy chat` | Interactive session with slash commands and history |
 | `oy model [filter]` | List, choose, and save a model id/routing shim |
 | `oy doctor` | Check model/auth/local-state setup and safety-relevant defaults |
-| `oy audit [focus]` | Read-only repository review with concise findings |
+| `oy audit [focus]` | Deterministic no-tools repository audit; writes `ISSUES.md` by default |
 | `oy --help` | Show CLI help |
 
 ## Common tasks
 
 ```bash
 oy "inspect the main module and suggest improvements"
-oy audit "security, complexity, and performance"
+oy audit "security, complexity, and performance"   # writes ISSUES.md
 oy run --out docs/plan.md "write a migration plan"
 oy chat --continue-session
 oy run --resume 20260325 "finish the refactor"
@@ -58,13 +58,17 @@ echo "update the changelog" | OY_NON_INTERACTIVE=1 oy run
 
 ## Audit
 
-`oy audit [focus]` runs a read-only review using the same read-only workspace tools as `oy chat --mode plan`. It asks for concise, evidence-first findings with severity, file/symbol evidence, impact, and a simple fix.
+`oy audit [focus]` runs a deterministic no-tools repository audit and writes `ISSUES.md` by default. The runner, not the model, collects reviewable workspace text, builds a repository manifest and security-relevant index, then sends the included text to the model as either one full review or a simple map→reduce chunk review for larger repositories.
+
+The audit prompt embeds an OWASP ASVS/MASVS checklist plus grugbrain complexity guidance, and asks for concise, evidence-first findings with severity, file/symbol evidence, trust boundary/sink where security-relevant, impact, exploitability/preconditions, references, and fixes. Generated reports include a transparency line showing the command/model context used.
 
 ```bash
-oy audit
+oy audit                         # writes ISSUES.md
 oy audit "security and complexity"
-oy audit "auth paths" --out ISSUES.md
+oy audit "auth paths" --out docs/audit.md
 ```
+
+`oy audit` intentionally does not expose `read`, `search`, `webfetch`, `bash`, or file-edit tools to the model. This keeps the audit simpler and makes the reviewed input deterministic. Use `oy chat --mode plan` when you want an exploratory read-only agent instead.
 
 ## Model setup
 
@@ -155,7 +159,7 @@ Avoid mounting the host Docker socket into AI-assisted containers; it is usually
 
 Non-interactive mode cannot pause for approval or questions. Use explicit modes/env only in workspaces and automation contexts you trust.
 
-Protections include workspace-bound file tools (even in auto modes), public-only `webfetch`, read-only modes, explicit approval modes, and clamped terminal previews.
+Protections include workspace-bound file tools (even in auto modes), public-only `webfetch`, read-only modes, explicit approval modes, no-tools deterministic audits, and clamped terminal previews.
 
 ## Tool round budget
 
@@ -182,10 +186,10 @@ Tool output shown in the terminal is a preview, not always the full tool result.
 
 Text previews use bat-like defaults: a small title bar, line numbers, a gutter, and color when the terminal supports it. `OY_COLOR=always` forces ANSI color, while `OY_COLOR=never`, `OY_COLOR=off`, or `NO_COLOR` disables it.
 
-- `read` returns line slices rendered with file name and source line numbers; use `offset` and `limit` to fetch more.
+- `read` returns line slices rendered with file name and source line numbers; use `offset` and `limit` to fetch more. Long lines are clamped to the preview width and tabs are expanded to stable columns so gutters stay aligned.
 - `search`, `list`, and `replace` previews show bounded item lists and say when more exist.
 - `bash` and `webfetch` summarize long output before it goes back to the model and render stdout/stderr/body snippets as numbered blocks.
-- Preview lines are clamped so terminal output remains scannable.
+- Preview lines are clamped so terminal output remains scannable instead of wrapping into misleading indentation.
 
 ## Model ids and routing shims
 

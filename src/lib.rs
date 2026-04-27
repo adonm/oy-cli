@@ -1,10 +1,12 @@
 #![recursion_limit = "256"]
 
 mod app;
+mod audit;
 mod bedrock;
 mod chat;
 mod config;
 mod model;
+mod prompts;
 mod session;
 mod tools;
 mod ui;

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+- Reworked `oy audit` as a deterministic no-tools audit pipeline that writes `ISSUES.md` by default, embeds OWASP ASVS/MASVS plus grugbrain guidance, and uses full-repo or map→reduce review depending on repository size.
+- Added generated audit report transparency lines showing the `oy audit` command/model context used.
+
+### Changed
+- Audit review input is now collected by the Rust runner rather than discovered by model tool calls, making included text and chunking deterministic.
+- `read` previews now clamp long code lines to the terminal preview width and expand tabs to stable columns so line-number gutters do not visually drift.
+
 ## [0.7.6] - 2026-04-27
 
 Consolidated changes since `v0.7.5`.
