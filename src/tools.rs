@@ -1971,10 +1971,7 @@ struct SearchText {
 fn read_text_file(root: &Path, path: &Path) -> Result<Option<SearchText>> {
     let rel = rel_path(root, path);
     let raw = fs::read(path)?;
-    if raw.contains(&0) {
-        return Ok(None);
-    }
-    Ok(String::from_utf8(raw).ok().map(|text| SearchText {
+    Ok(crate::decode_utf8(raw).ok().map(|text| SearchText {
         display_path: rel,
         text,
     }))
@@ -2046,10 +2043,13 @@ fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<Replace
         return Ok(ReplaceOutcome::Skipped("symlink"));
     }
     let raw = fs::read(path)?;
-    if raw.contains(&0) {
-        return Ok(ReplaceOutcome::Skipped("binary file"));
-    }
-    let text = String::from_utf8(raw).map_err(|_| anyhow!("cannot decode utf-8"))?;
+    let text = match crate::decode_utf8(raw) {
+        Ok(text) => text,
+        Err(crate::TextDecodeError::Binary) => {
+            return Ok(ReplaceOutcome::Skipped("binary file"));
+        }
+        Err(crate::TextDecodeError::NonUtf8) => bail!("cannot decode utf-8"),
+    };
     let count = regex.find_iter(&text).count();
     if count == 0 {
         return Ok(ReplaceOutcome::Unchanged);
@@ -2107,10 +2107,7 @@ fn preview_replace_plan(
             Ok(raw) => raw,
             Err(_) => continue,
         };
-        if raw.contains(&0) {
-            continue;
-        }
-        let Ok(text) = String::from_utf8(raw) else {
+        let Ok(text) = crate::decode_utf8(raw) else {
             continue;
         };
         if !regex.is_match(&text) {

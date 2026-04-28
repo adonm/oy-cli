@@ -3,6 +3,7 @@ use chrono::Utc;
 use futures_util::{StreamExt as _, stream};
 use ignore::WalkBuilder;
 use regex::Regex;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -28,6 +29,22 @@ pub struct AuditOptions {
     pub focus: String,
     pub out: PathBuf,
     pub max_chunks: usize,
+    pub format: AuditOutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditOutputFormat {
+    Markdown,
+    Sarif,
+}
+
+impl AuditOutputFormat {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Sarif => "sarif",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -141,8 +158,12 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
 
     let report = with_transparency_line(&report, &transparency_snippet(&options));
     let report = with_succinct_findings_summary(&report);
+    let output = match options.format {
+        AuditOutputFormat::Markdown => report,
+        AuditOutputFormat::Sarif => render_sarif(&report)?,
+    };
     progress.write_started(&output_path);
-    config::write_workspace_file(&output_path, report.as_bytes())?;
+    config::write_workspace_file(&output_path, output.as_bytes())?;
     progress.write_finished(&output_path);
     Ok(AuditResult {
         output_path,
@@ -265,10 +286,10 @@ fn collect_files(
             Ok(raw) => raw,
             Err(_) => continue,
         };
-        if raw.contains(&0) {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&raw).to_string();
+        let text = match crate::decode_utf8(raw) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
         if text.trim().is_empty() {
             continue;
         }
@@ -486,27 +507,51 @@ fn compact_to_tokens<'a>(
 }
 
 fn transparency_snippet(options: &AuditOptions) -> String {
-    let mut command = String::new();
+    let mut command = Vec::new();
     if !options.model.trim().is_empty() {
-        let _ = write!(command, "OY_MODEL={} ", options.model.trim());
+        command.push(format!("OY_MODEL={}", shell_quote(options.model.trim())));
     }
-    command.push_str("oy audit");
-    if options.out != Path::new("ISSUES.md") {
-        let _ = write!(command, " --out {}", options.out.display());
+    command.push("oy".to_string());
+    command.push("audit".to_string());
+    if options.format != AuditOutputFormat::Markdown {
+        command.push("--format".to_string());
+        command.push(options.format.name().to_string());
+    }
+    if options.out != default_output_path(options.format) {
+        command.push("--out".to_string());
+        command.push(shell_quote(&options.out.to_string_lossy()));
     }
     if options.max_chunks != DEFAULT_MAX_REVIEW_CHUNKS {
-        let _ = write!(command, " --max-chunks {}", options.max_chunks);
+        command.push("--max-chunks".to_string());
+        command.push(options.max_chunks.to_string());
     }
     if !options.focus.trim().is_empty() {
-        command.push(' ');
-        command.push_str(options.focus.trim());
+        command.push(shell_quote(options.focus.trim()));
     }
     format!(
         "> {} `{}` · {}",
         prompts::AUDIT_TRANSPARENCY_PREFIX,
-        command,
+        command.join(" "),
         Utc::now().format("%Y-%m-%d")
     )
+}
+
+pub fn default_output_path(format: AuditOutputFormat) -> PathBuf {
+    match format {
+        AuditOutputFormat::Markdown => PathBuf::from("ISSUES.md"),
+        AuditOutputFormat::Sarif => PathBuf::from("oy.sarif"),
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub(crate) fn with_transparency_line(report: &str, snippet: &str) -> String {
@@ -727,6 +772,138 @@ fn finish_markdown_owned(lines: Vec<String>) -> String {
     out
 }
 
+fn render_sarif(report: &str) -> Result<String> {
+    let findings = extract_findings(&report.lines().collect::<Vec<_>>());
+    let mut rules = std::collections::BTreeMap::<String, Value>::new();
+    let mut results = Vec::new();
+
+    for finding in findings {
+        let Some(location) = sarif_location(&finding.code_ref)? else {
+            continue;
+        };
+        let rule_id = sarif_rule_id(&finding);
+        let level = sarif_level(&finding.severity);
+        rules.entry(rule_id.clone()).or_insert_with(|| {
+            json!({
+                "id": rule_id,
+                "name": finding.title,
+                "shortDescription": { "text": finding.title },
+                "defaultConfiguration": { "level": level },
+                "properties": {
+                    "severity": finding.severity,
+                    "security-severity": sarif_security_severity(&finding.severity)
+                }
+            })
+        });
+        results.push(json!({
+            "ruleId": rule_id,
+            "level": level,
+            "message": { "text": format!("{}: {}", finding.severity, finding.title) },
+            "locations": [location],
+            "properties": {
+                "severity": finding.severity,
+                "codeRef": finding.code_ref
+            }
+        }));
+    }
+
+    let sarif = json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "oy-cli",
+                    "semanticVersion": env!("CARGO_PKG_VERSION"),
+                    "informationUri": "https://github.com/wagov-dtt/oy-cli",
+                    "rules": rules.into_values().collect::<Vec<_>>()
+                }
+            },
+            "results": results,
+            "columnKind": "utf16CodeUnits"
+        }]
+    });
+    let mut out = serde_json::to_string_pretty(&sarif)?;
+    out.push('\n');
+    Ok(out)
+}
+
+fn sarif_rule_id(finding: &FindingSummary) -> String {
+    let mut slug = String::new();
+    for ch in finding.title.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "finding" } else { slug };
+    format!("oy/{}/{}", finding.severity.to_ascii_lowercase(), slug)
+}
+
+fn sarif_level(severity: &str) -> &'static str {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" | "high" => "error",
+        "medium" => "warning",
+        _ => "note",
+    }
+}
+
+fn sarif_security_severity(severity: &str) -> &'static str {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" => "9.0",
+        "high" => "7.0",
+        "medium" => "5.0",
+        "low" => "2.0",
+        _ => "0.0",
+    }
+}
+
+fn sarif_location(code_ref: &str) -> Result<Option<Value>> {
+    let (path, line) = split_code_ref(code_ref);
+    if !is_safe_relative_path(path) {
+        bail!("audit finding path escapes workspace: {path}");
+    }
+    let mut region = serde_json::Map::new();
+    if let Some(line) = line {
+        region.insert("startLine".to_string(), json!(line));
+    }
+    let mut physical = serde_json::Map::new();
+    physical.insert(
+        "artifactLocation".to_string(),
+        json!({ "uri": path.replace('\\', "/"), "uriBaseId": "%SRCROOT%" }),
+    );
+    if !region.is_empty() {
+        physical.insert("region".to_string(), Value::Object(region));
+    }
+    Ok(Some(json!({ "physicalLocation": Value::Object(physical) })))
+}
+
+fn split_code_ref(code_ref: &str) -> (&str, Option<u32>) {
+    if let Some((path, tail)) = code_ref.rsplit_once(':')
+        && !tail.contains(':')
+        && let Ok(line) = tail.parse::<u32>()
+    {
+        return (path, Some(line));
+    }
+    (
+        code_ref
+            .split_once("::")
+            .map(|(path, _)| path)
+            .unwrap_or(code_ref),
+        None,
+    )
+}
+
+fn is_safe_relative_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
 fn rel_path(root: &Path, path: &Path) -> Result<String> {
     let resolved = path
         .canonicalize()
@@ -810,8 +987,56 @@ mod tests {
             focus: "auth paths".to_string(),
             out: PathBuf::from("ISSUES.md"),
             max_chunks: 240,
+            format: AuditOutputFormat::Markdown,
         });
-        assert!(snippet.contains("oy audit --max-chunks 240 auth paths"));
+        assert!(snippet.contains("oy audit --max-chunks 240 'auth paths'"));
+    }
+
+    #[test]
+    fn transparency_line_quotes_shell_words() {
+        let snippet = transparency_snippet(&AuditOptions {
+            root: PathBuf::from("."),
+            model: "my model".to_string(),
+            focus: "auth paths".to_string(),
+            out: PathBuf::from("audit output.md"),
+            max_chunks: DEFAULT_MAX_REVIEW_CHUNKS,
+            format: AuditOutputFormat::Markdown,
+        });
+        assert!(
+            snippet.contains("OY_MODEL='my model' oy audit --out 'audit output.md' 'auth paths'")
+        );
+    }
+
+    #[test]
+    fn sarif_renderer_maps_findings_to_results() {
+        let sarif = render_sarif(
+            "# Audit Issues\n\n## Detailed findings\n\n### High: path traversal reaches writes\n\n- Evidence: `src/files.rs:42` writes attacker paths.\n- Fix: canonicalize.\n",
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&sarif).unwrap();
+        assert_eq!(value["version"], "2.1.0");
+        assert_eq!(
+            value["runs"][0]["results"][0]["ruleId"],
+            "oy/high/path-traversal-reaches-writes"
+        );
+        assert_eq!(
+            value["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+                ["uri"],
+            "src/files.rs"
+        );
+        assert_eq!(
+            value["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"],
+            42
+        );
+    }
+
+    #[test]
+    fn sarif_renderer_rejects_escaping_paths() {
+        let err = render_sarif(
+            "# Audit Issues\n\n## Detailed findings\n\n### High: bad path\n\n- Evidence: `../secret.rs:1` is bad.\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("escapes workspace"));
     }
 
     #[test]

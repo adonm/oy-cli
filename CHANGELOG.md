@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-04-28
+
+### Added
+- Added `oy audit --format sarif`, writing SARIF 2.1.0 output to `oy.sarif` by default for GitHub code scanning ingestion.
+
+### Changed
+- Audit transparency snippets now quote shell-sensitive model, output, and focus values.
+- Centralized text/binary decoding for audit and file tools.
+
 ### Fixed
 - Scoped `OPENAI_API_KEY` and `OPENAI_BASE_URL` to OpenAI/OpenAIResp requests so they are not applied to unrelated providers.
 - Stopped Bedrock Mantle discovery from accepting OpenAI credentials or endpoint overrides; Mantle now requires Bedrock-specific bearer credentials.

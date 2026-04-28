@@ -32,6 +32,19 @@ pub(crate) use cli::{app, chat, config, ui};
 
 pub use ui::{OutputMode, set_output_mode};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextDecodeError {
+    Binary,
+    NonUtf8,
+}
+
+pub(crate) fn decode_utf8(raw: Vec<u8>) -> Result<String, TextDecodeError> {
+    if raw.contains(&0) {
+        return Err(TextDecodeError::Binary);
+    }
+    String::from_utf8(raw).map_err(|_| TextDecodeError::NonUtf8)
+}
+
 /// Runs the `oy` command dispatcher with command-line arguments excluding the program name.
 ///
 /// This is the same application entry point used by the binary after `src/main.rs` strips

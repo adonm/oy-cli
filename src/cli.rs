@@ -2039,7 +2039,7 @@ pub(crate) mod chat {
 // === app ===
 pub(crate) mod app {
     use anyhow::{Result, bail};
-    use clap::{Args, Parser, Subcommand};
+    use clap::{Args, Parser, Subcommand, ValueEnum};
     use std::io::IsTerminal as _;
     use std::path::{Path, PathBuf};
 
@@ -2068,6 +2068,21 @@ pub(crate) mod app {
         command: Option<Command>,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+    enum AuditFormat {
+        Markdown,
+        Sarif,
+    }
+
+    impl From<AuditFormat> for audit::AuditOutputFormat {
+        fn from(format: AuditFormat) -> Self {
+            match format {
+                AuditFormat::Markdown => Self::Markdown,
+                AuditFormat::Sarif => Self::Sarif,
+            }
+        }
+    }
+
     #[derive(Debug, Subcommand)]
     enum Command {
         /// Run one task in the current workspace; prompt can be args or stdin.
@@ -2078,15 +2093,21 @@ pub(crate) mod app {
         Model(ModelArgs),
         /// Check setup, auth, paths, and safety-relevant defaults.
         Doctor(DoctorArgs),
-        /// Audit the current workspace and write markdown findings.
+        /// Audit the current workspace and write findings.
         Audit {
             #[arg(
                 long,
-                value_name = "PATH",
-                default_value = "ISSUES.md",
-                help = "Write findings to a workspace file (default: ISSUES.md)"
+                value_enum,
+                default_value_t = AuditFormat::Markdown,
+                help = "Output format: markdown or sarif"
             )]
-            out: PathBuf,
+            format: AuditFormat,
+            #[arg(
+                long,
+                value_name = "PATH",
+                help = "Write findings to a workspace file (default: ISSUES.md or oy.sarif)"
+            )]
+            out: Option<PathBuf>,
             #[arg(
                 long,
                 value_name = "N",
@@ -2185,14 +2206,16 @@ pub(crate) mod app {
             Command::Model(args) => model_command(args).await,
             Command::Doctor(args) => doctor_command(args).await,
             Command::Audit {
+                format,
                 out,
                 max_chunks,
                 focus,
             } => {
                 audit_command(AuditArgs {
-                    out,
-                    max_chunks,
                     focus,
+                    out: out.unwrap_or_else(|| audit::default_output_path(format.into())),
+                    max_chunks,
+                    format: format.into(),
                 })
                 .await
             }
@@ -2201,6 +2224,7 @@ pub(crate) mod app {
 
     fn restore_trailing_audit_options(cli: &mut Cli) {
         let Some(Command::Audit {
+            format: _,
             out: _,
             max_chunks,
             focus,
@@ -2694,6 +2718,7 @@ pub(crate) mod app {
         focus: Vec<String>,
         out: PathBuf,
         max_chunks: usize,
+        format: audit::AuditOutputFormat,
     }
 
     async fn audit_command(args: AuditArgs) -> Result<i32> {
@@ -2706,6 +2731,7 @@ pub(crate) mod app {
             crate::ui::kv("workspace", root.display());
             crate::ui::kv("model", &model);
             crate::ui::kv("mode", "no-tools");
+            crate::ui::kv("format", args.format.name());
             crate::ui::kv("out", args.out.display());
             crate::ui::kv("max chunks", args.max_chunks);
             if !focus.trim().is_empty() {
@@ -2718,6 +2744,7 @@ pub(crate) mod app {
             focus,
             out: args.out,
             max_chunks: args.max_chunks,
+            format: args.format,
         })
         .await?;
         if crate::ui::is_json() {
@@ -2725,6 +2752,7 @@ pub(crate) mod app {
                 "output": result.output_path,
                 "files": result.file_count,
                 "chunks": result.chunk_count,
+                "format": args.format.name(),
                 "elapsed_ms": started.elapsed().as_millis(),
             });
             crate::ui::line(serde_json::to_string_pretty(&payload)?);
@@ -2819,9 +2847,20 @@ pub(crate) mod app {
         }
 
         #[test]
-        fn help_documents_audit_max_chunks() {
+        fn help_documents_audit_options() {
             let help = command_help_for_test("audit");
             assert!(help.contains("--max-chunks <N>"));
+            assert!(help.contains("--format <FORMAT>"));
+        }
+
+        #[test]
+        fn audit_accepts_sarif_format() {
+            let cli = parse_cli_for_test(&["oy", "audit", "--format", "sarif", "auth paths"]);
+            let Some(Command::Audit { format, out, .. }) = cli.command else {
+                panic!("expected audit command");
+            };
+            assert_eq!(format, AuditFormat::Sarif);
+            assert_eq!(out, None);
         }
 
         #[test]
