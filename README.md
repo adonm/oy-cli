@@ -108,6 +108,8 @@ export AWS_REGION=us-east-1          # base URL defaults from AWS/BEDROCK region
 oy model bedrock-mantle::moonshotai.kimi-k2.5
 ```
 
+Bedrock Mantle requires Bedrock-specific bearer credentials; `OPENAI_API_KEY` and `OPENAI_BASE_URL` are not used for Mantle discovery or requests.
+
 OpenCode Zen / Go (OpenAI-compatible APIs):
 
 ```bash
@@ -239,7 +241,7 @@ Override the config file path with `OY_CONFIG` and workspace with `OY_ROOT`.
 | `OY_MAX_TOOL_ROUNDS` | Tool-round budget per prompt; default `512`; set a number, `0`, or `unlimited` |
 | `OY_CONTEXT_LIMIT` | Approximate context-token limit; deterministic compaction starts near 80% |
 | `OY_COMPACT_RECENT_MESSAGES` | Recent transcript messages to keep during deterministic compaction |
-| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible auth/endpoint; also fallback for Bedrock Mantle |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI/OpenAIResp auth and optional OpenAI-compatible endpoint override; not reused for other routing shims |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION` | AWS Bedrock auth/region; SSO profiles use AWS CLI export/login |
 | `BEDROCK_REGION`, `BEDROCK_RUNTIME_ENDPOINT` | Override Bedrock region/runtime endpoint |
 | `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_MANTLE_API_KEY`, `BEDROCK_MANTLE_BASE_URL` | Bedrock Mantle OpenAI-compatible auth/endpoint |

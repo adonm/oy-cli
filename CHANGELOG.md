@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- Scoped `OPENAI_API_KEY` and `OPENAI_BASE_URL` to OpenAI/OpenAIResp requests so they are not applied to unrelated providers.
+- Stopped Bedrock Mantle discovery from accepting OpenAI credentials or endpoint overrides; Mantle now requires Bedrock-specific bearer credentials.
+
 ## [0.7.7] - 2026-04-28
 
 ### Added

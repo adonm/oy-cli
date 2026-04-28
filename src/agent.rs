@@ -899,14 +899,12 @@ pub(crate) mod model {
             SHIM_BEDROCK_MANTLE => bearer_endpoint_config(
                 SHIM_BEDROCK_MANTLE,
                 || {
-                    env_value("BEDROCK_MANTLE_BASE_URL")
-                        .or_else(|| env_value("OPENAI_BASE_URL"))
-                        .unwrap_or_else(|| {
-                            format!(
-                                "https://bedrock-mantle.{}.api.aws/v1",
-                                crate::bedrock::region()
-                            )
-                        })
+                    env_value("BEDROCK_MANTLE_BASE_URL").unwrap_or_else(|| {
+                        format!(
+                            "https://bedrock-mantle.{}.api.aws/v1",
+                            crate::bedrock::region()
+                        )
+                    })
                 },
                 &[
                     (
@@ -917,7 +915,6 @@ pub(crate) mod model {
                         "AWS_BEARER_TOKEN_BEDROCK",
                         env_value("AWS_BEARER_TOKEN_BEDROCK"),
                     ),
-                    ("OPENAI_API_KEY", env_value("OPENAI_API_KEY")),
                 ],
             ),
             SHIM_OPENCODE => opencode_endpoint_config(SHIM_OPENCODE, "https://opencode.ai/zen/v1"),
@@ -1213,12 +1210,11 @@ pub(crate) mod model {
             return Ok(None);
         };
         let resolver = AuthResolver::from_resolver_fn(move |model: ModelIden| {
-            let model_name = model.model_name.to_string();
-            let (inline_shim, _) = config::split_model_spec(&model_name);
-            if inline_shim.is_some_and(config::is_routing_shim) || env_value("OY_SHIM").is_some() {
-                return Ok(None);
+            if openai_env_applies_to_model(&model) {
+                Ok(Some(AuthData::from_single(api_key.clone())))
+            } else {
+                Ok(None)
             }
-            Ok(Some(AuthData::from_single(api_key.clone())))
         });
         Ok(Some(resolver))
     }
@@ -1229,6 +1225,19 @@ pub(crate) mod model {
         } else {
             AdapterKind::OpenAI
         }
+    }
+
+    fn is_openai_adapter(kind: AdapterKind) -> bool {
+        matches!(kind, AdapterKind::OpenAI | AdapterKind::OpenAIResp)
+    }
+
+    fn openai_env_applies_to_model(model: &ModelIden) -> bool {
+        is_openai_adapter(model.adapter_kind) && openai_env_applies_to_model_name(&model.model_name)
+    }
+
+    fn openai_env_applies_to_model_name(model_name: &str) -> bool {
+        let (namespace, _) = config::split_model_spec(model_name);
+        matches!(namespace, None | Some("openai_resp")) && env_value("OY_SHIM").is_none()
     }
 
     fn service_target_resolver() -> Result<Option<ServiceTargetResolver>> {
@@ -1242,15 +1251,14 @@ pub(crate) mod model {
             {
                 return Ok(mapped);
             }
-            if let Some(url) = base_url.as_ref().filter(|_| configured_shim.is_none()) {
-                let (namespace, _) = config::split_model_spec(&model_name);
-                if namespace.is_none_or(|shim| !config::is_routing_shim(shim)) {
-                    return Ok(ServiceTarget {
-                        endpoint: Endpoint::from_owned(normalize_base_url(url) + "/"),
-                        auth: target.auth,
-                        model: ModelIden::new(openai_adapter_for_model(&model_name), model_name),
-                    });
-                }
+            if let Some(url) = base_url.as_ref().filter(|_| configured_shim.is_none())
+                && openai_env_applies_to_model(&target.model)
+            {
+                return Ok(ServiceTarget {
+                    endpoint: Endpoint::from_owned(normalize_base_url(url) + "/"),
+                    auth: target.auth,
+                    model: ModelIden::new(openai_adapter_for_model(&model_name), model_name),
+                });
             }
             Ok(target)
         });
@@ -1299,6 +1307,7 @@ pub(crate) mod model {
         fn local_shim_endpoint_config_matches_python_defaults() {
             let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
             unsafe { std::env::remove_var("LOCAL_API_KEY") };
+            unsafe { std::env::remove_var("OY_SHIM") };
             unsafe { std::env::set_var("OPENAI_API_KEY", "openai-token") };
             let config = shim_endpoint_config("local-8088").unwrap();
             assert_eq!(config.shim, "local-8088");
@@ -1412,11 +1421,52 @@ pub(crate) mod model {
         }
 
         #[test]
-        fn bedrock_mantle_uses_bedrock_bearer_token_before_openai_key() {
+        fn openai_env_only_applies_to_openai_models_without_routing() {
+            let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            unsafe { std::env::remove_var("OY_SHIM") };
+            assert!(openai_env_applies_to_model(&ModelIden::new(
+                AdapterKind::OpenAI,
+                "gpt-4.1-mini"
+            )));
+            assert!(openai_env_applies_to_model(&ModelIden::new(
+                AdapterKind::OpenAIResp,
+                "gpt-5.5"
+            )));
+            assert!(openai_env_applies_to_model(&ModelIden::new(
+                AdapterKind::OpenAIResp,
+                "openai_resp::gpt-5.5"
+            )));
+            assert!(!openai_env_applies_to_model(&ModelIden::new(
+                AdapterKind::Gemini,
+                "gemini-2.5-flash"
+            )));
+            assert!(!openai_env_applies_to_model(&ModelIden::new(
+                AdapterKind::Anthropic,
+                "claude-sonnet-4"
+            )));
+            assert!(!openai_env_applies_to_model(&ModelIden::new(
+                AdapterKind::OpenAI,
+                "openai::gpt-4.1-mini"
+            )));
+            unsafe { std::env::set_var("OY_SHIM", "openai") };
+            assert!(!openai_env_applies_to_model(&ModelIden::new(
+                AdapterKind::OpenAI,
+                "gpt-4.1-mini"
+            )));
+            unsafe { std::env::remove_var("OY_SHIM") };
+        }
+
+        #[test]
+        fn bedrock_mantle_requires_bedrock_specific_bearer_token() {
+            let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
             unsafe { std::env::remove_var("BEDROCK_MANTLE_API_KEY") };
             unsafe { std::env::remove_var("BEDROCK_MANTLE_BASE_URL") };
-            unsafe { std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token") };
+            unsafe { std::env::remove_var("OPENAI_BASE_URL") };
             unsafe { std::env::set_var("OPENAI_API_KEY", "openai-token") };
+            assert!(shim_endpoint_config(SHIM_BEDROCK_MANTLE).is_none());
+
+            unsafe { std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token") };
+            unsafe { std::env::set_var("OPENAI_BASE_URL", "https://openai.example/v1") };
             let config = shim_endpoint_config(SHIM_BEDROCK_MANTLE).unwrap();
             assert_eq!(config.api_key, "bedrock-token");
             assert_eq!(config.source, "AWS_BEARER_TOKEN_BEDROCK");
@@ -1429,6 +1479,7 @@ pub(crate) mod model {
             );
             unsafe { std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK") };
             unsafe { std::env::remove_var("OPENAI_API_KEY") };
+            unsafe { std::env::remove_var("OPENAI_BASE_URL") };
         }
 
         #[test]
@@ -1463,6 +1514,7 @@ pub(crate) mod model {
         #[test]
         fn recommended_models_follow_detected_auth() {
             let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            unsafe { std::env::remove_var("OY_SHIM") };
             unsafe { std::env::set_var("OPENAI_API_KEY", "openai-token") };
             let recommendations = recommended_models();
             assert!(recommendations.contains(&"gpt-4.1-mini".to_string()));
