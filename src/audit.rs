@@ -1,12 +1,17 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use futures_util::{StreamExt as _, stream};
 use ignore::WalkBuilder;
+use regex::Regex;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
-use crate::{config, model, prompts, session};
+use crate::{config, model, session};
 
 const TARGET_CHUNK_TOKENS: usize = 64_000;
 const SMALL_REPO_TOKENS: usize = 80_000;
@@ -14,6 +19,7 @@ const MAX_REVIEW_CHUNKS: usize = 80;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const SECURITY_INDEX_LIMIT: usize = 160;
 const FINDINGS_PER_CHUNK_LIMIT_TOKENS: usize = 6_000;
+const DEFAULT_AUDIT_PARALLELISM: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct AuditOptions {
@@ -46,6 +52,7 @@ struct AuditChunk {
 }
 
 pub async fn run(options: AuditOptions) -> Result<AuditResult> {
+    let started = Instant::now();
     let model_spec = model::to_genai_model_spec(&options.model);
     let output_path = config::resolve_workspace_output_path(&options.root, &options.out)?;
     let files = collect_files(&options.root, Some(&output_path), &model_spec)?;
@@ -61,26 +68,54 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             chunks.len()
         );
     }
+    let file_count = chunks.iter().map(|chunk| chunk.files.len()).sum::<usize>();
+    let chunk_count = chunks.len();
+    let progress = AuditProgress::new(started, file_count, chunk_count);
+    progress.prepared();
 
     let system_prompt = prompts::audit_system_prompt();
     let report = if chunks.len() == 1 && chunks[0].tokens <= SMALL_REPO_TOKENS {
         let repo_text = chunk_text(&chunks[0]);
         let prompt = prompts::audit_full_prompt(&options.focus, &manifest, &index, &repo_text);
-        session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?
+        progress.review_started(None);
+        let report =
+            session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?;
+        progress.review_finished(1);
+        report
     } else {
+        progress.review_started(Some(DEFAULT_AUDIT_PARALLELISM));
+        let completed_chunks = Arc::new(AtomicUsize::new(0));
+        let mut chunk_findings = stream::iter(chunks.iter().enumerate())
+            .map(|(idx, chunk)| {
+                let chunk_id = idx + 1;
+                let prompt = prompts::audit_chunk_prompt(
+                    &options.focus,
+                    &manifest,
+                    &index,
+                    chunk_id,
+                    chunk_count,
+                    &chunk_text(chunk),
+                );
+                let model = &options.model;
+                let system_prompt = &system_prompt;
+                let completed_chunks = Arc::clone(&completed_chunks);
+                async move {
+                    let findings =
+                        session::run_prompt_once_no_tools(model, system_prompt, &prompt).await?;
+                    let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress.review_finished(completed);
+                    Ok::<_, anyhow::Error>((chunk_id, findings))
+                }
+            })
+            .buffer_unordered(DEFAULT_AUDIT_PARALLELISM)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        chunk_findings.sort_by_key(|(chunk_id, _)| *chunk_id);
+
         let mut candidate_findings = String::new();
-        for (idx, chunk) in chunks.iter().enumerate() {
-            let chunk_id = idx + 1;
-            let prompt = prompts::audit_chunk_prompt(
-                &options.focus,
-                &manifest,
-                &index,
-                chunk_id,
-                chunks.len(),
-                &chunk_text(chunk),
-            );
-            let findings =
-                session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?;
+        for (chunk_id, findings) in chunk_findings {
             let compact = compact_to_tokens(
                 &model_spec,
                 findings.trim(),
@@ -94,16 +129,96 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             candidate_findings.push('\n');
         }
         let prompt = prompts::audit_reduce_prompt(&options.focus, &manifest, &candidate_findings);
-        session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?
+        progress.summarise_started();
+        let report =
+            session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?;
+        progress.summarise_finished();
+        report
     };
 
     let report = with_transparency_line(&report, &transparency_snippet(&options));
+    let report = with_succinct_findings_summary(&report);
+    progress.write_started(&output_path);
     config::write_workspace_file(&output_path, report.as_bytes())?;
+    progress.write_finished(&output_path);
     Ok(AuditResult {
         output_path,
-        file_count: chunks.iter().map(|chunk| chunk.files.len()).sum(),
-        chunk_count: chunks.len(),
+        file_count,
+        chunk_count,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AuditProgress {
+    started: Instant,
+    file_count: usize,
+    chunk_count: usize,
+}
+
+impl AuditProgress {
+    fn new(started: Instant, file_count: usize, chunk_count: usize) -> Self {
+        Self {
+            started,
+            file_count,
+            chunk_count,
+        }
+    }
+
+    fn prepared(&self) {
+        self.line(
+            "prepared",
+            1,
+            1,
+            format_args!("{} files · {} chunks", self.file_count, self.chunk_count),
+        );
+    }
+
+    fn review_started(&self, parallelism: Option<usize>) {
+        let detail = match parallelism {
+            Some(parallelism) => format!(
+                "reviewing {} chunks · parallelism {parallelism}",
+                self.chunk_count
+            ),
+            None => "reviewing full repo".to_string(),
+        };
+        self.line("review", 0, self.chunk_count, detail);
+    }
+
+    fn review_finished(&self, completed: usize) {
+        if completed < self.chunk_count && !completed.is_multiple_of(self.review_update_stride()) {
+            return;
+        }
+        let detail = if completed >= self.chunk_count {
+            "review complete".to_string()
+        } else {
+            format!("{completed}/{} chunks complete", self.chunk_count)
+        };
+        self.line("review", completed, self.chunk_count, detail);
+    }
+
+    fn review_update_stride(&self) -> usize {
+        self.chunk_count.div_ceil(10).max(1)
+    }
+
+    fn summarise_started(&self) {
+        self.line("summarise", 0, 1, "deduping and ranking findings");
+    }
+
+    fn summarise_finished(&self) {
+        self.line("summarise", 1, 1, "summary complete");
+    }
+
+    fn write_started(&self, output_path: &Path) {
+        self.line("write", 0, 1, output_path.display());
+    }
+
+    fn write_finished(&self, output_path: &Path) {
+        self.line("write", 1, 1, output_path.display());
+    }
+
+    fn line(&self, label: &str, current: usize, total: usize, detail: impl std::fmt::Display) {
+        crate::ui::progress(label, current, total, detail, self.started.elapsed());
+    }
 }
 
 fn collect_files(
@@ -163,7 +278,7 @@ fn collect_files(
             text,
         });
     }
-    files.sort_by(|a, b| audit_priority(a).cmp(&audit_priority(b)));
+    files.sort_by_key(audit_priority);
     Ok(files)
 }
 
@@ -416,7 +531,192 @@ pub(crate) fn with_transparency_line(report: &str, snippet: &str) -> String {
             }
         }
     }
-    let mut out = rebuilt.join("\n");
+    finish_markdown(rebuilt)
+}
+
+pub(crate) fn with_succinct_findings_summary(report: &str) -> String {
+    let lines = report.lines().collect::<Vec<_>>();
+    if has_heading(&lines, "Findings summary") {
+        return finish_markdown(lines);
+    }
+    let findings = extract_findings(&lines);
+    if findings.is_empty() {
+        return finish_markdown(lines);
+    }
+
+    let insert_at = transparency_insert_index(&lines);
+    let mut rebuilt = Vec::with_capacity(lines.len() + findings.len() + 4);
+    rebuilt.extend(lines[..insert_at].iter().map(|line| (*line).to_string()));
+    if rebuilt.last().is_some_and(|line| !line.trim().is_empty()) {
+        rebuilt.push(String::new());
+    }
+    rebuilt.push("## Findings summary".to_string());
+    rebuilt.push(String::new());
+    rebuilt.extend(findings.into_iter().map(|finding| finding.to_markdown()));
+    rebuilt.push(String::new());
+    rebuilt.extend(lines[insert_at..].iter().map(|line| (*line).to_string()));
+    finish_markdown_owned(rebuilt)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FindingSummary {
+    severity: String,
+    title: String,
+    code_ref: String,
+}
+
+impl FindingSummary {
+    fn to_markdown(&self) -> String {
+        format!(
+            "- **{}** `{}` — {}",
+            self.severity, self.code_ref, self.title
+        )
+    }
+}
+
+fn extract_findings(lines: &[&str]) -> Vec<FindingSummary> {
+    static HEADING_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"^(#{2,4})\s+(.+?)\s*$").expect("valid heading regex")
+    });
+    let mut findings = Vec::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
+
+    for line in lines {
+        if let Some(captures) = HEADING_RE.captures(line) {
+            if let Some((heading, body)) = current.take()
+                && let Some(finding) = finding_from_section(&heading, &body)
+            {
+                findings.push(finding);
+            }
+            let level = captures.get(1).map(|m| m.as_str().len()).unwrap_or(0);
+            let heading = captures
+                .get(2)
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_default();
+            if level >= 2 && is_finding_heading(&heading) {
+                current = Some((heading, Vec::new()));
+            } else {
+                current = None;
+            }
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push(line);
+        }
+    }
+    if let Some((heading, body)) = current.take()
+        && let Some(finding) = finding_from_section(&heading, &body)
+    {
+        findings.push(finding);
+    }
+    findings
+}
+
+fn finding_from_section(heading: &str, body: &[&str]) -> Option<FindingSummary> {
+    let severity = severity_from_text(heading)
+        .or_else(|| body.iter().find_map(|line| severity_from_text(line)))
+        .unwrap_or_else(|| "Unrated".to_string());
+    let title = clean_finding_title(heading);
+    let code_ref = body
+        .iter()
+        .find_map(|line| code_ref_from_line(line))
+        .or_else(|| code_ref_from_line(heading))?;
+    Some(FindingSummary {
+        severity,
+        title,
+        code_ref,
+    })
+}
+
+fn is_finding_heading(heading: &str) -> bool {
+    let lower = heading.to_ascii_lowercase();
+    !matches!(
+        lower.as_str(),
+        "findings summary"
+            | "summary"
+            | "detailed findings"
+            | "details"
+            | "no concrete findings"
+            | "audit issues"
+    )
+}
+
+fn severity_from_text(text: &str) -> Option<String> {
+    static SEVERITY_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?i)\b(critical|high|medium|low|info|informational)\b")
+            .expect("valid severity regex")
+    });
+    SEVERITY_RE
+        .captures(text)
+        .and_then(|captures| captures.get(1))
+        .map(
+            |match_| match match_.as_str().to_ascii_lowercase().as_str() {
+                "critical" => "Critical".to_string(),
+                "high" => "High".to_string(),
+                "medium" => "Medium".to_string(),
+                "low" => "Low".to_string(),
+                _ => "Info".to_string(),
+            },
+        )
+}
+
+fn clean_finding_title(heading: &str) -> String {
+    static TITLE_SEVERITY_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(
+            r"(?i)^\s*[\[(]?\s*(informational|critical|high|medium|low|info)\s*[\])]?\s*[:—–-]+\s*",
+        )
+        .expect("valid title severity regex")
+    });
+    let title = heading.trim().trim_matches('#').trim();
+    let title = TITLE_SEVERITY_RE.replace(title, "").trim().to_string();
+    if title.is_empty() {
+        "Untitled finding".to_string()
+    } else {
+        title
+    }
+}
+
+fn code_ref_from_line(line: &str) -> Option<String> {
+    static CODE_REF_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"[A-Za-z0-9_.@+\-/]+\.[A-Za-z0-9]+(?::\d+)?(?:::[A-Za-z_][A-Za-z0-9_]*)?")
+            .expect("valid code reference regex")
+    });
+    CODE_REF_RE.find(line).map(|match_| {
+        match_
+            .as_str()
+            .trim_matches(|ch: char| ch == '`' || ch == ',' || ch == ')' || ch == ']')
+            .to_string()
+    })
+}
+
+fn has_heading(lines: &[&str], heading: &str) -> bool {
+    lines.iter().any(|line| {
+        line.trim_start_matches('#')
+            .trim()
+            .eq_ignore_ascii_case(heading)
+    })
+}
+
+fn transparency_insert_index(lines: &[&str]) -> usize {
+    lines
+        .iter()
+        .position(|line| line.starts_with(&format!("> {}", prompts::AUDIT_TRANSPARENCY_PREFIX)))
+        .map(|idx| idx + 1)
+        .unwrap_or_else(|| {
+            lines
+                .iter()
+                .position(|line| line.trim() == prompts::AUDIT_REPORT_TITLE)
+                .map(|idx| idx + 1)
+                .unwrap_or(0)
+        })
+}
+
+fn finish_markdown(lines: Vec<&str>) -> String {
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn finish_markdown_owned(lines: Vec<String>) -> String {
+    let mut out = lines.join("\n");
     out.push('\n');
     out
 }
@@ -479,6 +779,24 @@ mod tests {
     }
 
     #[test]
+    fn succinct_summary_is_inserted_from_detailed_findings() {
+        let out = with_succinct_findings_summary(
+            "# Audit Issues\n\n> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `oy audit`\n\n## Detailed findings\n\n### High: path traversal reaches file writes\n\n- Evidence: `src/files.rs:42` passes user input into write.\n- Fix: canonicalize under the workspace.\n\n### Low: noisy retry loop\n\n- Severity: Low\n- Evidence: `src/retry.rs::spin` retries without backoff.\n",
+        );
+        assert!(out.contains("## Findings summary"));
+        assert!(out.contains("- **High** `src/files.rs:42` — path traversal reaches file writes"));
+        assert!(out.contains("- **Low** `src/retry.rs::spin` — noisy retry loop"));
+        assert!(out.find("## Findings summary") < out.find("## Detailed findings"));
+    }
+
+    #[test]
+    fn existing_findings_summary_is_preserved() {
+        let report =
+            "# Audit Issues\n\n## Findings summary\n\n- **High** `src/lib.rs:1` — existing\n";
+        assert_eq!(with_succinct_findings_summary(report), report);
+    }
+
+    #[test]
     fn chunking_keeps_files_under_target_when_possible() {
         let files = vec![
             AuditFile {
@@ -514,5 +832,154 @@ mod tests {
         assert!(should_skip_path("target/debug/app"));
         assert!(should_skip_path("Cargo.lock"));
         assert!(!should_skip_path("src/main.rs"));
+    }
+}
+
+// === Audit prompts ===
+mod prompts {
+    use std::fmt::Write as _;
+
+    pub const AUDIT_REPORT_TITLE: &str = "# Audit Issues";
+    pub const AUDIT_TRANSPARENCY_PREFIX: &str =
+        "Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli):";
+
+    pub const AUDIT_SYSTEM_PROMPT: &str = r#"You are oy in audit mode. Audit the repository for security issues, unnecessary complexity, and material usability or performance problems.
+Be terse, evidence-first, and repo-specific. Avoid generic best-practice advice, style nits, and speculation.
+
+Finding quality bar:
+- Report only concrete issues with a plausible attack path, trigger, broken invariant, data exposure, integrity risk, privilege impact, or material operational impact.
+- For vulnerabilities, include the trust boundary, sink, affected path/symbol evidence, impact, exploitability/preconditions, and a concrete fix.
+- Prefer critical/high security findings and issues likely to cause production incidents.
+- Prefer simple remediations that remove whole bug classes.
+- Return [] or say no concrete findings for a chunk when evidence is weak.
+- Final reports must include a succinct all-findings summary with code references, then detailed writeups for only the most severe 10-20 findings.
+
+Use the embedded OWASP/grugbrain reference as a lightweight checklist and citation guide. Spend tokens on repository evidence, not long standards explanations."#;
+
+    pub const AUDIT_REFERENCE: &str = r#"Audit reference checklist:
+
+OWASP ASVS 5.0 quick map:
+- V1 Architecture: trust boundaries, secure design, attack surface, threat model gaps, dangerous defaults.
+- V2 Authentication: credential handling, MFA, session/auth lifecycle, account recovery.
+- V3 Session: cookie/token handling, fixation, expiration, revocation, CSRF-relevant state.
+- V4 Access Control: object/function authorization, tenant isolation, confused deputy paths.
+- V5 Validation: parser boundaries, canonicalization, path traversal, SSRF, injection, deserialization.
+- V6 Cryptography: key management, weak/custom crypto, randomness, secret storage.
+- V7 Error/Logging: secret leakage, unsafe diagnostics, audit trail gaps.
+- V8 Data Protection: sensitive data at rest/in transit, retention, cache/backup exposure.
+- V9 Communications: TLS verification, hostname validation, downgrade/debug transport.
+- V10 Malicious Code: supply chain, unsafe dynamic loading, dependency/update risk.
+- V11 Business Logic: state-machine bypass, race/double-submit, workflow abuse.
+- V12 Files/Resources: upload/download, archive extraction, filesystem boundaries, quotas.
+- V13 API/Web Service: mass assignment, schema validation, rate limits, authz on APIs.
+- V14 Configuration: insecure defaults, debug flags, secret/config sprawl.
+
+OWASP MASVS/MASWE for mobile repos only:
+- STORAGE, CRYPTO, AUTH, NETWORK, PLATFORM, CODE, RESILIENCE, PRIVACY; use MASWE IDs only when a concrete mobile weakness maps cleanly.
+
+Grugbrain complexity filter:
+- Grugbrain has no formal section IDs; do not invent citations. Use exact lookup phrases only.
+- Useful phrases: `complexity very bad`, `local reasoning`, `small sharp tools`, `avoid wrong abstraction`, `too much abstraction`, `closures like salt`, `reproduce bug first`, `testing`.
+- Use grugbrain for complexity/maintainability findings, or as secondary support where complexity materially increases exploitability or review failure risk.
+
+Combined heuristic:
+- Security bug plus high complexity is higher priority because it is harder to review, fix safely, and prevent from recurring.
+- Prefer findings where code both violates a security control and hides that violation behind abstraction, config sprawl, hidden state, or broad capability.
+- If a simpler design removes an entire bug class, say so explicitly."#;
+
+    pub fn audit_chunk_prompt(
+        focus: &str,
+        manifest: &str,
+        index: &str,
+        chunk_id: usize,
+        chunk_count: usize,
+        chunk_text: &str,
+    ) -> String {
+        let mut prompt = String::new();
+        let _ = writeln!(prompt, "Review audit chunk {chunk_id}/{chunk_count}.");
+        push_focus(&mut prompt, focus);
+        prompt.push_str("\nReturn concise candidate findings for this chunk only. Use markdown with one `###` heading per finding, or return `[]` if there are no concrete findings. For each finding include severity, category, evidence path/symbol, trust boundary/sink when security-relevant, impact, reference, and fix. Do not write files.\n\n");
+        prompt.push_str("Repository manifest:\n");
+        prompt.push_str(manifest.trim());
+        prompt.push_str("\n\nSecurity-relevant index:\n");
+        prompt.push_str(index.trim());
+        prompt.push_str("\n\nChunk contents:\n");
+        prompt.push_str(chunk_text.trim());
+        prompt
+    }
+
+    pub fn audit_full_prompt(focus: &str, manifest: &str, index: &str, repo_text: &str) -> String {
+        let mut prompt = String::new();
+        prompt.push_str("Conduct a full repository audit and return the final markdown report.\n");
+        push_focus(&mut prompt, focus);
+        prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; include category, evidence, trust boundary/sink where security-relevant, impact, exploitability/preconditions, reference, and fix.\n4. Avoid generic advice. Do not write files.\n\n");
+        prompt.push_str("Repository manifest:\n");
+        prompt.push_str(manifest.trim());
+        prompt.push_str("\n\nSecurity-relevant index:\n");
+        prompt.push_str(index.trim());
+        prompt.push_str("\n\nRepository contents:\n");
+        prompt.push_str(repo_text.trim());
+        prompt
+    }
+
+    pub fn audit_reduce_prompt(focus: &str, manifest: &str, findings: &str) -> String {
+        let mut prompt = String::new();
+        prompt.push_str("Condense candidate audit findings into the final markdown report.\n");
+        push_focus(&mut prompt, focus);
+        prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding that survives dedupe, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; preserve the shortest evidence needed to prove exploitability or impact, plus category, trust boundary/sink where security-relevant, reference, and fix.\n4. Drop weak/speculative/duplicate items, but do not omit concrete lower-severity findings from the summary.\n\n");
+        prompt.push_str("Repository manifest:\n");
+        prompt.push_str(manifest.trim());
+        prompt.push_str("\n\nCandidate findings:\n");
+        prompt.push_str(findings.trim());
+        prompt
+    }
+
+    fn push_focus(out: &mut String, focus: &str) {
+        let focus = focus.trim();
+        if !focus.is_empty() {
+            let _ = writeln!(out, "Additional focus: {focus}");
+        }
+    }
+
+    pub fn audit_system_prompt() -> String {
+        format!(
+            "{}\n\n{}",
+            AUDIT_SYSTEM_PROMPT.trim(),
+            AUDIT_REFERENCE.trim()
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn audit_system_prompt_embeds_owasp_and_grugbrain_reference() {
+            let prompt = audit_system_prompt();
+            assert!(prompt.contains("OWASP ASVS 5.0"));
+            assert!(prompt.contains("Grugbrain"));
+            assert!(prompt.contains("complexity very bad"));
+            assert!(prompt.contains("trust boundary"));
+        }
+
+        #[test]
+        fn audit_prompts_include_focus_when_present() {
+            let prompt = audit_full_prompt("auth paths", "files: 1", "- hit", "src/lib.rs");
+            assert!(prompt.contains("Additional focus: auth paths"));
+            assert!(prompt.contains("# Audit Issues"));
+        }
+
+        #[test]
+        fn final_audit_prompts_request_succinct_summary_and_limited_details() {
+            let full = audit_full_prompt("", "files: 1", "- hit", "src/lib.rs");
+            assert!(full.contains("## Findings summary"));
+            assert!(full.contains("every concrete finding"));
+            assert!(full.contains("most severe 10-20"));
+
+            let reduce = audit_reduce_prompt("", "files: 1", "### High\nEvidence: src/lib.rs:1");
+            assert!(reduce.contains("## Findings summary"));
+            assert!(reduce.contains("do not omit concrete lower-severity findings"));
+            assert!(reduce.contains("most severe 10-20"));
+        }
     }
 }

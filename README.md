@@ -60,7 +60,7 @@ echo "update the changelog" | OY_NON_INTERACTIVE=1 oy run
 
 `oy audit [focus]` runs a deterministic no-tools repository audit and writes `ISSUES.md` by default. The runner, not the model, collects reviewable workspace text, builds a repository manifest and security-relevant index, then sends the included text to the model as either one full review or a simple map→reduce chunk review for larger repositories.
 
-The audit prompt embeds an OWASP ASVS/MASVS checklist plus grugbrain complexity guidance, and asks for concise, evidence-first findings with severity, file/symbol evidence, trust boundary/sink where security-relevant, impact, exploitability/preconditions, references, and fixes. Generated reports include a transparency line showing the command/model context used.
+The audit prompt embeds an OWASP ASVS/MASVS checklist plus grugbrain complexity guidance, and asks for concise, evidence-first findings with severity, file/symbol evidence, trust boundary/sink where security-relevant, impact, exploitability/preconditions, references, and fixes. Generated reports include a transparency line showing the command/model context used, a succinct all-findings summary with code refs, and detailed writeups for only the most severe 10-20 findings.
 
 ```bash
 oy audit                         # writes ISSUES.md
@@ -122,6 +122,8 @@ Local OpenAI-compatible server:
 oy model local-8080::qwen3.5
 oy chat
 ```
+
+Local endpoint auth uses `LOCAL_API_KEY` when set and otherwise sends a placeholder `oy-local` bearer token; it does not reuse `OPENAI_API_KEY` for localhost probes.
 
 ## Chat UX
 
@@ -243,7 +245,7 @@ Override the config file path with `OY_CONFIG` and workspace with `OY_ROOT`.
 | `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_MANTLE_API_KEY`, `BEDROCK_MANTLE_BASE_URL` | Bedrock Mantle OpenAI-compatible auth/endpoint |
 | `OPENCODE_API_KEY`, `OPENCODE_BASE_URL`, `OPENCODE_GO_BASE_URL` | OpenCode Zen/Go auth/endpoint; falls back to `~/.local/share/opencode/auth.json` |
 | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | Copilot shim auth |
-| `LOCAL_API_KEY` | Local `local-<port>` shim key; falls back to `OPENAI_API_KEY` then `oy-local` |
+| `LOCAL_API_KEY` | Local `local-<port>` shim key; falls back to placeholder `oy-local` |
 
 ## Troubleshooting
 
@@ -253,6 +255,16 @@ Override the config file path with `OY_CONFIG` and workspace with `OY_ROOT`.
 - Untrusted repo: use `oy chat --mode plan` first, preferably inside a container or VM.
 
 ## Development
+
+Top-level source layout is intentionally coarse-grained after the 0.7.7 maintainability pass:
+
+| Path | Role |
+|---|---|
+| `src/agent.rs` | Model routing, Bedrock/OpenAI-compatible adapters, session state, transcript compaction |
+| `src/cli.rs` | CLI commands, configuration, terminal UI, interactive chat shell |
+| `src/tools.rs` | Workspace-bound tools, schemas, previews, approval and filesystem/network boundaries |
+| `src/audit.rs` | Deterministic no-tools audit runner and audit prompts |
+| `src/lib.rs`, `src/main.rs` | Public facade and binary entry point |
 
 ```bash
 cargo fmt --check

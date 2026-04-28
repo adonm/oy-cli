@@ -2,11 +2,17 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-04-28
+
 ### Added
 - Reworked `oy audit` as a deterministic no-tools audit pipeline that writes `ISSUES.md` by default, embeds OWASP ASVS/MASVS plus grugbrain guidance, and uses full-repo or map→reduce review depending on repository size.
 - Added generated audit report transparency lines showing the `oy audit` command/model context used.
 
 ### Changed
+- Consolidated the agent stack into `src/agent.rs` and CLI/runtime UI/configuration into `src/cli.rs`, leaving a smaller top-level module surface for future maintenance.
+- Reorganized `src/tools.rs` with explicit review sections while keeping the tool registry in one place.
+- Audit progress now emits consolidated phase updates instead of per-chunk detail spam.
+- Audit reports now request and backfill a succinct all-findings summary with code refs, while reserving detailed writeups for the most severe 10-20 findings.
 - Audit review input is now collected by the Rust runner rather than discovered by model tool calls, making included text and chunking deterministic.
 - `read` previews now clamp long code lines to the terminal preview width and expand tabs to stable columns so line-number gutters do not visually drift.
 

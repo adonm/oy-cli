@@ -30,6 +30,7 @@ use genai::chat::Tool;
 
 use crate::config;
 
+// === Public tool types and constants ===
 pub const DEFAULT_LIMIT: usize = 910;
 pub const DEFAULT_WEBFETCH_TIMEOUT_SECONDS: u64 = 60;
 const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
@@ -313,6 +314,7 @@ fn default_todo_status() -> String {
     "pending".to_string()
 }
 
+// === Tool definitions and schemas ===
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolGate {
     Always,
@@ -614,6 +616,7 @@ fn schema_bash() -> Value {
     )
 }
 
+// === Invocation, summaries, and previews ===
 pub fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
     TOOL_DEFS
         .iter()
@@ -1203,6 +1206,7 @@ fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+// === Todo formatting and persistence ===
 pub fn format_todos(todos: &[TodoItem]) -> String {
     if todos.is_empty() {
         return "<empty todo list>".to_string();
@@ -1327,6 +1331,7 @@ fn todos_to_markdown(todos: &[TodoItem]) -> String {
     out
 }
 
+// === Tool implementations ===
 fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
     reject_out_of_workspace_path(&ctx.root, &args.path, None)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
@@ -1853,6 +1858,7 @@ fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
     }))
 }
 
+// === Workspace filesystem boundary ===
 fn reject_out_of_workspace_path(root: &Path, path: &str, resolved: Option<&Path>) -> Result<()> {
     let raw = Path::new(path);
     if raw.is_absolute() {
@@ -2123,6 +2129,7 @@ fn preview_replace_plan(
     Ok(combined_diff(&changed))
 }
 
+// === Public network boundary ===
 async fn follow_public_redirects(
     initial_client: &reqwest::Client,
     mut response: reqwest::Response,
@@ -2236,6 +2243,7 @@ fn is_text_content_type(content_type: &str) -> bool {
         || content_type.is_empty()
 }
 
+// === Mutation approval boundary ===
 fn require_mutation_approval(ctx: &ToolContext, tool: &str, preview: Option<&str>) -> Result<()> {
     match ctx.policy.approval(tool) {
         Approval::Auto => Ok(()),
@@ -2273,6 +2281,7 @@ fn approve_tool(tool: &str, preview: Option<&str>) -> Result<()> {
     }
 }
 
+// === Tests ===
 #[cfg(test)]
 mod tests {
     use super::*;

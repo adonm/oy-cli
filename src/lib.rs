@@ -1,15 +1,12 @@
 #![recursion_limit = "256"]
 
-mod app;
+mod agent;
 mod audit;
-mod bedrock;
-mod chat;
-mod config;
-mod model;
-mod prompts;
-mod session;
+mod cli;
 mod tools;
-mod ui;
+
+pub(crate) use agent::{bedrock, model, session};
+pub(crate) use cli::{app, chat, config, ui};
 
 pub use ui::{OutputMode, set_output_mode};
 
