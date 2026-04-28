@@ -1,6 +1,7 @@
 name: Rust CI and Release
 
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ["v*"]
@@ -11,7 +12,7 @@ permissions:
 
 jobs:
   ci:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main')
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -23,7 +24,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --all-targets --locked
+      - name: Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+      - name: CLI help smoke
+        run: |
+          cargo run --locked -- --help
+          cargo run --locked -- run --help
+          cargo run --locked -- chat --help
+          cargo run --locked -- audit --help | tee /tmp/oy-audit-help.txt
+          grep -F -- "--max-chunks <N>" /tmp/oy-audit-help.txt
+          cargo run --locked -- model --help
+          cargo run --locked -- doctor --help
+      - name: Documentation drift checks
+        run: |
+          ! grep -R -n -E 'src/(app|chat|config|model|session|ui)\.rs' README.md CONTRIBUTING.md docs
       - name: Package crate
         run: cargo package --locked
 

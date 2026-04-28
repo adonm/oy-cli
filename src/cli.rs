@@ -808,11 +808,16 @@ pub(crate) mod ui {
     use syntect::util::as_24_bit_terminal_escaped;
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+    /// Controls how much user-facing output `oy` writes while it runs.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum OutputMode {
+        /// Suppress normal progress output.
         Quiet = 0,
+        /// Show standard human-readable progress output.
         Normal = 1,
+        /// Show fuller tool previews and diagnostic context.
         Verbose = 2,
+        /// Prefer machine-readable JSON where a command supports it.
         Json = 3,
     }
 
@@ -834,6 +839,7 @@ pub(crate) mod ui {
         set_output_mode(mode);
     }
 
+    /// Sets the process-wide output mode used by CLI rendering helpers.
     pub fn set_output_mode(mode: OutputMode) {
         OUTPUT_MODE.store(mode as u8, Ordering::Relaxed);
     }
@@ -2073,7 +2079,24 @@ pub(crate) mod app {
         /// Check setup, auth, paths, and safety-relevant defaults.
         Doctor(DoctorArgs),
         /// Audit the current workspace and write markdown findings.
-        Audit(AuditArgs),
+        Audit {
+            #[arg(
+                long,
+                value_name = "PATH",
+                default_value = "ISSUES.md",
+                help = "Write findings to a workspace file (default: ISSUES.md)"
+            )]
+            out: PathBuf,
+            #[arg(
+                long,
+                value_name = "N",
+                default_value_t = audit::DEFAULT_MAX_REVIEW_CHUNKS,
+                help = "Maximum audit chunks to review before failing closed"
+            )]
+            max_chunks: usize,
+            #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
+            focus: Vec<String>,
+        },
     }
 
     #[derive(Debug, Args, Clone)]
@@ -2143,22 +2166,10 @@ pub(crate) mod app {
         mode: String,
     }
 
-    #[derive(Debug, Args, Clone)]
-    struct AuditArgs {
-        #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
-        focus: Vec<String>,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "ISSUES.md",
-            help = "Write findings to a workspace file (default: ISSUES.md)"
-        )]
-        out: PathBuf,
-    }
-
     pub async fn run(argv: Vec<String>) -> Result<i32> {
         let normalized = normalize_args(argv);
-        let cli = Cli::parse_from(std::iter::once("oy".to_string()).chain(normalized.clone()));
+        let mut cli = Cli::parse_from(std::iter::once("oy".to_string()).chain(normalized.clone()));
+        restore_trailing_audit_options(&mut cli);
         crate::ui::init_output_mode(cli_output_mode(&cli));
         match cli.command.unwrap_or(Command::Run(RunArgs {
             shared: SharedModeArgs {
@@ -2173,8 +2184,58 @@ pub(crate) mod app {
             Command::Chat(args) => chat_command(args).await,
             Command::Model(args) => model_command(args).await,
             Command::Doctor(args) => doctor_command(args).await,
-            Command::Audit(args) => audit_command(args).await,
+            Command::Audit {
+                out,
+                max_chunks,
+                focus,
+            } => {
+                audit_command(AuditArgs {
+                    out,
+                    max_chunks,
+                    focus,
+                })
+                .await
+            }
         }
+    }
+
+    fn restore_trailing_audit_options(cli: &mut Cli) {
+        let Some(Command::Audit {
+            out: _,
+            max_chunks,
+            focus,
+        }) = &mut cli.command
+        else {
+            return;
+        };
+        let mut filtered_focus = Vec::new();
+        let mut i = 0usize;
+        while i < focus.len() {
+            match focus[i].as_str() {
+                "--max-chunks" => {
+                    if let Some(value) = focus.get(i + 1)
+                        && let Ok(parsed) = value.parse::<usize>()
+                    {
+                        *max_chunks = parsed;
+                        i += 2;
+                        continue;
+                    }
+                }
+                raw if raw.starts_with("--max-chunks=") => {
+                    if let Some((_, value)) = raw.split_once('=')
+                        && let Ok(parsed) = value.parse::<usize>()
+                    {
+                        *max_chunks = parsed;
+                        i += 1;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            filtered_focus.push(focus[i].clone());
+            i += 1;
+        }
+        *focus = filtered_focus;
     }
 
     fn cli_output_mode(cli: &Cli) -> Option<crate::ui::OutputMode> {
@@ -2187,6 +2248,24 @@ pub(crate) mod app {
         } else {
             None
         }
+    }
+
+    #[cfg(test)]
+    fn parse_cli_for_test(args: &[&str]) -> Cli {
+        let mut cli = Cli::parse_from(args);
+        restore_trailing_audit_options(&mut cli);
+        cli
+    }
+
+    #[cfg(test)]
+    fn command_help_for_test(command: &str) -> String {
+        let mut cmd = <Cli as clap::CommandFactory>::command();
+        let Some(subcommand) = cmd.find_subcommand_mut(command) else {
+            panic!("unknown command: {command}");
+        };
+        let mut help = Vec::new();
+        subcommand.write_long_help(&mut help).expect("write help");
+        String::from_utf8(help).expect("utf8 help")
     }
 
     fn normalize_args(mut args: Vec<String>) -> Vec<String> {
@@ -2610,6 +2689,13 @@ pub(crate) mod app {
         )
     }
 
+    #[derive(Debug, Clone)]
+    struct AuditArgs {
+        focus: Vec<String>,
+        out: PathBuf,
+        max_chunks: usize,
+    }
+
     async fn audit_command(args: AuditArgs) -> Result<i32> {
         let started = std::time::Instant::now();
         let focus = args.focus.join(" ");
@@ -2621,6 +2707,7 @@ pub(crate) mod app {
             crate::ui::kv("model", &model);
             crate::ui::kv("mode", "no-tools");
             crate::ui::kv("out", args.out.display());
+            crate::ui::kv("max chunks", args.max_chunks);
             if !focus.trim().is_empty() {
                 crate::ui::kv("focus", crate::ui::compact_preview(&focus, 100));
             }
@@ -2630,6 +2717,7 @@ pub(crate) mod app {
             model,
             focus,
             out: args.out,
+            max_chunks: args.max_chunks,
         })
         .await?;
         if crate::ui::is_json() {
@@ -2716,6 +2804,25 @@ pub(crate) mod app {
     #[cfg(test)]
     mod audit_tests {
         use super::*;
+
+        #[test]
+        fn audit_accepts_max_chunks_flag() {
+            let cli = parse_cli_for_test(&["oy", "audit", "--max-chunks", "240", "auth paths"]);
+            let Some(Command::Audit {
+                max_chunks, focus, ..
+            }) = cli.command
+            else {
+                panic!("expected audit command");
+            };
+            assert_eq!(max_chunks, 240);
+            assert_eq!(focus, vec!["auth paths"]);
+        }
+
+        #[test]
+        fn help_documents_audit_max_chunks() {
+            let help = command_help_for_test("audit");
+            assert!(help.contains("--max-chunks <N>"));
+        }
 
         #[test]
         fn exact_model_specs_are_endpoint_qualified_or_provider_ids() {

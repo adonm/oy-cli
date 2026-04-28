@@ -15,7 +15,7 @@ use crate::{config, model, session};
 
 const TARGET_CHUNK_TOKENS: usize = 64_000;
 const SMALL_REPO_TOKENS: usize = 80_000;
-const MAX_REVIEW_CHUNKS: usize = 80;
+pub const DEFAULT_MAX_REVIEW_CHUNKS: usize = 80;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const SECURITY_INDEX_LIMIT: usize = 160;
 const FINDINGS_PER_CHUNK_LIMIT_TOKENS: usize = 6_000;
@@ -27,6 +27,7 @@ pub struct AuditOptions {
     pub model: String,
     pub focus: String,
     pub out: PathBuf,
+    pub max_chunks: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -62,9 +63,11 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     let manifest = build_manifest(&files);
     let index = build_security_index(&files);
     let chunks = chunk_files(files, TARGET_CHUNK_TOKENS);
-    if chunks.len() > MAX_REVIEW_CHUNKS {
+    if chunks.len() > options.max_chunks {
         bail!(
-            "audit would require {} chunks; narrow the repo or raise chunking limits before running",
+            "audit would require {} chunks, above the --max-chunks limit of {}; rerun with a focused path/filter or pass --max-chunks {} to allow this run",
+            chunks.len(),
+            options.max_chunks,
             chunks.len()
         );
     }
@@ -491,6 +494,9 @@ fn transparency_snippet(options: &AuditOptions) -> String {
     if options.out != Path::new("ISSUES.md") {
         let _ = write!(command, " --out {}", options.out.display());
     }
+    if options.max_chunks != DEFAULT_MAX_REVIEW_CHUNKS {
+        let _ = write!(command, " --max-chunks {}", options.max_chunks);
+    }
     if !options.focus.trim().is_empty() {
         command.push(' ');
         command.push_str(options.focus.trim());
@@ -794,6 +800,18 @@ mod tests {
         let report =
             "# Audit Issues\n\n## Findings summary\n\n- **High** `src/lib.rs:1` — existing\n";
         assert_eq!(with_succinct_findings_summary(report), report);
+    }
+
+    #[test]
+    fn transparency_line_includes_non_default_max_chunks() {
+        let snippet = transparency_snippet(&AuditOptions {
+            root: PathBuf::from("."),
+            model: String::new(),
+            focus: "auth paths".to_string(),
+            out: PathBuf::from("ISSUES.md"),
+            max_chunks: 240,
+        });
+        assert!(snippet.contains("oy audit --max-chunks 240 auth paths"));
     }
 
     #[test]

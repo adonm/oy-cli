@@ -1,5 +1,8 @@
 # oy
 
+[![Crates.io](https://img.shields.io/crates/v/oy-cli.svg)](https://crates.io/crates/oy-cli)
+[![docs.rs](https://docs.rs/oy-cli/badge.svg)](https://docs.rs/oy-cli)
+
 `oy` is a local AI coding CLI for your shell. It helps you inspect a codebase, ask questions, make small edits, run commands, and audit repositories from the current workspace.
 
 ## Quick start
@@ -140,9 +143,10 @@ Useful exact model ids include:
 oy audit
 oy audit "security and complexity"
 oy audit "auth paths" --out docs/audit.md
+oy audit --max-chunks 240
 ```
 
-The model does not get file-edit tools, shell access, or live search during an audit. The runner collects the review input first, then asks the model to report evidence-first findings.
+The model does not get file-edit tools, shell access, or live search during an audit. The runner collects the review input first, then asks the model to report evidence-first findings. Large repositories fail closed above 80 review chunks by default; pass `--max-chunks N` when you intentionally want a larger audit.
 
 ## Interactive chat
 
@@ -217,6 +221,12 @@ Default local paths:
 
 ## Development
 
+Maintainer docs:
+
+- `CONTRIBUTING.md` — local checks, design rules, and release-note expectations.
+- `docs/architecture.md` — runtime flow, module map, trust boundaries, and audit pipeline.
+- `docs/tool-safety.md` — tool capabilities, approval modes, and boundary guidance.
+
 Top-level source layout:
 
 | Path | Role |
@@ -231,9 +241,10 @@ Checks:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo run -- --help
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+cargo run --locked -- --help
 ```
 
 ## License
