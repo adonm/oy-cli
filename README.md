@@ -158,6 +158,7 @@ In `oy chat`:
 - `/help` lists commands
 - `/status` shows model, workspace, mode, context, and todos
 - `/ask <question>` is read-only research; it cannot edit files or run `bash`
+- `webfetch` can fetch public docs/API pages and follows redirects by default; it sends an honest `oy-cli/<version>` user agent plus doc-friendly `Accept` headers, while still blocking private/local targets and sensitive headers
 
 For multi-step work, `oy` keeps an in-memory todo list. It writes `TODO.md` only when you explicitly ask and the current mode allows it.
 

@@ -166,7 +166,7 @@ When context gets long, compress to the plan, key evidence, and next action. If 
         "sloc" => "Count source lines with tokei for repository sizing. `path` may be one path or whitespace-separated paths.",
         "bash" => "Run a shell command in the workspace. Use only when file tools are insufficient or when you must run/check something.",
         "ask" => "Ask the user in interactive runs. Reserve for genuine ambiguity or irreversible choices.",
-        "webfetch" => "Fetch public web pages/files. Blocks localhost/private IPs and sensitive headers.",
+        "webfetch" => "Fetch public web pages/files. Follows public redirects by default; blocks localhost/private IPs and sensitive headers.",
         "todo" => "Manage the in-memory todo list. Available in read-only modes; persistence to TODO.md is opt-in and requires write approval.",
         other => other,
     }

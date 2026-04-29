@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-04-29
+
+### Changed
+- `webfetch` now follows public redirects by default and sends non-credentialed document-friendly `User-Agent`/`Accept` headers so common public docs URLs work without extra model-supplied headers.
+
+### Fixed
+- Bounded large-audit reduce prompts so high-chunk audits compact candidate findings before hitting model prompt limits.
+
 ## [0.7.12] - 2026-04-28
 
 ### Added

@@ -20,6 +20,9 @@ pub const DEFAULT_MAX_REVIEW_CHUNKS: usize = 80;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const SECURITY_INDEX_LIMIT: usize = 160;
 const FINDINGS_PER_CHUNK_LIMIT_TOKENS: usize = 6_000;
+const REDUCE_PROMPT_MAX_TOKENS: usize = 220_000;
+const REDUCE_FINDINGS_TOKEN_RESERVE: usize = 4_000;
+const REDUCE_FINDINGS_MIN_TOKENS: usize = 8_000;
 const DEFAULT_AUDIT_PARALLELISM: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -134,13 +137,20 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             .collect::<Result<Vec<_>>>()?;
         chunk_findings.sort_by_key(|(chunk_id, _)| *chunk_id);
 
+        let reduce_findings_budget = reduce_candidate_findings_budget(
+            &model_spec,
+            &options.focus,
+            &manifest,
+            REDUCE_PROMPT_MAX_TOKENS,
+        );
+        let per_chunk_findings_limit = FINDINGS_PER_CHUNK_LIMIT_TOKENS.min(
+            reduce_findings_budget
+                .saturating_div(chunk_findings.len().max(1))
+                .max(1),
+        );
         let mut candidate_findings = String::new();
         for (chunk_id, findings) in chunk_findings {
-            let compact = compact_to_tokens(
-                &model_spec,
-                findings.trim(),
-                FINDINGS_PER_CHUNK_LIMIT_TOKENS,
-            );
+            let compact = compact_to_tokens(&model_spec, findings.trim(), per_chunk_findings_limit);
             let _ = writeln!(
                 candidate_findings,
                 "\n## Candidate findings from chunk {chunk_id}\n"
@@ -148,6 +158,13 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             candidate_findings.push_str(compact.trim());
             candidate_findings.push('\n');
         }
+        let candidate_findings = bounded_reduce_findings(
+            &model_spec,
+            &options.focus,
+            &manifest,
+            &candidate_findings,
+            REDUCE_PROMPT_MAX_TOKENS,
+        );
         let prompt = prompts::audit_reduce_prompt(&options.focus, &manifest, &candidate_findings);
         progress.summarise_started();
         let report =
@@ -502,8 +519,62 @@ fn compact_to_tokens<'a>(
     if session::count_tokens(model_spec, text) <= max_tokens {
         return std::borrow::Cow::Borrowed(text);
     }
-    let (short, _) = crate::ui::head_tail(text, max_tokens.saturating_mul(4).max(2000));
-    std::borrow::Cow::Owned(short)
+    std::borrow::Cow::Owned(compact_owned_to_tokens(model_spec, text, max_tokens))
+}
+
+fn compact_owned_to_tokens(model_spec: &str, text: &str, max_tokens: usize) -> String {
+    let mut max_chars = max_tokens.saturating_mul(4).max(2000);
+    loop {
+        let (short, truncated) = crate::ui::head_tail(text, max_chars);
+        if !truncated || session::count_tokens(model_spec, &short) <= max_tokens || max_chars <= 512
+        {
+            return short;
+        }
+        max_chars = max_chars.saturating_mul(3) / 4;
+    }
+}
+
+fn reduce_candidate_findings_budget(
+    model_spec: &str,
+    focus: &str,
+    manifest: &str,
+    max_prompt_tokens: usize,
+) -> usize {
+    let prompt_without_findings = prompts::audit_reduce_prompt(focus, manifest, "");
+    let overhead_tokens = session::count_tokens(model_spec, &prompt_without_findings);
+    max_prompt_tokens
+        .saturating_sub(overhead_tokens)
+        .saturating_sub(REDUCE_FINDINGS_TOKEN_RESERVE)
+        .max(REDUCE_FINDINGS_MIN_TOKENS)
+}
+
+fn bounded_reduce_findings(
+    model_spec: &str,
+    focus: &str,
+    manifest: &str,
+    findings: &str,
+    max_prompt_tokens: usize,
+) -> String {
+    let prompt_tokens = |findings: &str| {
+        let prompt = prompts::audit_reduce_prompt(focus, manifest, findings);
+        session::count_tokens(model_spec, &prompt)
+    };
+    if prompt_tokens(findings) <= max_prompt_tokens {
+        return findings.to_string();
+    }
+
+    let findings_budget =
+        reduce_candidate_findings_budget(model_spec, focus, manifest, max_prompt_tokens);
+    let mut current_budget = findings_budget;
+    let mut bounded = compact_owned_to_tokens(model_spec, findings, current_budget);
+
+    while prompt_tokens(&bounded) > max_prompt_tokens && current_budget > REDUCE_FINDINGS_MIN_TOKENS
+    {
+        current_budget = (current_budget.saturating_mul(3) / 4).max(REDUCE_FINDINGS_MIN_TOKENS);
+        bounded = compact_owned_to_tokens(model_spec, findings, current_budget);
+    }
+
+    bounded
 }
 
 fn transparency_snippet(options: &AuditOptions) -> String {
@@ -1075,6 +1146,30 @@ mod tests {
         assert!(should_skip_path("target/debug/app"));
         assert!(should_skip_path("Cargo.lock"));
         assert!(!should_skip_path("src/main.rs"));
+    }
+
+    #[test]
+    fn compact_to_tokens_enforces_token_limit() {
+        let text = "candidate finding with evidence src/lib.rs:1 and remediation\n".repeat(10_000);
+        let compact = compact_to_tokens("gpt-4o", &text, 1_000);
+        assert!(session::count_tokens("gpt-4o", &compact) <= 1_000);
+        assert!(compact.contains("truncated"));
+    }
+
+    #[test]
+    fn reduce_findings_prompt_is_bounded_for_many_chunks() {
+        let manifest = "files: 240\nestimated_tokens: 12000000\nbytes: 48000000\nlanguages: Rust";
+        let finding = "### High: issue\n- Evidence: `src/lib.rs:1` attacker input reaches sink.\n- Impact: data exposure.\n- Fix: validate at boundary.\n";
+        let mut findings = String::new();
+        for chunk_id in 1..=240 {
+            let _ = writeln!(findings, "\n## Candidate findings from chunk {chunk_id}\n");
+            findings.push_str(&finding.repeat(200));
+        }
+
+        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 20_000);
+        let prompt = prompts::audit_reduce_prompt("", manifest, &bounded);
+        assert!(session::count_tokens("gpt-4o", &prompt) <= 20_000);
+        assert!(bounded.contains("truncated"));
     }
 }
 

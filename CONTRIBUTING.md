@@ -35,6 +35,7 @@ cargo package --locked
 - Inspect before edits; verify after edits.
 - Keep public docs aligned with implemented CLI help.
 - For security-sensitive work, name the trust boundary, validate near it, fail closed, and add focused tests.
+- For `webfetch` changes, keep model use simple: public docs should work by default with redirects and non-credentialed document-friendly headers, while every request/redirect remains public-only and sensitive headers stay denied.
 - Do not add providers, persistence, process, file, network, or credential handling without a concrete user need and focused tests.
 
 ## Important paths

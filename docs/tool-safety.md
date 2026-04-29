@@ -39,13 +39,15 @@ Workspace tools should only operate within `OY_ROOT` or the current directory. W
 
 ## Network boundary
 
-`webfetch` is for public documentation and public API research. It should fail closed for localhost, private, link-local, reserved, multicast, and ambiguous address forms. When changing it:
+`webfetch` is for public documentation and public API research. It follows redirects by default and sends an honest `oy-cli/<version>` `User-Agent` plus document-friendly `Accept` headers so common docs URLs work without model-supplied header tuning. It should still fail closed for localhost, private, link-local, reserved, multicast, and ambiguous address forms. When changing it:
 
 - validate before each request and redirect,
+- keep redirects capped and public-only,
 - normalize IPv4-mapped IPv6 addresses,
 - reject sensitive request headers,
+- keep default headers non-credentialed and overrideable only through validation,
 - cap time and response size,
-- add regression tests for public/private IP classification.
+- add regression tests for public/private IP classification and webfetch defaults.
 
 ## Shell boundary
 

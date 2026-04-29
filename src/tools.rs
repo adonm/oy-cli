@@ -8,6 +8,7 @@ use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
 use regex::Regex;
 use reqwest::StatusCode;
+use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use similar::{ChangeTag, TextDiff};
@@ -37,6 +38,12 @@ const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
 const MAX_WEBFETCH_TIMEOUT_SECONDS: u64 = 120;
 const MAX_BASH_OUTPUT_BYTES: usize = 200_000;
 const MAX_WEBFETCH_BYTES: usize = 2 * 1024 * 1024;
+const WEBFETCH_ACCEPT: &str = "text/markdown,text/plain,text/html,application/xhtml+xml,application/json,application/xml;q=0.9,*/*;q=0.8";
+const WEBFETCH_USER_AGENT: &str = concat!(
+    "oy-cli/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/wagov-dtt/oy-cli)"
+);
 const TODO_FILE: &str = "TODO.md";
 const PREVIEW_ITEMS: usize = 20;
 const NORMAL_PREVIEW_LINES: usize = 8;
@@ -268,7 +275,7 @@ struct WebfetchArgs {
     method: String,
     #[serde(default)]
     headers: Option<BTreeMap<String, String>>,
-    #[serde(default)]
+    #[serde(default = "default_follow_redirects")]
     follow_redirects: bool,
     #[serde(default = "default_web_timeout", deserialize_with = "deserialize_u64")]
     timeout_seconds: u64,
@@ -309,6 +316,9 @@ fn default_method() -> String {
 }
 fn default_web_timeout() -> u64 {
     DEFAULT_WEBFETCH_TIMEOUT_SECONDS
+}
+fn default_follow_redirects() -> bool {
+    true
 }
 fn default_todo_status() -> String {
     "pending".to_string()
@@ -582,7 +592,7 @@ fn schema_webfetch() -> Value {
                 "headers",
                 json!({"type": ["object", "null"], "additionalProperties": string()}),
             ),
-            ("follow_redirects", bool_default(false)),
+            ("follow_redirects", bool_default(true)),
             (
                 "timeout_seconds",
                 integer_default(DEFAULT_WEBFETCH_TIMEOUT_SECONDS),
@@ -1675,31 +1685,15 @@ async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
     }
     let url = validate_public_url(&args.url).await?;
     let resolved = public_socket_addrs(&url).await?;
+    let headers = validated_webfetch_headers(args.headers.as_ref())?;
     let client = webfetch_client(&url, &resolved, args.timeout_seconds)?;
     let mut request = client.request(method.parse()?, url.clone());
-    if let Some(headers) = args.headers.as_ref() {
-        for (key, value) in headers {
-            let lower = key.to_ascii_lowercase();
-            if matches!(
-                lower.as_str(),
-                "authorization"
-                    | "cookie"
-                    | "host"
-                    | "proxy-authorization"
-                    | "x-forwarded-for"
-                    | "x-real-ip"
-            ) {
-                bail!("Header {key:?} is not allowed in webfetch requests");
-            }
-            if value.contains('\r') || value.contains('\n') {
-                bail!("Header value for {key:?} contains invalid CRLF characters");
-            }
-            request = request.header(key, value);
-        }
+    for (key, value) in &headers {
+        request = request.header(key, value);
     }
     let mut response = request.send().await?;
     if args.follow_redirects {
-        response = follow_public_redirects(&client, response, &method).await?;
+        response = follow_public_redirects(response, &method, &headers).await?;
     }
     let status = response.status();
     let version = response.version();
@@ -2128,11 +2122,10 @@ fn preview_replace_plan(
 
 // === Public network boundary ===
 async fn follow_public_redirects(
-    initial_client: &reqwest::Client,
     mut response: reqwest::Response,
     method: &str,
+    headers: &BTreeMap<String, String>,
 ) -> Result<reqwest::Response> {
-    let _ = initial_client;
     for _ in 0..10 {
         if !response.status().is_redirection() {
             return Ok(response);
@@ -2146,9 +2139,47 @@ async fn follow_public_redirects(
         validate_public_url_parts(&next_url)?;
         let resolved = public_socket_addrs(&next_url).await?;
         let client = webfetch_client(&next_url, &resolved, MAX_WEBFETCH_TIMEOUT_SECONDS)?;
-        response = client.request(method.parse()?, next_url).send().await?;
+        let mut request = client.request(method.parse()?, next_url);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        response = request.send().await?;
     }
     bail!("too many redirects")
+}
+
+fn validated_webfetch_headers(
+    headers: Option<&BTreeMap<String, String>>,
+) -> Result<BTreeMap<String, String>> {
+    let mut validated = BTreeMap::from([
+        (ACCEPT.as_str().to_string(), WEBFETCH_ACCEPT.to_string()),
+        (
+            USER_AGENT.as_str().to_string(),
+            WEBFETCH_USER_AGENT.to_string(),
+        ),
+    ]);
+    if let Some(headers) = headers {
+        for (key, value) in headers {
+            let lower = key.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "authorization"
+                    | "cookie"
+                    | "host"
+                    | "proxy-authorization"
+                    | "x-forwarded-for"
+                    | "x-real-ip"
+            ) {
+                bail!("Header {key:?} is not allowed in webfetch requests");
+            }
+            if value.contains('\r') || value.contains('\n') {
+                bail!("Header value for {key:?} contains invalid CRLF characters");
+            }
+            validated.retain(|existing, _| !existing.eq_ignore_ascii_case(key));
+            validated.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(validated)
 }
 
 fn webfetch_client(
@@ -2360,10 +2391,46 @@ mod tests {
 
         let webfetch = schema_for("webfetch");
         assert_eq!(webfetch["required"], json!(["url"]));
+        assert_eq!(webfetch["properties"]["follow_redirects"]["default"], true);
         assert_eq!(
             webfetch["properties"]["headers"]["type"],
             json!(["object", "null"])
         );
+    }
+
+    #[test]
+    fn webfetch_defaults_to_redirects_and_doc_friendly_headers() {
+        let args: WebfetchArgs = serde_json::from_value(json!({
+            "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-files-mounting-eks.md"
+        }))
+        .unwrap();
+        assert!(args.follow_redirects);
+
+        let headers = validated_webfetch_headers(args.headers.as_ref()).unwrap();
+        assert_eq!(headers.get(ACCEPT.as_str()).unwrap(), WEBFETCH_ACCEPT);
+        assert!(
+            headers
+                .get(USER_AGENT.as_str())
+                .unwrap()
+                .starts_with("oy-cli/")
+        );
+    }
+
+    #[test]
+    fn webfetch_custom_headers_override_defaults_but_sensitive_headers_stay_denied() {
+        let custom = BTreeMap::from([
+            ("accept".to_string(), "application/json".to_string()),
+            ("X-Trace".to_string(), "1".to_string()),
+        ]);
+        let headers = validated_webfetch_headers(Some(&custom)).unwrap();
+        assert_eq!(headers.get(ACCEPT.as_str()).unwrap(), "application/json");
+        assert_eq!(headers.get("X-Trace").unwrap(), "1");
+
+        let denied = BTreeMap::from([("Authorization".to_string(), "Bearer x".to_string())]);
+        assert!(validated_webfetch_headers(Some(&denied)).is_err());
+
+        let invalid = BTreeMap::from([("X-Trace".to_string(), "bad\r\nvalue".to_string())]);
+        assert!(validated_webfetch_headers(Some(&invalid)).is_err());
     }
 
     #[test]
