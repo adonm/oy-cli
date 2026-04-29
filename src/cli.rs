@@ -1562,8 +1562,8 @@ pub(crate) mod ui {
 
 // === chat ===
 pub(crate) mod chat {
-    use anyhow::Result;
-    use dialoguer::{Input, Select, theme::ColorfulTheme};
+    use anyhow::{Context as _, Result};
+    use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
     use std::fmt::Display;
 
     use reedline_repl_rs::reedline::{
@@ -1577,6 +1577,7 @@ pub(crate) mod chat {
     use crate::session::{self, Session};
 
     const HISTORY_SIZE: usize = 10_000;
+    const MAX_CONTEXT_RECOVERY_ATTEMPTS: usize = 3;
 
     fn chat_line_editor(history_path: PathBuf) -> Result<Reedline> {
         let mut keybindings = default_emacs_keybindings();
@@ -1659,7 +1660,7 @@ pub(crate) mod chat {
         if let Some(command) = line.strip_prefix('/') {
             return handle_slash_command(session, command.trim()).await;
         }
-        run_prompt_with_model_reselect(session, line).await?;
+        run_prompt_with_context_recovery(session, line).await?;
         Ok(true)
     }
 
@@ -1880,7 +1881,8 @@ pub(crate) mod chat {
         Ok(true)
     }
 
-    async fn run_prompt_with_model_reselect(session: &mut Session, prompt: &str) -> Result<()> {
+    async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -> Result<()> {
+        let mut recovery_attempts = 0usize;
         loop {
             match session::run_prompt(session, prompt).await {
                 Ok(answer) => {
@@ -1889,40 +1891,105 @@ pub(crate) mod chat {
                     }
                     return Ok(());
                 }
-                Err(err) if config::can_prompt() => {
-                    crate::ui::err_line(format_args!("model call failed: {err:#}"));
-                    session.transcript.undo_last_turn();
-                    let Some(model) = choose_replacement_model(session).await? else {
+                Err(err) => {
+                    let Some(budget_err) = err
+                        .downcast_ref::<session::ContextBudgetExceeded>()
+                        .copied()
+                    else {
                         return Err(err);
                     };
-                    session.model = model;
-                    config::save_model_config(&session.model)?;
-                    crate::ui::err_line(format_args!("retrying with model: {}", session.model));
+                    recovery_attempts += 1;
+                    crate::ui::err_line(format_args!("model call failed: {err:#}"));
+                    session.transcript.undo_last_turn();
+                    if recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
+                        offer_save_after_context_failures(session)?;
+                        return Ok(());
+                    }
+                    if !recover_context_budget(session, recovery_attempts, budget_err)? {
+                        return Ok(());
+                    }
                 }
-                Err(err) => return Err(err),
             }
         }
     }
 
-    async fn choose_replacement_model(session: &Session) -> Result<Option<String>> {
-        let listing = model::inspect_models().await?;
-        let items = replacement_model_choices(&session.model, listing.all_models, listing.hints);
-        if items.is_empty() {
-            return Ok(None);
+    fn recover_context_budget(
+        session: &mut Session,
+        attempt: usize,
+        budget_err: session::ContextBudgetExceeded,
+    ) -> Result<bool> {
+        if config::can_prompt() {
+            let raised_limit =
+                config::context_config().input_budget_tokens() >= budget_err.estimated_tokens;
+            let choices = vec![
+                format!(
+                    "Retry with current OY_CONTEXT_LIMIT={}{}",
+                    config::context_config().limit_tokens,
+                    if raised_limit {
+                        " (now sufficient)"
+                    } else {
+                        ""
+                    }
+                ),
+                "Force-truncate oldest history and retry".to_string(),
+                "Save session and stop".to_string(),
+                "Stop without saving".to_string(),
+            ];
+            let choice = ask("Context is over budget. Choose recovery", Some(&choices))?;
+            if choice.starts_with("Retry with current OY_CONTEXT_LIMIT=") {
+                return Ok(true);
+            }
+            match choice.as_str() {
+                "Force-truncate oldest history and retry" => {}
+                "Save session and stop" => {
+                    let path = session.save(None)?;
+                    crate::ui::success(format_args!("saved session {}", path.display()));
+                    crate::ui::line(
+                        "Try `/load` later, or switch models with `/model` after reloading.",
+                    );
+                    return Ok(false);
+                }
+                _ => return Ok(false),
+            }
         }
-        choose_model(None, &items)
+
+        let before = session.context_status().estimate.total_tokens;
+        let removed = session.transcript.force_truncate_oldest_turns();
+        let after = session.context_status().estimate.total_tokens;
+        if removed == 0 || after >= before {
+            if attempt + 1 >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
+                offer_save_after_context_failures(session)?;
+                return Ok(false);
+            }
+            anyhow::bail!(
+                "context remains over budget and no more history can be truncated; save the session and try a different model later"
+            );
+        }
+        crate::ui::warn(format_args!(
+            "force-truncated {removed} old messages: {before} -> {after} tokens"
+        ));
+        Ok(true)
     }
 
-    fn replacement_model_choices(
-        current: &str,
-        mut models: Vec<String>,
-        hints: Vec<String>,
-    ) -> Vec<String> {
-        models.extend(hints);
-        models.retain(|item| item != current);
-        models.sort();
-        models.dedup();
-        models
+    fn offer_save_after_context_failures(session: &Session) -> Result<()> {
+        crate::ui::warn(format_args!(
+            "context is still over budget after {MAX_CONTEXT_RECOVERY_ATTEMPTS} recovery attempts"
+        ));
+        if config::can_prompt()
+            && Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Save this session so you can resume later?")
+                .default(true)
+                .interact()?
+        {
+            let path = session
+                .save(None)
+                .context("failed to save over-budget session")?;
+            crate::ui::success(format_args!("saved session {}", path.display()));
+        }
+        crate::ui::line(
+            "Try `/load` later, then raise OY_CONTEXT_LIMIT, use `/compact`, or switch models with `/model`.",
+        );
+        Ok(())
     }
 
     pub fn choose_model(current: Option<&str>, items: &[String]) -> Result<Option<String>> {
@@ -2022,16 +2089,6 @@ pub(crate) mod chat {
             assert!(help.contains("/quit"));
             assert!(help.contains("/compact"));
             assert!(help.contains("/status"));
-        }
-
-        #[test]
-        fn replacement_model_choices_drop_current_and_dedup() {
-            let choices = replacement_model_choices(
-                "broken",
-                vec!["broken".into(), "ok".into()],
-                vec!["ok".into(), "other".into()],
-            );
-            assert_eq!(choices, vec!["ok".to_string(), "other".to_string()]);
         }
     }
 }

@@ -1619,6 +1619,25 @@ pub(crate) mod session {
         pub summary_present: bool,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ContextBudgetExceeded {
+        pub estimated_tokens: usize,
+        pub input_budget_tokens: usize,
+        pub limit_tokens: usize,
+    }
+
+    impl std::fmt::Display for ContextBudgetExceeded {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "context estimate {} exceeds input budget {}; use /compact, temporarily raise OY_CONTEXT_LIMIT, or force-truncate history",
+                self.estimated_tokens, self.input_budget_tokens
+            )
+        }
+    }
+
+    impl std::error::Error for ContextBudgetExceeded {}
+
     fn model_tokenizer_name(model: &str) -> &str {
         model
             .rsplit_once("::")
@@ -1732,6 +1751,31 @@ pub(crate) mod session {
                 }
             }
             false
+        }
+
+        pub fn force_truncate_oldest_turns(&mut self) -> usize {
+            if self.messages.len() <= 1 {
+                return 0;
+            }
+            let remove_count = (self.messages.len() / 4)
+                .max(1)
+                .min(self.messages.len() - 1);
+            let keep_from = self.valid_truncation_keep_from(remove_count);
+            if keep_from == 0 || keep_from >= self.messages.len() {
+                return 0;
+            }
+            self.messages.drain(..keep_from);
+            keep_from
+        }
+
+        fn valid_truncation_keep_from(&self, requested: usize) -> usize {
+            let mut keep_from = self.valid_compaction_keep_from(requested);
+            while keep_from < self.messages.len()
+                && !matches!(self.messages[keep_from], StoredMessage::User { .. })
+            {
+                keep_from += 1;
+            }
+            keep_from
         }
 
         pub fn token_estimate(
@@ -2241,11 +2285,12 @@ Transcript to compact:
                 .transcript
                 .token_estimate(model_spec, &session.system_prompt, &session.todos);
         if estimate.total_tokens > config.input_budget_tokens() {
-            bail!(
-                "context estimate {} exceeds input budget {}; use /compact to summarize older messages",
-                estimate.total_tokens,
-                config.input_budget_tokens()
-            );
+            return Err(ContextBudgetExceeded {
+                estimated_tokens: estimate.total_tokens,
+                input_budget_tokens: config.input_budget_tokens(),
+                limit_tokens: config.limit_tokens,
+            }
+            .into());
         }
         Ok(())
     }
@@ -2757,6 +2802,36 @@ Transcript to compact:
             assert_eq!(tx.messages.len(), 2);
             assert!(matches!(tx.messages[0], StoredMessage::User { .. }));
             assert!(matches!(tx.messages[1], StoredMessage::Assistant { .. }));
+        }
+
+        #[test]
+        fn force_truncate_oldest_turns_removes_old_history_without_orphan_tool() {
+            let mut tx = Transcript {
+                summary: None,
+                messages: vec![
+                    StoredMessage::User {
+                        content: "old user".into(),
+                    },
+                    StoredMessage::AssistantToolCalls {
+                        tool_calls: vec![StoredToolCall {
+                            call_id: "call-1".into(),
+                            fn_name: "read".into(),
+                            fn_arguments: json!({"path": "src/main.rs"}),
+                        }],
+                    },
+                    StoredMessage::Tool {
+                        call_id: "call-1".into(),
+                        content: "tool result".into(),
+                    },
+                    StoredMessage::User {
+                        content: "new user".into(),
+                    },
+                ],
+            };
+
+            assert_eq!(tx.force_truncate_oldest_turns(), 3);
+            assert_eq!(tx.messages.len(), 1);
+            assert!(matches!(tx.messages[0], StoredMessage::User { .. }));
         }
 
         #[test]

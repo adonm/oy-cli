@@ -14,6 +14,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo run --locked -- --help
 ```
 
+Run clippy after formatting so its suggestions apply cleanly. Keep `--all-targets --locked -- -D warnings` intact: it checks tests/examples as well as the binary and treats every lint as something to fix before review.
+
 For release-adjacent changes, also run:
 
 ```bash
