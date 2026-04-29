@@ -8,7 +8,7 @@
 ## Quick start
 
 ```bash
-mise use -g github:wagov-dtt/oy-cli@latest   # install oy with mise
+mise use cargo-binstall cargo:oy-cli # install oy with mise
 oy doctor                                    # check setup
 oy model                                     # choose or confirm a model
 oy "summarize this repo"
@@ -27,14 +27,14 @@ oy chat --mode plan
 Recommended:
 
 ```bash
-mise use -g github:wagov-dtt/oy-cli@latest
+mise use cargo-binstall cargo:oy-cli
 oy --help
 ```
 
-From source:
+With Cargo:
 
 ```bash
-cargo install --path .
+cargo install oy-cli
 oy --help
 ```
 
