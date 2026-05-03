@@ -231,8 +231,8 @@ Top-level source layout:
 
 | Path | Role |
 |---|---|
-| `src/agent.rs` | Model routing, providers, sessions, context compaction |
-| `src/cli.rs` | CLI commands, config, terminal UI, chat shell |
+| `src/agent.rs`, `src/agent/` | Model routing, providers, sessions, context compaction |
+| `src/cli.rs`, `src/cli/` | CLI commands, config, terminal UI, chat shell |
 | `src/tools.rs` | Workspace tools, approvals, previews, safety boundaries |
 | `src/audit.rs` | Deterministic audit runner and prompts |
 | `src/lib.rs`, `src/main.rs` | Library facade and binary entry point |

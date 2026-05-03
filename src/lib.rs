@@ -27,7 +27,7 @@ mod audit;
 mod cli;
 mod tools;
 
-pub(crate) use agent::{bedrock, model, session};
+pub(crate) use agent::{bedrock, compaction, model, session};
 pub(crate) use cli::{app, chat, config, ui};
 
 pub use ui::{OutputMode, set_output_mode};

@@ -2208,6 +2208,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kdam"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d847be338ef16a13f97637c062d97fb52ebe0ff3b77fa18456d5ed366317e4f7"
+dependencies = [
+ "terminal_size",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2488,6 +2498,7 @@ dependencies = [
  "html2md",
  "ignore",
  "insta",
+ "kdam",
  "reedline-repl-rs",
  "regex",
  "reqwest",

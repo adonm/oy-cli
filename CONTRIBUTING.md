@@ -44,9 +44,9 @@ cargo package --locked
 
 | Path | Role |
 |---|---|
-| `src/agent.rs` | Provider integration, model routing, Bedrock support, sessions, transcripts, context compaction, tool loop |
+| `src/agent.rs`, `src/agent/` | Provider integration, model routing, Bedrock support, sessions, transcripts, context compaction, tool loop |
 | `src/audit.rs` | Deterministic no-tools audit runner, file collection, chunking, prompts, report post-processing |
-| `src/cli.rs` | Config paths, safety modes, terminal UI, chat shell, command handlers |
+| `src/cli.rs`, `src/cli/` | Config paths, safety modes, terminal UI, chat shell, command handlers |
 | `src/tools.rs` | Tool schemas, tool dispatch, previews, todos, filesystem/network/mutation approval boundaries |
 | `src/lib.rs`, `src/main.rs` | Public facade and binary entry point |
 | `tests/snapshots.rs` | Snapshot coverage for chat help and tool previews |

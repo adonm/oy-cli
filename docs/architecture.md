@@ -8,33 +8,36 @@
 user argv/stdin
   -> src/main.rs
   -> oy::run in src/lib.rs
-  -> cli::app in src/cli.rs
-  -> session in src/agent.rs
+  -> cli::app in src/cli/app.rs
+  -> cli::app::{session_cmd, model_cmd, doctor_cmd, audit_cmd}
+  -> agent::session in src/agent/session.rs
+  -> agent::{chat, transcript, compaction, model, auth, endpoints}
   -> model provider / tool loop
-  -> src/tools.rs for local capabilities
+  -> src/tools.rs and src/tools/ for local capabilities
 ```
 
 1. `src/main.rs` converts process errors into a user-facing exit code.
 2. `src/lib.rs` keeps the public crate surface small.
-3. `cli::app` parses commands, resolves the workspace and safety mode, then starts `run`, `chat`, `model`, `doctor`, or `audit`.
-4. `agent::session` owns transcripts, context budgeting, compaction, tool-call loops, and saved sessions.
-5. `agent::model` and `agent::bedrock` resolve provider-specific clients and model routing.
-6. `src/tools.rs` validates tool arguments and enforces approval, workspace, network, and mutation boundaries.
-7. `src/audit.rs` is separate from the tool loop: it collects repository text first, then sends no-tools audit prompts to the model.
+3. `cli::app` parses commands, restores legacy argument shapes, and delegates command bodies to `cli::app/*_cmd.rs`.
+4. `cli::config` is a facade over focused config modules for modes, paths, prompts, model config, environment knobs, and saved sessions.
+5. `agent::session` owns session orchestration and saved sessions; transcript storage, context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
+6. `agent::model` and `agent::bedrock` resolve provider-specific clients and model routing.
+7. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries.
+8. `src/audit.rs` is separate from the tool loop: it orchestrates collection, chunk review/reduce, rendering, and report writing through focused `src/audit/` modules.
 
 ## Main modules
 
 | Path | Responsibility |
 |---|---|
-| `src/agent.rs` | Provider integration, model selection, Bedrock support, sessions, transcripts, context compaction, tool loop |
-| `src/audit.rs` | Deterministic no-tools audit collection, chunking, prompt construction, report writing |
-| `src/cli.rs` | Config paths, safety modes, terminal UI, interactive chat shell, command handlers |
-| `src/tools.rs` | Tool schemas, tool dispatch, previews, todos, workspace filesystem boundary, webfetch boundary, mutation approval |
+| `src/agent.rs`, `src/agent/` | Provider integration, model selection, auth/endpoint discovery, Bedrock support, sessions, transcripts, context compaction, chat/tool loop |
+| `src/audit.rs`, `src/audit/` | Deterministic no-tools audit orchestration, input collection, chunking, prompt construction, report/SARIF writing |
+| `src/cli.rs`, `src/cli/` | Command parsing/dispatch, command handlers, config paths, safety modes, terminal UI, interactive chat shell |
+| `src/tools.rs`, `src/tools/` | Tool schemas, tool dispatch, previews, todos, workspace filesystem boundary, webfetch boundary, mutation approval |
 | `src/lib.rs` | Small public facade used by the binary and tests |
 | `src/main.rs` | Tokio entry point and process exit handling |
 | `tests/snapshots.rs` | Snapshot tests for chat help and tool preview UX |
 
-The current layout intentionally keeps only a few top-level Rust files. If a file is split later, prefer mechanical extraction with no behavior changes and keep `src/lib.rs` stable.
+The current layout keeps top-level Rust files as facades/orchestrators where practical. When splitting files, prefer mechanical extraction with no behavior changes, keep trust-boundary validation near entry points, and keep `src/lib.rs` stable.
 
 ## Trust boundaries
 
