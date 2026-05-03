@@ -14,7 +14,11 @@ pub(crate) mod config {
     pub struct SavedModelConfig {
         pub model: Option<String>,
         pub shim: Option<String>,
+        #[serde(default)]
+        pub recent_models: Vec<String>,
     }
+
+    const RECENT_MODEL_LIMIT: usize = 5;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct SessionFile {
@@ -237,10 +241,53 @@ When context gets long, compress to the plan, key evidence, and next action. If 
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
         }
-        let payload = saved_model_config_from_selection(model_spec);
+        let previous = load_model_config()?;
+        let mut payload = saved_model_config_from_selection(model_spec);
+        payload.recent_models = updated_recent_models(&previous.recent_models, model_spec);
         let text = serde_json::to_string_pretty(&payload)?;
         write_private_file(&path, text.as_bytes())?;
         Ok(())
+    }
+
+    pub fn recent_models() -> Result<Vec<String>> {
+        Ok(load_model_config()?.recent_models)
+    }
+
+    pub fn clear_recent_models() -> Result<()> {
+        let path = config_root();
+        if let Some(parent) = path.parent() {
+            create_private_dir_all(parent)?;
+        }
+        let mut config = load_model_config()?;
+        if config.model.is_none() && config.shim.is_none() && config.recent_models.is_empty() {
+            if path.exists() {
+                let text = serde_json::to_string_pretty(&config)?;
+                write_private_file(&path, text.as_bytes())?;
+            }
+            return Ok(());
+        }
+        config.recent_models.clear();
+        let text = serde_json::to_string_pretty(&config)?;
+        write_private_file(&path, text.as_bytes())?;
+        Ok(())
+    }
+
+    fn updated_recent_models(previous: &[String], selected: &str) -> Vec<String> {
+        let selected = selected.trim();
+        if selected.is_empty() {
+            return previous.iter().take(RECENT_MODEL_LIMIT).cloned().collect();
+        }
+        let canonical = crate::model::canonical_model_spec(selected);
+        let mut recent = Vec::with_capacity(RECENT_MODEL_LIMIT);
+        recent.push(canonical.clone());
+        recent.extend(
+            previous
+                .iter()
+                .map(|item| crate::model::canonical_model_spec(item))
+                .filter(|item| !item.is_empty() && item != &canonical),
+        );
+        recent.truncate(RECENT_MODEL_LIMIT);
+        recent
     }
 
     pub fn saved_model_config_from_selection(model_spec: &str) -> SavedModelConfig {
@@ -250,11 +297,13 @@ When context gets long, compress to the plan, key evidence, and next action. If 
             return SavedModelConfig {
                 model: Some(genai_model_for_shim(shim, model)),
                 shim: Some(shim.to_string()),
+                recent_models: Vec::new(),
             };
         }
         SavedModelConfig {
             model: Some(model_spec.to_string()),
             shim: None,
+            recent_models: Vec::new(),
         }
     }
 
@@ -656,6 +705,9 @@ When context gets long, compress to the plan, key evidence, and next action. If 
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::sync::Mutex;
+
+        static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
         #[test]
         fn mode_policy_and_risk_labels_are_centralized() {
@@ -709,10 +761,59 @@ When context gets long, compress to the plan, key evidence, and next action. If 
             let saved = saved_model_config_from_selection("copilot::gpt-5.5");
             assert_eq!(saved.model.as_deref(), Some("openai_resp::gpt-5.5"));
             assert_eq!(saved.shim.as_deref(), Some("copilot"));
+            assert!(saved.recent_models.is_empty());
 
             let saved = saved_model_config_from_selection("openai_resp::gpt-5.5");
             assert_eq!(saved.model.as_deref(), Some("openai_resp::gpt-5.5"));
             assert_eq!(saved.shim.as_deref(), None);
+            assert!(saved.recent_models.is_empty());
+        }
+
+        #[test]
+        fn saved_model_config_defaults_legacy_recent_models() {
+            let saved: SavedModelConfig =
+                serde_json::from_str(r#"{"model":"gpt-test","shim":null}"#).unwrap();
+            assert_eq!(saved.model.as_deref(), Some("gpt-test"));
+            assert!(saved.recent_models.is_empty());
+        }
+
+        #[test]
+        fn recent_models_are_deduped_most_recent_first_and_limited() {
+            let previous = vec![
+                "gpt-a".to_string(),
+                "gpt-b".to_string(),
+                "gpt-c".to_string(),
+                "gpt-d".to_string(),
+                "gpt-e".to_string(),
+            ];
+            assert_eq!(
+                updated_recent_models(&previous, " gpt-c "),
+                vec!["gpt-c", "gpt-a", "gpt-b", "gpt-d", "gpt-e"]
+            );
+            assert_eq!(
+                updated_recent_models(&previous, "gpt-f"),
+                vec!["gpt-f", "gpt-a", "gpt-b", "gpt-c", "gpt-d"]
+            );
+        }
+
+        #[test]
+        fn save_and_clear_model_config_persist_recent_models() {
+            let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("config.json");
+            unsafe { env::set_var("OY_CONFIG", &config) };
+
+            save_model_config("gpt-a").unwrap();
+            save_model_config("gpt-b").unwrap();
+            save_model_config("gpt-a").unwrap();
+            assert_eq!(recent_models().unwrap(), vec!["gpt-a", "gpt-b"]);
+
+            clear_recent_models().unwrap();
+            let saved = load_model_config().unwrap();
+            assert_eq!(saved.model.as_deref(), Some("gpt-a"));
+            assert!(saved.recent_models.is_empty());
+
+            unsafe { env::remove_var("OY_CONFIG") };
         }
 
         #[test]
@@ -1789,11 +1890,49 @@ pub(crate) mod chat {
 
     async fn model_command(value: Option<&str>, session: &mut Session) -> Result<bool> {
         if let Some(value) = value {
-            config::save_model_config(value)?;
-            session.model = model::resolve_model(Some(value))?;
+            save_selected_model(value, session)?;
+            crate::ui::line(format_args!("model: {}", session.model));
+            return Ok(true);
+        }
+
+        match choose_recent_model(Some(&session.model), &config::recent_models()?)? {
+            RecentModelChoice::Selected(model_spec) => {
+                save_selected_model(&model_spec, session)?;
+            }
+            RecentModelChoice::Clear => {
+                config::clear_recent_models()?;
+                crate::ui::success("cleared recent model history");
+            }
+            RecentModelChoice::Inspect => {
+                let listing = model::inspect_models().await?;
+                print_chat_model_listing(&listing);
+                if let Some(chosen) = choose_model_from_items(
+                    listing.current.as_deref(),
+                    &listing.all_models,
+                    "Models",
+                )? {
+                    save_selected_model(&chosen, session)?;
+                }
+            }
+            RecentModelChoice::Cancelled => {}
         }
         crate::ui::line(format_args!("model: {}", session.model));
         Ok(true)
+    }
+
+    fn save_selected_model(model_spec: &str, session: &mut Session) -> Result<()> {
+        config::save_model_config(model_spec)?;
+        session.model = model::resolve_model(Some(model_spec))?;
+        Ok(())
+    }
+
+    fn print_chat_model_listing(listing: &model::ModelListing) {
+        crate::ui::section("Models");
+        crate::ui::kv("current", listing.current.as_deref().unwrap_or("<unset>"));
+        crate::ui::kv("selectable", listing.all_models.len());
+        if listing.all_models.is_empty() {
+            crate::ui::warn("no models found from configured endpoints");
+        }
     }
 
     fn thinking_command(value: Option<&str>) -> Result<bool> {
@@ -1996,6 +2135,51 @@ pub(crate) mod chat {
         choose_model_with_initial_list(current, items, true)
     }
 
+    pub fn choose_recent_model(
+        current: Option<&str>,
+        recent: &[String],
+    ) -> Result<RecentModelChoice> {
+        if recent.len() < 2 || !config::can_prompt() {
+            return Ok(RecentModelChoice::Inspect);
+        }
+        let items = recent_model_menu_items(recent);
+        let default = current
+            .and_then(|value| recent.iter().position(|item| item == value))
+            .unwrap_or(0);
+        let choice = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Recent models")
+            .items(&items)
+            .default(default)
+            .interact_opt()?;
+        Ok(match choice {
+            Some(index) if index < recent.len() => {
+                RecentModelChoice::Selected(recent[index].clone())
+            }
+            Some(index) if index == recent.len() => RecentModelChoice::Inspect,
+            Some(_) => RecentModelChoice::Clear,
+            None => RecentModelChoice::Cancelled,
+        })
+    }
+
+    fn recent_model_menu_items(recent: &[String]) -> Vec<String> {
+        recent
+            .iter()
+            .cloned()
+            .chain([
+                "Inspect all models…".to_string(),
+                "Clear recent model history".to_string(),
+            ])
+            .collect()
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum RecentModelChoice {
+        Selected(String),
+        Inspect,
+        Clear,
+        Cancelled,
+    }
+
     pub fn choose_model_with_initial_list(
         current: Option<&str>,
         items: &[String],
@@ -2004,14 +2188,25 @@ pub(crate) mod chat {
         if items.is_empty() || !config::can_prompt() {
             return Ok(None);
         }
+        choose_model_from_items(current, items, "Models")
+    }
+
+    pub fn choose_model_from_items(
+        current: Option<&str>,
+        items: &[String],
+        label: &str,
+    ) -> Result<Option<String>> {
+        if items.is_empty() || !config::can_prompt() {
+            return Ok(None);
+        }
         let theme = ColorfulTheme::default();
         let default = current.and_then(|value| items.iter().position(|item| item == value));
         let mut prompt = Select::with_theme(&theme)
-            .with_prompt("Models")
+            .with_prompt(label)
             .items(items)
             .default(default.unwrap_or(0));
         if current.is_some() {
-            prompt = prompt.with_prompt("Models (Esc keeps current)");
+            prompt = prompt.with_prompt(format!("{label} (Esc keeps current)"));
         }
         Ok(prompt.interact_opt()?.map(|index| items[index].clone()))
     }
@@ -2089,6 +2284,20 @@ pub(crate) mod chat {
             assert!(help.contains("/quit"));
             assert!(help.contains("/compact"));
             assert!(help.contains("/status"));
+        }
+
+        #[test]
+        fn recent_model_menu_appends_inspect_and_clear_actions() {
+            let items = recent_model_menu_items(&["gpt-a".to_string(), "gpt-b".to_string()]);
+            assert_eq!(
+                items,
+                vec![
+                    "gpt-a",
+                    "gpt-b",
+                    "Inspect all models…",
+                    "Clear recent model history"
+                ]
+            );
         }
     }
 }
@@ -2228,7 +2437,7 @@ pub(crate) mod app {
     struct ModelArgs {
         #[arg(
             value_name = "MODEL",
-            help = "Model id or routing shim selection, e.g. copilot::gpt-4.1-mini"
+            help = "Model id or routing shim selection from `oy model`, e.g. copilot::<model-id>"
         )]
         model: Option<String>,
     }
@@ -2451,6 +2660,24 @@ pub(crate) mod app {
             return Ok(0);
         }
 
+        if args.model.is_none() && !crate::ui::is_json() {
+            let current = model::resolve_model(None).ok();
+            match crate::chat::choose_recent_model(current.as_deref(), &config::recent_models()?)? {
+                crate::chat::RecentModelChoice::Selected(model_spec) => {
+                    config::save_model_config(&model_spec)?;
+                    print_saved_model(&model_spec);
+                    return Ok(0);
+                }
+                crate::chat::RecentModelChoice::Clear => {
+                    config::clear_recent_models()?;
+                    crate::ui::success("cleared recent model history");
+                    return Ok(0);
+                }
+                crate::chat::RecentModelChoice::Cancelled => return Ok(0),
+                crate::chat::RecentModelChoice::Inspect => {}
+            }
+        }
+
         let listing = model::inspect_models().await?;
         if let Some(model_spec) = args.model {
             let normalized = resolve_model_choice(&listing, &model_spec)?;
@@ -2497,10 +2724,9 @@ pub(crate) mod app {
             "current": listing.current,
             "current_shim": listing.current_shim,
             "saved": saved,
+            "recent_models": config::recent_models()?,
             "auth": listing.auth,
-            "recommended": listing.recommended,
             "dynamic": listing.dynamic,
-            "hints": listing.hints,
             "all_models": listing.all_models,
         });
         crate::ui::line(serde_json::to_string_pretty(&payload)?);
@@ -2517,13 +2743,20 @@ pub(crate) mod app {
             ),
         );
         crate::ui::kv("selectable", listing.all_models.len());
-        if !listing.recommended.is_empty() {
-            crate::ui::kv("recommended", listing.recommended.join(", "));
-            if listing.current.is_none() {
-                crate::ui::line(format_args!("  Try: oy model {}", listing.recommended[0]));
+        if let Ok(recent) = config::recent_models()
+            && !recent.is_empty()
+        {
+            crate::ui::line("");
+            crate::ui::section("Recent models");
+            for model in recent {
+                let marker = if listing.current.as_deref() == Some(model.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                crate::ui::line(format_args!("    {marker} {model}"));
             }
         }
-
         if !listing.auth.is_empty() {
             crate::ui::line("");
             crate::ui::section("Auth / shims");
@@ -2579,30 +2812,6 @@ pub(crate) mod app {
                         item.models.len() - MODEL_LIST_LIMIT
                     ));
                 }
-            }
-        }
-
-        let hinted = listing
-            .hints
-            .iter()
-            .filter(|hint| {
-                !listing
-                    .dynamic
-                    .iter()
-                    .any(|group| group.models.iter().any(|model| model == *hint))
-            })
-            .collect::<Vec<_>>();
-        if !hinted.is_empty() {
-            crate::ui::line("");
-            crate::ui::section("Built-in selectable hints");
-            for hint in hinted.iter().take(MODEL_LIST_LIMIT) {
-                crate::ui::line(format_args!("  {hint}"));
-            }
-            if hinted.len() > MODEL_LIST_LIMIT {
-                crate::ui::line(format_args!(
-                    "  … {} more hints",
-                    hinted.len() - MODEL_LIST_LIMIT
-                ));
             }
         }
     }
@@ -2674,6 +2883,7 @@ pub(crate) mod app {
                 "workspace": root,
                 "model": listing.current,
                 "shim": listing.current_shim,
+                "recent_models": config::recent_models()?,
                 "auth": listing.auth,
                 "mode": mode.name(),
                 "policy": policy,
@@ -2684,7 +2894,6 @@ pub(crate) mod app {
                 "sessions_dir": sessions_dir,
                 "history_dir": history_dir,
                 "bash": bash_ok,
-                "recommended": listing.recommended,
                 "next_step": recommended_next_step(&listing),
             });
             crate::ui::line(serde_json::to_string_pretty(&payload)?);
@@ -2695,6 +2904,9 @@ pub(crate) mod app {
         crate::ui::kv("workspace", root.display());
         crate::ui::kv("model", listing.current.as_deref().unwrap_or("<unset>"));
         crate::ui::kv("shim", listing.current_shim.as_deref().unwrap_or("<none>"));
+        if let Ok(recent) = config::recent_models() {
+            crate::ui::kv("recent models", recent.len());
+        }
         crate::ui::kv("mode", mode.name());
         crate::ui::kv("files-write", format_args!("{:?}", policy.files_write));
         crate::ui::kv("shell", format_args!("{:?}", policy.shell));
@@ -2756,10 +2968,11 @@ pub(crate) mod app {
         if listing.current.is_some() {
             return "Run `oy \"inspect this repo\"` or `oy chat`.".to_string();
         }
-        if let Some(choice) = listing.recommended.first() {
-            return format!("Configure a model: `oy model {choice}`.");
+        if listing.all_models.is_empty() {
+            return "Configure provider auth, then run `oy model` to inspect endpoint models."
+                .to_string();
         }
-        "Configure provider auth, then run `oy model`; see `oy doctor` output.".to_string()
+        "Choose an introspected model with `oy model <name>`.".to_string()
     }
 
     fn safe_container_command(root: &Path, read_only: bool) -> String {

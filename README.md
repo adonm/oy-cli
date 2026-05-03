@@ -100,14 +100,16 @@ OY_ROOT=../my-project oy "summarize this repo"
 ```bash
 export OPENAI_API_KEY=...
 export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
-oy model gpt-4.1-mini
+oy model                 # lists models from GET /models when OPENAI_API_KEY is set
+oy model <model-from-list>
 ```
 
 ### GitHub Copilot
 
 ```bash
 gh auth login
-oy model copilot::gpt-4.1-mini
+oy model                 # lists models from Copilot-compatible GET /models when GitHub auth is available
+oy model copilot::<model-from-list>
 ```
 
 ### AWS Bedrock
@@ -116,24 +118,21 @@ oy model copilot::gpt-4.1-mini
 aws configure sso        # one-time setup, or use normal AWS env credentials
 export AWS_PROFILE=my-sso
 export AWS_REGION=ap-southeast-2
-oy model bedrock::global.amazon.nova-2-lite-v1:0
+oy model                 # Bedrock-compatible HTTP shims list from GET /models when bearer auth is available
+oy model bedrock::<model-id>
 ```
 
 ### Local OpenAI-compatible server
 
 ```bash
-oy model local-8080::qwen3.5
+oy model                 # lists models from http://127.0.0.1:8080/v1/models using LOCAL_API_KEY or default local auth
+oy model local-8080::<model-from-list>
 oy chat
 ```
 
-Useful exact model ids include:
+`oy model` only shows models returned by configured auth-backed OpenAI-compatible `/models` endpoints. If an opencode or opencode-go key is available, both `https://opencode.ai/zen/v1/models` and `https://opencode.ai/zen/go/v1/models` are probed. If no provider auth is available, no selectable models are shown.
 
-- `copilot::gpt-4.1-mini`
-- `bedrock::global.amazon.nova-2-lite-v1:0`
-- `bedrock-mantle::moonshotai.kimi-k2.5`
-- `opencode::gpt-5.1-codex-max`
-- `opencode-go::kimi-k2.5`
-- `local-8080::qwen3.5`
+The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect all endpoints or clear the recent history.
 
 ## Audit
 
@@ -192,7 +191,7 @@ Default local paths:
 
 | Path | Purpose |
 |---|---|
-| `~/.config/oy-rust/config.json` | Saved model id and routing shim |
+| `~/.config/oy-rust/config.json` | Saved model id, routing shim, and recent model history |
 | `~/.config/oy-rust/sessions/` | Saved transcripts |
 | `~/.config/oy-rust/history/` | Chat history |
 
@@ -210,7 +209,7 @@ Default local paths:
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible auth/endpoint |
 | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | Copilot auth |
 | `AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Bedrock auth/region |
-| `LOCAL_API_KEY` | Local `local-<port>` shim key |
+| `LOCAL_API_KEY` | Optional local `local-<port>` shim key; defaults to `oy-local` |
 
 ## Troubleshooting
 

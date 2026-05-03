@@ -541,9 +541,7 @@ pub(crate) mod model {
         pub current: Option<String>,
         pub current_shim: Option<String>,
         pub auth: Vec<AuthStatus>,
-        pub recommended: Vec<String>,
         pub dynamic: Vec<AdapterModels>,
-        pub hints: Vec<String>,
         pub all_models: Vec<String>,
     }
 
@@ -604,11 +602,7 @@ pub(crate) mod model {
 
     fn no_model_message() -> String {
         let mut lines = vec!["No model configured.".to_string()];
-        if let Some(choice) = recommended_models().first() {
-            lines.push(format!("Detected provider auth. Try: oy model {choice}"));
-        } else {
-            lines.push("No provider auth detected. Run `oy doctor` for setup help.".to_string());
-        }
+        lines.push("Run `oy model` to inspect auth-backed model endpoints.".to_string());
         lines.push("Then run: oy \"inspect this repo\"".to_string());
         lines.push(
             "Advanced: use `oy model` to list options or set OY_MODEL for one run.".to_string(),
@@ -625,61 +619,6 @@ pub(crate) mod model {
         Ok(config::load_model_config()?.shim)
     }
 
-    pub fn recommended_models() -> Vec<String> {
-        let mut out = Vec::new();
-        let auth = auth_statuses();
-        if auth.iter().any(|item| item.adapter == SHIM_OPENAI) {
-            out.push("gpt-4.1-mini".to_string());
-        }
-        if auth.iter().any(|item| item.adapter == "github") {
-            out.push("copilot::gpt-4.1-mini".to_string());
-        }
-        if auth.iter().any(|item| item.adapter == "bedrock") {
-            out.push("bedrock::global.amazon.nova-2-lite-v1:0".to_string());
-        }
-        if auth.iter().any(|item| item.adapter == SHIM_BEDROCK_MANTLE) {
-            out.push("bedrock-mantle::moonshotai.kimi-k2.5".to_string());
-        }
-        if auth.iter().any(|item| item.adapter == SHIM_OPENCODE) {
-            out.push("opencode::gpt-5.1-codex-max".to_string());
-        }
-        if auth.iter().any(|item| item.adapter == SHIM_OPENCODE_GO) {
-            out.push("opencode-go::kimi-k2.5".to_string());
-        }
-        if auth
-            .iter()
-            .any(|item| item.adapter == "local-openai-compatible")
-        {
-            out.push("local-8080::qwen3.5".to_string());
-        }
-        out.sort();
-        out.dedup();
-        out
-    }
-
-    pub fn list_builtin_model_hints() -> Vec<String> {
-        vec![
-            "openai_resp::gpt-5.5".to_string(),
-            "gpt-5.4-mini".to_string(),
-            "gpt-4.1-mini".to_string(),
-            "copilot::gpt-4.1-mini".to_string(),
-            "bedrock::global.amazon.nova-2-lite-v1:0".to_string(),
-            "bedrock::au.anthropic.claude-sonnet-4-5-20250929-v1:0".to_string(),
-            "bedrock::au.anthropic.claude-haiku-4-5-20251001-v1:0".to_string(),
-            "bedrock::global.anthropic.claude-sonnet-4-5-20250929-v1:0".to_string(),
-            "bedrock::openai.gpt-oss-120b-1:0".to_string(),
-            "bedrock-mantle::moonshotai.kimi-k2.5".to_string(),
-            "bedrock-mantle::moonshot.kimi-k2-thinking".to_string(),
-            "bedrock-mantle::openai.gpt-oss-120b".to_string(),
-            "opencode::gpt-5.1-codex-max".to_string(),
-            "opencode::kimi-k2.5".to_string(),
-            "opencode::gpt-5-nano".to_string(),
-            "opencode-go::kimi-k2.5".to_string(),
-            "local-8080::qwen3.5".to_string(),
-            "local-11434::qwen3.5".to_string(),
-        ]
-    }
-
     pub async fn inspect_models() -> Result<ModelListing> {
         let current = resolve_model(None).ok();
         let current_shim = resolve_shim().ok().flatten();
@@ -687,27 +626,22 @@ pub(crate) mod model {
             .into_iter()
             .filter(|item| item.present || item.auto_configured)
             .collect::<Vec<_>>();
-        let recommended = recommended_models();
         let dynamic = inspect_openai_compatible_models().await;
-        let hints = list_builtin_model_hints();
-        let all_models = collect_all_models(&dynamic, &hints);
+        let all_models = collect_all_models(&dynamic);
         Ok(ModelListing {
             current,
             current_shim,
             auth,
-            recommended,
             dynamic,
-            hints,
             all_models,
         })
     }
 
-    fn collect_all_models(dynamic: &[AdapterModels], hints: &[String]) -> Vec<String> {
+    fn collect_all_models(dynamic: &[AdapterModels]) -> Vec<String> {
         let mut items = dynamic
             .iter()
             .filter(|group| group.ok)
             .flat_map(|group| group.models.iter().cloned())
-            .chain(hints.iter().cloned())
             .collect::<Vec<_>>();
         items.sort();
         items.dedup();
@@ -928,7 +862,7 @@ pub(crate) mod model {
                     shim: value.to_string(),
                     base_url: local_base_url(value),
                     api_key: local_api_key(),
-                    source: "local OpenAI-compatible endpoint".to_string(),
+                    source: local_api_key_source(),
                 }),
             _ => None,
         }
@@ -969,12 +903,7 @@ pub(crate) mod model {
     }
 
     fn opencode_auth_key(shim: &str) -> Option<String> {
-        let provider = if shim == SHIM_OPENCODE_GO {
-            SHIM_OPENCODE_GO
-        } else {
-            SHIM_OPENCODE
-        };
-        opencode_auth_key_from_path(provider, opencode_auth_path())
+        opencode_auth_key_from_path(shim, opencode_auth_path())
     }
 
     fn opencode_auth_path() -> PathBuf {
@@ -992,11 +921,9 @@ pub(crate) mod model {
     }
 
     fn opencode_auth_key_from_value(provider: &str, value: &Value) -> Option<String> {
-        let provider_value = value.get(provider).or_else(|| {
-            provider
-                .strip_suffix('/')
-                .and_then(|trimmed| value.get(trimmed))
-        })?;
+        let provider_value = opencode_provider_candidates(provider)
+            .into_iter()
+            .find_map(|candidate| value.get(candidate))?;
         match provider_value.get("type").and_then(Value::as_str) {
             Some("api") => provider_value
                 .get("key")
@@ -1010,6 +937,14 @@ pub(crate) mod model {
                 .filter(|key| !key.trim().is_empty())
                 .map(ToOwned::to_owned),
             _ => None,
+        }
+    }
+
+    fn opencode_provider_candidates(provider: &str) -> Vec<&'static str> {
+        match provider {
+            SHIM_OPENCODE => vec![SHIM_OPENCODE, SHIM_OPENCODE_GO],
+            SHIM_OPENCODE_GO => vec![SHIM_OPENCODE_GO, SHIM_OPENCODE],
+            _ => Vec::new(),
         }
     }
 
@@ -1062,6 +997,14 @@ pub(crate) mod model {
 
     fn local_api_key() -> String {
         env_value("LOCAL_API_KEY").unwrap_or_else(|| "oy-local".to_string())
+    }
+
+    fn local_api_key_source() -> String {
+        if env_value("LOCAL_API_KEY").is_some() {
+            "LOCAL_API_KEY".to_string()
+        } else {
+            "default local auth".to_string()
+        }
     }
 
     async fn fetch_openai_compatible_models(
@@ -1304,7 +1247,7 @@ pub(crate) mod model {
         static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
         #[test]
-        fn local_shim_endpoint_config_matches_python_defaults() {
+        fn local_shim_endpoint_config_uses_default_local_auth() {
             let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
             unsafe { std::env::remove_var("LOCAL_API_KEY") };
             unsafe { std::env::remove_var("OY_SHIM") };
@@ -1313,7 +1256,14 @@ pub(crate) mod model {
             assert_eq!(config.shim, "local-8088");
             assert_eq!(config.base_url, "http://127.0.0.1:8088/v1");
             assert_eq!(config.api_key, "oy-local");
+            assert_eq!(config.source, "default local auth");
+
+            unsafe { std::env::set_var("LOCAL_API_KEY", "local-token") };
+            let config = shim_endpoint_config("local-8088").unwrap();
+            assert_eq!(config.api_key, "local-token");
+            assert_eq!(config.source, "LOCAL_API_KEY");
             assert!(shim_endpoint_config("local-nope").is_none());
+            unsafe { std::env::remove_var("LOCAL_API_KEY") };
             unsafe { std::env::remove_var("OPENAI_API_KEY") };
         }
 
@@ -1331,10 +1281,9 @@ pub(crate) mod model {
         }
 
         #[test]
-        fn model_listing_includes_static_hints_as_selectable_models() {
-            let hints = vec!["gpt-4.1-mini".to_string()];
-            let models = collect_all_models(&[], &hints);
-            assert_eq!(models, vec!["gpt-4.1-mini".to_string()]);
+        fn model_listing_only_includes_introspected_models() {
+            let models = collect_all_models(&[]);
+            assert!(models.is_empty());
         }
 
         #[test]
@@ -1388,16 +1337,21 @@ pub(crate) mod model {
 
         #[test]
         fn inline_routing_shim_overrides_configured_shim() {
+            let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            unsafe { std::env::set_var("LOCAL_API_KEY", "local-token") };
             let target = ModelIden::new(AdapterKind::OpenAI, "local-8088::qwen3.5".to_string());
             let mapped = openai_compatible_target(&target, Some("openai"))
                 .unwrap()
                 .unwrap();
             assert_eq!(mapped.model.model_name, "qwen3.5");
             assert_eq!(mapped.endpoint.base_url(), "http://127.0.0.1:8088/v1/");
+            unsafe { std::env::remove_var("LOCAL_API_KEY") };
         }
 
         #[test]
         fn native_adapter_namespace_is_not_treated_as_routing_shim() {
+            let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            unsafe { std::env::set_var("LOCAL_API_KEY", "local-token") };
             let target =
                 ModelIden::new(AdapterKind::OpenAIResp, "openai_resp::gpt-5.5".to_string());
             assert!(openai_compatible_target(&target, None).unwrap().is_none());
@@ -1408,16 +1362,20 @@ pub(crate) mod model {
             assert_eq!(mapped.model.model_name, "openai_resp::gpt-5.5");
             assert_eq!(mapped.model.adapter_kind, AdapterKind::OpenAIResp);
             assert_eq!(mapped.endpoint.base_url(), "http://127.0.0.1:8088/v1/");
+            unsafe { std::env::remove_var("LOCAL_API_KEY") };
         }
 
         #[test]
         fn configured_shim_still_routes_plain_model() {
+            let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            unsafe { std::env::set_var("LOCAL_API_KEY", "local-token") };
             let target = ModelIden::new(AdapterKind::OpenAI, "qwen3.5".to_string());
             let mapped = openai_compatible_target(&target, Some("local-8088"))
                 .unwrap()
                 .unwrap();
             assert_eq!(mapped.model.model_name, "qwen3.5");
             assert_eq!(mapped.endpoint.base_url(), "http://127.0.0.1:8088/v1/");
+            unsafe { std::env::remove_var("LOCAL_API_KEY") };
         }
 
         #[test]
@@ -1496,6 +1454,22 @@ pub(crate) mod model {
                 opencode_auth_key_from_value(SHIM_OPENCODE_GO, &value),
                 Some("go-token".to_string())
             );
+
+            let only_zen = serde_json::json!({
+                "opencode": { "type": "api", "key": "shared-token" }
+            });
+            assert_eq!(
+                opencode_auth_key_from_value(SHIM_OPENCODE_GO, &only_zen),
+                Some("shared-token".to_string())
+            );
+
+            let only_go = serde_json::json!({
+                "opencode-go": { "type": "wellknown", "token": "go-shared-token" }
+            });
+            assert_eq!(
+                opencode_auth_key_from_value(SHIM_OPENCODE, &only_go),
+                Some("go-shared-token".to_string())
+            );
         }
 
         #[test]
@@ -1507,31 +1481,12 @@ pub(crate) mod model {
             assert_eq!(config.api_key, "env-token");
             assert_eq!(config.source, "OPENCODE_API_KEY");
             assert_eq!(config.base_url, "https://example.invalid/v1");
+            let go_config = shim_endpoint_config(SHIM_OPENCODE_GO).unwrap();
+            assert_eq!(go_config.api_key, "env-token");
+            assert_eq!(go_config.source, "OPENCODE_API_KEY");
+            assert_eq!(go_config.base_url, "https://example.invalid/v1");
             unsafe { std::env::remove_var("OPENCODE_API_KEY") };
             unsafe { std::env::remove_var("OPENCODE_BASE_URL") };
-        }
-
-        #[test]
-        fn recommended_models_follow_detected_auth() {
-            let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-            unsafe { std::env::remove_var("OY_SHIM") };
-            unsafe { std::env::set_var("OPENAI_API_KEY", "openai-token") };
-            let recommendations = recommended_models();
-            assert!(recommendations.contains(&"gpt-4.1-mini".to_string()));
-            unsafe { std::env::remove_var("OPENAI_API_KEY") };
-        }
-
-        #[test]
-        fn builtin_hints_include_bedrock_variants() {
-            let hints = list_builtin_model_hints();
-            assert!(hints.iter().any(|item| item.starts_with("bedrock::")));
-            assert!(
-                hints
-                    .iter()
-                    .any(|item| item.starts_with("bedrock-mantle::"))
-            );
-            assert!(hints.iter().any(|item| item.starts_with("opencode::")));
-            assert!(hints.iter().any(|item| item.starts_with("opencode-go::")));
         }
     }
 }
@@ -1579,9 +1534,17 @@ pub(crate) mod session {
         #[serde(rename = "summary")]
         Summary { content: String },
         #[serde(rename = "assistant")]
-        Assistant { content: String },
+        Assistant {
+            content: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            reasoning_content: Option<String>,
+        },
         #[serde(rename = "assistant_tool_calls")]
-        AssistantToolCalls { tool_calls: Vec<StoredToolCall> },
+        AssistantToolCalls {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            reasoning_content: Option<String>,
+            tool_calls: Vec<StoredToolCall>,
+        },
         #[serde(rename = "tool")]
         Tool { call_id: String, content: String },
     }
@@ -1698,8 +1661,8 @@ pub(crate) mod session {
             match self {
                 StoredMessage::User { content }
                 | StoredMessage::Summary { content }
-                | StoredMessage::Assistant { content } => content.clone(),
-                StoredMessage::AssistantToolCalls { tool_calls } => tool_calls
+                | StoredMessage::Assistant { content, .. } => content.clone(),
+                StoredMessage::AssistantToolCalls { tool_calls, .. } => tool_calls
                     .iter()
                     .map(|call| format!("{} {}", call.fn_name, call.fn_arguments))
                     .collect::<Vec<_>>()
@@ -1891,10 +1854,14 @@ pub(crate) mod session {
                     StoredMessage::Summary { content } => {
                         req = req.append_message(ChatMessage::user(content.clone()))
                     }
-                    StoredMessage::Assistant { content } => {
-                        req = req.append_message(ChatMessage::assistant(content.clone()))
+                    StoredMessage::Assistant { content, .. } => {
+                        let reasoning_content = msg_reasoning_content(msg);
+                        req = req.append_message(
+                            ChatMessage::assistant(content.clone())
+                                .with_reasoning_content(reasoning_content),
+                        )
                     }
-                    StoredMessage::AssistantToolCalls { tool_calls } => {
+                    StoredMessage::AssistantToolCalls { tool_calls, .. } => {
                         let calls = tool_calls
                             .iter()
                             .filter(|call| {
@@ -1914,7 +1881,11 @@ pub(crate) mod session {
                             })
                             .collect::<Vec<_>>();
                         if !calls.is_empty() {
-                            req = req.append_message(ChatMessage::assistant(calls));
+                            let reasoning_content = msg_reasoning_content(msg);
+                            req = req.append_message(
+                                ChatMessage::assistant(calls)
+                                    .with_reasoning_content(reasoning_content),
+                            );
                         }
                     }
                     StoredMessage::Tool { call_id, content } => {
@@ -2132,7 +2103,7 @@ pub(crate) mod session {
                 count_tokens(model, &text)
             ));
             match message {
-                StoredMessage::AssistantToolCalls { tool_calls } => {
+                StoredMessage::AssistantToolCalls { tool_calls, .. } => {
                     for call in tool_calls {
                         out.push_str(&format!(
                             "- tool call `{}` args: {}\n",
@@ -2192,6 +2163,21 @@ pub(crate) mod session {
             max_tokens,
             "transcript pre-truncated for summarization",
         )
+    }
+
+    fn msg_reasoning_content(message: &StoredMessage) -> Option<String> {
+        match message {
+            StoredMessage::Assistant {
+                reasoning_content, ..
+            }
+            | StoredMessage::AssistantToolCalls {
+                reasoning_content, ..
+            } => reasoning_content
+                .as_ref()
+                .filter(|reasoning| !reasoning.trim().is_empty())
+                .cloned(),
+            _ => None,
+        }
     }
 
     fn has_following_tool_response(messages: &[StoredMessage], call_id: &str) -> bool {
@@ -2608,6 +2594,7 @@ Transcript to compact:
                     .transcript
                     .messages
                     .push(StoredMessage::AssistantToolCalls {
+                        reasoning_content: response.reasoning_content.clone(),
                         tool_calls: tool_calls
                             .iter()
                             .map(|call| StoredToolCall {
@@ -2645,9 +2632,11 @@ Transcript to compact:
                 continue;
             }
 
+            let reasoning_content = response.reasoning_content.clone();
             let answer = response.into_first_text().unwrap_or_default();
             session.transcript.messages.push(StoredMessage::Assistant {
                 content: answer.clone(),
+                reasoning_content,
             });
             return Ok(answer);
         }
@@ -2785,11 +2774,13 @@ Transcript to compact:
                     },
                     StoredMessage::Assistant {
                         content: "two".into(),
+                        reasoning_content: None,
                     },
                     StoredMessage::User {
                         content: "three".into(),
                     },
                     StoredMessage::AssistantToolCalls {
+                        reasoning_content: None,
                         tool_calls: Vec::new(),
                     },
                     StoredMessage::Tool {
@@ -2813,6 +2804,7 @@ Transcript to compact:
                         content: "old user".into(),
                     },
                     StoredMessage::AssistantToolCalls {
+                        reasoning_content: None,
                         tool_calls: vec![StoredToolCall {
                             call_id: "call-1".into(),
                             fn_name: "read".into(),
@@ -2874,12 +2866,14 @@ Transcript to compact:
                     },
                     StoredMessage::Assistant {
                         content: "old assistant".into(),
+                        reasoning_content: None,
                     },
                     StoredMessage::User {
                         content: "recent user".into(),
                     },
                     StoredMessage::Assistant {
                         content: "recent assistant".into(),
+                        reasoning_content: None,
                     },
                 ],
             };
@@ -2901,6 +2895,7 @@ Transcript to compact:
                         content: "old user".into(),
                     },
                     StoredMessage::AssistantToolCalls {
+                        reasoning_content: None,
                         tool_calls: vec![StoredToolCall {
                             call_id: "call-1".into(),
                             fn_name: "read".into(),
@@ -2927,6 +2922,73 @@ Transcript to compact:
         }
 
         #[test]
+        fn chat_request_round_trips_assistant_reasoning_content() {
+            let tx = Transcript {
+                summary: None,
+                messages: vec![
+                    StoredMessage::User {
+                        content: "hello".into(),
+                    },
+                    StoredMessage::Assistant {
+                        content: "answer".into(),
+                        reasoning_content: Some("internal reasoning".into()),
+                    },
+                ],
+            };
+            let ctx = ToolContext {
+                root: std::path::PathBuf::new(),
+                interactive: false,
+                policy: ToolPolicy::read_only(),
+                todos: Vec::new(),
+            };
+
+            let req = tx.to_chat_request("system", &ctx);
+
+            assert_eq!(req.messages.len(), 2);
+            assert_eq!(req.messages[1].content.first_text(), Some("answer"));
+            assert_eq!(
+                req.messages[1].content.joined_reasoning_content().as_deref(),
+                Some("internal reasoning")
+            );
+        }
+
+        #[test]
+        fn chat_request_round_trips_tool_call_reasoning_content() {
+            let tx = Transcript {
+                summary: None,
+                messages: vec![
+                    StoredMessage::AssistantToolCalls {
+                        reasoning_content: Some("tool reasoning".into()),
+                        tool_calls: vec![StoredToolCall {
+                            call_id: "call-1".into(),
+                            fn_name: "read".into(),
+                            fn_arguments: json!({"path": "src/main.rs"}),
+                        }],
+                    },
+                    StoredMessage::Tool {
+                        call_id: "call-1".into(),
+                        content: "tool result".into(),
+                    },
+                ],
+            };
+            let ctx = ToolContext {
+                root: std::path::PathBuf::new(),
+                interactive: false,
+                policy: ToolPolicy::read_only(),
+                todos: Vec::new(),
+            };
+
+            let req = tx.to_chat_request("system", &ctx);
+
+            assert_eq!(req.messages.len(), 2);
+            assert_eq!(
+                req.messages[0].content.joined_reasoning_content().as_deref(),
+                Some("tool reasoning")
+            );
+            assert_eq!(req.messages[0].content.tool_calls().len(), 1);
+        }
+
+        #[test]
         fn chat_request_drops_orphan_tool_messages() {
             let tx = Transcript {
                 summary: None,
@@ -2936,6 +2998,7 @@ Transcript to compact:
                         content: "orphan".into(),
                     },
                     StoredMessage::AssistantToolCalls {
+                        reasoning_content: None,
                         tool_calls: vec![StoredToolCall {
                             call_id: "no-result".into(),
                             fn_name: "read".into(),
@@ -2976,6 +3039,7 @@ Transcript to compact:
                     },
                     StoredMessage::Assistant {
                         content: "hi".into(),
+                        reasoning_content: None,
                     },
                 ],
             };
