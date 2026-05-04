@@ -309,9 +309,13 @@ mod tests {
     }
 
     #[test]
-    fn skips_lockfiles_and_build_dirs() {
+    fn skips_lockfiles_build_dirs_and_likely_secrets() {
         assert!(should_skip_path("target/debug/app"));
         assert!(should_skip_path("Cargo.lock"));
+        assert!(should_skip_path(".env"));
+        assert!(should_skip_path("config/.npmrc"));
+        assert!(should_skip_path("keys/id_ed25519"));
+        assert!(should_skip_path("certs/prod.pem"));
         assert!(!should_skip_path("src/main.rs"));
     }
 

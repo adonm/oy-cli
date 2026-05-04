@@ -33,9 +33,9 @@ pub(super) fn collect_files(
     let output_path = output_path.and_then(|path| path.canonicalize().ok());
     let mut builder = WalkBuilder::new(root);
     builder
-        .hidden(false)
+        .hidden(true)
         .git_ignore(true)
-        .git_global(false)
+        .git_global(true)
         .git_exclude(true)
         .follow_links(false);
     for entry in builder.build() {
@@ -85,13 +85,31 @@ pub(super) fn collect_files(
     Ok(files)
 }
 
+const SKIP_DIR_PREFIXES: &[&str] = &[".git/", "target/", "node_modules/", ".venv/", ".tmp/"];
+const SKIP_FILENAMES: &[&str] = &[
+    "cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "uv.lock",
+    "go.sum",
+    ".env",
+    ".env.local",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+];
+const SKIP_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];
+
 pub(super) fn should_skip_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    if lower.starts_with(".git/")
-        || lower.starts_with("target/")
-        || lower.starts_with("node_modules/")
-        || lower.starts_with(".venv/")
-        || lower.starts_with(".tmp/")
+    if SKIP_DIR_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
     {
         return true;
     }
@@ -100,10 +118,13 @@ pub(super) fn should_skip_path(path: &str) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    matches!(
-        name.as_str(),
-        "cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "uv.lock" | "go.sum"
-    )
+    if SKIP_FILENAMES.contains(&name.as_str()) {
+        return true;
+    }
+    Path::new(&lower)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| SKIP_EXTENSIONS.contains(&extension))
 }
 
 fn audit_priority(file: &AuditFile) -> (u8, std::cmp::Reverse<usize>, String) {

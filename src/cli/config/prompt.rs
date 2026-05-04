@@ -16,13 +16,16 @@ Work inspect → edit → verify. Use the cheapest sufficient tool:
 4. `replace` for surgical edits.
 5. `bash` only when file tools are insufficient or when you must run/check something.
 Batch independent reads/searches. Stop when enough evidence exists.
+`search` and `sloc` accept whitespace-separated paths (e.g. `src/app.rs src/ui.rs`).
+Prefer `mode=literal` for `replace`; use regex only when you need capture groups.
 Prefer small, boring, idiomatic, functional, testable code with explicit data flow.
 For security-sensitive work, name the trust boundary, validate near it, fail closed, and add focused tests.
 Do not add file, process, network, credential, or persistence capability unless necessary.
 For 3+ step work, keep a short in-memory todo; persist `TODO.md` only on explicit request or quit prompt.
 Use `webfetch` for public docs/API research when useful; prefer it over guessing.
-Tool arguments are schemas, not prose: use documented names, numeric `limit`/`offset`/timeouts, and `mode=literal` for exact search/replace when regex metacharacters are not intended.
+Tool arguments are schemas, not prose: use documented names, numeric `limit`/`offset`/timeouts.
 Manage context aggressively: keep only key facts and paths. Prefer narrow `path`, `offset`, `limit`, and `exclude`; use `sloc` if you need a repo-size snapshot.
+Tools return up to 2000 items by default; set `limit` only when you want fewer.
 Before mutating files or running commands, state the next action briefly. After finishing, report changed files and checks.
 When context gets long, compress to the plan, key evidence, and next action. If blocked, say what you tried and the next step."#;
 

@@ -6,51 +6,33 @@ use super::{
 };
 
 pub(super) fn tool_call_summary(name: &str, args: &Value) -> String {
-    match name {
-        "list" => summary_list(args),
-        "read" => summary_read(args),
-        "search" => summary_search(args),
-        "replace" => summary_replace(args),
-        "sloc" => summary_sloc(args),
-        "bash" => summary_bash(args),
-        "webfetch" => summary_webfetch(args),
-        "ask" => summary_ask(args),
-        "todo" => summary_todo(args),
-        _ => preview_value(args, 120),
-    }
+    super::registry::find_def(name)
+        .map(|def| (def.summary)(args))
+        .unwrap_or_else(|| preview_value(args, 120))
 }
 
 pub(crate) fn tool_output(name: &str, value: &Value) -> String {
-    match name {
-        "list" => preview_list(value),
-        "read" => preview_read(value),
-        "search" => preview_search(value),
-        "replace" => preview_replace(value),
-        "sloc" => preview_sloc(value),
-        "bash" => preview_bash(value),
-        "webfetch" => preview_webfetch(value),
-        "ask" => preview_ask(value),
-        "todo" => preview_todo(value),
-        _ => preview_generic(value),
-    }
+    super::registry::find_def(name)
+        .map(|def| (def.output)(value))
+        .unwrap_or_else(|| preview_generic(value))
 }
 
-fn summary_list(args: &Value) -> String {
+pub(super) fn summary_list(args: &Value) -> String {
     compact_kvs(args, &[("path", 60), ("exclude", 40)])
 }
 
-fn summary_read(args: &Value) -> String {
+pub(super) fn summary_read(args: &Value) -> String {
     compact_kvs(args, &[("path", 70), ("offset", 12), ("limit", 12)])
 }
 
-fn summary_search(args: &Value) -> String {
+pub(super) fn summary_search(args: &Value) -> String {
     compact_kvs(
         args,
         &[("pattern", 70), ("path", 50), ("mode", 12), ("exclude", 35)],
     )
 }
 
-fn summary_replace(args: &Value) -> String {
+pub(super) fn summary_replace(args: &Value) -> String {
     compact_kvs(
         args,
         &[
@@ -62,23 +44,23 @@ fn summary_replace(args: &Value) -> String {
     )
 }
 
-fn summary_sloc(args: &Value) -> String {
+pub(super) fn summary_sloc(args: &Value) -> String {
     compact_kvs(args, &[("path", 70), ("exclude", 40)])
 }
 
-fn summary_bash(args: &Value) -> String {
+pub(super) fn summary_bash(args: &Value) -> String {
     preview_value(args.get("command").unwrap_or(&Value::Null), 100)
 }
 
-fn summary_webfetch(args: &Value) -> String {
+pub(super) fn summary_webfetch(args: &Value) -> String {
     compact_kvs(args, &[("method", 8), ("url", 100)])
 }
 
-fn summary_ask(args: &Value) -> String {
+pub(super) fn summary_ask(args: &Value) -> String {
     preview_value(args.get("question").unwrap_or(&Value::Null), 100)
 }
 
-fn summary_todo(args: &Value) -> String {
+pub(super) fn summary_todo(args: &Value) -> String {
     todo_call_summary(args)
 }
 
@@ -123,7 +105,7 @@ fn todo_call_summary(args: &Value) -> String {
     }
 }
 
-fn preview_value(value: &Value, max: usize) -> String {
+pub(super) fn preview_value(value: &Value, max: usize) -> String {
     let raw = value
         .as_str()
         .map(ToOwned::to_owned)
@@ -203,7 +185,7 @@ fn append_preview_lines(out: &mut String, text: &str, title: &str) {
     }
 }
 
-fn preview_generic(value: &Value) -> String {
+pub(super) fn preview_generic(value: &Value) -> String {
     if crate::ui::is_verbose() {
         crate::ui::clamp_lines(
             &super::encode_tool_output(value),
@@ -217,7 +199,7 @@ fn preview_generic(value: &Value) -> String {
     }
 }
 
-fn preview_list(value: &Value) -> String {
+pub(super) fn preview_list(value: &Value) -> String {
     let items = value
         .get("items")
         .and_then(Value::as_array)
@@ -249,7 +231,7 @@ fn preview_list(value: &Value) -> String {
         out.trim_start().to_string()
     })
 }
-fn preview_read(value: &Value) -> String {
+pub(super) fn preview_read(value: &Value) -> String {
     let path = value_str(value, "path");
     let offset = value_usize(value, "offset");
     let line_count = value_usize(value, "line_count");
@@ -283,7 +265,7 @@ fn preview_read(value: &Value) -> String {
         out
     })
 }
-fn preview_search(value: &Value) -> String {
+pub(super) fn preview_search(value: &Value) -> String {
     let matches = value
         .get("matches")
         .and_then(Value::as_array)
@@ -340,7 +322,7 @@ fn format_search_hit(item: &Value) -> String {
         text
     )
 }
-fn preview_replace(value: &Value) -> String {
+pub(super) fn preview_replace(value: &Value) -> String {
     let changed = value
         .get("changed_files")
         .and_then(Value::as_array)
@@ -392,7 +374,7 @@ fn preview_replace(value: &Value) -> String {
         out.trim_start().to_string()
     })
 }
-fn preview_bash(value: &Value) -> String {
+pub(super) fn preview_bash(value: &Value) -> String {
     let code = value
         .get("returncode")
         .and_then(Value::as_i64)
@@ -451,7 +433,7 @@ fn preview_bash(value: &Value) -> String {
         out.trim_start().to_string()
     })
 }
-fn preview_webfetch(value: &Value) -> String {
+pub(super) fn preview_webfetch(value: &Value) -> String {
     let status = value
         .get("status_code")
         .and_then(Value::as_u64)
@@ -490,7 +472,7 @@ fn preview_webfetch(value: &Value) -> String {
         out.trim_start().to_string()
     })
 }
-fn preview_sloc(value: &Value) -> String {
+pub(super) fn preview_sloc(value: &Value) -> String {
     let total = value
         .pointer("/output/Total/code")
         .and_then(Value::as_u64)
@@ -531,7 +513,7 @@ fn preview_sloc(value: &Value) -> String {
         out.trim_start().to_string()
     })
 }
-fn preview_ask(value: &Value) -> String {
+pub(super) fn preview_ask(value: &Value) -> String {
     let answer = value.as_str().unwrap_or_default();
     if answer.is_empty() {
         "<no selection>".to_string()
@@ -543,7 +525,7 @@ fn preview_ask(value: &Value) -> String {
     }
 }
 
-fn preview_todo(value: &Value) -> String {
+pub(super) fn preview_todo(value: &Value) -> String {
     let preview = value_str(value, "preview");
     if !preview.is_empty() {
         return limited_preview_body(preview);

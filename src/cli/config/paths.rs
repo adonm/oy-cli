@@ -80,9 +80,12 @@ pub fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn resolve_workspace_output_path(root: &Path, requested: &Path) -> Result<PathBuf> {
     if requested.is_absolute()
-        || requested
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+        || requested.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
     {
         bail!(
             "output path must stay inside workspace: {}",
@@ -93,17 +96,42 @@ pub fn resolve_workspace_output_path(root: &Path, requested: &Path) -> Result<Pa
         .canonicalize()
         .context("failed to resolve workspace root")?;
     let path = root.join(requested);
-    let parent = path.parent().unwrap_or(&root);
-    if parent.exists() {
-        let resolved_parent = parent
-            .canonicalize()
-            .with_context(|| format!("failed resolving {}", parent.display()))?;
-        if !resolved_parent.starts_with(&root) {
-            bail!("output path escapes workspace: {}", requested.display());
-        }
-    }
+    ensure_output_ancestors_safe(&root, &path, requested)?;
     reject_symlink_destination(&path)?;
     Ok(path)
+}
+
+fn ensure_output_ancestors_safe(root: &Path, path: &Path, requested: &Path) -> Result<()> {
+    let mut current = root.to_path_buf();
+    let relative_parent = path
+        .parent()
+        .unwrap_or(root)
+        .strip_prefix(root)
+        .context("output path must stay inside workspace")?;
+    for component in relative_parent.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                bail!(
+                    "output path escapes workspace through symlink ancestor: {}",
+                    requested.display()
+                )
+            }
+            Ok(_) => {
+                let resolved = current
+                    .canonicalize()
+                    .with_context(|| format!("failed resolving {}", current.display()))?;
+                if !resolved.starts_with(root) {
+                    bail!("output path escapes workspace: {}", requested.display());
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed checking {}", current.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn reject_symlink_destination(path: &Path) -> Result<()> {

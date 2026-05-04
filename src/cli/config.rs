@@ -67,6 +67,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn output_paths_reject_symlink_ancestor_escapes() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), dir.path().join("reports")).unwrap();
+        let err =
+            resolve_workspace_output_path(dir.path(), Path::new("reports/new/out.md")).unwrap_err();
+        assert!(err.to_string().contains("symlink ancestor"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn output_paths_reject_symlink_destinations() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();

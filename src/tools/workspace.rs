@@ -20,6 +20,9 @@ use super::args::{
 };
 use super::{Approval, PREVIEW_ITEMS, ToolContext, require_mutation_approval};
 
+pub(super) const MAX_WORKSPACE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SEARCH_MATCHES: usize = 10_000;
+
 // === Workspace tool implementations ===
 pub(super) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
     reject_out_of_workspace_path(&ctx.root, &args.path, None)?;
@@ -159,26 +162,46 @@ pub(super) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> 
     let (matcher, column_regex, mode, warning) = search_matchers(&args.pattern, args.mode)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let targets = resolve_existing_paths(ctx, &args.path)?;
+    let shown = args.limit.max(1);
+    let cap = shown.min(MAX_SEARCH_MATCHES);
     let mut matches = Vec::new();
     let mut errors = Vec::new();
+    let mut truncated = false;
     for target in &targets {
         for path in walk_files(&ctx.root, target, &exclude)? {
-            match search_file(&ctx.root, &path, &matcher, &column_regex) {
-                Ok(mut found) => matches.append(&mut found),
+            match search_file_limited(
+                &ctx.root,
+                &path,
+                &matcher,
+                &column_regex,
+                cap.saturating_sub(matches.len()),
+            ) {
+                Ok(SearchFileMatches {
+                    matches: mut found,
+                    truncated: file_truncated,
+                }) => {
+                    matches.append(&mut found);
+                    if file_truncated || matches.len() >= cap {
+                        truncated = true;
+                        break;
+                    }
+                }
                 Err(err) => errors
                     .push(json!({"path": rel_path(&ctx.root, &path), "message": err.to_string()})),
             }
         }
+        if truncated {
+            break;
+        }
     }
-    let shown = args.limit.max(1);
     Ok(json!({
         "pattern": args.pattern,
         "mode": mode,
         "warning": warning,
         "path": args.path,
         "match_count": matches.len(),
-        "matches": matches.iter().take(shown).cloned().collect::<Vec<_>>(),
-        "truncated": matches.len() > shown,
+        "matches": matches,
+        "truncated": truncated,
         "exclude": args.exclude.as_ref().map(ExcludeArg::patterns),
         "errors": if errors.is_empty() { Value::Null } else { Value::Array(errors) }
     }))
@@ -393,6 +416,12 @@ struct SearchText {
 
 fn read_text_file(root: &Path, path: &Path) -> Result<Option<SearchText>> {
     let rel = rel_path(root, path);
+    if fs::metadata(path)?.len() > MAX_WORKSPACE_FILE_BYTES {
+        bail!(
+            "file exceeds workspace read cap of {} bytes: {rel}",
+            MAX_WORKSPACE_FILE_BYTES
+        );
+    }
     let raw = fs::read(path)?;
     Ok(crate::decode_utf8(raw).ok().map(|text| SearchText {
         display_path: rel,
@@ -420,35 +449,66 @@ fn search_text_grep(
     text: &str,
     matcher: &RegexMatcher,
     column_regex: &Regex,
+    limit: usize,
     out: &mut Vec<Value>,
-) -> Result<()> {
+) -> Result<bool> {
+    if limit == 0 {
+        return Ok(true);
+    }
+    let mut truncated = false;
     let mut searcher = SearcherBuilder::new().line_number(true).build();
     let mut sink = UTF8(|line_number, line: &str| {
+        if out.len() >= limit {
+            truncated = true;
+            return Ok(false);
+        }
         let column = column_regex.find(line).map(|m| m.start() + 1).unwrap_or(1);
         push_match(display_path, line_number as usize, line, column, out);
+        if out.len() >= limit {
+            truncated = true;
+            return Ok(false);
+        }
         Ok(true)
     });
     searcher.search_reader(matcher, text.as_bytes(), &mut sink)?;
-    Ok(())
+    Ok(truncated)
 }
 
+pub(super) struct SearchFileMatches {
+    pub(super) matches: Vec<Value>,
+    pub(super) truncated: bool,
+}
+
+pub(super) fn search_file_limited(
+    root: &Path,
+    path: &Path,
+    matcher: &RegexMatcher,
+    column_regex: &Regex,
+    limit: usize,
+) -> Result<SearchFileMatches> {
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    if let Some(item) = read_text_file(root, path)? {
+        truncated = search_text_grep(
+            &item.display_path,
+            &item.text,
+            matcher,
+            column_regex,
+            limit,
+            &mut matches,
+        )?;
+    }
+    Ok(SearchFileMatches { matches, truncated })
+}
+
+#[cfg(test)]
 pub(super) fn search_file(
     root: &Path,
     path: &Path,
     matcher: &RegexMatcher,
     column_regex: &Regex,
 ) -> Result<Vec<Value>> {
-    let mut out = Vec::new();
-    if let Some(item) = read_text_file(root, path)? {
-        search_text_grep(
-            &item.display_path,
-            &item.text,
-            matcher,
-            column_regex,
-            &mut out,
-        )?;
-    }
-    Ok(out)
+    Ok(search_file_limited(root, path, matcher, column_regex, usize::MAX)?.matches)
 }
 
 enum ReplaceOutcome {
@@ -460,6 +520,9 @@ enum ReplaceOutcome {
 fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<ReplaceOutcome> {
     if path.is_symlink() {
         return Ok(ReplaceOutcome::Skipped("symlink"));
+    }
+    if fs::metadata(path)?.len() > MAX_WORKSPACE_FILE_BYTES {
+        return Ok(ReplaceOutcome::Skipped("file exceeds workspace read cap"));
     }
     let raw = fs::read(path)?;
     let text = match crate::decode_utf8(raw) {
@@ -520,6 +583,12 @@ fn preview_replace_plan(
     let mut changed = Vec::new();
     for path in walk_files(&ctx.root, target, exclude)? {
         if path.is_symlink() {
+            continue;
+        }
+        if fs::metadata(&path)
+            .ok()
+            .is_some_and(|meta| meta.len() > MAX_WORKSPACE_FILE_BYTES)
+        {
             continue;
         }
         let raw = match fs::read(&path) {
