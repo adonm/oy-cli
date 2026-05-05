@@ -17,8 +17,7 @@ mod history;
 
 use commands::handle_slash_command;
 pub(crate) use commands::{
-    RecentModelChoice, ask, chat_help_text, choose_model, choose_model_with_initial_list,
-    choose_recent_model,
+    RecentModelChoice, ask, choose_model, choose_model_with_initial_list, choose_recent_model,
 };
 use history::history_path;
 

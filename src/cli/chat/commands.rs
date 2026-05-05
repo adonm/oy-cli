@@ -378,6 +378,11 @@ mod tests {
     }
 
     #[test]
+    fn chat_help_snapshot() {
+        insta::assert_snapshot!(chat_help_text());
+    }
+
+    #[test]
     fn recent_model_menu_appends_inspect_and_clear_actions() {
         let items = recent_model_menu_items(&["gpt-a".to_string(), "gpt-b".to_string()]);
         assert_eq!(

@@ -1,7 +1,6 @@
 ---
-source: tests/snapshots.rs
-assertion_line: 107
-expression: "tools::preview_tool_output(\"replace\", &value)"
+source: src/tools/preview.rs
+expression: tool_output("replace", &value)
 ---
 6 files changed · 9 replacements · returned=6 · truncated=no
 src/lib.rs · 1 repl

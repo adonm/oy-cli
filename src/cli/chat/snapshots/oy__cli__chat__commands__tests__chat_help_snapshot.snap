@@ -1,6 +1,5 @@
 ---
-source: tests/snapshots.rs
-assertion_line: 12
+source: src/cli/chat/commands.rs
 expression: chat_help_text()
 ---
 Enter sends; Alt/Shift+Enter inserts newline

@@ -1,7 +1,6 @@
 ---
-source: tests/snapshots.rs
-assertion_line: 124
-expression: "tools::preview_tool_output(\"webfetch\", &value)"
+source: src/tools/preview.rs
+expression: tool_output("webfetch", &value)
 ---
 HTTP 200 · markdown · 6 lines · truncated=no · https://example.com/docs
 ── markdown
