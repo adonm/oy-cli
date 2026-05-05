@@ -1,6 +1,6 @@
 [package]
 name = "oy-cli"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 rust-version = "1.91.1"
 description = "Local AI coding CLI for inspecting, editing, running commands, and auditing repositories"
@@ -56,7 +56,7 @@ tiktoken-rs = "0.11"
 tokei = "14.0"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "stream"] }
 futures-util = "0.3"
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "process", "time", "net", "io-util"] }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "process", "signal", "time", "net", "io-util"] }
 toon-format = { version = "0.4.5", default-features = false }
 url = "2.5"
 aws-config = "1.8.16"

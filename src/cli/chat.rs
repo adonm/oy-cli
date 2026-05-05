@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use dialoguer::{Confirm, theme::ColorfulTheme};
 use std::fmt::Display;
 
@@ -42,7 +42,10 @@ fn chat_line_editor(history_path: PathBuf) -> Result<Reedline> {
 
 pub async fn run_chat(session: &mut Session) -> Result<i32> {
     crate::ui::section("oy chat");
-    crate::ui::kv("keys", "Enter sends · Alt/Shift+Enter newline · /? help");
+    crate::ui::kv(
+        "keys",
+        "Enter sends · Alt/Shift+Enter newline · Ctrl-C interrupts active turn/quits prompt · /? help",
+    );
     let history_path = history_path("chat")?;
     let mut line_editor = chat_line_editor(history_path.clone())?;
     let prompt = DefaultPrompt::new(
@@ -109,10 +112,31 @@ async fn handle_chat_line(session: &mut Session, line: &str) -> Result<bool> {
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ChatTurnInterrupted;
+
+impl std::fmt::Display for ChatTurnInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "chat turn interrupted")
+    }
+}
+
+impl std::error::Error for ChatTurnInterrupted {}
+
+async fn run_prompt_interruptible(session: &mut Session, prompt: &str) -> Result<String> {
+    tokio::select! {
+        result = session::run_prompt(session, prompt) => result,
+        signal_result = tokio::signal::ctrl_c() => {
+            signal_result.context("failed to listen for Ctrl-C")?;
+            bail!(ChatTurnInterrupted);
+        }
+    }
+}
+
 async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -> Result<()> {
     let mut recovery_attempts = 0usize;
     loop {
-        match session::run_prompt(session, prompt).await {
+        match run_prompt_interruptible(session, prompt).await {
             Ok(answer) => {
                 if !answer.is_empty() {
                     crate::ui::markdown(&format!("{answer}\n"));
@@ -120,6 +144,11 @@ async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -
                 return Ok(());
             }
             Err(err) => {
+                if err.is::<ChatTurnInterrupted>() {
+                    session.transcript.undo_last_turn();
+                    crate::ui::warn("interrupted current turn; still in chat");
+                    return Ok(());
+                }
                 let Some(budget_err) = err
                     .downcast_ref::<session::ContextBudgetExceeded>()
                     .copied()

@@ -54,7 +54,7 @@ fn normalize_chat_command(command: &str) -> &str {
 
 pub fn chat_help_text() -> String {
     [
-        "Enter sends; Alt/Shift+Enter inserts newline",
+        "Enter sends; Alt/Shift+Enter inserts newline; Ctrl-C interrupts an active turn or exits at the prompt",
         "/help (/h, /?) -- show help",
         "/status (/s), /debug (/d) -- show model, mode, context, and todos",
         "/model [value] (/m) -- show or switch model",
