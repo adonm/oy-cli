@@ -2,7 +2,7 @@ use super::args::{
     BashArgs, HeaderPolicy, ListArgs, ReadArgs, RedirectPolicy, ReplaceArgs, ReplaceMode,
     SearchArgs, SearchMode, SlocArgs, TodoArgs, TodoItemInput, WebfetchArgs,
 };
-use super::network::{is_public_ip, validated_webfetch_headers};
+use super::network::{is_public_ip, tool_webfetch, validated_webfetch_headers};
 use super::todo::tool_todo;
 use super::workspace::{self, search_file};
 use super::*;
@@ -304,6 +304,31 @@ fn read_only_exposes_research_tools_but_not_mutation_tools() {
     }
 }
 
+#[tokio::test]
+async fn webfetch_checks_network_policy_at_sink() {
+    let (_dir, ctx) = test_context(
+        ToolPolicy {
+            files: FileAccess::ReadOnly,
+            shell: Approval::Deny,
+            network: NetworkAccess::Disabled,
+        },
+        false,
+    );
+    let err = tool_webfetch(
+        &ctx,
+        WebfetchArgs {
+            url: "https://example.com".into(),
+            method: "GET".into(),
+            headers: HeaderPolicy::default(),
+            redirects: RedirectPolicy::None,
+            timeout_seconds: DEFAULT_WEBFETCH_TIMEOUT_SECONDS,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("tool denied by policy"));
+}
+
 #[test]
 fn sloc_accepts_space_separated_paths() {
     let (dir, ctx) = test_context(auto_policy(), false);
@@ -562,6 +587,30 @@ fn list_does_not_expand_zip_members() {
     assert_eq!(value["count"], 1);
     let items = value["items"].as_array().unwrap();
     assert_eq!(items, &vec![json!("sample.zip")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn list_does_not_follow_symlink_globs_outside_workspace() {
+    use std::os::unix::fs::symlink;
+
+    let (dir, ctx) = test_context(auto_policy(), false);
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("secret-name.txt"), "secret").unwrap();
+    symlink(outside.path(), dir.path().join("link")).unwrap();
+
+    let value = workspace::tool_list(
+        &ctx,
+        ListArgs {
+            path: "link/*".into(),
+            exclude: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value["count"], 0);
+    assert!(value["items"].as_array().unwrap().is_empty());
 }
 
 #[test]

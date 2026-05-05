@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -10,9 +10,7 @@ pub(super) fn render_sarif(report: &str) -> Result<String> {
     let mut results = Vec::new();
 
     for finding in findings {
-        let Some(location) = sarif_location(&finding.code_ref)? else {
-            continue;
-        };
+        let location = sarif_location(&finding.code_ref);
         let rule_id = sarif_rule_id(&finding);
         let level = sarif_level(&finding.severity);
         rules.entry(rule_id.clone()).or_insert_with(|| {
@@ -27,16 +25,19 @@ pub(super) fn render_sarif(report: &str) -> Result<String> {
                 }
             })
         });
-        results.push(json!({
+        let mut result = json!({
             "ruleId": rule_id,
             "level": level,
             "message": { "text": format!("{}: {}", finding.severity, finding.title) },
-            "locations": [location],
             "properties": {
                 "severity": finding.severity,
                 "codeRef": finding.code_ref
             }
-        }));
+        });
+        if let Some(location) = location {
+            result["locations"] = json!([location]);
+        }
+        results.push(result);
     }
 
     let sarif = json!({
@@ -92,11 +93,9 @@ fn sarif_security_severity(severity: &str) -> &'static str {
     }
 }
 
-fn sarif_location(code_ref: &str) -> Result<Option<Value>> {
+fn sarif_location(code_ref: &str) -> Option<Value> {
     let (path, line) = split_code_ref(code_ref);
-    if !is_safe_relative_path(path) {
-        bail!("audit finding path escapes workspace: {path}");
-    }
+    let path = normalize_safe_relative_path(path)?;
     let mut region = serde_json::Map::new();
     if let Some(line) = line {
         region.insert("startLine".to_string(), json!(line));
@@ -104,12 +103,12 @@ fn sarif_location(code_ref: &str) -> Result<Option<Value>> {
     let mut physical = serde_json::Map::new();
     physical.insert(
         "artifactLocation".to_string(),
-        json!({ "uri": path.replace('\\', "/"), "uriBaseId": "%SRCROOT%" }),
+        json!({ "uri": path, "uriBaseId": "%SRCROOT%" }),
     );
     if !region.is_empty() {
         physical.insert("region".to_string(), Value::Object(region));
     }
-    Ok(Some(json!({ "physicalLocation": Value::Object(physical) })))
+    Some(json!({ "physicalLocation": Value::Object(physical) }))
 }
 
 fn split_code_ref(code_ref: &str) -> (&str, Option<u32>) {
@@ -128,10 +127,21 @@ fn split_code_ref(code_ref: &str) -> (&str, Option<u32>) {
     )
 }
 
-fn is_safe_relative_path(path: &str) -> bool {
+fn normalize_safe_relative_path(path: &str) -> Option<String> {
     let path = Path::new(path);
-    !path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    if path.is_absolute() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => out.push(value.to_string_lossy()),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out.join("/"))
 }

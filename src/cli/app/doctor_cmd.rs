@@ -136,8 +136,20 @@ fn recommended_next_step(listing: &model::ModelListing) -> String {
 
 fn safe_container_command(root: &Path, read_only: bool) -> String {
     let mode = if read_only { "ro" } else { "rw" };
+    let mount = format!("{}:/workspace:{mode}", root.display());
     format!(
-        "docker run --rm -it -v \"{}:/workspace:{mode}\" -w /workspace oy-image oy chat --mode plan",
-        root.display()
+        "docker run --rm -it -v {} -w /workspace oy-image oy chat --mode plan",
+        shell_quote(&mount)
     )
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }

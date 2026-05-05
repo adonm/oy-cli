@@ -269,12 +269,19 @@ mod tests {
     }
 
     #[test]
-    fn sarif_renderer_rejects_escaping_paths() {
-        let err = render_sarif(
-            "# Audit Issues\n\n## Detailed findings\n\n### High: bad path\n\n- Evidence: `../secret.rs:1` is bad.\n",
+    fn sarif_renderer_omits_unsafe_locations_without_dropping_results() {
+        let sarif = render_sarif(
+            "# Audit Issues\n\n## Detailed findings\n\n### High: good path\n\n- Evidence: `./src/files.rs:42` writes attacker paths.\n\n### Medium: bad path\n\n- Evidence: `../secret.rs:1` is bad.\n",
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("escapes workspace"));
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let results = value["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "src/files.rs"
+        );
+        assert!(results[1].get("locations").is_none());
     }
 
     #[test]
@@ -313,7 +320,10 @@ mod tests {
         assert!(should_skip_path("target/debug/app"));
         assert!(should_skip_path("Cargo.lock"));
         assert!(should_skip_path(".env"));
+        assert!(should_skip_path(".env.production"));
         assert!(should_skip_path("config/.npmrc"));
+        assert!(should_skip_path("config/credentials.json"));
+        assert!(should_skip_path("k8s/secrets.yaml"));
         assert!(should_skip_path("keys/id_ed25519"));
         assert!(should_skip_path("certs/prod.pem"));
         assert!(!should_skip_path("src/main.rs"));
@@ -325,6 +335,23 @@ mod tests {
         let compact = compact_to_tokens("gpt-4o", &text, 1_000);
         assert!(compaction::count_tokens("gpt-4o", &compact) <= 1_000);
         assert!(compact.contains("truncated"));
+    }
+
+    #[test]
+    fn reduce_findings_compaction_preserves_middle_finding_headings() {
+        let manifest = "files: 1\nestimated_tokens: 1\nbytes: 1\nlanguages: Rust";
+        let mut findings = String::new();
+        for idx in 1..=30 {
+            let _ = writeln!(findings, "### Medium: issue {idx}");
+            let _ = writeln!(findings, "- Evidence: `src/file{idx}.rs:1` reaches sink.");
+            findings.push_str(&"- Detail: repeated context.\n".repeat(100));
+        }
+
+        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 2_000);
+        assert!(bounded.contains("### Medium: issue 1"));
+        assert!(bounded.contains("### Medium: issue 15"));
+        assert!(bounded.contains("### Medium: issue 30"));
+        assert!(!bounded.contains("truncated"));
     }
 
     #[test]

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-05
+
+### Changed
+- Trimmed the Rust library surface so only the command runner and diagnostic helper remain stable public API; internal modules are now crate-private.
+- Moved snapshot coverage into the modules that own chat command help and tool preview rendering.
+- Split CLI UI rendering/progress/text helpers and session storage/no-op guard helpers into smaller modules for local reasoning.
+- Replaced ad-hoc JSON construction in tool implementations with typed internal output structs before serialization.
+- Updated `ISSUES.md` with validation status for remediated and still-open audit findings.
+
+### Fixed
+- Enforced disabled-network policy inside the `webfetch` sink before URL resolution or outbound I/O.
+- Prevented `list` glob expansion from reporting entries whose canonical path resolves outside the workspace through symlinks.
+- Hardened audit input skipping for more secret-like filenames, including `.env.*`, credentials, secrets, and token files.
+- Serialized transcript compaction input as escaped JSON records and marked message bodies as untrusted data to avoid pseudo-XML prompt-boundary confusion.
+- Kept SARIF generation available when one model-produced code reference is unsafe by omitting only that result location.
+- Preserved middle audit findings during reduce compaction by trimming per finding instead of raw head/tail truncation.
+- Shell-quoted the Docker mount argument printed by `doctor` for container safety guidance.
+
 ## [0.7.16] - 2026-05-05
 
 ### Changed

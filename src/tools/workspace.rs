@@ -132,8 +132,8 @@ pub(super) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
         };
         let mut out = glob(&pattern)?
             .filter_map(|entry| entry.ok())
-            .filter(|path| !exclude.is_match(rel_path(&ctx.root, path).as_str()))
-            .map(|path| display_path(&ctx.root, &path))
+            .filter_map(|path| safe_list_item(&ctx.root, &path))
+            .filter(|item| !exclude.is_match(item.as_str()))
             .collect::<Vec<_>>();
         out.sort();
         out.dedup();
@@ -465,6 +465,14 @@ fn display_path(root: &Path, path: &Path) -> String {
         value.push('/');
     }
     value
+}
+
+fn safe_list_item(root: &Path, path: &Path) -> Option<String> {
+    let resolved = path.canonicalize().ok()?;
+    if !within_root(root, &resolved) {
+        return None;
+    }
+    Some(display_path(root, path))
 }
 
 fn within_root(root: &Path, path: &Path) -> bool {

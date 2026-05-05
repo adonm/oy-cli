@@ -2477,7 +2477,7 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "oy-cli"
-version = "0.7.16"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "aws-config",

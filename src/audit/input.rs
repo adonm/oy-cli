@@ -93,8 +93,6 @@ const SKIP_FILENAMES: &[&str] = &[
     "yarn.lock",
     "uv.lock",
     "go.sum",
-    ".env",
-    ".env.local",
     ".npmrc",
     ".pypirc",
     ".netrc",
@@ -103,6 +101,7 @@ const SKIP_FILENAMES: &[&str] = &[
     "id_ecdsa",
     "id_ed25519",
 ];
+const SKIP_FILENAME_SUBSTRINGS: &[&str] = &["credential", "secret", "token"];
 const SKIP_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];
 
 pub(super) fn should_skip_path(path: &str) -> bool {
@@ -119,6 +118,15 @@ pub(super) fn should_skip_path(path: &str) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
     if SKIP_FILENAMES.contains(&name.as_str()) {
+        return true;
+    }
+    if name == ".env" || name.starts_with(".env.") {
+        return true;
+    }
+    if SKIP_FILENAME_SUBSTRINGS
+        .iter()
+        .any(|needle| name.contains(needle))
+    {
         return true;
     }
     Path::new(&lower)

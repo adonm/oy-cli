@@ -12,7 +12,7 @@ use url::Url;
 
 use super::args::{HeaderPolicy, RedirectPolicy, WebfetchArgs};
 use super::{
-    MAX_WEBFETCH_BYTES, MAX_WEBFETCH_TIMEOUT_SECONDS, ToolContext, WEBFETCH_ACCEPT,
+    MAX_WEBFETCH_BYTES, MAX_WEBFETCH_TIMEOUT_SECONDS, NetworkAccess, ToolContext, WEBFETCH_ACCEPT,
     WEBFETCH_USER_AGENT,
 };
 
@@ -44,7 +44,9 @@ fn is_false(value: &bool) -> bool {
 }
 
 pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
-    let _ = ctx;
+    if ctx.policy.network != NetworkAccess::Enabled {
+        bail!("tool denied by policy: webfetch");
+    }
     let method = args.method.to_ascii_uppercase();
     if !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
         bail!("Only GET/HEAD/OPTIONS are allowed, got {method}");

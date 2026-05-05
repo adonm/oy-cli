@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::compaction;
 
 use super::{REDUCE_FINDINGS_MIN_TOKENS, REDUCE_FINDINGS_TOKEN_RESERVE, prompts};
@@ -14,6 +16,26 @@ pub(super) fn compact_to_tokens<'a>(
 }
 
 fn compact_owned_to_tokens(model_spec: &str, text: &str, max_tokens: usize) -> String {
+    let findings = split_candidate_findings(text);
+    if findings.len() <= 1 {
+        return compact_head_tail_to_tokens(model_spec, text, max_tokens);
+    }
+
+    let mut per_finding_chars = max_tokens.saturating_mul(4) / findings.len().max(1);
+    per_finding_chars = per_finding_chars.clamp(80, 4000);
+    loop {
+        let compact = compact_findings_by_section(&findings, per_finding_chars);
+        if compaction::count_tokens(model_spec, &compact) <= max_tokens {
+            return compact;
+        }
+        if per_finding_chars <= 80 {
+            return compact_head_tail_to_tokens(model_spec, &compact, max_tokens);
+        }
+        per_finding_chars = (per_finding_chars.saturating_mul(3) / 4).max(80);
+    }
+}
+
+fn compact_head_tail_to_tokens(model_spec: &str, text: &str, max_tokens: usize) -> String {
     let mut max_chars = max_tokens.saturating_mul(4).max(2000);
     loop {
         let (short, truncated) = crate::ui::head_tail(text, max_chars);
@@ -25,6 +47,45 @@ fn compact_owned_to_tokens(model_spec: &str, text: &str, max_tokens: usize) -> S
         }
         max_chars = max_chars.saturating_mul(3) / 4;
     }
+}
+
+fn split_candidate_findings(text: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let is_boundary = line.starts_with("## Candidate findings from chunk ")
+            || line.starts_with("### ")
+            || line.starts_with("#### ");
+        if is_boundary && !current.trim().is_empty() {
+            sections.push(current.trim().to_string());
+            current.clear();
+        }
+        let _ = writeln!(current, "{line}");
+    }
+    if !current.trim().is_empty() {
+        sections.push(current.trim().to_string());
+    }
+    sections
+}
+
+fn compact_findings_by_section(findings: &[String], per_finding_chars: usize) -> String {
+    let mut out = String::new();
+    for finding in findings {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        if finding.chars().count() <= per_finding_chars {
+            out.push_str(finding);
+            continue;
+        }
+        let mut lines = finding.lines();
+        let heading = lines.next().unwrap_or_default();
+        let body = lines.collect::<Vec<_>>().join("\n");
+        let body_budget = per_finding_chars.saturating_sub(heading.chars().count() + 64);
+        let preview = crate::ui::truncate_chars(&body.replace('\n', " "), body_budget.max(80));
+        let _ = write!(out, "{heading}\n… details compacted: {preview}");
+    }
+    out
 }
 
 pub(super) fn reduce_candidate_findings_budget(
