@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -62,11 +63,21 @@ fn format_todo_line(item: &TodoItem) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct TodoStatusCounts {
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub(super) struct TodoStatusCounts {
     pending: usize,
     in_progress: usize,
     done: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TodoOutput {
+    pub path: &'static str,
+    pub persisted: bool,
+    pub items: Vec<TodoItem>,
+    pub count: usize,
+    pub status_counts: TodoStatusCounts,
+    pub preview: String,
 }
 
 fn todo_status_counts(todos: &[TodoItem]) -> TodoStatusCounts {
@@ -159,16 +170,12 @@ pub(super) fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> 
     }
     let counts = todo_status_counts(&ctx.todos);
     let preview = format_todo_preview(&ctx.todos);
-    Ok(json!({
-        "path": TODO_FILE,
-        "persisted": args.persist,
-        "items": ctx.todos,
-        "count": ctx.todos.len(),
-        "status_counts": {
-            "pending": counts.pending,
-            "in_progress": counts.in_progress,
-            "done": counts.done
-        },
-        "preview": preview
-    }))
+    Ok(serde_json::to_value(TodoOutput {
+        path: TODO_FILE,
+        persisted: args.persist,
+        items: ctx.todos.clone(),
+        count: ctx.todos.len(),
+        status_counts: counts,
+        preview,
+    })?)
 }

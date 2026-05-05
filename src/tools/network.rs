@@ -2,7 +2,8 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt as _;
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, USER_AGENT};
-use serde_json::{Map, Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -14,6 +15,33 @@ use super::{
     MAX_WEBFETCH_BYTES, MAX_WEBFETCH_TIMEOUT_SECONDS, ToolContext, WEBFETCH_ACCEPT,
     WEBFETCH_USER_AGENT,
 };
+
+#[derive(Debug, Serialize)]
+pub(super) struct WebfetchOutput {
+    pub method: String,
+    pub url: String,
+    pub status_code: u16,
+    pub reason_phrase: &'static str,
+    pub http_version: String,
+    pub headers: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<&'static str>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub binary: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_bytes: Option<usize>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_capped: Option<bool>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
     let _ = ctx;
@@ -57,9 +85,9 @@ pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Resu
             } else {
                 v.to_str().unwrap_or("").to_string()
             };
-            (key, Value::String(value))
+            (key, value)
         })
-        .collect::<Map<String, Value>>();
+        .collect::<BTreeMap<_, _>>();
 
     let (body, body_capped) = read_limited_response(response, MAX_WEBFETCH_BYTES).await?;
     if is_text_content_type(&content_type) {
@@ -74,33 +102,42 @@ pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Resu
         };
         let (text_preview, preview_truncated) = crate::ui::head_tail(&normalized, 12_000);
         let truncated = preview_truncated || body_capped;
-        return Ok(json!({
-            "method": method,
-            "url": final_url,
-            "status_code": status.as_u16(),
-            "reason_phrase": reason_phrase(status),
-            "http_version": format!("{:?}", version),
-            "headers": header_map,
-            "text": normalized,
-            "text_preview": text_preview,
-            "format": if content_type.contains("html") { "markdown" } else { "text" },
-            "truncated": truncated,
-            "body_capped": body_capped
-        }));
+        return Ok(serde_json::to_value(WebfetchOutput {
+            method,
+            url: final_url,
+            status_code: status.as_u16(),
+            reason_phrase: reason_phrase(status),
+            http_version: format!("{:?}", version),
+            headers: header_map,
+            text: Some(normalized),
+            text_preview: Some(text_preview),
+            format: Some(if content_type.contains("html") {
+                "markdown"
+            } else {
+                "text"
+            }),
+            binary: false,
+            content_bytes: None,
+            truncated,
+            body_capped: Some(body_capped),
+        })?);
     }
 
-    let bytes = body;
-    Ok(json!({
-        "method": method,
-        "url": final_url,
-        "status_code": status.as_u16(),
-        "reason_phrase": reason_phrase(status),
-        "http_version": format!("{:?}", version),
-        "headers": header_map,
-        "binary": true,
-        "content_bytes": bytes.len(),
-        "truncated": body_capped
-    }))
+    Ok(serde_json::to_value(WebfetchOutput {
+        method,
+        url: final_url,
+        status_code: status.as_u16(),
+        reason_phrase: reason_phrase(status),
+        http_version: format!("{:?}", version),
+        headers: header_map,
+        text: None,
+        text_preview: None,
+        format: None,
+        binary: true,
+        content_bytes: Some(body.len()),
+        truncated: body_capped,
+        body_capped: None,
+    })?)
 }
 async fn read_limited_response(
     response: reqwest::Response,

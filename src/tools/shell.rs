@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt as _;
@@ -14,6 +15,20 @@ use super::policy::require_mutation_approval;
 
 const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
 const MAX_BASH_OUTPUT_BYTES: usize = 200_000;
+
+#[derive(Debug, Serialize)]
+pub(super) struct BashOutput {
+    pub command: String,
+    pub returncode: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_preview: String,
+    pub stderr_preview: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub stdout_capped: bool,
+    pub stderr_capped: bool,
+}
 
 pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value> {
     if args.command.len() > config::max_bash_cmd_bytes() {
@@ -51,18 +66,18 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
     let (stderr, stderr_truncated) = stderr_task.await??;
     let (stdout_preview, stdout_preview_truncated) = crate::ui::head_tail(&stdout, 12_000);
     let (stderr_preview, stderr_preview_truncated) = crate::ui::head_tail(&stderr, 8_000);
-    Ok(json!({
-        "command": args.command,
-        "returncode": status.code().unwrap_or(-1),
-        "stdout": stdout,
-        "stderr": stderr,
-        "stdout_preview": stdout_preview,
-        "stderr_preview": stderr_preview,
-        "stdout_truncated": stdout_truncated || stdout_preview_truncated,
-        "stderr_truncated": stderr_truncated || stderr_preview_truncated,
-        "stdout_capped": stdout_truncated,
-        "stderr_capped": stderr_truncated
-    }))
+    Ok(serde_json::to_value(BashOutput {
+        command: args.command,
+        returncode: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+        stdout_preview,
+        stderr_preview,
+        stdout_truncated: stdout_truncated || stdout_preview_truncated,
+        stderr_truncated: stderr_truncated || stderr_preview_truncated,
+        stdout_capped: stdout_truncated,
+        stderr_capped: stderr_truncated,
+    })?)
 }
 
 async fn read_child_output<R>(mut reader: R, max_bytes: usize) -> Result<(String, bool)>

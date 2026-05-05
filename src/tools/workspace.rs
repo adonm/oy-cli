@@ -6,7 +6,8 @@ use grep_searcher::SearcherBuilder;
 use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
 use regex::Regex;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 use std::fmt::Write as _;
 use std::fs;
@@ -22,6 +23,89 @@ use super::{Approval, PREVIEW_ITEMS, ToolContext, require_mutation_approval};
 
 pub(super) const MAX_WORKSPACE_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 10_000;
+
+#[derive(Debug, Serialize)]
+pub(super) struct ListOutput {
+    pub path: String,
+    pub items: Vec<String>,
+    pub count: usize,
+    pub truncated: bool,
+    pub exclude: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ReadOutput {
+    pub path: String,
+    pub offset: usize,
+    pub limit: usize,
+    pub text: String,
+    pub line_count: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SearchHit {
+    pub path: String,
+    pub line_number: usize,
+    pub column: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ToolErrorItem {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SearchOutput {
+    pub pattern: String,
+    pub mode: &'static str,
+    pub warning: Option<String>,
+    pub path: String,
+    pub match_count: usize,
+    pub matches: Vec<SearchHit>,
+    pub truncated: bool,
+    pub exclude: Option<Vec<String>>,
+    pub errors: Option<Vec<ToolErrorItem>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ChangedFileOutput {
+    pub path: String,
+    pub replacements: usize,
+    pub diff: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SkippedFileOutput {
+    pub path: String,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ReplaceOutput {
+    pub pattern: String,
+    pub replacement: String,
+    pub mode: &'static str,
+    pub path: String,
+    pub changed_file_count: usize,
+    pub replacement_count: usize,
+    pub changed_files: Vec<ChangedFileOutput>,
+    pub diff: String,
+    pub truncated: bool,
+    pub exclude: Option<Vec<String>>,
+    pub skipped: Vec<SkippedFileOutput>,
+    pub errors: Vec<ToolErrorItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SlocOutput {
+    pub path: String,
+    pub format: &'static str,
+    pub output: Value,
+    pub exclude: Option<Vec<String>>,
+}
 
 // === Workspace tool implementations ===
 pub(super) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
@@ -55,13 +139,13 @@ pub(super) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
         out.dedup();
         out
     };
-    Ok(json!({
-        "path": args.path,
-        "items": items.iter().take(shown_limit).cloned().collect::<Vec<_>>(),
-        "count": items.len(),
-        "truncated": items.len() > shown_limit,
-        "exclude": args.exclude.as_ref().map(ExcludeArg::patterns)
-    }))
+    Ok(serde_json::to_value(ListOutput {
+        path: args.path,
+        items: items.iter().take(shown_limit).cloned().collect(),
+        count: items.len(),
+        truncated: items.len() > shown_limit,
+        exclude: args.exclude.as_ref().map(ExcludeArg::patterns),
+    })?)
 }
 
 pub(super) fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
@@ -88,27 +172,27 @@ pub(super) fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
         }
     }
     let truncated = line_count > stop;
-    Ok(json!({
-        "path": display_path,
-        "offset": args.offset,
-        "limit": args.limit,
-        "text": shown.join("\n"),
-        "line_count": line_count,
-        "truncated": truncated
-    }))
+    Ok(serde_json::to_value(ReadOutput {
+        path: display_path,
+        offset: args.offset,
+        limit: args.limit,
+        text: shown.join("\n"),
+        line_count,
+        truncated,
+    })?)
 }
 
 fn search_matchers(
     pattern: &str,
     mode: SearchMode,
-) -> Result<(RegexMatcher, Regex, &'static str, Value)> {
+) -> Result<(RegexMatcher, Regex, &'static str, Option<String>)> {
     match mode {
         SearchMode::Regex => Ok((
             RegexMatcher::new_line_matcher(pattern)
                 .with_context(|| format!("invalid regex: {pattern}"))?,
             Regex::new(pattern).with_context(|| format!("invalid regex: {pattern}"))?,
             "regex",
-            Value::Null,
+            None,
         )),
         SearchMode::Literal => {
             let escaped = regex::escape(pattern);
@@ -116,7 +200,7 @@ fn search_matchers(
                 RegexMatcher::new_line_matcher(&escaped)?,
                 Regex::new(&escaped)?,
                 "literal",
-                Value::Null,
+                None,
             ))
         }
         SearchMode::Auto => match Regex::new(pattern) {
@@ -125,7 +209,7 @@ fn search_matchers(
                     .with_context(|| format!("invalid regex: {pattern}"))?,
                 regex,
                 "regex",
-                Value::Null,
+                None,
             )),
             Err(err) => {
                 let escaped = regex::escape(pattern);
@@ -133,7 +217,7 @@ fn search_matchers(
                     RegexMatcher::new_line_matcher(&escaped)?,
                     Regex::new(&escaped)?,
                     "literal",
-                    json!(format!(
+                    Some(format!(
                         "pattern was not valid regex; searched literally: {err}"
                     )),
                 ))
@@ -186,25 +270,27 @@ pub(super) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> 
                         break;
                     }
                 }
-                Err(err) => errors
-                    .push(json!({"path": rel_path(&ctx.root, &path), "message": err.to_string()})),
+                Err(err) => errors.push(ToolErrorItem {
+                    path: rel_path(&ctx.root, &path),
+                    message: err.to_string(),
+                }),
             }
         }
         if truncated {
             break;
         }
     }
-    Ok(json!({
-        "pattern": args.pattern,
-        "mode": mode,
-        "warning": warning,
-        "path": args.path,
-        "match_count": matches.len(),
-        "matches": matches,
-        "truncated": truncated,
-        "exclude": args.exclude.as_ref().map(ExcludeArg::patterns),
-        "errors": if errors.is_empty() { Value::Null } else { Value::Array(errors) }
-    }))
+    Ok(serde_json::to_value(SearchOutput {
+        pattern: args.pattern,
+        mode,
+        warning,
+        path: args.path,
+        match_count: matches.len(),
+        matches,
+        truncated,
+        exclude: args.exclude.as_ref().map(ExcludeArg::patterns),
+        errors: (!errors.is_empty()).then_some(errors),
+    })?)
 }
 pub(super) fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value> {
     let (regex, replacement, mode) = replace_matcher_and_replacement(&args)?;
@@ -223,37 +309,41 @@ pub(super) fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value
     for path in walk_files(&ctx.root, &target, &exclude)? {
         match replace_file(&path, &regex, &replacement) {
             Ok(ReplaceOutcome::Changed { count, diff }) => {
-                changed_files.push(json!({
-                    "path": rel_path(&ctx.root, &path),
-                    "replacements": count,
-                    "diff": diff
-                }));
+                changed_files.push(ChangedFileOutput {
+                    path: rel_path(&ctx.root, &path),
+                    replacements: count,
+                    diff,
+                });
                 replacement_count += count;
             }
             Ok(ReplaceOutcome::Unchanged) => {}
-            Ok(ReplaceOutcome::Skipped(reason)) => {
-                skipped.push(json!({"path": rel_path(&ctx.root, &path), "reason": reason}))
-            }
-            Err(err) => {
-                errors.push(json!({"path": rel_path(&ctx.root, &path), "message": err.to_string()}))
-            }
+            Ok(ReplaceOutcome::Skipped(reason)) => skipped.push(SkippedFileOutput {
+                path: rel_path(&ctx.root, &path),
+                reason,
+            }),
+            Err(err) => errors.push(ToolErrorItem {
+                path: rel_path(&ctx.root, &path),
+                message: err.to_string(),
+            }),
         }
     }
     let shown = args.limit.max(1);
-    Ok(json!({
-        "pattern": args.pattern,
-        "replacement": args.replacement,
-        "mode": mode,
-        "path": args.path,
-        "changed_file_count": changed_files.len(),
-        "replacement_count": replacement_count,
-        "changed_files": changed_files.iter().take(shown).cloned().collect::<Vec<_>>(),
-        "diff": combined_diff(&changed_files),
-        "truncated": changed_files.len() > shown,
-        "exclude": args.exclude.as_ref().map(ExcludeArg::patterns),
-        "skipped": skipped,
-        "errors": errors
-    }))
+    let changed_file_count = changed_files.len();
+    let diff = combined_diff(&changed_files);
+    Ok(serde_json::to_value(ReplaceOutput {
+        pattern: args.pattern,
+        replacement: args.replacement,
+        mode,
+        path: args.path,
+        changed_file_count,
+        replacement_count,
+        changed_files: changed_files.into_iter().take(shown).collect(),
+        diff,
+        truncated: changed_file_count > shown,
+        exclude: args.exclude.as_ref().map(ExcludeArg::patterns),
+        skipped,
+        errors,
+    })?)
 }
 
 pub(super) fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
@@ -290,12 +380,12 @@ pub(super) fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
         );
     }
 
-    Ok(json!({
-        "path": args.path,
-        "format": "tokei-json",
-        "output": output,
-        "exclude": if exclude.is_empty() { Value::Null } else { serde_json::to_value(exclude)? }
-    }))
+    Ok(serde_json::to_value(SlocOutput {
+        path: args.path,
+        format: "tokei-json",
+        output,
+        exclude: (!exclude.is_empty()).then_some(exclude),
+    })?)
 }
 
 fn sort_tokei_reports(languages: &mut TokeiLanguages) {
@@ -434,14 +524,14 @@ fn push_match(
     line_number: usize,
     line: &str,
     column: usize,
-    out: &mut Vec<Value>,
+    out: &mut Vec<SearchHit>,
 ) {
-    out.push(json!({
-        "path": display_path,
-        "line_number": line_number,
-        "column": column,
-        "text": crate::ui::truncate_chars(line.trim_end_matches(['\r', '\n']), 1000)
-    }));
+    out.push(SearchHit {
+        path: display_path.to_string(),
+        line_number,
+        column,
+        text: crate::ui::truncate_chars(line.trim_end_matches(['\r', '\n']), 1000),
+    });
 }
 
 fn search_text_grep(
@@ -450,7 +540,7 @@ fn search_text_grep(
     matcher: &RegexMatcher,
     column_regex: &Regex,
     limit: usize,
-    out: &mut Vec<Value>,
+    out: &mut Vec<SearchHit>,
 ) -> Result<bool> {
     if limit == 0 {
         return Ok(true);
@@ -475,7 +565,7 @@ fn search_text_grep(
 }
 
 pub(super) struct SearchFileMatches {
-    pub(super) matches: Vec<Value>,
+    pub(super) matches: Vec<SearchHit>,
     pub(super) truncated: bool,
 }
 
@@ -507,7 +597,7 @@ pub(super) fn search_file(
     path: &Path,
     matcher: &RegexMatcher,
     column_regex: &Regex,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<SearchHit>> {
     Ok(search_file_limited(root, path, matcher, column_regex, usize::MAX)?.matches)
 }
 
@@ -562,10 +652,10 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
     crate::ui::head_tail(&out, 12000).0
 }
 
-fn combined_diff(files: &[Value]) -> String {
+fn combined_diff(files: &[ChangedFileOutput]) -> String {
     let text = files
         .iter()
-        .filter_map(|item| item.get("diff").and_then(Value::as_str))
+        .map(|item| item.diff.as_str())
         .filter(|diff| !diff.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
@@ -602,11 +692,12 @@ fn preview_replace_plan(
             continue;
         }
         let updated = regex.replace_all(&text, replacement).into_owned();
-        changed.push(json!({
-            "path": rel_path(&ctx.root, &path),
-            "replacements": regex.find_iter(&text).count(),
-            "diff": unified_diff(&rel_path(&ctx.root, &path), &text, &updated)
-        }));
+        let display_path = rel_path(&ctx.root, &path);
+        changed.push(ChangedFileOutput {
+            replacements: regex.find_iter(&text).count(),
+            diff: unified_diff(&display_path, &text, &updated),
+            path: display_path,
+        });
         if changed.len() >= args.limit.clamp(1, PREVIEW_ITEMS) {
             break;
         }
