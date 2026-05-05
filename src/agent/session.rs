@@ -1,9 +1,7 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest};
-use serde_json::{Value, json};
-use std::collections::BTreeSet;
-use std::path::Path;
+use serde_json::json;
 
 use super::chat::{display_model, exec_chat, token_count_text};
 use super::compaction::{compact_text, compaction_prompt, count_tokens, deterministic_summary};
@@ -12,8 +10,14 @@ pub use super::transcript::{
     Transcript,
 };
 use crate::config::{self, SafetyMode, SessionFile};
+
+mod noop;
+mod storage;
+pub use storage::load_saved;
+
 use crate::model;
 use crate::tools::{TodoItem, TodoStatus, ToolContext, ToolPolicy};
+use noop::RepeatedNoopTools;
 
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 512;
 
@@ -157,53 +161,6 @@ impl Session {
     }
 }
 
-pub fn load_saved(
-    name: Option<&str>,
-    interactive: bool,
-    mode: SafetyMode,
-    policy: ToolPolicy,
-) -> Result<Option<Session>> {
-    let Some(path) = config::resolve_saved_session(name)? else {
-        return Ok(None);
-    };
-    let saved = config::load_session_file(&path)?;
-    let transcript: Transcript = serde_json::from_value(saved.transcript)
-        .with_context(|| format!("invalid saved transcript in {}", path.display()))?;
-    let root = config::oy_root()?;
-    ensure_saved_workspace_matches(&path, saved.workspace_root.as_deref(), &root)?;
-    let mode = saved.mode.unwrap_or(mode);
-    let system_prompt = config::system_prompt(interactive, mode);
-    Ok(Some(Session {
-        root,
-        model: saved.model,
-        system_prompt,
-        interactive,
-        policy,
-        mode,
-        transcript,
-        todos: saved.todos,
-    }))
-}
-
-fn ensure_saved_workspace_matches(
-    session_path: &Path,
-    saved_root: Option<&Path>,
-    current_root: &Path,
-) -> Result<()> {
-    let Some(saved_root) = saved_root else {
-        return Ok(());
-    };
-    if saved_root == current_root {
-        return Ok(());
-    }
-    bail!(
-        "saved session {} belongs to workspace {}; current workspace is {}",
-        session_path.display(),
-        saved_root.display(),
-        current_root.display()
-    )
-}
-
 async fn ensure_context_budget(session: &mut Session, model_spec: &str) -> Result<()> {
     let config = config::context_config();
     let estimate =
@@ -310,49 +267,6 @@ async fn compact_llm_session_with_client(
         compacted_tools: 0,
         summarized: true,
     }))
-}
-
-#[derive(Default)]
-struct RepeatedNoopTools {
-    seen: BTreeSet<String>,
-}
-
-impl RepeatedNoopTools {
-    fn record(&mut self, name: &str, args: &Value, result: &Value) -> Result<()> {
-        if !is_noop_tool_result(name, result) {
-            self.seen.clear();
-            return Ok(());
-        }
-        let key = format!(
-            "{}:{}",
-            name,
-            serde_json::to_string(args).unwrap_or_default()
-        );
-        if !self.seen.insert(key) {
-            bail!(
-                "tool loop made no progress: repeated no-op {name}; inspect the latest tool output and choose a different action"
-            )
-        }
-        Ok(())
-    }
-}
-
-fn is_noop_tool_result(name: &str, result: &Value) -> bool {
-    match name {
-        "replace" => {
-            result.get("replacement_count").and_then(Value::as_u64) == Some(0)
-                && result
-                    .get("changed_file_count")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    == 0
-                && result
-                    .get("errors")
-                    .and_then(Value::as_array)
-                    .is_none_or(Vec::is_empty)
-        }
-        _ => false,
-    }
 }
 
 pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
@@ -480,69 +394,5 @@ async fn run_prompt_with_policy(
             reasoning_content,
         });
         return Ok(answer);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn saved_workspace_mismatch_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let current = tempfile::tempdir().unwrap();
-        let session_path = dir.path().join("session.json");
-        let saved_root = dir.path().to_path_buf();
-
-        let err = ensure_saved_workspace_matches(&session_path, Some(&saved_root), current.path())
-            .unwrap_err();
-
-        assert!(err.to_string().contains("belongs to workspace"));
-    }
-
-    #[test]
-    fn saved_workspace_allows_legacy_without_root() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            ensure_saved_workspace_matches(&dir.path().join("session.json"), None, dir.path())
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn repeated_noop_tools_rejects_repeated_zero_replace() {
-        let mut guard = RepeatedNoopTools::default();
-        let args = json!({"path": "src/main.rs", "pattern": "missing", "replacement": "x"});
-        let result = json!({
-            "changed_file_count": 0,
-            "replacement_count": 0,
-            "errors": []
-        });
-
-        guard.record("replace", &args, &result).unwrap();
-        let err = guard.record("replace", &args, &result).unwrap_err();
-
-        assert!(err.to_string().contains("repeated no-op replace"));
-    }
-
-    #[test]
-    fn repeated_noop_tools_allows_retry_after_progress() {
-        let mut guard = RepeatedNoopTools::default();
-        let args = json!({"path": "src/main.rs", "pattern": "missing", "replacement": "x"});
-        let noop = json!({
-            "changed_file_count": 0,
-            "replacement_count": 0,
-            "errors": []
-        });
-        let progress = json!({
-            "changed_file_count": 1,
-            "replacement_count": 1,
-            "errors": []
-        });
-
-        guard.record("replace", &args, &noop).unwrap();
-        guard.record("replace", &args, &progress).unwrap();
-
-        assert!(guard.record("replace", &args, &noop).is_ok());
     }
 }
