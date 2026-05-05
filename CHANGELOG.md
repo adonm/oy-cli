@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-05-05
+
+### Changed
+- Updated agent guidance to favor simple, direct, data-oriented code with explicit local data/control flow, stable boundaries, and measured performance.
+- Audit prompts now flag complexity that complects concerns, hides state/dataflow, blocks local reasoning, or obscures performance/security boundaries.
+- Transcript compaction now preserves design constraints, invariants, and rejected abstractions when they affect follow-up work.
+
 ## [0.7.13] - 2026-04-29
 
 ### Changed

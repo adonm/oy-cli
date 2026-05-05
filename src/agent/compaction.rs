@@ -187,6 +187,7 @@ Preserve facts needed to continue work:
 - user goals, constraints, preferences, and explicit instructions
 - exact filenames, commands, APIs, errors, test results, and config/env names
 - decisions made and rationale when important
+- design constraints, invariants, and rejected abstractions when they affect next actions
 - tool results that affect next actions
 - changes already made
 - active todos/current plan/open questions

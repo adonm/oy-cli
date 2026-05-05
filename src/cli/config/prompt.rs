@@ -19,6 +19,7 @@ Batch independent reads/searches. Stop when enough evidence exists.
 `search` and `sloc` accept whitespace-separated paths (e.g. `src/app.rs src/ui.rs`).
 Prefer `mode=literal` for `replace`; use regex only when you need capture groups.
 Prefer small, boring, idiomatic, functional, testable code with explicit data flow.
+Design bias: prefer simple over easy. Keep data/control flow explicit and local; prefer plain data, pure functions, direct code, stable boundaries, and measured performance. Avoid needless layers, hidden state, clever abstraction, and framework gravity.
 For security-sensitive work, name the trust boundary, validate near it, fail closed, and add focused tests.
 Do not add file, process, network, credential, or persistence capability unless necessary.
 For 3+ step work, keep a short in-memory todo; persist `TODO.md` only on explicit request or quit prompt.

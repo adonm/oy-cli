@@ -12,6 +12,7 @@ Finding quality bar:
 - For vulnerabilities, include the trust boundary, sink, affected path/symbol evidence, impact, exploitability/preconditions, and a concrete fix.
 - Prefer critical/high security findings and issues likely to cause production incidents.
 - Prefer simple remediations that remove whole bug classes.
+- Flag complexity when it complects separate concerns, hides state/dataflow, blocks local reasoning, or obscures performance/security boundaries.
 - Return [] or say no concrete findings for a chunk when evidence is weak.
 - Final reports must include a succinct all-findings summary with code references, then detailed writeups for only the most severe 10-20 findings.
 
