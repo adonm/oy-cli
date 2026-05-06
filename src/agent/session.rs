@@ -1,25 +1,33 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use chrono::Utc;
-use genai::chat::{ChatMessage, ChatOptions, ChatRequest};
-use serde_json::json;
 
-use super::chat::{display_model, exec_chat, token_count_text};
-use super::compaction::{compact_text, compaction_prompt, count_tokens, deterministic_summary};
-pub use super::transcript::{
-    CompactionStats, ContextBudgetExceeded, ContextStatus, StoredMessage, StoredToolCall,
-    Transcript,
-};
+use super::compaction::count_tokens;
+pub use super::transcript::{CompactionStats, ContextBudgetExceeded, ContextStatus, Transcript};
 use crate::config::{self, SafetyMode, SessionFile};
 
-mod noop;
 mod storage;
 pub use storage::load_saved;
 
 use crate::model;
 use crate::tools::{TodoItem, TodoStatus, ToolContext, ToolPolicy};
-use noop::RepeatedNoopTools;
+use std::sync::{Arc, Mutex};
 
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 512;
+
+fn display_model(model_spec: &str) -> &str {
+    model_spec
+        .rsplit_once("::")
+        .map(|(_, model)| model)
+        .unwrap_or(model_spec)
+}
+
+fn token_count_text(count: usize) -> String {
+    if count < 1000 {
+        format!("{count} tok")
+    } else {
+        format!("{:.1}k tok", count as f64 / 1000.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -63,12 +71,6 @@ impl Session {
         }
     }
 
-    fn chat_options(&self) -> Option<ChatOptions> {
-        model::reasoning_effort_option(&self.model)
-            .and_then(|effort| effort.parse().ok())
-            .map(|effort| ChatOptions::default().with_reasoning_effort(effort))
-    }
-
     fn wait_status(&self, model_spec: &str) -> String {
         let estimate = self
             .transcript
@@ -79,9 +81,6 @@ impl Session {
             token_count_text(estimate.total_tokens),
             format!("{} msg", estimate.messages),
         ];
-        if let Some(effort) = model::default_reasoning_effort(model_spec) {
-            parts.push(format!("think {effort}"));
-        }
         if !self.todos.is_empty() {
             let active = self
                 .todos
@@ -94,7 +93,7 @@ impl Session {
     }
 
     pub fn context_status(&self) -> ContextStatus {
-        let model_spec = model::to_genai_model_spec(&self.model);
+        let model_spec = self.model.trim().to_string();
         let config = config::context_config();
         ContextStatus {
             estimate: self
@@ -109,7 +108,7 @@ impl Session {
 
     pub fn compact_deterministic(&mut self) -> Option<CompactionStats> {
         let config = config::context_config();
-        let model_spec = model::to_genai_model_spec(&self.model);
+        let model_spec = self.model.trim().to_string();
         let before = self
             .transcript
             .token_estimate(&model_spec, &self.system_prompt, &self.todos);
@@ -142,10 +141,6 @@ impl Session {
             }
         }
         stats
-    }
-
-    pub async fn compact_llm(&mut self) -> Result<Option<CompactionStats>> {
-        compact_llm_session(self, true).await
     }
 
     pub fn save(&self, name: Option<&str>) -> Result<std::path::PathBuf> {
@@ -195,80 +190,6 @@ async fn ensure_context_budget(session: &mut Session, model_spec: &str) -> Resul
     Ok(())
 }
 
-async fn compact_llm_session(
-    session: &mut Session,
-    force: bool,
-) -> Result<Option<CompactionStats>> {
-    let client = model::build_client()?;
-    let model_spec = model::to_genai_model_spec(&session.model);
-    compact_llm_session_with_client(session, &client, &model_spec, force).await
-}
-
-async fn compact_llm_session_with_client(
-    session: &mut Session,
-    client: &genai::Client,
-    model_spec: &str,
-    force: bool,
-) -> Result<Option<CompactionStats>> {
-    let config = config::context_config();
-    let before =
-        session
-            .transcript
-            .token_estimate(model_spec, &session.system_prompt, &session.todos);
-    if !force && before.total_tokens <= config.input_budget_tokens() {
-        return Ok(None);
-    }
-    if session.transcript.messages.len() <= 1 {
-        return Ok(None);
-    }
-
-    let protected = config
-        .recent_messages
-        .max(1)
-        .min(session.transcript.messages.len() - 1);
-    let keep_from = session
-        .transcript
-        .valid_compaction_keep_from(session.transcript.messages.len() - protected);
-    if keep_from == 0 {
-        return Ok(None);
-    }
-
-    let removed = session.transcript.messages[..keep_from].to_vec();
-    let prompt = compaction_prompt(session.transcript.summary.as_deref(), &removed, model_spec);
-    let req = ChatRequest::default()
-        .with_system(
-            "You compact coding-agent transcripts. Return only the compacted markdown summary.",
-        )
-        .append_message(ChatMessage::user(prompt));
-    let options = session.chat_options();
-    let response = exec_chat(model_spec, client, req, options.as_ref()).await?;
-    let mut summary = response.into_first_text().unwrap_or_default();
-    if summary.trim().is_empty() {
-        summary = deterministic_summary(&removed, model_spec, config.summary_tokens);
-    } else if count_tokens(model_spec, &summary) > config.summary_tokens {
-        summary = compact_text(
-            &summary,
-            model_spec,
-            config.summary_tokens,
-            "llm summary compacted",
-        );
-    }
-
-    let removed_messages = removed.len();
-    session.transcript.rebuild_with_summary(summary, keep_from);
-    let after =
-        session
-            .transcript
-            .token_estimate(model_spec, &session.system_prompt, &session.todos);
-    Ok(Some(CompactionStats {
-        before_tokens: before.total_tokens,
-        after_tokens: after.total_tokens,
-        removed_messages,
-        compacted_tools: 0,
-        summarized: true,
-    }))
-}
-
 pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
     run_prompt_with_policy(session, prompt, None).await
 }
@@ -282,11 +203,7 @@ pub async fn run_prompt_once_no_tools(
     system_prompt: &str,
     prompt: &str,
 ) -> Result<String> {
-    let client = model::build_client()?;
-    let model_spec = model::to_genai_model_spec(model);
-    let req = ChatRequest::default()
-        .with_system(system_prompt)
-        .append_message(ChatMessage::user(prompt.to_string()));
+    let model_spec = model.trim().to_string();
     if !crate::ui::is_quiet() {
         let tokens = count_tokens(&model_spec, system_prompt) + count_tokens(&model_spec, prompt);
         crate::ui::err_line(format_args!(
@@ -295,11 +212,15 @@ pub async fn run_prompt_once_no_tools(
             token_count_text(tokens)
         ));
     }
-    let options = model::reasoning_effort_option(model)
-        .and_then(|effort| effort.parse().ok())
-        .map(|effort| ChatOptions::default().with_reasoning_effort(effort));
-    let response = exec_chat(&model_spec, &client, req, options.as_ref()).await?;
-    Ok(response.into_first_text().unwrap_or_default())
+    let response = model::exec_chat(
+        &model_spec,
+        system_prompt,
+        vec![rig::completion::Message::user(prompt.to_string())],
+        Vec::new(),
+        config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS),
+    )
+    .await?;
+    Ok(response.output)
 }
 
 async fn run_prompt_with_policy(
@@ -307,92 +228,50 @@ async fn run_prompt_with_policy(
     prompt: &str,
     policy_override: Option<ToolPolicy>,
 ) -> Result<String> {
-    let client = model::build_client()?;
-    session.transcript.messages.push(StoredMessage::User {
-        content: prompt.to_string(),
-    });
-    let mut repeated_noop_tools = RepeatedNoopTools::default();
-    let tool_round_limit = config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS);
-    let mut tool_round_count = 0usize;
-    let mut tool_call_count = 0usize;
+    session
+        .transcript
+        .messages
+        .push(rig::completion::Message::user(prompt.to_string()));
+    let max_tool_rounds = config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS);
 
-    loop {
-        let mut tool_context = session.tool_context();
-        if let Some(policy) = policy_override {
-            tool_context.policy = policy;
-        }
-        let tool_specs = crate::tools::tool_specs(&tool_context);
-        let model_spec = model::to_genai_model_spec(&session.model);
-        ensure_context_budget(session, &model_spec).await?;
-        let req = session
-            .transcript
-            .to_chat_request(&session.system_prompt, &tool_context)
-            .with_tools(tool_specs.clone());
-        if !crate::ui::is_quiet() {
-            crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
-        }
-        let options = session.chat_options();
-        let response = exec_chat(&model_spec, &client, req, options.as_ref()).await?;
-        let tool_calls = response
-            .tool_calls()
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        if !tool_calls.is_empty() {
-            let next_tool_round = tool_round_count + 1;
-            if tool_round_limit.exceeded(next_tool_round) {
-                let limit = tool_round_limit.label();
-                bail!(
-                    "tool loop exceeded {limit} tool rounds ({tool_call_count} tool calls completed); set OY_MAX_TOOL_ROUNDS=<number> or OY_MAX_TOOL_ROUNDS=unlimited for trusted long runs"
-                );
-            }
-            tool_round_count = next_tool_round;
-            crate::ui::tool_batch(tool_round_count, tool_calls.len());
-            session
-                .transcript
-                .messages
-                .push(StoredMessage::AssistantToolCalls {
-                    reasoning_content: response.reasoning_content.clone(),
-                    tool_calls: tool_calls
-                        .iter()
-                        .map(|call| StoredToolCall {
-                            call_id: call.call_id.clone(),
-                            fn_name: call.fn_name.clone(),
-                            fn_arguments: call.fn_arguments.clone(),
-                        })
-                        .collect(),
-                });
-
-            for call in tool_calls {
-                tool_call_count += 1;
-                let mut ctx = session.tool_context();
-                if let Some(policy) = policy_override {
-                    ctx.policy = policy;
-                }
-                let result =
-                    match crate::tools::invoke(&mut ctx, &call.fn_name, call.fn_arguments.clone())
-                        .await
-                    {
-                        Ok(value) => value,
-                        Err(err) => json!({"ok": false, "error": err.to_string()}),
-                    };
-                session.todos = ctx.todos;
-                let content = crate::tools::encode_tool_output(&result);
-                repeated_noop_tools.record(&call.fn_name, &call.fn_arguments, &result)?;
-                session.transcript.messages.push(StoredMessage::Tool {
-                    call_id: call.call_id.clone(),
-                    content,
-                });
-            }
-            continue;
-        }
-
-        let reasoning_content = response.reasoning_content.clone();
-        let answer = response.into_first_text().unwrap_or_default();
-        session.transcript.messages.push(StoredMessage::Assistant {
-            content: answer.clone(),
-            reasoning_content,
-        });
-        return Ok(answer);
+    let mut tool_context = session.tool_context();
+    if let Some(policy) = policy_override {
+        tool_context.policy = policy;
     }
+    let tool_context = Arc::new(Mutex::new(tool_context));
+    let model_spec = session.model.trim().to_string();
+    ensure_context_budget(session, &model_spec).await?;
+    let preamble = session.transcript.request_preamble(
+        &session.system_prompt,
+        &tool_context.lock().expect("tool context mutex poisoned"),
+    );
+    let turn_start = session.transcript.messages.len().saturating_sub(1);
+    let messages = session.transcript.to_messages();
+    if !crate::ui::is_quiet() {
+        crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
+    }
+    let response = model::exec_chat(
+        &model_spec,
+        &preamble,
+        messages,
+        crate::tools::rig_tools(tool_context.clone()),
+        max_tool_rounds,
+    )
+    .await?;
+    session.todos = tool_context
+        .lock()
+        .expect("tool context mutex poisoned")
+        .todos
+        .clone();
+    if let Some(messages) = response.messages {
+        session
+            .transcript
+            .replace_turn_from_rig(turn_start, messages);
+    } else {
+        session
+            .transcript
+            .messages
+            .push(rig::completion::Message::assistant(response.output.clone()));
+    }
+    Ok(response.output)
 }

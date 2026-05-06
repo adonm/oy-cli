@@ -55,27 +55,25 @@ pub fn max_bash_cmd_bytes() -> usize {
         .unwrap_or(16 * 1024)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolRoundLimit {
-    Limited(usize),
-    Unlimited,
-}
-
-impl ToolRoundLimit {
-    pub fn exceeded(self, completed_rounds: usize) -> bool {
-        matches!(self, Self::Limited(max) if completed_rounds > max)
-    }
-
-    pub fn label(self) -> String {
-        match self {
-            Self::Limited(max) => max.to_string(),
-            Self::Unlimited => "unlimited".to_string(),
-        }
-    }
-}
-
-pub fn max_tool_rounds(default: usize) -> ToolRoundLimit {
+pub fn max_tool_rounds(default: usize) -> usize {
     parse_tool_round_limit(env::var("OY_MAX_TOOL_ROUNDS").ok().as_deref(), default)
+}
+
+pub(super) fn parse_tool_round_limit(value: Option<&str>, default: usize) -> usize {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return default.max(1);
+    };
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "unlimited" | "none" | "off"
+    ) {
+        return usize::MAX / 4;
+    }
+    match value.parse::<usize>() {
+        Ok(0) => usize::MAX / 4,
+        Ok(max) => max,
+        Err(_) => default.max(1),
+    }
 }
 
 fn parse_usize_env(name: &str, default: usize) -> usize {
@@ -83,23 +81,6 @@ fn parse_usize_env(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(default)
-}
-
-pub(super) fn parse_tool_round_limit(value: Option<&str>, default: usize) -> ToolRoundLimit {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return ToolRoundLimit::Limited(default.max(1));
-    };
-    if matches!(
-        value.to_ascii_lowercase().as_str(),
-        "unlimited" | "none" | "off"
-    ) {
-        return ToolRoundLimit::Unlimited;
-    }
-    match value.parse::<usize>() {
-        Ok(0) => ToolRoundLimit::Unlimited,
-        Ok(max) => ToolRoundLimit::Limited(max),
-        Err(_) => ToolRoundLimit::Limited(default.max(1)),
-    }
 }
 
 fn parse_f64_env(name: &str, default: f64) -> f64 {

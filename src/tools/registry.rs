@@ -1,5 +1,7 @@
-use genai::chat::Tool;
+use rig::completion::ToolDefinition;
+use rig::tool::{ToolDyn, ToolError};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 use super::ToolContext;
 use super::policy::{Approval, NetworkAccess};
@@ -22,6 +24,7 @@ pub(super) enum ToolGate {
 }
 
 /// A tool's definition: everything needed to expose it to the model and render results.
+#[derive(Clone, Copy)]
 pub(super) struct ToolDef {
     pub name: &'static str,
     pub gate: ToolGate,
@@ -114,16 +117,75 @@ fn tool_enabled(ctx: &ToolContext, def: &ToolDef) -> bool {
     }
 }
 
-fn spec(def: &ToolDef) -> Tool {
-    Tool::new(def.name)
-        .with_description(crate::config::tool_description(def.name))
-        .with_schema((def.schema)())
+fn spec(def: &ToolDef) -> ToolDefinition {
+    ToolDefinition {
+        name: def.name.to_string(),
+        description: crate::config::tool_description(def.name),
+        parameters: (def.schema)(),
+    }
 }
 
-pub(crate) fn tool_specs(ctx: &ToolContext) -> Vec<Tool> {
+#[cfg(test)]
+pub(crate) fn tool_specs(ctx: &ToolContext) -> Vec<ToolDefinition> {
+    enabled_tool_defs(ctx).into_iter().map(spec).collect()
+}
+
+pub(crate) fn rig_tools(ctx: Arc<Mutex<ToolContext>>) -> Vec<Box<dyn ToolDyn>> {
+    let defs = {
+        let ctx = ctx.lock().expect("tool context mutex poisoned");
+        enabled_tool_defs(&ctx)
+    };
+    defs.into_iter()
+        .map(|def| {
+            Box::new(OyTool {
+                def,
+                ctx: ctx.clone(),
+            }) as Box<dyn ToolDyn>
+        })
+        .collect()
+}
+
+fn enabled_tool_defs(ctx: &ToolContext) -> Vec<&'static ToolDef> {
     TOOL_DEFS
         .iter()
         .filter(|def| tool_enabled(ctx, def))
-        .map(spec)
         .collect()
+}
+
+#[derive(Clone)]
+struct OyTool {
+    def: &'static ToolDef,
+    ctx: Arc<Mutex<ToolContext>>,
+}
+
+impl ToolDyn for OyTool {
+    fn name(&self) -> String {
+        self.def.name.to_string()
+    }
+
+    fn definition<'a>(
+        &'a self,
+        _prompt: String,
+    ) -> rig::wasm_compat::WasmBoxedFuture<'a, ToolDefinition> {
+        Box::pin(async move { spec(self.def) })
+    }
+
+    fn call<'a>(
+        &'a self,
+        args: String,
+    ) -> rig::wasm_compat::WasmBoxedFuture<'a, std::result::Result<String, ToolError>> {
+        Box::pin(async move { call_tool(self.ctx.clone(), self.def.name, args).await })
+    }
+}
+
+async fn call_tool(
+    ctx: Arc<Mutex<ToolContext>>,
+    name: &str,
+    args: String,
+) -> std::result::Result<String, ToolError> {
+    let args = serde_json::from_str::<Value>(&args).map_err(ToolError::JsonError)?;
+    let value = super::invoke_shared(ctx, name, args)
+        .await
+        .map_err(|err| ToolError::ToolCallError(err.into()))?;
+    Ok(super::encode_tool_output(&value))
 }

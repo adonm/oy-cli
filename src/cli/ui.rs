@@ -7,7 +7,7 @@ mod progress;
 mod render;
 mod text;
 
-pub use progress::{format_duration, progress, tool_batch, tool_error, tool_result, tool_start};
+pub use progress::{format_duration, progress, tool_error, tool_result, tool_start};
 pub use render::{block_title, code, diff, markdown, text_block};
 pub use text::{clamp_lines, compact_preview, compact_spaces, head_tail, truncate_chars};
 
@@ -166,10 +166,6 @@ pub fn yellow(text: impl Display) -> String {
 
 pub fn red(text: impl Display) -> String {
     paint("31", text)
-}
-
-pub fn magenta(text: impl Display) -> String {
-    paint("35", text)
 }
 
 pub fn status_text(ok: bool, text: impl Display) -> String {

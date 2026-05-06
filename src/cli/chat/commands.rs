@@ -19,7 +19,6 @@ pub(super) async fn handle_slash_command(session: &mut Session, command: &str) -
         "tokens" => tokens_command(session),
         "compact" => compact_command(parts.next(), session).await,
         "model" => model_command(parts.next(), session).await,
-        "thinking" => thinking_command(parts.next()),
         "debug" | "status" => status_command(session),
         "ask" => {
             let prompt = parts.collect::<Vec<_>>().join(" ");
@@ -62,7 +61,7 @@ pub fn chat_help_text() -> String {
         "/save [name], /load [name] -- save or load a session",
         "/undo (/u), /clear (/c) -- repair conversation state",
         "/quit (/q), /exit -- end session",
-        "Advanced: /tokens, /compact [llm|deterministic], /thinking [auto|off|low|medium|high]",
+        "Advanced: /tokens, /compact [llm|deterministic]",
     ]
     .join("\n")
 }
@@ -106,10 +105,9 @@ fn tokens_command(session: &Session) -> Result<bool> {
 
 async fn compact_command(mode: Option<&str>, session: &mut Session) -> Result<bool> {
     let before = session.context_status().estimate.total_tokens;
-    let stats = match mode.unwrap_or("llm") {
-        "" | "llm" | "smart" => session.compact_llm().await?,
-        "deterministic" | "det" | "fast" => session.compact_deterministic(),
-        other => anyhow::bail!("compact mode must be llm or deterministic; got {other}"),
+    let stats = match mode.unwrap_or("deterministic") {
+        "" | "deterministic" | "det" | "fast" | "llm" | "smart" => session.compact_deterministic(),
+        other => anyhow::bail!("compact mode must be deterministic; got {other}"),
     };
     let after = session.context_status().estimate.total_tokens;
     crate::ui::section("Compaction");
@@ -173,35 +171,10 @@ fn print_chat_model_listing(listing: &model::ModelListing) {
     }
 }
 
-fn thinking_command(value: Option<&str>) -> Result<bool> {
-    if let Some(value) = value {
-        match value {
-            "" | "auto" => unsafe { std::env::remove_var("OY_THINKING") },
-            "off" | "none" => unsafe { std::env::set_var("OY_THINKING", "none") },
-            "minimal" | "low" | "medium" | "high" => unsafe {
-                std::env::set_var("OY_THINKING", value)
-            },
-            other => anyhow::bail!(
-                "thinking must be auto, off, minimal, low, medium, or high; got {other}"
-            ),
-        }
-    }
-    crate::ui::line(format_args!(
-        "thinking: {}",
-        std::env::var("OY_THINKING").unwrap_or_else(|_| "auto".to_string())
-    ));
-    Ok(true)
-}
-
 fn status_command(session: &Session) -> Result<bool> {
     crate::ui::section("Status");
     crate::ui::kv("workspace", session.root.display());
     crate::ui::kv("model", &session.model);
-    crate::ui::kv("genai", model::to_genai_model_spec(&session.model));
-    crate::ui::kv(
-        "thinking",
-        model::default_reasoning_effort(&session.model).unwrap_or("auto/off"),
-    );
     crate::ui::kv("mode", session.mode.name());
     crate::ui::kv("interactive", crate::ui::bool_text(session.interactive));
     crate::ui::kv(

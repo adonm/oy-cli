@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crate::{config, model, session};
+use crate::{config, session};
 
 mod input;
 mod progress;
@@ -67,7 +67,7 @@ pub struct AuditResult {
 
 pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     let started = Instant::now();
-    let model_spec = model::to_genai_model_spec(&options.model);
+    let model_spec = options.model.trim().to_string();
     let output_path = config::resolve_workspace_output_path(&options.root, &options.out)?;
     let files = collect_files(&options.root, Some(&output_path), &model_spec)?;
     if files.is_empty() {

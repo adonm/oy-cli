@@ -10,7 +10,7 @@ pub use env_config::{
 };
 pub use mode::{SafetyMode, policy_risk_label, tool_policy};
 pub use model_config::{
-    clear_recent_models, is_openai_responses_model, is_routing_shim, load_model_config,
+    canonical_model_spec, canonical_provider, clear_recent_models, load_model_config,
     recent_models, save_model_config, saved_model_config_from_selection, split_model_spec,
 };
 pub use paths::{
@@ -21,7 +21,7 @@ pub use prompt::{ask_system_prompt, session_text_value, system_prompt, tool_desc
 pub use sessions::{SessionFile, load_session_file, resolve_saved_session, save_session_file};
 
 #[cfg(test)]
-use env_config::{ToolRoundLimit, parse_tool_round_limit};
+use env_config::parse_tool_round_limit;
 #[cfg(test)]
 use model_config::{SavedModelConfig, updated_recent_models};
 #[cfg(test)]
@@ -95,16 +95,18 @@ mod tests {
     }
 
     #[test]
-    fn saved_model_config_keeps_exact_genai_model_and_infers_routing_shim() {
+    fn saved_model_config_canonicalizes_provider_specs() {
         let saved = saved_model_config_from_selection("copilot::gpt-5.5");
-        assert_eq!(saved.model.as_deref(), Some("openai_resp::gpt-5.5"));
-        assert_eq!(saved.shim.as_deref(), Some("copilot"));
+        assert_eq!(saved.model.as_deref(), Some("github-copilot/gpt-5.5"));
+        assert!(saved.shim.is_none());
         assert!(saved.recent_models.is_empty());
 
-        let saved = saved_model_config_from_selection("openai_resp::gpt-5.5");
-        assert_eq!(saved.model.as_deref(), Some("openai_resp::gpt-5.5"));
-        assert_eq!(saved.shim.as_deref(), None);
-        assert!(saved.recent_models.is_empty());
+        let saved = saved_model_config_from_selection("openai::gpt-5.5");
+        assert_eq!(saved.model.as_deref(), Some("openai/gpt-5.5"));
+        assert!(saved.shim.is_none());
+
+        let saved = saved_model_config_from_selection("google-vertex::gemini-test");
+        assert_eq!(saved.model.as_deref(), Some("vertexai/gemini-test"));
     }
 
     #[test]
@@ -112,6 +114,7 @@ mod tests {
         let saved: SavedModelConfig =
             serde_json::from_str(r#"{"model":"gpt-test","shim":null}"#).unwrap();
         assert_eq!(saved.model.as_deref(), Some("gpt-test"));
+        assert!(saved.shim.is_none());
         assert!(saved.recent_models.is_empty());
     }
 
@@ -209,27 +212,10 @@ mod tests {
 
     #[test]
     fn tool_round_limit_supports_high_and_unlimited_values() {
-        assert_eq!(
-            parse_tool_round_limit(None, 512),
-            ToolRoundLimit::Limited(512)
-        );
-        assert_eq!(
-            parse_tool_round_limit(Some("2048"), 512),
-            ToolRoundLimit::Limited(2048)
-        );
-        assert_eq!(
-            parse_tool_round_limit(Some("0"), 512),
-            ToolRoundLimit::Unlimited
-        );
-        assert_eq!(
-            parse_tool_round_limit(Some("unlimited"), 512),
-            ToolRoundLimit::Unlimited
-        );
-        assert_eq!(
-            parse_tool_round_limit(Some("bad"), 512),
-            ToolRoundLimit::Limited(512)
-        );
-        assert!(ToolRoundLimit::Limited(2).exceeded(3));
-        assert!(!ToolRoundLimit::Unlimited.exceeded(usize::MAX));
+        assert_eq!(parse_tool_round_limit(None, 512), 512);
+        assert_eq!(parse_tool_round_limit(Some("2048"), 512), 2048);
+        assert!(parse_tool_round_limit(Some("0"), 512) > 1_000_000);
+        assert!(parse_tool_round_limit(Some("unlimited"), 512) > 1_000_000);
+        assert_eq!(parse_tool_round_limit(Some("bad"), 512), 512);
     }
 }

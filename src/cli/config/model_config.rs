@@ -7,6 +7,7 @@ use super::paths::{config_root, create_private_dir_all, write_private_file};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SavedModelConfig {
     pub model: Option<String>,
+    #[serde(default)]
     pub shim: Option<String>,
     #[serde(default)]
     pub recent_models: Vec<String>,
@@ -33,7 +34,11 @@ pub fn save_model_config(model_spec: &str) -> Result<()> {
     }
     let previous = load_model_config()?;
     let mut payload = saved_model_config_from_selection(model_spec);
-    payload.recent_models = updated_recent_models(&previous.recent_models, model_spec);
+    let selected = payload
+        .model
+        .as_deref()
+        .unwrap_or_else(|| model_spec.trim());
+    payload.recent_models = updated_recent_models(&previous.recent_models, selected);
     let text = serde_json::to_string_pretty(&payload)?;
     write_private_file(&path, text.as_bytes())?;
     Ok(())
@@ -67,13 +72,13 @@ pub(super) fn updated_recent_models(previous: &[String], selected: &str) -> Vec<
     if selected.is_empty() {
         return previous.iter().take(RECENT_MODEL_LIMIT).cloned().collect();
     }
-    let canonical = crate::model::canonical_model_spec(selected);
+    let canonical = selected.trim().to_string();
     let mut recent = Vec::with_capacity(RECENT_MODEL_LIMIT);
     recent.push(canonical.clone());
     recent.extend(
         previous
             .iter()
-            .map(|item| crate::model::canonical_model_spec(item))
+            .map(|item| item.trim().to_string())
             .filter(|item| !item.is_empty() && item != &canonical),
     );
     recent.truncate(RECENT_MODEL_LIMIT);
@@ -81,51 +86,29 @@ pub(super) fn updated_recent_models(previous: &[String], selected: &str) -> Vec<
 }
 
 pub fn saved_model_config_from_selection(model_spec: &str) -> SavedModelConfig {
-    let model_spec = model_spec.trim();
-    let (prefix, model) = split_model_spec(model_spec);
-    if let Some(shim) = prefix.filter(|shim| is_routing_shim(shim)) {
-        return SavedModelConfig {
-            model: Some(genai_model_for_shim(shim, model)),
-            shim: Some(shim.to_string()),
-            recent_models: Vec::new(),
-        };
-    }
     SavedModelConfig {
-        model: Some(model_spec.to_string()),
+        model: Some(canonical_model_spec(model_spec)),
         shim: None,
         recent_models: Vec::new(),
     }
 }
 
-fn genai_model_for_shim(shim: &str, model: &str) -> String {
-    if is_copilot_shim(shim) && is_openai_responses_model(model) {
-        format!("openai_resp::{model}")
-    } else {
-        model.to_string()
+pub fn canonical_model_spec(model_spec: &str) -> String {
+    let model_spec = model_spec.trim();
+    let (prefix, model) = split_model_spec(model_spec);
+    match prefix {
+        Some(provider) => format!("{}/{model}", canonical_provider(provider)),
+        None => model_spec.to_string(),
     }
 }
 
-pub fn is_openai_responses_model(model: &str) -> bool {
-    let (_, model) = split_model_spec(model);
-    let model = model
-        .rsplit_once('/')
-        .map(|(_, name)| name)
-        .unwrap_or(model);
-    model.starts_with("gpt-5.5")
-        || (model.starts_with("gpt") && (model.contains("codex") || model.contains("pro")))
-}
-
-pub fn is_routing_shim(shim: &str) -> bool {
-    matches!(
-        shim,
-        "openai" | "copilot" | "bedrock-mantle" | "opencode" | "opencode-go"
-    ) || shim
-        .strip_prefix("local-")
-        .is_some_and(|port| port.parse::<u16>().is_ok())
-}
-
-fn is_copilot_shim(shim: &str) -> bool {
-    shim == "copilot"
+pub fn canonical_provider(provider: &str) -> &str {
+    match provider.trim() {
+        "copilot" => "github-copilot",
+        "bedrock" => "amazon-bedrock",
+        "google-vertex" | "google-vertexai" => "vertexai",
+        provider => provider,
+    }
 }
 
 pub fn split_model_spec(spec: &str) -> (Option<&str>, &str) {

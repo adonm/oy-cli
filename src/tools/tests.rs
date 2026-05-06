@@ -33,7 +33,7 @@ fn schema_for(name: &str) -> Value {
     tool_specs(&ctx)
         .into_iter()
         .find(|tool| tool.name.as_str() == name)
-        .and_then(|tool| tool.schema)
+        .map(|tool| tool.parameters)
         .unwrap_or_else(|| panic!("missing schema for {name}"))
 }
 
@@ -41,9 +41,7 @@ fn schema_for(name: &str) -> Value {
 fn tool_schemas_are_closed_objects_with_valid_required_fields() {
     let (_dir, ctx) = test_context(auto_policy(), true);
     for tool in tool_specs(&ctx) {
-        let schema = tool
-            .schema
-            .unwrap_or_else(|| panic!("missing schema for {}", tool.name));
+        let schema = tool.parameters;
         assert_eq!(schema["type"], "object", "{} type", tool.name);
         assert_eq!(
             schema["additionalProperties"], false,

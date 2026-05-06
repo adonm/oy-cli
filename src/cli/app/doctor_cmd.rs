@@ -38,7 +38,6 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         let payload = serde_json::json!({
             "workspace": root,
             "model": listing.current,
-            "shim": listing.current_shim,
             "recent_models": config::recent_models()?,
             "auth": listing.auth,
             "mode": mode.name(),
@@ -59,7 +58,6 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     crate::ui::section("Doctor");
     crate::ui::kv("workspace", root.display());
     crate::ui::kv("model", listing.current.as_deref().unwrap_or("<unset>"));
-    crate::ui::kv("shim", listing.current_shim.as_deref().unwrap_or("<none>"));
     if let Ok(recent) = config::recent_models() {
         crate::ui::kv("recent models", recent.len());
     }

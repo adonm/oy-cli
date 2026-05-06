@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::num::NonZeroU16;
 use std::time::Duration;
 
-use super::{cyan, err_line, faint, green, is_quiet, line, magenta, red};
+use super::{cyan, err_line, faint, green, is_quiet, line, red};
 
 pub fn progress(
     label: &str,
@@ -56,13 +56,6 @@ fn progress_bar(current: usize, total: usize, width: u16) -> String {
     )
 }
 
-pub fn tool_batch(round: usize, count: usize) {
-    if is_quiet() {
-        return;
-    }
-    err_line(tool_batch_line(round, count));
-}
-
 pub fn tool_start(name: &str, detail: &str) {
     if is_quiet() {
         return;
@@ -109,10 +102,6 @@ pub fn format_duration(elapsed: Duration) -> String {
     }
 }
 
-fn tool_batch_line(round: usize, count: usize) -> String {
-    format!("{} tools r{round} ×{count}", magenta("↻"))
-}
-
 fn tool_start_line(name: &str, detail: &str) -> String {
     if detail.is_empty() {
         format!("  {} {name}", cyan("→"))
@@ -149,7 +138,6 @@ mod tests {
     #[test]
     fn tool_progress_lines_are_dense() {
         set_output_mode(OutputMode::Normal);
-        assert_eq!(tool_batch_line(2, 3), "↻ tools r2 ×3");
         assert_eq!(
             tool_start_line("read", "path=src/main.rs"),
             "  → read · path=src/main.rs"

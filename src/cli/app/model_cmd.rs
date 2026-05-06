@@ -10,7 +10,7 @@ const MODEL_LIST_LIMIT: usize = 30;
 pub(super) struct ModelArgs {
     #[arg(
         value_name = "MODEL",
-        help = "Model id or routing shim selection from `oy model`, e.g. copilot::<model-id>"
+        help = "Model id from `oy model`, e.g. github-copilot/<model-id> or copilot::<model-id>"
     )]
     model: Option<String>,
 }
@@ -21,7 +21,7 @@ pub(super) async fn model_command(args: ModelArgs) -> Result<i32> {
         .as_deref()
         .filter(|value| is_exact_model_spec(value))
     {
-        let normalized = model::canonical_model_spec(model_spec);
+        let normalized = config::canonical_model_spec(model_spec);
         config::save_model_config(&normalized)?;
         if crate::ui::is_json() {
             print_saved_model_json(&normalized)?;
@@ -93,7 +93,6 @@ fn print_saved_model_json(saved: &str) -> Result<()> {
 fn print_model_json(listing: &model::ModelListing, saved: Option<&str>) -> Result<()> {
     let payload = serde_json::json!({
         "current": listing.current,
-        "current_shim": listing.current_shim,
         "saved": saved,
         "recent_models": config::recent_models()?,
         "auth": listing.auth,
@@ -106,13 +105,7 @@ fn print_model_json(listing: &model::ModelListing, saved: Option<&str>) -> Resul
 
 fn print_model_listing(listing: &model::ModelListing) {
     crate::ui::section("Models");
-    crate::ui::kv(
-        "current",
-        current_model_text(
-            listing.current.as_deref().unwrap_or("<unset>"),
-            listing.current_shim.as_deref(),
-        ),
-    );
+    crate::ui::kv("current", listing.current.as_deref().unwrap_or("<unset>"));
     crate::ui::kv("selectable", listing.all_models.len());
     if let Ok(recent) = config::recent_models()
         && !recent.is_empty()
@@ -133,14 +126,9 @@ fn print_model_listing(listing: &model::ModelListing) {
         crate::ui::section("Auth / shims");
         for item in &listing.auth {
             let env_var = item.env_var.as_deref().unwrap_or("-");
-            let active = if listing.current_shim.as_deref() == Some(item.adapter.as_str()) {
-                " *"
-            } else {
-                ""
-            };
             crate::ui::line(format_args!(
-                "  {}{}  {} ({})",
-                item.adapter, active, env_var, item.source
+                "  {}  {} ({})",
+                item.adapter, env_var, item.source
             ));
             crate::ui::line(format_args!("    {}", item.detail));
         }
@@ -191,26 +179,16 @@ fn print_model_listing(listing: &model::ModelListing) {
     }
 }
 
-fn current_model_text(model_spec: &str, shim: Option<&str>) -> String {
-    match shim.filter(|value| !value.is_empty()) {
-        Some(shim) => format!("{model_spec} (shim: {shim})"),
-        None => model_spec.to_string(),
-    }
-}
-
 fn print_saved_model(selection: &str) {
     let saved = config::saved_model_config_from_selection(selection);
     crate::ui::success(format_args!(
         "saved model {}",
         saved.model.as_deref().unwrap_or(selection)
     ));
-    if let Some(shim) = saved.shim {
-        crate::ui::kv("shim", shim);
-    }
 }
 
 fn resolve_model_choice(listing: &model::ModelListing, query: &str) -> Result<String> {
-    let normalized = model::canonical_model_spec(query);
+    let normalized = config::canonical_model_spec(query);
     if listing.all_models.iter().any(|item| item == &normalized) {
         return Ok(normalized);
     }

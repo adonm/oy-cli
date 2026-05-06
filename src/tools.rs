@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 mod args;
 mod network;
@@ -22,6 +23,8 @@ pub(crate) use output::{encode_tool_output, preview_tool_output};
 pub(crate) use policy::{
     Approval, FileAccess, NetworkAccess, ToolPolicy, require_mutation_approval,
 };
+pub(crate) use registry::rig_tools;
+#[cfg(test)]
 pub(crate) use registry::tool_specs;
 use shell::tool_bash;
 
@@ -74,7 +77,25 @@ fn parse_tool_args<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T> {
     })
 }
 
+#[cfg(test)]
 pub async fn invoke(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
+    invoke_inner(ctx, name, args).await
+}
+
+pub async fn invoke_shared(
+    shared: Arc<Mutex<ToolContext>>,
+    name: &str,
+    args: Value,
+) -> Result<Value> {
+    let mut ctx = shared.lock().expect("tool context mutex poisoned").clone();
+    let result = invoke_inner(&mut ctx, name, args).await;
+    if result.is_ok() {
+        shared.lock().expect("tool context mutex poisoned").todos = ctx.todos;
+    }
+    result
+}
+
+async fn invoke_inner(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
     note_tool(name, &args);
     let started = std::time::Instant::now();
     let result = match name {
