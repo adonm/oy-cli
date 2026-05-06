@@ -1,13 +1,15 @@
 # Audit Issues
 
 > Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=opencode-go/deepseek-v4-pro oy audit` · 2026-05-06
+>
+> **Status**: 4 of 6 findings fixed in [v0.8.7](https://github.com/wagov-dtt/oy-cli/releases/tag/v0.8.7).
 
 ## Findings summary
 
-- **High** `src/agent/model.rs::resolve_chat_route` / `src/cli/chat.rs:159` — API key leakage through error reporting
-- **High** `src/cli/ui/render.rs::render_markdown`, `paint` — Terminal ANSI escape injection from unsanitised model output
-- **Medium** `src/tools/network.rs::is_public_ipv4` — Missing IPv4 special‑purpose address range allows non‑public webfetch
-- **Medium** `src/cli/chat/commands.rs:111-114` — Unsafe, non‑thread‑safe process environment mutation
+- **High** ~~`src/agent/model.rs::resolve_chat_route` / `src/cli/chat.rs:159` — API key leakage through error reporting~~ ✅ Fixed v0.8.7
+- **High** ~~`src/cli/ui/render.rs::render_markdown`, `paint` — Terminal ANSI escape injection from unsanitised model output~~ ✅ Fixed v0.8.7
+- **Medium** ~~`src/tools/network.rs::is_public_ipv4` — Missing IPv4 special‑purpose address range allows non‑public webfetch~~ ✅ Fixed v0.8.7
+- **Medium** ~~`src/cli/chat/commands.rs:111-114` — Unsafe, non‑thread‑safe process environment mutation~~ ✅ Fixed v0.8.7
 - **Medium** `src/tools/network.rs::is_public_ipv4` – manual IP classification with high audit burden (complexity)
 - **Low**  `src/tools/shell.rs::tool_bash` — Shell commands inherit full environment including secrets
 
@@ -32,6 +34,8 @@
   OWASP ASVS V7.3 – “Verify that error handling logic in security controls denies access by default and does not disclose sensitive information.”  
 - **Fix**  
   Wrap the rig client or the `exec_chat` result in an error type that redacts `Authorization` and other sensitive headers before the error is surfaced. Avoid printing `{:#}` for errors that may contain secrets; use a safe error representation.
+- **Resolution** (v0.8.7)  
+  Replaced `{err:#}` with `{err}` in `src/main.rs`, `src/cli/chat.rs`, and `src/cli/ui/progress.rs`.
 
 ---
 
@@ -52,6 +56,8 @@
   CWE-150 (Improper Neutralization of Escape, Meta, or Control Sequences). OWASP ASVS V5.3.4 – “Verify that output encoding is applied to prevent … terminal injection attacks.”  
 - **Fix**  
   Strip or escape the `\x1b` (ESC) character from every line of model output before adding colour codes. Use a library that sanitises terminal output, or simply replace `\x1b` with a visible placeholder.
+- **Resolution** (v0.8.7)  
+  Added `strip_escapes()` in `render_markdown` and a defense-in-depth check in `paint()` — both replace `\x1b` with `␛` before any terminal output.
 
 ---
 
@@ -72,6 +78,8 @@
   OWASP ASVS V5.2.6 – “Verify that the application protects against Server‑Side Request Forgery (SSRF) attacks by validating all internal or remote requests.”  
 - **Fix**  
   Replace the manual IPv4 classification with a well‑tested library (e.g. `ipnet`) that supports the full IANA special‑purpose address registry. At minimum, add the `192.0.0.0/24` block and any other missing reserved ranges (e.g. `240.0.0.0/4` is already covered, but verify).
+- **Resolution** (v0.8.7)  
+  Added `192.0.0.0/24` (IETF Protocol Assignments) to the `is_public_ipv4` blocklist. The manual classification remains for now but the missing range is covered.
 
 ---
 
@@ -91,6 +99,8 @@
   Rust `std::env::set_var` safety documentation.  
 - **Fix**  
   Replace direct environment manipulation with a synchronised configuration store (e.g. `OnceCell`/`LazyLock`/`RwLock<HashMap>`). Read the setting from that store in the model routing code instead of depending on the environment after initialisation.
+- **Resolution** (v0.8.7)  
+  Replaced `unsafe { std::env::set_var/remove_var }` in `commands.rs` with `model::set_thinking_override()`, backed by a `LazyLock<RwLock<Option<String>>>`. Updated `configured_reasoning_effort()` and `reasoning_effort_option()` to check the override before environment variables.
 
 ---
 

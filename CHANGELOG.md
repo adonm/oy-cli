@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.7] - 2026-05-07
+
+### Security
+- Stripped ESC (`\x1b`) characters from model output in `render_markdown` and `paint` to prevent terminal ANSI escape injection (CWE-150, OWASP ASVS V5.3.4).
+- Replaced `{err:#}` alternate formatting with plain `{err}` in `main.rs`, `chat.rs`, and `progress.rs` to avoid leaking API keys through error chains (OWASP ASVS V7.3).
+- Added `192.0.0.0/24` (IETF Protocol Assignments) to the `is_public_ipv4` blocklist, closing an SSRF bypass in `tool_webfetch` (OWASP ASVS V5.2.6).
+- Replaced `unsafe { std::env::set_var/remove_var }` calls in `/thinking` with a thread-safe `LazyLock<RwLock<Option<String>>>` store, eliminating undefined behaviour from concurrent environment mutation.
+
 ## [0.8.6] - 2026-05-07
 
 ### Changed
