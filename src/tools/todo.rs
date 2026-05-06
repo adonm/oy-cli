@@ -128,16 +128,14 @@ fn todos_to_markdown(todos: &[TodoItem]) -> String {
 }
 
 pub(super) fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> {
-    if !args.todos.is_empty() {
+    if args.todos.is_some() {
         require_mutation_approval(ctx, "todo", Some("update the in-memory todo list"))?;
     }
     if args.persist {
         require_mutation_approval(ctx, "todo_persist", Some("write TODO.md in the workspace"))?;
     }
-    let input_todos = if args.todos.is_empty() {
-        ctx.todos.clone()
-    } else {
-        args.todos
+    let input_todos = if let Some(todos) = args.todos {
+        todos
             .into_iter()
             .map(|item| TodoItem {
                 id: item.id.unwrap_or_default(),
@@ -145,6 +143,8 @@ pub(super) fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> 
                 status: item.status,
             })
             .collect()
+    } else {
+        ctx.todos.clone()
     };
     let todos = input_todos
         .into_iter()

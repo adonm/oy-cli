@@ -95,44 +95,26 @@ OY_ROOT=../my-project oy "summarize this repo"
 
 `oy` supports several model backends. The easiest path is to run `oy doctor`, then `oy model`.
 
-### OpenAI or OpenAI-compatible
+### Model metadata and selection
+
+`oy model` uses `opencode models --verbose` as the model metadata source. That keeps provider/model listings in OpenCode instead of duplicating a local registry in `oy`. Install and configure OpenCode credentials for the providers you want listed, then run:
+
+```bash
+oy model                 # list Rig-supported models from opencode models --verbose
+oy model <provider/model-from-list>
+```
+
+OpenAI can also be used directly without OpenCode metadata:
 
 ```bash
 export OPENAI_API_KEY=...
 export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
-oy model                 # lists models from GET /models when OPENAI_API_KEY is set
-oy model <model-from-list>
+oy model openai/gpt-4.1
 ```
 
-### GitHub Copilot
+GitHub Copilot, Bedrock, Vertex AI, and OpenAI-compatible providers listed by OpenCode are routed through Rig clients where supported. Newer Copilot reasoning models that Rig 0.36 does not yet route through `/responses` are handled by a narrow local compatibility shim and require a Copilot API token.
 
-```bash
-gh auth login
-oy model                 # lists models from Copilot-compatible GET /models when GitHub auth is available
-oy model copilot::<model-from-list>
-```
-
-### AWS Bedrock
-
-```bash
-aws configure sso        # one-time setup, or use normal AWS env credentials
-export AWS_PROFILE=my-sso
-export AWS_REGION=ap-southeast-2
-oy model                 # Bedrock-compatible HTTP shims list from GET /models when bearer auth is available
-oy model bedrock::<model-id>
-```
-
-### Local OpenAI-compatible server
-
-```bash
-oy model                 # lists models from http://127.0.0.1:8080/v1/models using LOCAL_API_KEY or default local auth
-oy model local-8080::<model-from-list>
-oy chat
-```
-
-`oy model` only shows models returned by configured auth-backed OpenAI-compatible `/models` endpoints. If an opencode or opencode-go key is available, both `https://opencode.ai/zen/v1/models` and `https://opencode.ai/zen/go/v1/models` are probed. If no provider auth is available, no selectable models are shown.
-
-The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect all endpoints or clear the recent history.
+The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect the full OpenCode listing or clear the recent history.
 
 ## Audit
 

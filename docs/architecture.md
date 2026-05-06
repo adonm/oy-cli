@@ -21,7 +21,7 @@ user argv/stdin
 3. `cli::app` parses commands, restores legacy argument shapes, and delegates command bodies to `cli::app/*_cmd.rs`.
 4. `cli::config` is a facade over focused config modules for modes, paths, prompts, model config, environment knobs, and saved sessions.
 5. `agent::session` owns session orchestration and saved sessions; transcript storage, context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
-6. `agent::model` resolves a small chat route, then uses Rig clients for execution. `agent::opencode_models` is the only source of OpenCode verbose model metadata; do not add local provider/model registries.
+6. `agent::model` resolves a small chat route, then uses Rig clients for execution. `agent::opencode_models` is the only source of OpenCode verbose model metadata; do not add local provider/model registries. The only accepted provider-routing shim is the narrow Copilot `/responses` workaround for Rig versions that route only Codex models correctly.
 7. `agent::auth` owns environment/OpenCode/GitHub credential lookup; callers should not duplicate provider auth probing.
 8. `agent::bedrock` contains AWS-specific client/auth integration.
 9. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries.

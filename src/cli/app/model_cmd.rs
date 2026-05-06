@@ -135,9 +135,9 @@ fn print_model_listing(listing: &model::ModelListing) {
     }
 
     crate::ui::line("");
-    crate::ui::section("Introspected endpoint models");
+    crate::ui::section("OpenCode verbose models");
     if listing.dynamic.is_empty() {
-        crate::ui::line("  none found from configured OpenAI-compatible endpoints");
+        crate::ui::line("  none found from `opencode models --verbose`");
     } else {
         for item in &listing.dynamic {
             match item {

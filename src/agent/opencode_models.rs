@@ -79,6 +79,12 @@ impl OpenCodeModelListing {
             })
     }
 
+    pub(crate) fn api_id(&self, provider: &str, model: &str) -> String {
+        self.find(provider, model)
+            .map(|model| model.api_id().to_string())
+            .unwrap_or_else(|| model.to_string())
+    }
+
     pub(crate) fn into_adapter_models(self) -> Vec<AdapterModels> {
         let mut groups = std::collections::BTreeMap::<String, Vec<String>>::new();
         for model in self.models {
@@ -194,6 +200,20 @@ pub(crate) fn inspect() -> Vec<AdapterModels> {
     }
 }
 
+pub(crate) fn find(provider: &str, model: &str) -> Option<OpenCodeModel> {
+    OpenCodeModelListing::load()
+        .ok()?
+        .find(provider, model)
+        .cloned()
+}
+
+pub(crate) fn api_id(provider: &str, model: &str) -> String {
+    OpenCodeModelListing::load()
+        .ok()
+        .map(|listing| listing.api_id(provider, model))
+        .unwrap_or_else(|| model.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +237,8 @@ anthropic/claude-test
         let model = listing.find("github-copilot", "gpt-5.5").unwrap();
         assert_eq!(model.api_id(), "gpt-5.5");
         assert_eq!(model.api_url(), Some("https://api.githubcopilot.com"));
+        assert_eq!(listing.api_id("github-copilot", "gpt-5.5"), "gpt-5.5");
+        assert_eq!(listing.api_id("bedrock", "unknown"), "unknown");
         let groups = listing.into_adapter_models();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);

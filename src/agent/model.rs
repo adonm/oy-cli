@@ -10,8 +10,8 @@ use std::env;
 
 pub(crate) use super::auth::{AuthStatus, auth_statuses};
 use super::auth::{GitHubCopilotAuth, env_value, github_copilot_auth, opencode_auth_key};
+use super::opencode_models;
 pub(crate) use super::opencode_models::AdapterModels;
-use super::opencode_models::{self, OpenCodeModelListing};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelListing {
@@ -41,7 +41,7 @@ pub fn resolve_model(configured: Option<&str>) -> Result<String> {
 fn no_model_message() -> String {
     [
         "No model configured.",
-        "Run `oy model` to inspect auth-backed model endpoints.",
+        "Run `oy model` to inspect OpenCode verbose model metadata.",
         "Then run: oy \"inspect this repo\"",
         "Advanced: use `oy model` to list options or set OY_MODEL for one run.",
     ]
@@ -69,7 +69,7 @@ pub async fn inspect_models() -> Result<ModelListing> {
         .into_iter()
         .filter(|item| item.availability.is_available())
         .collect::<Vec<_>>();
-    let dynamic = inspect_opencode_models();
+    let dynamic = opencode_models::inspect();
     let all_models = collect_all_models(&dynamic);
     Ok(ModelListing {
         current,
@@ -109,11 +109,6 @@ enum ChatRoute {
         api_key: String,
         base_url: Option<String>,
     },
-    OpenAiCompatible {
-        model: String,
-        api_key: String,
-        base_url: String,
-    },
     GitHubCopilot {
         model: String,
         auth: GitHubCopilotAuth,
@@ -136,15 +131,17 @@ fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
     let provider = provider.map(config::canonical_provider).unwrap_or("openai");
     match provider {
         "github-copilot" => {
-            let model_info = opencode_model("github-copilot", model);
+            let model_info = opencode_models::find("github-copilot", model);
             let model_id = model_info
                 .as_ref()
                 .map(|model| model.api_id().to_string())
                 .unwrap_or_else(|| model.to_string());
             let auth = github_copilot_auth().context("GitHub Copilot auth is not configured")?;
-            if copilot_uses_responses_api(&model_id) {
+            if copilot_requires_responses_api_shim(&model_id) {
                 let GitHubCopilotAuth::ApiKey(api_key) = auth else {
-                    bail!("GitHub Copilot model `{model}` requires a Copilot API token, but only a GitHub token is configured");
+                    bail!(
+                        "GitHub Copilot model `{model}` requires a Copilot API token, but only a GitHub token is configured"
+                    );
                 };
                 Ok(ChatRoute::GitHubCopilotResponses {
                     model: model_id,
@@ -165,10 +162,10 @@ fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
             }
         }
         "amazon-bedrock" => Ok(ChatRoute::Bedrock {
-            model: opencode_api_id("bedrock", model),
+            model: opencode_models::api_id("bedrock", model),
         }),
         "vertexai" => Ok(ChatRoute::VertexAi {
-            model: opencode_api_id("vertexai", model),
+            model: opencode_models::api_id("vertexai", model),
         }),
         "openai" => Ok(ChatRoute::OpenAi {
             model: model.to_string(),
@@ -176,22 +173,26 @@ fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
             base_url: env_value("OPENAI_BASE_URL"),
         }),
         provider => {
-            let model_info = opencode_model(provider, model)
+            let model_info = opencode_models::find(provider, model)
                 .ok_or_else(|| anyhow!("unknown OpenCode model `{provider}/{model}`"))?;
             if !model_info.is_openai_compatible_api() {
                 bail!("OpenCode model `{provider}/{model}` is not OpenAI-compatible");
             }
-            Ok(ChatRoute::OpenAiCompatible {
+            Ok(ChatRoute::OpenAi {
                 model: model_info.api_id().to_string(),
                 api_key: opencode_auth_key(provider).ok_or_else(|| {
                     anyhow!("OpenCode auth.json has no credentials for `{provider}`")
                 })?,
-                base_url: model_info
-                    .api_url()
-                    .ok_or_else(|| {
-                        anyhow!("OpenCode model `{provider}/{model}` does not expose an API URL")
-                    })?
-                    .to_string(),
+                base_url: Some(
+                    model_info
+                        .api_url()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "OpenCode model `{provider}/{model}` does not expose an API URL"
+                            )
+                        })?
+                        .to_string(),
+                ),
             })
         }
     }
@@ -225,28 +226,11 @@ async fn execute_chat_route(
                 .await
                 .map_err(Into::into)
         }
-        ChatRoute::OpenAiCompatible {
-            model,
-            api_key,
-            base_url,
-        } => {
-            let client = openai::Client::builder()
-                .api_key(api_key)
-                .base_url(base_url)
-                .build()?
-                .completions_api();
-            let agent = client.agent(&model).preamble(preamble).tools(tools).build();
-            agent
-                .prompt(prompt)
-                .with_history(history)
-                .max_turns(max_turns)
-                .extended_details()
-                .await
-                .map_err(Into::into)
-        }
         ChatRoute::GitHubCopilot { model, auth } => {
             let client = match auth {
-                GitHubCopilotAuth::ApiKey(api_key) => copilot::Client::builder().api_key(api_key).build()?,
+                GitHubCopilotAuth::ApiKey(api_key) => {
+                    copilot::Client::builder().api_key(api_key).build()?
+                }
                 GitHubCopilotAuth::GitHubAccessToken(token) => copilot::Client::builder()
                     .github_access_token(token)
                     .build()?,
@@ -317,26 +301,13 @@ fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
     (None, spec)
 }
 
-fn opencode_api_id(provider: &str, model: &str) -> String {
-    opencode_model(provider, model)
-        .map(|model| model.api_id().to_string())
-        .unwrap_or_else(|| model.to_string())
-}
-
-fn copilot_uses_responses_api(model: &str) -> bool {
+fn copilot_requires_responses_api_shim(model: &str) -> bool {
+    // Rig 0.36 routes only `*codex*` Copilot models to `/responses`.
+    // Newer Copilot reasoning models also require `/responses`, so keep
+    // this local compatibility shim until Rig exposes metadata-based routing
+    // or expands its own Copilot route rule.
     let model = model.to_ascii_lowercase();
     model.contains("codex") || model.starts_with("gpt-5") || model.starts_with("gemini-3")
-}
-
-fn opencode_model(provider: &str, model: &str) -> Option<super::opencode_models::OpenCodeModel> {
-    OpenCodeModelListing::load()
-        .ok()?
-        .find(provider, model)
-        .cloned()
-}
-
-fn inspect_opencode_models() -> Vec<AdapterModels> {
-    opencode_models::inspect()
 }
 
 #[cfg(test)]
@@ -363,9 +334,11 @@ mod tests {
 
     #[test]
     fn copilot_routes_reasoning_models_to_responses_api() {
-        assert!(copilot_uses_responses_api("gpt-5.5"));
-        assert!(copilot_uses_responses_api("gpt-5.3-codex"));
-        assert!(copilot_uses_responses_api("gemini-3.1-pro-preview"));
-        assert!(!copilot_uses_responses_api("gpt-4.1"));
+        assert!(copilot_requires_responses_api_shim("gpt-5.5"));
+        assert!(copilot_requires_responses_api_shim("gpt-5.3-codex"));
+        assert!(copilot_requires_responses_api_shim(
+            "gemini-3.1-pro-preview"
+        ));
+        assert!(!copilot_requires_responses_api_shim("gpt-4.1"));
     }
 }

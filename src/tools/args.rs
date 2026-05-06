@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::{DEFAULT_LIMIT, DEFAULT_WEBFETCH_TIMEOUT_SECONDS, TodoStatus};
@@ -219,12 +220,42 @@ pub(super) struct AskArgs {
     pub(super) choices: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub(super) struct TodoArgs {
-    #[serde(default, alias = "items")]
-    pub(super) todos: Vec<TodoItemInput>,
-    #[serde(default)]
+    pub(super) todos: Option<Vec<TodoItemInput>>,
     pub(super) persist: bool,
+}
+
+impl<'de> Deserialize<'de> for TodoArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        let Value::Object(ref mut object) = value else {
+            return Err(serde::de::Error::custom("todo arguments must be an object"));
+        };
+
+        if object.contains_key("todos") && object.contains_key("items") {
+            object.remove("items");
+        } else if let Some(items) = object.remove("items") {
+            object.insert("todos".to_string(), items);
+        }
+
+        #[derive(Deserialize)]
+        struct RawTodoArgs {
+            #[serde(default)]
+            todos: Option<Vec<TodoItemInput>>,
+            #[serde(default)]
+            persist: bool,
+        }
+
+        let raw = RawTodoArgs::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            todos: raw.todos,
+            persist: raw.persist,
+        })
+    }
 }
 
 fn default_glob() -> String {
