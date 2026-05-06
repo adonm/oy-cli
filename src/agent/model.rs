@@ -143,7 +143,6 @@ enum ChatRoute {
     },
     Bedrock {
         model: String,
-        additional_params: Option<serde_json::Value>,
     },
     VertexAi {
         model: String,
@@ -186,16 +185,12 @@ fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
             }
         }
         "amazon-bedrock" => {
-            let model_info = opencode_models::find("amazon-bedrock", model)
-                .or_else(|| opencode_models::find("bedrock", model));
+            let model_info = bedrock_model_info(model);
             let model_id = model_info
                 .as_ref()
                 .map(|model| model.api_id().to_string())
-                .unwrap_or_else(|| model.to_string());
-            Ok(ChatRoute::Bedrock {
-                model: model_id,
-                additional_params: bedrock_reasoning_params(model_info.as_ref()),
-            })
+                .unwrap_or_else(|| opencode_models::api_id("bedrock", model));
+            Ok(ChatRoute::Bedrock { model: model_id })
         }
         "vertexai" => Ok(ChatRoute::VertexAi {
             model: opencode_models::api_id("vertexai", model),
@@ -308,16 +303,9 @@ async fn execute_chat_route(
                 .await
                 .map_err(Into::into)
         }
-        ChatRoute::Bedrock {
-            model,
-            additional_params,
-        } => {
+        ChatRoute::Bedrock { model } => {
             let client = crate::bedrock::client().await?;
-            let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
-            if let Some(params) = additional_params {
-                agent_builder = agent_builder.additional_params(params);
-            }
-            let agent = agent_builder.build();
+            let agent = client.agent(&model).preamble(preamble).tools(tools).build();
             agent
                 .prompt(prompt)
                 .with_history(history)
@@ -367,35 +355,9 @@ fn copilot_requires_responses_api_shim(model: &str) -> bool {
     model.contains("codex") || model.starts_with("gpt-5") || model.starts_with("gemini-3")
 }
 
-fn bedrock_reasoning_params(
-    model_info: Option<&opencode_models::OpenCodeModel>,
-) -> Option<serde_json::Value> {
-    let model_info = model_info?;
-    let effort = if env::var("OY_THINKING").is_ok() || env::var("OY_REASONING_EFFORT").is_ok() {
-        configured_reasoning_effort()
-    } else {
-        model_info.default_reasoning_effort().map(str::to_string)
-    }?;
-    if effort == "none" {
-        return None;
-    }
-
-    let serde_json::Value::Object(config) = model_info.reasoning_config_for_effort(&effort)? else {
-        return None;
-    };
-    let mut thinking = serde_json::Map::new();
-    if let Some(value) = config.get("type") {
-        thinking.insert("type".to_string(), value.clone());
-    }
-    if let Some(value) = config.get("budgetTokens") {
-        thinking.insert("budget_tokens".to_string(), value.clone());
-    }
-    if thinking.get("type").and_then(|value| value.as_str()) != Some("adaptive") {
-        if let Some(value) = config.get("maxReasoningEffort") {
-            thinking.insert("effort".to_string(), value.clone());
-        }
-    }
-    (!thinking.is_empty()).then(|| serde_json::json!({ "thinking": thinking }))
+fn bedrock_model_info(model: &str) -> Option<opencode_models::OpenCodeModel> {
+    opencode_models::find("amazon-bedrock", model)
+        .or_else(|| opencode_models::find("bedrock", model))
 }
 
 // ---------------------------------------------------------------------------
@@ -587,34 +549,6 @@ mod tests {
             Some("medium")
         );
         unsafe { std::env::remove_var("OY_THINKING") };
-    }
-
-    #[test]
-    fn bedrock_reasoning_params_omit_effort_for_adaptive_thinking() {
-        let text = r#"amazon-bedrock/global.anthropic.claude-opus-4-7
-{
-  "id": "global.anthropic.claude-opus-4-7",
-  "providerID": "amazon-bedrock",
-  "api": { "id": "global.anthropic.claude-opus-4-7", "npm": "@ai-sdk/amazon-bedrock" },
-  "capabilities": { "reasoning": true },
-  "variants": {
-    "high": {
-      "reasoningConfig": {
-        "type": "adaptive",
-        "maxReasoningEffort": "high"
-      }
-    }
-  }
-}
-"#;
-        let listing = opencode_models::parse_verbose(text).unwrap();
-        let model = listing
-            .find("amazon-bedrock", "global.anthropic.claude-opus-4-7")
-            .unwrap();
-        assert_eq!(
-            bedrock_reasoning_params(Some(model)),
-            Some(serde_json::json!({ "thinking": { "type": "adaptive" } }))
-        );
     }
 
     #[test]

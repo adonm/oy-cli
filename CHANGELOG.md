@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Restored Bedrock Converse routing to avoid injecting unsupported reasoning request fields while keeping `amazon-bedrock`/`bedrock` model ID lookup compatible.
+
 ## [0.8.0] - 2026-05-05
 
 ### Changed
