@@ -122,7 +122,12 @@ pub(super) fn bounded_reduce_findings(
     }
 
     let findings_budget = reduce_candidate_findings_budget(
-        model_spec, focus, manifest, max_prompt_tokens, min_tokens, reserve_tokens,
+        model_spec,
+        focus,
+        manifest,
+        max_prompt_tokens,
+        min_tokens,
+        reserve_tokens,
     );
     let mut current_budget = findings_budget;
     let mut bounded = compact_owned_to_tokens(model_spec, findings, current_budget);

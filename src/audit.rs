@@ -402,7 +402,8 @@ mod tests {
             findings.push_str(&"- Detail: repeated context.\n".repeat(100));
         }
 
-        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 2_000, 8_000, 4_000);
+        let bounded =
+            bounded_reduce_findings("gpt-4o", "", manifest, &findings, 2_000, 8_000, 4_000);
         assert!(bounded.contains("### Medium: issue 1"));
         assert!(bounded.contains("### Medium: issue 15"));
         assert!(bounded.contains("### Medium: issue 30"));
@@ -419,7 +420,8 @@ mod tests {
             findings.push_str(&finding.repeat(200));
         }
 
-        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 20_000, 8_000, 4_000);
+        let bounded =
+            bounded_reduce_findings("gpt-4o", "", manifest, &findings, 20_000, 8_000, 4_000);
         let prompt = prompts::audit_reduce_prompt("", manifest, &bounded);
         assert!(compaction::count_tokens("gpt-4o", &prompt) <= 20_000);
         assert!(bounded.contains("truncated"));

@@ -94,10 +94,7 @@ pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
     let endpoint = model_info
         .as_ref()
         .and_then(|info| info.api_url().map(|s| s.trim_end_matches('/').to_string()));
-    ProviderInfo {
-        provider,
-        endpoint,
-    }
+    ProviderInfo { provider, endpoint }
 }
 
 /// Look up token limits for a model spec from OpenCode metadata.
