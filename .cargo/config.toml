@@ -1,0 +1,4 @@
+[build]
+# sccache speeds up repeated compilation by caching artifacts locally.
+# Remove this section if sccache causes issues.
+rustc-wrapper = "sccache"

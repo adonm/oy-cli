@@ -3,18 +3,24 @@
 # Run `just` or `just --list` to see available recipes.
 #
 # Quick start:
-#   just check          # run all CI checks locally
+#   just dev            # fast checks (fmt + cargo check)
+#   just check          # full CI suite (slow — uses multiple cargo subcommands)
 #   just fix            # auto-fix formatting and clippy lints
 #   just run -- "summarize this repo"
 #
-# Requires: cargo, rustc >= 1.91.1
+# Requires: cargo, rustc >= 1.91.1, sccache (for cached compilation)
 
 _default:
     @just --list
 
 # === Development checks ===
 
-# Run the full local CI suite: format, clippy, test, rustdoc, and CLI help smoke test.
+# Fast development check: format + cargo check (no recompilation across subcommands).
+dev: _fmt-check
+    cargo check --locked
+
+# Full local CI suite. Slow because each cargo subcommand invalidates previous
+# compilation artifacts. Use `just dev` for quick feedback during development.
 check: _fmt-check _clippy _test _rustdoc _help-smoke
     @echo "✓ all checks passed"
 
