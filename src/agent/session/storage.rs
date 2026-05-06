@@ -18,7 +18,7 @@ pub fn load_saved(
     let transcript: Transcript = serde_json::from_value(saved.transcript)
         .with_context(|| format!("invalid saved transcript in {}", path.display()))?;
     let root = config::oy_root()?;
-    ensure_saved_workspace_matches(&path, saved.workspace_root.as_deref(), &root)?;
+    ensure_saved_workspace_matches(&path, &saved.workspace_root, &root)?;
     let mode = saved.mode.unwrap_or(mode);
     let system_prompt = config::system_prompt(interactive, mode);
     Ok(Some(Session {
@@ -35,12 +35,9 @@ pub fn load_saved(
 
 fn ensure_saved_workspace_matches(
     session_path: &Path,
-    saved_root: Option<&Path>,
+    saved_root: &Path,
     current_root: &Path,
 ) -> Result<()> {
-    let Some(saved_root) = saved_root else {
-        return Ok(());
-    };
     if saved_root == current_root {
         return Ok(());
     }
@@ -63,18 +60,9 @@ mod tests {
         let session_path = dir.path().join("session.json");
         let saved_root = dir.path().to_path_buf();
 
-        let err = ensure_saved_workspace_matches(&session_path, Some(&saved_root), current.path())
-            .unwrap_err();
+        let err =
+            ensure_saved_workspace_matches(&session_path, &saved_root, current.path()).unwrap_err();
 
         assert!(err.to_string().contains("belongs to workspace"));
-    }
-
-    #[test]
-    fn saved_workspace_allows_legacy_without_root() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            ensure_saved_workspace_matches(&dir.path().join("session.json"), None, dir.path())
-                .is_ok()
-        );
     }
 }

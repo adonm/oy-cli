@@ -173,7 +173,7 @@ Default local paths:
 
 | Path | Purpose |
 |---|---|
-| `~/.config/oy-rust/config.json` | Saved model id, routing shim, and recent model history |
+| `~/.config/oy-rust/config.json` | Saved model id and recent model history |
 | `~/.config/oy-rust/sessions/` | Saved transcripts |
 | `~/.config/oy-rust/history/` | Chat history |
 
@@ -182,7 +182,6 @@ Default local paths:
 | Variable | Purpose |
 |---|---|
 | `OY_MODEL` | Override model for this session |
-| `OY_SHIM` | Override routing shim |
 | `OY_ROOT` | Run against a different workspace |
 | `OY_NON_INTERACTIVE` | Disable approval/question prompts for automation |
 | `OY_CONFIG` | Override config file path |

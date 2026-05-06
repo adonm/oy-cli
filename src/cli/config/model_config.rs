@@ -8,8 +8,6 @@ use super::paths::{config_root, create_private_dir_all, write_private_file};
 pub struct SavedModelConfig {
     pub model: Option<String>,
     #[serde(default)]
-    pub shim: Option<String>,
-    #[serde(default)]
     pub recent_models: Vec<String>,
 }
 
@@ -54,7 +52,7 @@ pub fn clear_recent_models() -> Result<()> {
         create_private_dir_all(parent)?;
     }
     let mut config = load_model_config()?;
-    if config.model.is_none() && config.shim.is_none() && config.recent_models.is_empty() {
+    if config.model.is_none() && config.recent_models.is_empty() {
         if path.exists() {
             let text = serde_json::to_string_pretty(&config)?;
             write_private_file(&path, text.as_bytes())?;
@@ -88,7 +86,6 @@ pub(super) fn updated_recent_models(previous: &[String], selected: &str) -> Vec<
 pub fn saved_model_config_from_selection(model_spec: &str) -> SavedModelConfig {
     SavedModelConfig {
         model: Some(canonical_model_spec(model_spec)),
-        shim: None,
         recent_models: Vec::new(),
     }
 }

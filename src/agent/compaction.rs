@@ -1,5 +1,5 @@
 use rig::completion::message::{AssistantContent, Message, ToolResultContent, UserContent};
-use tiktoken_rs::{bpe_for_model, cl100k_base};
+use tiktoken_rs::{bpe_for_model, cl100k_base_singleton};
 
 fn model_tokenizer_name(model: &str) -> &str {
     model
@@ -10,13 +10,8 @@ fn model_tokenizer_name(model: &str) -> &str {
 
 pub(crate) fn count_tokens(model: &str, text: &str) -> usize {
     let model_name = model_tokenizer_name(model);
-    if let Ok(bpe) = bpe_for_model(model_name) {
-        return bpe.encode_with_special_tokens(text).len();
-    }
-    cl100k_base()
-        .ok()
-        .map(|bpe| bpe.encode_with_special_tokens(text).len())
-        .unwrap_or_else(|| text.split_whitespace().count())
+    let bpe = bpe_for_model(model_name).unwrap_or_else(|_| cl100k_base_singleton());
+    bpe.encode_with_special_tokens(text).len()
 }
 
 fn take_chars(text: &str, max_chars: usize) -> String {
@@ -29,17 +24,16 @@ fn take_last_chars(text: &str, max_chars: usize) -> String {
     chars.into_iter().collect()
 }
 
-pub(super) fn compact_text(text: &str, model: &str, max_tokens: usize, label: &str) -> String {
-    let tokens = count_tokens(model, text);
-    if tokens <= max_tokens {
+pub(super) fn compact_text(text: &str, max_bytes: usize, label: &str) -> String {
+    if text.len() <= max_bytes {
         return text.to_string();
     }
-    let target_chars = max_tokens.saturating_mul(3).max(512);
+    let target_chars = max_bytes.max(512);
     let half = target_chars / 2;
     let head = take_chars(text, half);
     let tail = take_last_chars(text, half);
     format!(
-        "[{label}] original ~{tokens} tokens, {} bytes. Preserved head/tail.\n\n--- head ---\n{}\n\n--- tail ---\n{}",
+        "[{label}] original {} bytes. Preserved head/tail.\n\n--- head ---\n{}\n\n--- tail ---\n{}",
         text.len(),
         head.trim_end(),
         tail.trim_start()

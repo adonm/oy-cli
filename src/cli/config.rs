@@ -23,7 +23,7 @@ pub use sessions::{SessionFile, load_session_file, resolve_saved_session, save_s
 #[cfg(test)]
 use env_config::parse_tool_round_limit;
 #[cfg(test)]
-use model_config::{SavedModelConfig, updated_recent_models};
+use model_config::updated_recent_models;
 #[cfg(test)]
 use paths::DEFAULT_CONFIG_DIR_NAME;
 
@@ -31,7 +31,11 @@ use paths::DEFAULT_CONFIG_DIR_NAME;
 mod tests {
     use super::*;
     use crate::tools::FileAccess;
-    use std::{env, fs, path::Path, sync::Mutex};
+    use std::{
+        env, fs,
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
 
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -98,24 +102,13 @@ mod tests {
     fn saved_model_config_canonicalizes_provider_specs() {
         let saved = saved_model_config_from_selection("copilot::gpt-5.5");
         assert_eq!(saved.model.as_deref(), Some("github-copilot/gpt-5.5"));
-        assert!(saved.shim.is_none());
         assert!(saved.recent_models.is_empty());
 
         let saved = saved_model_config_from_selection("openai::gpt-5.5");
         assert_eq!(saved.model.as_deref(), Some("openai/gpt-5.5"));
-        assert!(saved.shim.is_none());
 
         let saved = saved_model_config_from_selection("google-vertex::gemini-test");
         assert_eq!(saved.model.as_deref(), Some("vertexai/gemini-test"));
-    }
-
-    #[test]
-    fn saved_model_config_defaults_legacy_recent_models() {
-        let saved: SavedModelConfig =
-            serde_json::from_str(r#"{"model":"gpt-test","shim":null}"#).unwrap();
-        assert_eq!(saved.model.as_deref(), Some("gpt-test"));
-        assert!(saved.shim.is_none());
-        assert!(saved.recent_models.is_empty());
     }
 
     #[test]
@@ -180,27 +173,11 @@ mod tests {
     }
 
     #[test]
-    fn session_file_ignores_legacy_mode_and_defaults_missing_fields() {
-        let raw = r#"{
-        "model": "gpt-test",
-        "agent": "default",
-        "mode": "auto-approve",
-        "saved_at": "2026-01-01T00:00:00",
-        "transcript": {"messages": []}
-    }"#;
-        let file: SessionFile = serde_json::from_str(raw).unwrap();
-        assert_eq!(file.model, "gpt-test");
-        assert!(file.todos.is_empty());
-        assert!(file.workspace_root.is_none());
-        assert_eq!(file.mode, Some(SafetyMode::AutoAll));
-    }
-
-    #[test]
     fn session_file_save_stores_mode() {
         let file = SessionFile {
             model: "gpt-test".into(),
             saved_at: "2026-01-01T00:00:00".into(),
-            workspace_root: None,
+            workspace_root: PathBuf::from("/workspace"),
             mode: Some(SafetyMode::Default),
             transcript: serde_json::json!({"messages": []}),
             todos: Vec::new(),

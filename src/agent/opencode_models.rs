@@ -44,6 +44,10 @@ pub(crate) struct OpenCodeModel {
     provider_id: String,
     #[serde(default)]
     api: OpenCodeModelApi,
+    #[serde(default)]
+    capabilities: OpenCodeCapabilities,
+    #[serde(default)]
+    variants: std::collections::HashMap<String, OpenCodeVariant>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -51,6 +55,21 @@ struct OpenCodeModelApi {
     id: Option<String>,
     url: Option<String>,
     npm: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OpenCodeCapabilities {
+    #[serde(default)]
+    pub reasoning: bool,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct OpenCodeVariant {
+    #[serde(default, rename = "reasoningEffort")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl OpenCodeModelListing {
@@ -122,6 +141,48 @@ impl OpenCodeModel {
             .url
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+    }
+
+    /// Whether OpenCode reports this model as reasoning-capable.
+    pub(crate) fn supports_reasoning(&self) -> bool {
+        self.capabilities.reasoning
+    }
+
+    /// Supported reasoning effort levels, derived from the model's variants.
+    /// Returns an empty slice when the model has no reasoning variants
+    /// (capabilities.reasoning may still be true).
+    pub(crate) fn reasoning_efforts(&self) -> Vec<&str> {
+        let mut efforts: Vec<&str> = self
+            .variants
+            .keys()
+            .map(|s| s.as_str())
+            .filter(|k| {
+                // Only include keys that map to known reasoning effort values
+                matches!(*k, "none" | "minimal" | "low" | "medium" | "high")
+            })
+            .collect();
+        efforts.sort();
+        efforts
+    }
+
+    /// Default reasoning effort from OpenCode metadata.
+    /// Returns `Some("high")` when the model is reasoning-capable and
+    /// "high" is a supported variant, otherwise the first available variant,
+    /// otherwise `None`.
+    pub(crate) fn default_reasoning_effort(&self) -> Option<&str> {
+        if !self.supports_reasoning() {
+            return None;
+        }
+        let efforts = self.reasoning_efforts();
+        if efforts.is_empty() {
+            // Model says it supports reasoning but has no explicit variants;
+            // "high" is the safe default.
+            Some("high")
+        } else if efforts.contains(&"high") {
+            Some("high")
+        } else {
+            efforts.first().copied()
+        }
     }
 
     pub(crate) fn is_openai_compatible_api(&self) -> bool {
@@ -212,6 +273,15 @@ pub(crate) fn api_id(provider: &str, model: &str) -> String {
         .ok()
         .map(|listing| listing.api_id(provider, model))
         .unwrap_or_else(|| model.to_string())
+}
+
+/// Look up reasoning metadata for a model from OpenCode.
+/// Returns `None` when the listing can't be loaded or the model isn't found.
+pub(crate) fn lookup_reasoning(provider: &str, model: &str) -> Option<OpenCodeModel> {
+    OpenCodeModelListing::load()
+        .ok()?
+        .find(provider, model)
+        .cloned()
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ pub(super) async fn handle_slash_command(session: &mut Session, command: &str) -
         }
         "tokens" => tokens_command(session),
         "compact" => compact_command(parts.next(), session).await,
+        "thinking" => thinking_command(parts.next(), session),
         "model" => model_command(parts.next(), session).await,
         "debug" | "status" => status_command(session),
         "ask" => {
@@ -61,7 +62,7 @@ pub fn chat_help_text() -> String {
         "/save [name], /load [name] -- save or load a session",
         "/undo (/u), /clear (/c) -- repair conversation state",
         "/quit (/q), /exit -- end session",
-        "Advanced: /tokens, /compact [llm|deterministic]",
+        "Advanced: /tokens, /compact [llm|deterministic], /thinking [auto|off|effort]",
     ]
     .join("\n")
 }
@@ -103,24 +104,45 @@ fn tokens_command(session: &Session) -> Result<bool> {
     Ok(true)
 }
 
+fn thinking_command(value: Option<&str>, session: &Session) -> Result<bool> {
+    let supported = model::reasoning_efforts_for(&session.model);
+    if let Some(value) = value {
+        match value {
+            "" | "auto" => unsafe { std::env::remove_var("OY_THINKING") },
+            "off" | "none" => unsafe { std::env::set_var("OY_THINKING", "none") },
+            val if supported.iter().any(|s| s == val) => unsafe {
+                std::env::set_var("OY_THINKING", val)
+            },
+            other => anyhow::bail!(
+                "thinking must be auto, off, or one of: {}; got {other}",
+                supported.join(", ")
+            ),
+        }
+    }
+    let current = std::env::var("OY_THINKING")
+        .ok()
+        .or_else(|| model::default_reasoning_effort(&session.model))
+        .unwrap_or_else(|| "auto".to_string());
+    crate::ui::line(format_args!("thinking: {current}"));
+    if !supported.is_empty() {
+        crate::ui::line(format_args!("  model supports: {}", supported.join(", ")));
+    } else {
+        crate::ui::line("  model does not advertise reasoning support");
+    }
+    Ok(true)
+}
+
 async fn compact_command(mode: Option<&str>, session: &mut Session) -> Result<bool> {
-    let before = session.context_status().estimate.total_tokens;
     let stats = match mode.unwrap_or("deterministic") {
         "" | "deterministic" | "det" | "fast" | "llm" | "smart" => session.compact_deterministic(),
         other => anyhow::bail!("compact mode must be deterministic; got {other}"),
     };
-    let after = session.context_status().estimate.total_tokens;
     crate::ui::section("Compaction");
     if let Some(stats) = stats {
-        crate::ui::kv(
-            "tokens",
-            format_args!("{} -> {}", stats.before_tokens, stats.after_tokens),
-        );
         crate::ui::kv("removed messages", stats.removed_messages);
         crate::ui::kv("tool outputs", stats.compacted_tools);
         crate::ui::kv("summarized", stats.summarized);
     } else {
-        crate::ui::kv("tokens", format_args!("{before} -> {after}"));
         crate::ui::line("nothing to compact");
     }
     Ok(true)
@@ -172,9 +194,18 @@ fn print_chat_model_listing(listing: &model::ModelListing) {
 }
 
 fn status_command(session: &Session) -> Result<bool> {
+    let info = model::provider_info(&session.model);
     crate::ui::section("Status");
     crate::ui::kv("workspace", session.root.display());
     crate::ui::kv("model", &session.model);
+    crate::ui::kv("provider", &info.provider);
+    if let Some(ref endpoint) = info.endpoint {
+        crate::ui::kv("endpoint", endpoint);
+    }
+    crate::ui::kv(
+        "thinking",
+        model::default_reasoning_effort(&session.model).unwrap_or_else(|| "auto/off".to_string()),
+    );
     crate::ui::kv("mode", session.mode.name());
     crate::ui::kv("interactive", crate::ui::bool_text(session.interactive));
     crate::ui::kv(

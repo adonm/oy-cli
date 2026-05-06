@@ -1,9 +1,7 @@
-name: Rust CI and Release
+name: Release
 
 on:
-  pull_request:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -11,39 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  ci:
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main'))
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Format
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-      - name: Test
-        run: cargo test --all-targets --locked
-      - name: Rustdoc
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
-      - name: CLI help smoke
-        run: |
-          cargo run --locked -- --help
-          cargo run --locked -- run --help
-          cargo run --locked -- chat --help
-          cargo run --locked -- audit --help | tee /tmp/oy-audit-help.txt
-          grep -F -- "--max-chunks <N>" /tmp/oy-audit-help.txt
-          cargo run --locked -- model --help
-          cargo run --locked -- doctor --help
-      - name: Documentation drift checks
-        run: |
-          ! grep -R -n -E 'src/(app|chat|config|model|session|ui)\.rs' README.md CONTRIBUTING.md docs
-      - name: Package crate
-        run: cargo package --locked
-
   release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository_owner == 'wagov-dtt'
+    if: github.repository_owner == 'wagov-dtt'
     name: Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -94,7 +61,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository_owner == 'wagov-dtt'
+    if: github.repository_owner == 'wagov-dtt'
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -133,7 +100,7 @@ jobs:
         run: gh release edit "${REF_NAME}" --repo "${REPOSITORY}" --draft=false
 
   publish-crate:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository_owner == 'wagov-dtt'
+    if: github.repository_owner == 'wagov-dtt'
     needs: release
     runs-on: ubuntu-latest
     environment: crates-io

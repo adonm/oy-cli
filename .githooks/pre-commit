@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# oy-cli pre-commit hook — fast checks before each commit.
+#
+# To install:
+#   git config core.hooksPath .githooks
+#
+# Or copy/symlink into .git/hooks/:
+#   ln -sf ../../.githooks/pre-commit .git/hooks/pre-commit
+
+set -euo pipefail
+
+echo "==> cargo fmt --check"
+cargo fmt --check
+
+echo "==> cargo clippy -- -D warnings"
+cargo clippy -- -D warnings
+
+echo "✓ pre-commit checks passed"

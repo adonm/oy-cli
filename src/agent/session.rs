@@ -29,6 +29,10 @@ fn token_count_text(count: usize) -> String {
     }
 }
 
+fn tokens_to_compaction_bytes(tokens: usize) -> usize {
+    tokens.saturating_mul(4).max(512)
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub root: std::path::PathBuf,
@@ -108,31 +112,18 @@ impl Session {
 
     pub fn compact_deterministic(&mut self) -> Option<CompactionStats> {
         let config = config::context_config();
-        let model_spec = self.model.trim().to_string();
-        let before = self
-            .transcript
-            .token_estimate(&model_spec, &self.system_prompt, &self.todos);
+        let mut stats = self.transcript.deterministic_compact_old_turns(
+            config.recent_messages,
+            tokens_to_compaction_bytes(config.summary_tokens),
+        );
         let compacted_tools = self
             .transcript
-            .compact_tool_outputs(&model_spec, config.tool_output_tokens);
-        let mut stats = self.transcript.deterministic_compact_old_turns(
-            &model_spec,
-            &self.system_prompt,
-            &self.todos,
-            config.input_budget_tokens(),
-            config.recent_messages,
-            config.summary_tokens,
-        );
+            .compact_tool_outputs(tokens_to_compaction_bytes(config.tool_output_tokens));
         if compacted_tools > 0 {
-            let after =
-                self.transcript
-                    .token_estimate(&model_spec, &self.system_prompt, &self.todos);
             match stats.as_mut() {
                 Some(stats) => stats.compacted_tools = compacted_tools,
                 None => {
                     stats = Some(CompactionStats {
-                        before_tokens: before.total_tokens,
-                        after_tokens: after.total_tokens,
                         removed_messages: 0,
                         compacted_tools,
                         summarized: false,
@@ -147,7 +138,7 @@ impl Session {
         let payload = SessionFile {
             model: self.model.clone(),
             saved_at: Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
-            workspace_root: Some(self.root.clone()),
+            workspace_root: self.root.clone(),
             mode: Some(self.mode),
             transcript: serde_json::to_value(&self.transcript)?,
             todos: self.todos.clone(),
@@ -170,8 +161,8 @@ async fn ensure_context_budget(session: &mut Session, model_spec: &str) -> Resul
         && !crate::ui::is_quiet()
     {
         crate::ui::err_line(format_args!(
-            "compacted context: {} -> {} tokens ({} old messages, {} tool outputs)",
-            stats.before_tokens, stats.after_tokens, stats.removed_messages, stats.compacted_tools
+            "compacted context: {} old messages, {} tool outputs",
+            stats.removed_messages, stats.compacted_tools
         ));
     }
 

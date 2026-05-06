@@ -11,8 +11,7 @@ use super::paths::{sessions_dir, write_private_file};
 pub struct SessionFile {
     pub model: String,
     pub saved_at: String,
-    #[serde(default)]
-    pub workspace_root: Option<PathBuf>,
+    pub workspace_root: PathBuf,
     #[serde(default)]
     pub mode: Option<SafetyMode>,
     pub transcript: serde_json::Value,

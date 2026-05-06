@@ -106,7 +106,6 @@ Major changes since `v0.5.1`.
 Major changes since `v0.4.6`.
 
 ### Added
-- `oy audit-logic [focus]`, a logic-focused audit mode that skips docs and lockfiles, strips comments/docstrings where possible, and concentrates review on executable behaviour.
 - Session continuation and resume for `oy chat` and `oy run` via `--continue-session` and `--resume <name-or-number>`.
 - Built-in modes for common approval policies: `plan`, `accept-edits`, and `auto-approve`.
 - `oy renovate-local` for running Renovate locally and writing lookup reports to `.tmp/renovate-<date>.json`.

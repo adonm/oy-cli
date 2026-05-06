@@ -22,8 +22,6 @@ pub struct TokenEstimate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CompactionStats {
-    pub before_tokens: usize,
-    pub after_tokens: usize,
     pub removed_messages: usize,
     pub compacted_tools: usize,
     pub summarized: bool,
@@ -117,7 +115,7 @@ impl Transcript {
         }
     }
 
-    pub fn compact_tool_outputs(&mut self, model: &str, max_tokens: usize) -> usize {
+    pub fn compact_tool_outputs(&mut self, max_bytes: usize) -> usize {
         let mut compacted = 0;
         for message in &mut self.messages {
             let Message::User { content } = message else {
@@ -134,8 +132,7 @@ impl Transcript {
                     if text.text.contains("[tool output compacted]") {
                         continue;
                     }
-                    text.text =
-                        compact_text(&text.text, model, max_tokens, "tool output compacted");
+                    text.text = compact_text(&text.text, max_bytes, "tool output compacted");
                     if text.text.contains("[tool output compacted]") {
                         compacted += 1;
                     }
@@ -147,15 +144,10 @@ impl Transcript {
 
     pub fn deterministic_compact_old_turns(
         &mut self,
-        model: &str,
-        system_prompt: &str,
-        todos: &[TodoItem],
-        budget: usize,
         recent_messages: usize,
-        summary_tokens: usize,
+        summary_bytes: usize,
     ) -> Option<CompactionStats> {
-        let before = self.token_estimate(model, system_prompt, todos);
-        if before.total_tokens <= budget || self.messages.len() <= 1 {
+        if self.messages.len() <= 1 {
             return None;
         }
         let protected = recent_messages.max(1).min(self.messages.len() - 1);
@@ -164,11 +156,8 @@ impl Transcript {
             return None;
         }
         let removed_messages = keep_from;
-        self.truncate_with_note(keep_from, model, summary_tokens);
-        let after = self.token_estimate(model, system_prompt, todos);
+        self.truncate_with_note(keep_from, summary_bytes);
         Some(CompactionStats {
-            before_tokens: before.total_tokens,
-            after_tokens: after.total_tokens,
             removed_messages,
             compacted_tools: 0,
             summarized: true,
@@ -212,7 +201,7 @@ impl Transcript {
         keep_from
     }
 
-    fn truncate_with_note(&mut self, keep_from: usize, model: &str, summary_tokens: usize) {
+    fn truncate_with_note(&mut self, keep_from: usize, summary_bytes: usize) {
         let existing = self.summary.take();
         let note = format!(
             "[context truncated] Removed {keep_from} older messages; retained the most recent conversation window."
@@ -221,12 +210,7 @@ impl Transcript {
             .filter(|s| !s.trim().is_empty())
             .map(|summary| format!("{}\n\n{}", summary.trim(), note))
             .unwrap_or(note);
-        self.summary = Some(compact_text(
-            &merged,
-            model,
-            summary_tokens,
-            "truncated summary",
-        ));
+        self.summary = Some(compact_text(&merged, summary_bytes, "truncated summary"));
         self.messages = self.messages.split_off(keep_from.min(self.messages.len()));
     }
 }
