@@ -16,8 +16,9 @@ pub fn markdown(text: &str) {
 }
 
 fn render_markdown(text: &str) -> String {
+    let text = strip_escapes(text);
     if !color_enabled() {
-        return text.to_string();
+        return text;
     }
     let mut in_fence = false;
     let mut out = String::new();
@@ -41,6 +42,14 @@ fn render_markdown(text: &str) -> String {
         out
     } else {
         out.trim_end_matches('\n').to_string()
+    }
+}
+
+fn strip_escapes(text: &str) -> String {
+    if text.contains('\x1b') {
+        text.replace('\x1b', "␛")
+    } else {
+        text.to_string()
     }
 }
 

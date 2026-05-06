@@ -88,7 +88,7 @@ pub fn tool_error(name: &str, elapsed: Duration, err: impl Display) {
         return;
     }
     err_line(format_args!(
-        "  {} {name} {} · {err:#}",
+        "  {} {name} {} · {err}",
         red("✗"),
         format_duration(elapsed)
     ));

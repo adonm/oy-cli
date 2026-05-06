@@ -305,7 +305,8 @@ fn is_public_ipv4(ip: std::net::Ipv4Addr) -> bool {
         || octets[0] == 0
         || octets[0] >= 240
         || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-        || (octets[0] == 198 && (18..=19).contains(&octets[1])))
+        || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)) // 192.0.0.0/24 – IETF Protocol Assignments
 }
 
 fn is_public_ipv6(ip: std::net::Ipv6Addr) -> bool {

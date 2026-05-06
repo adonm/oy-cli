@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "oy-cli"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "chrono",

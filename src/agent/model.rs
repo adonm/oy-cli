@@ -7,6 +7,7 @@ use rig::providers::{copilot, openai};
 use rig::tool::ToolDyn;
 use serde::Serialize;
 use std::env;
+use std::sync::{LazyLock, RwLock};
 
 pub(crate) use super::auth::{AuthStatus, auth_statuses};
 use super::auth::{GitHubCopilotAuth, env_value, github_copilot_auth, opencode_auth_key};
@@ -339,7 +340,10 @@ pub fn default_reasoning_effort(model_spec: &str) -> Option<String> {
 /// Resolve the reasoning effort value for a model spec,
 /// honouring env-var overrides and falling back to OpenCode model metadata.
 pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
-    if env::var("OY_THINKING").is_ok() || env::var("OY_REASONING_EFFORT").is_ok() {
+    if THINKING_OVERRIDE.read().expect("thinking override lock poisoned").is_some()
+        || env::var("OY_THINKING").is_ok()
+        || env::var("OY_REASONING_EFFORT").is_ok()
+    {
         return configured_reasoning_effort();
     }
     let (_, model) = config::split_model_spec(model_spec);
@@ -357,8 +361,34 @@ pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
     reasoning_capable_fallback(base_model).map(|s| s.to_string())
 }
 
+/// Thread-safe override set by the `/thinking` command, taking precedence over env vars.
+static THINKING_OVERRIDE: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
+
+/// Set the thinking effort override. Use `None` / `"auto"` to clear.
+pub fn set_thinking_override(value: Option<&str>) {
+    let mut guard = THINKING_OVERRIDE.write().expect("thinking override lock poisoned");
+    match value {
+        Some("auto") | Some("") | None => *guard = None,
+        Some(v) => *guard = Some(v.to_string()),
+    }
+}
+
+/// Get the current thinking effort, checking override first, then env.
+pub fn get_thinking_effort() -> Option<String> {
+    THINKING_OVERRIDE
+        .read()
+        .expect("thinking override lock poisoned")
+        .clone()
+        .or_else(|| env_value("OY_THINKING"))
+        .or_else(|| env_value("OY_REASONING_EFFORT"))
+}
+
 fn configured_reasoning_effort() -> Option<String> {
-    env_value("OY_THINKING")
+    THINKING_OVERRIDE
+        .read()
+        .expect("thinking override lock poisoned")
+        .clone()
+        .or_else(|| env_value("OY_THINKING"))
         .or_else(|| env_value("OY_REASONING_EFFORT"))
         .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
             "" | "auto" => None,
@@ -497,15 +527,14 @@ mod tests {
 
     #[test]
     fn reasoning_env_override_can_disable_or_adjust() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        unsafe { std::env::set_var("OY_THINKING", "none") };
+        set_thinking_override(Some("none"));
         assert_eq!(default_reasoning_effort("gpt-5.5").as_deref(), Some("none"));
-        unsafe { std::env::set_var("OY_THINKING", "medium") };
+        set_thinking_override(Some("medium"));
         assert_eq!(
             default_reasoning_effort("gpt-5.5").as_deref(),
             Some("medium")
         );
-        unsafe { std::env::remove_var("OY_THINKING") };
+        set_thinking_override(None);
     }
 
     #[test]

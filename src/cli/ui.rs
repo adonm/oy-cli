@@ -137,11 +137,20 @@ pub fn terminal_width() -> usize {
 }
 
 pub fn paint(code: &str, text: impl Display) -> String {
+    let text = text.to_string();
+    if text.contains('\x1b') {
+        return sanitize_terminal(&text);
+    }
     if color_enabled() {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
-        text.to_string()
+        text
     }
+}
+
+/// Strip terminal escape sequences to prevent injection from untrusted input.
+fn sanitize_terminal(text: &str) -> String {
+    text.replace('\x1b', "␛")
 }
 
 pub fn faint(text: impl Display) -> String {

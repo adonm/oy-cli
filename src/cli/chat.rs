@@ -156,7 +156,7 @@ async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -
                     return Err(err);
                 };
                 recovery_attempts += 1;
-                crate::ui::err_line(format_args!("model call failed: {err:#}"));
+                crate::ui::err_line(format_args!("model call failed: {err}"));
                 session.transcript.undo_last_turn();
                 if recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
                     offer_save_after_context_failures(session)?;

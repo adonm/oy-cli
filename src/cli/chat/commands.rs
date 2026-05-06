@@ -108,19 +108,18 @@ fn thinking_command(value: Option<&str>, session: &Session) -> Result<bool> {
     let supported = model::reasoning_efforts_for(&session.model);
     if let Some(value) = value {
         match value {
-            "" | "auto" => unsafe { std::env::remove_var("OY_THINKING") },
-            "off" | "none" => unsafe { std::env::set_var("OY_THINKING", "none") },
-            val if supported.iter().any(|s| s == val) => unsafe {
-                std::env::set_var("OY_THINKING", val)
-            },
+            "" | "auto" => model::set_thinking_override(None),
+            "off" | "none" => model::set_thinking_override(Some("none")),
+            val if supported.iter().any(|s| s == val) => {
+                model::set_thinking_override(Some(val));
+            }
             other => anyhow::bail!(
                 "thinking must be auto, off, or one of: {}; got {other}",
                 supported.join(", ")
             ),
         }
     }
-    let current = std::env::var("OY_THINKING")
-        .ok()
+    let current = model::get_thinking_effort()
         .or_else(|| model::default_reasoning_effort(&session.model))
         .unwrap_or_else(|| "auto".to_string());
     crate::ui::line(format_args!("thinking: {current}"));
