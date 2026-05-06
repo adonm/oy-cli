@@ -8,7 +8,7 @@
 #   just fix            # auto-fix formatting and clippy lints
 #   just run -- "summarize this repo"
 #
-# Requires: cargo, rustc >= 1.91.1, sccache (for cached compilation)
+# Requires: cargo, rustc >= 1.91.1
 
 _default:
     @just --list

@@ -13,6 +13,9 @@ jobs:
     if: github.repository_owner == 'wagov-dtt'
     name: Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
     strategy:
       fail-fast: false
       matrix:
@@ -30,9 +33,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target }}
+      - uses: jdx/mise-action@v4
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
       - name: Build size-optimized release binary
         env:
           RUSTFLAGS: -C debuginfo=0
@@ -107,11 +110,12 @@ jobs:
     permissions:
       contents: read
       id-token: write
+
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: jdx/mise-action@v4
       - name: Verify crate package
         run: cargo package --locked
       - name: Authenticate with crates.io
