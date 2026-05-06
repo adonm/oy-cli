@@ -70,6 +70,8 @@ pub(crate) struct OpenCodeCapabilities {
 pub(crate) struct OpenCodeVariant {
     #[serde(default, rename = "reasoningEffort")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, rename = "reasoningConfig")]
+    pub reasoning_config: Option<serde_json::Value>,
 }
 
 impl OpenCodeModelListing {
@@ -183,6 +185,10 @@ impl OpenCodeModel {
         } else {
             efforts.first().copied()
         }
+    }
+
+    pub(crate) fn reasoning_config_for_effort(&self, effort: &str) -> Option<&serde_json::Value> {
+        self.variants.get(effort)?.reasoning_config.as_ref()
     }
 
     pub(crate) fn is_openai_compatible_api(&self) -> bool {

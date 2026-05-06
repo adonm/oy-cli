@@ -93,10 +93,8 @@ pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
         .unwrap_or("openai")
         .to_string();
     let model = model.to_string();
-    let endpoint = opencode_models::find(&provider, &model).and_then(|info| {
-        info.api_url()
-            .map(|s| s.trim_end_matches('/').to_string())
-    });
+    let endpoint = opencode_models::find(&provider, &model)
+        .and_then(|info| info.api_url().map(|s| s.trim_end_matches('/').to_string()));
     ProviderInfo {
         provider,
         model,
@@ -115,7 +113,16 @@ pub async fn exec_chat(
     let route = resolve_chat_route(model_spec)?;
     let mut history = messages;
     let prompt = history.pop().unwrap_or_else(|| Message::user(""));
-    execute_chat_route(route, preamble, history, prompt, tools, max_turns, reasoning_effort).await
+    execute_chat_route(
+        route,
+        preamble,
+        history,
+        prompt,
+        tools,
+        max_turns,
+        reasoning_effort,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +143,7 @@ enum ChatRoute {
     },
     Bedrock {
         model: String,
+        additional_params: Option<serde_json::Value>,
     },
     VertexAi {
         model: String,
@@ -177,9 +185,18 @@ fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
                 })
             }
         }
-        "amazon-bedrock" => Ok(ChatRoute::Bedrock {
-            model: opencode_models::api_id("bedrock", model),
-        }),
+        "amazon-bedrock" => {
+            let model_info = opencode_models::find("amazon-bedrock", model)
+                .or_else(|| opencode_models::find("bedrock", model));
+            let model_id = model_info
+                .as_ref()
+                .map(|model| model.api_id().to_string())
+                .unwrap_or_else(|| model.to_string());
+            Ok(ChatRoute::Bedrock {
+                model: model_id,
+                additional_params: bedrock_reasoning_params(model_info.as_ref()),
+            })
+        }
         "vertexai" => Ok(ChatRoute::VertexAi {
             model: opencode_models::api_id("vertexai", model),
         }),
@@ -291,11 +308,14 @@ async fn execute_chat_route(
                 .await
                 .map_err(Into::into)
         }
-        ChatRoute::Bedrock { model } => {
+        ChatRoute::Bedrock {
+            model,
+            additional_params,
+        } => {
             let client = crate::bedrock::client().await?;
             let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
-            if let Some(ref params) = reasoning_effort {
-                agent_builder = agent_builder.additional_params(params.clone());
+            if let Some(params) = additional_params {
+                agent_builder = agent_builder.additional_params(params);
             }
             let agent = agent_builder.build();
             agent
@@ -345,6 +365,37 @@ fn copilot_requires_responses_api_shim(model: &str) -> bool {
     // or expands its own Copilot route rule.
     let model = model.to_ascii_lowercase();
     model.contains("codex") || model.starts_with("gpt-5") || model.starts_with("gemini-3")
+}
+
+fn bedrock_reasoning_params(
+    model_info: Option<&opencode_models::OpenCodeModel>,
+) -> Option<serde_json::Value> {
+    let model_info = model_info?;
+    let effort = if env::var("OY_THINKING").is_ok() || env::var("OY_REASONING_EFFORT").is_ok() {
+        configured_reasoning_effort()
+    } else {
+        model_info.default_reasoning_effort().map(str::to_string)
+    }?;
+    if effort == "none" {
+        return None;
+    }
+
+    let serde_json::Value::Object(config) = model_info.reasoning_config_for_effort(&effort)? else {
+        return None;
+    };
+    let mut thinking = serde_json::Map::new();
+    if let Some(value) = config.get("type") {
+        thinking.insert("type".to_string(), value.clone());
+    }
+    if let Some(value) = config.get("budgetTokens") {
+        thinking.insert("budget_tokens".to_string(), value.clone());
+    }
+    if thinking.get("type").and_then(|value| value.as_str()) != Some("adaptive") {
+        if let Some(value) = config.get("maxReasoningEffort") {
+            thinking.insert("effort".to_string(), value.clone());
+        }
+    }
+    (!thinking.is_empty()).then(|| serde_json::json!({ "thinking": thinking }))
 }
 
 // ---------------------------------------------------------------------------
@@ -517,10 +568,7 @@ mod tests {
 
     #[test]
     fn reasoning_defaults_to_high_for_capable_models_and_allows_suffix_override() {
-        assert_eq!(
-            default_reasoning_effort("gpt-5.5").as_deref(),
-            Some("high")
-        );
+        assert_eq!(default_reasoning_effort("gpt-5.5").as_deref(), Some("high"));
         assert_eq!(
             default_reasoning_effort("copilot::gpt-5.5-low").as_deref(),
             Some("low")
@@ -532,10 +580,7 @@ mod tests {
     fn reasoning_env_override_can_disable_or_adjust() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         unsafe { std::env::set_var("OY_THINKING", "none") };
-        assert_eq!(
-            default_reasoning_effort("gpt-5.5").as_deref(),
-            Some("none")
-        );
+        assert_eq!(default_reasoning_effort("gpt-5.5").as_deref(), Some("none"));
         unsafe { std::env::set_var("OY_THINKING", "medium") };
         assert_eq!(
             default_reasoning_effort("gpt-5.5").as_deref(),
@@ -545,13 +590,38 @@ mod tests {
     }
 
     #[test]
+    fn bedrock_reasoning_params_omit_effort_for_adaptive_thinking() {
+        let text = r#"amazon-bedrock/global.anthropic.claude-opus-4-7
+{
+  "id": "global.anthropic.claude-opus-4-7",
+  "providerID": "amazon-bedrock",
+  "api": { "id": "global.anthropic.claude-opus-4-7", "npm": "@ai-sdk/amazon-bedrock" },
+  "capabilities": { "reasoning": true },
+  "variants": {
+    "high": {
+      "reasoningConfig": {
+        "type": "adaptive",
+        "maxReasoningEffort": "high"
+      }
+    }
+  }
+}
+"#;
+        let listing = opencode_models::parse_verbose(text).unwrap();
+        let model = listing
+            .find("amazon-bedrock", "global.anthropic.claude-opus-4-7")
+            .unwrap();
+        assert_eq!(
+            bedrock_reasoning_params(Some(model)),
+            Some(serde_json::json!({ "thinking": { "type": "adaptive" } }))
+        );
+    }
+
+    #[test]
     fn reasoning_effort_json_uses_flat_param() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let json = reasoning_effort_json("gpt-5.5");
-        assert_eq!(
-            json,
-            Some(serde_json::json!({"reasoning_effort": "high"}))
-        );
+        assert_eq!(json, Some(serde_json::json!({"reasoning_effort": "high"})));
         assert_eq!(reasoning_effort_json("gpt-4.1-mini"), None);
     }
 }
