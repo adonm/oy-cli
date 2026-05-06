@@ -490,7 +490,9 @@ mod tests {
             default_reasoning_effort("copilot::gpt-5.5-low").as_deref(),
             Some("low")
         );
-        assert_eq!(default_reasoning_effort("gpt-4.1-mini"), None);
+        // Use a model absent from both the static fallback and OpenCode metadata
+        // so the test is deterministic regardless of whether `opencode` is available.
+        assert_eq!(default_reasoning_effort("test/no-reasoning-model"), None);
     }
 
     #[test]
