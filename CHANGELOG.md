@@ -1,9 +1,25 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.6] - 2026-05-07
+
+### Changed
+- Derived all audit sizing constants (chunk size, reduce prompt limit, findings budget, security index) from the current model's token limits instead of hardcoded values.
+- Derived context config input limit and output reserve ratio from model-specific token limits via OpenCode metadata, so session compaction and budget enforcement adapt per model.
+- Replaced the hardcoded `context_config()` with `context_config_for_model()` that takes optional model input/output limits; env vars `OY_CONTEXT_LIMIT` and `OY_CONTEXT_OUTPUT_RESERVE` still override.
+
+### Removed
+- Removed `rig-bedrock` and `rig-vertexai` dependencies, `src/agent/bedrock.rs`, Bedrock/VertexAI chat routes, and all associated provider mappings, auth status, and docs.
+- Removed dead code: `wrap_line` function, `ProviderInfo.model` field, `OpenCodeVariant` struct field, and the now-unused `textwrap` dependency.
+
+## [0.8.5] - 2026-05-06
+
+### Changed
+- Replaced low-level LLM plumbing with Rig agents.
+- Simplified model metadata routing.
+- Used OpenCode model metadata for reasoning capability and effort discovery.
 
 ### Fixed
-- Restored Bedrock Converse routing to avoid injecting unsupported reasoning request fields while keeping `amazon-bedrock`/`bedrock` model ID lookup compatible.
+- Fixed Bedrock adaptive thinking params and Converse routing regression.
 
 ## [0.8.0] - 2026-05-05
 

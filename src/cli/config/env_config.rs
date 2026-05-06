@@ -33,9 +33,23 @@ pub fn can_prompt() -> bool {
     std::io::stdin().is_terminal() && !non_interactive()
 }
 
-pub fn context_config() -> ContextConfig {
-    let limit_tokens = parse_usize_env("OY_CONTEXT_LIMIT", 128_000).max(1_000);
-    let output_reserve_tokens = parse_usize_env("OY_CONTEXT_OUTPUT_RESERVE", 12_000);
+/// Build a [`ContextConfig`] with model-derived defaults.
+///
+/// `input_limit` overrides the hard-coded default for `OY_CONTEXT_LIMIT` (128 000).
+/// `output_limit` overrides the default `OY_CONTEXT_OUTPUT_RESERVE` (12 000, or 10% of output).
+/// The env vars `OY_CONTEXT_LIMIT` / `OY_CONTEXT_OUTPUT_RESERVE` always take precedence.
+pub fn context_config_for_model(
+    input_limit: Option<usize>,
+    output_limit: Option<usize>,
+) -> ContextConfig {
+    let default_limit = input_limit.unwrap_or(128_000).max(1_000);
+    let default_output_reserve = output_limit
+        .map(|out| (out as f64 * 0.10) as usize)
+        .unwrap_or(12_000)
+        .clamp(1_000, 100_000);
+    let limit_tokens = parse_usize_env("OY_CONTEXT_LIMIT", default_limit).max(1_000);
+    let output_reserve_tokens =
+        parse_usize_env("OY_CONTEXT_OUTPUT_RESERVE", default_output_reserve);
     let safety_reserve_tokens = parse_usize_env("OY_CONTEXT_SAFETY_RESERVE", 4_000);
     ContextConfig {
         limit_tokens,

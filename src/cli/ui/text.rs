@@ -74,18 +74,6 @@ pub fn clamp_lines(text: &str, max_lines: usize, max_cols: usize) -> String {
     out
 }
 
-#[allow(dead_code)]
-pub fn wrap_line(text: &str, indent: &str) -> String {
-    let width = super::terminal_width()
-        .saturating_sub(indent.width())
-        .max(20);
-    textwrap::wrap(text, width)
-        .into_iter()
-        .map(|line| format!("{indent}{line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 pub fn head_tail(text: &str, max_chars: usize) -> (String, bool) {
     if text.chars().count() <= max_chars {
         return (text.to_string(), false);

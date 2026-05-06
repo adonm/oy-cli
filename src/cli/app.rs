@@ -244,9 +244,7 @@ mod audit_tests {
     fn exact_model_specs_are_endpoint_qualified_or_provider_ids() {
         assert!(model_cmd::is_exact_model_spec("copilot::gpt-4.1-mini"));
         assert!(model_cmd::is_exact_model_spec("openai/gpt-4.1-mini"));
-        assert!(model_cmd::is_exact_model_spec(
-            "bedrock::global.amazon.nova-2-lite-v1:0"
-        ));
+        assert!(model_cmd::is_exact_model_spec("copilot::gpt-5.5"));
         assert!(!model_cmd::is_exact_model_spec("gpt"));
         assert!(!model_cmd::is_exact_model_spec("nova"));
     }

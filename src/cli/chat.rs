@@ -176,12 +176,15 @@ fn recover_context_budget(
     budget_err: session::ContextBudgetExceeded,
 ) -> Result<bool> {
     if config::can_prompt() {
-        let raised_limit =
-            config::context_config().input_budget_tokens() >= budget_err.estimated_tokens;
+        let limits = crate::model::model_limits(&session.model);
+        let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
+        let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
+        let ctx_cfg = config::context_config_for_model(input_limit, output_limit);
+        let raised_limit = ctx_cfg.input_budget_tokens() >= budget_err.estimated_tokens;
         let choices = vec![
             format!(
                 "Retry with current OY_CONTEXT_LIMIT={}{}",
-                config::context_config().limit_tokens,
+                ctx_cfg.limit_tokens,
                 if raised_limit {
                     " (now sufficient)"
                 } else {

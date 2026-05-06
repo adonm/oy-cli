@@ -6,7 +6,7 @@ mod prompt;
 mod sessions;
 
 pub use env_config::{
-    can_prompt, context_config, max_bash_cmd_bytes, max_tool_rounds, non_interactive,
+    can_prompt, context_config_for_model, max_bash_cmd_bytes, max_tool_rounds, non_interactive,
 };
 pub use mode::{SafetyMode, policy_risk_label, tool_policy};
 pub use model_config::{
@@ -106,9 +106,6 @@ mod tests {
 
         let saved = saved_model_config_from_selection("openai::gpt-5.5");
         assert_eq!(saved.model.as_deref(), Some("openai/gpt-5.5"));
-
-        let saved = saved_model_config_from_selection("google-vertex::gemini-test");
-        assert_eq!(saved.model.as_deref(), Some("vertexai/gemini-test"));
     }
 
     #[test]

@@ -23,15 +23,14 @@ user argv/stdin
 5. `agent::session` owns session orchestration and saved sessions; transcript storage, context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
 6. `agent::model` resolves a small chat route, then uses Rig clients for execution. `agent::opencode_models` is the only source of OpenCode verbose model metadata; do not add local provider/model registries. The only accepted provider-routing shim is the narrow Copilot `/responses` workaround for Rig versions that route only Codex models correctly.
 7. `agent::auth` owns environment/OpenCode/GitHub credential lookup; callers should not duplicate provider auth probing.
-8. `agent::bedrock` contains AWS-specific client/auth integration.
-9. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries.
+8. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries.
 10. `src/audit.rs` is separate from the tool loop: it orchestrates collection, chunk review/reduce, rendering, and report writing through focused `src/audit/` modules.
 
 ## Main modules
 
 | Path | Responsibility |
 |---|---|
-| `src/agent.rs`, `src/agent/` | Provider integration, model selection, auth discovery, OpenCode model metadata, Bedrock support, sessions, transcripts, context compaction, chat/tool loop |
+| `src/agent.rs`, `src/agent/` | Provider integration, model selection, auth discovery, OpenCode model metadata, sessions, transcripts, context compaction, chat/tool loop |
 | `src/audit.rs`, `src/audit/` | Deterministic no-tools audit orchestration, input collection, chunking, prompt construction, report/SARIF writing |
 | `src/cli.rs`, `src/cli/` | Command parsing/dispatch, command handlers, config paths, safety modes, terminal UI, interactive chat shell |
 | `src/tools.rs`, `src/tools/` | Tool schemas, tool dispatch, previews, todos, workspace filesystem boundary, webfetch boundary, mutation approval |

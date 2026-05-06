@@ -98,7 +98,10 @@ impl Session {
 
     pub fn context_status(&self) -> ContextStatus {
         let model_spec = self.model.trim().to_string();
-        let config = config::context_config();
+        let limits = crate::agent::model::model_limits(&model_spec);
+        let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
+        let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
+        let config = config::context_config_for_model(input_limit, output_limit);
         ContextStatus {
             estimate: self
                 .transcript
@@ -111,7 +114,10 @@ impl Session {
     }
 
     pub fn compact_deterministic(&mut self) -> Option<CompactionStats> {
-        let config = config::context_config();
+        let limits = crate::agent::model::model_limits(&self.model);
+        let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
+        let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
+        let config = config::context_config_for_model(input_limit, output_limit);
         let mut stats = self.transcript.deterministic_compact_old_turns(
             config.recent_messages,
             tokens_to_compaction_bytes(config.summary_tokens),
@@ -148,7 +154,10 @@ impl Session {
 }
 
 async fn ensure_context_budget(session: &mut Session, model_spec: &str) -> Result<()> {
-    let config = config::context_config();
+    let limits = crate::agent::model::model_limits(model_spec);
+    let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
+    let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
+    let config = config::context_config_for_model(input_limit, output_limit);
     let estimate =
         session
             .transcript

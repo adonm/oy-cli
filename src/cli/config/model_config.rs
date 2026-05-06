@@ -102,8 +102,6 @@ pub fn canonical_model_spec(model_spec: &str) -> String {
 pub fn canonical_provider(provider: &str) -> &str {
     match provider.trim() {
         "copilot" => "github-copilot",
-        "bedrock" => "amazon-bedrock",
-        "google-vertex" | "google-vertexai" => "vertexai",
         provider => provider,
     }
 }

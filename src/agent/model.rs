@@ -76,11 +76,8 @@ fn collect_all_models(dynamic: &[AdapterModels]) -> Vec<String> {
 /// Information about the rig provider for a model spec.
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderInfo {
-    /// The rig provider module name (e.g. "openai", "github-copilot", "amazon-bedrock", "vertexai")
+    /// The rig provider module name (e.g. "openai", "github-copilot")
     pub provider: String,
-    /// The bare model name without provider prefix
-    #[allow(dead_code)]
-    pub model: String,
     /// The API endpoint URL, if determinable from OpenCode metadata
     pub endpoint: Option<String>,
 }
@@ -93,13 +90,22 @@ pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
         .unwrap_or("openai")
         .to_string();
     let model = model.to_string();
-    let endpoint = opencode_models::find(&provider, &model)
+    let model_info = opencode_models::find(&provider, &model);
+    let endpoint = model_info
+        .as_ref()
         .and_then(|info| info.api_url().map(|s| s.trim_end_matches('/').to_string()));
     ProviderInfo {
         provider,
-        model,
         endpoint,
     }
+}
+
+/// Look up token limits for a model spec from OpenCode metadata.
+/// Returns `None` when OpenCode isn't available or the model isn't found.
+pub(crate) fn model_limits(model_spec: &str) -> Option<opencode_models::OpenCodeModelLimit> {
+    let (provider, model) = split_model_spec(model_spec.trim());
+    let provider = provider.map(config::canonical_provider)?;
+    opencode_models::lookup_limit(provider, model)
 }
 
 pub async fn exec_chat(
@@ -141,12 +147,6 @@ enum ChatRoute {
         api_key: String,
         base_url: String,
     },
-    Bedrock {
-        model: String,
-    },
-    VertexAi {
-        model: String,
-    },
 }
 
 fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
@@ -184,17 +184,6 @@ fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
                 })
             }
         }
-        "amazon-bedrock" => {
-            let model_info = bedrock_model_info(model);
-            let model_id = model_info
-                .as_ref()
-                .map(|model| model.api_id().to_string())
-                .unwrap_or_else(|| opencode_models::api_id("bedrock", model));
-            Ok(ChatRoute::Bedrock { model: model_id })
-        }
-        "vertexai" => Ok(ChatRoute::VertexAi {
-            model: opencode_models::api_id("vertexai", model),
-        }),
         "openai" => Ok(ChatRoute::OpenAi {
             model: model.to_string(),
             api_key: env_value("OPENAI_API_KEY").context("OpenAI auth is not configured")?,
@@ -303,32 +292,6 @@ async fn execute_chat_route(
                 .await
                 .map_err(Into::into)
         }
-        ChatRoute::Bedrock { model } => {
-            let client = crate::bedrock::client().await?;
-            let agent = client.agent(&model).preamble(preamble).tools(tools).build();
-            agent
-                .prompt(prompt)
-                .with_history(history)
-                .max_turns(max_turns)
-                .extended_details()
-                .await
-                .map_err(Into::into)
-        }
-        ChatRoute::VertexAi { model } => {
-            let client = rig_vertexai::Client::builder().build()?;
-            let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
-            if let Some(ref params) = reasoning_effort {
-                agent_builder = agent_builder.additional_params(params.clone());
-            }
-            let agent = agent_builder.build();
-            agent
-                .prompt(prompt)
-                .with_history(history)
-                .max_turns(max_turns)
-                .extended_details()
-                .await
-                .map_err(Into::into)
-        }
     }
 }
 
@@ -353,11 +316,6 @@ fn copilot_requires_responses_api_shim(model: &str) -> bool {
     // or expands its own Copilot route rule.
     let model = model.to_ascii_lowercase();
     model.contains("codex") || model.starts_with("gpt-5") || model.starts_with("gemini-3")
-}
-
-fn bedrock_model_info(model: &str) -> Option<opencode_models::OpenCodeModel> {
-    opencode_models::find("amazon-bedrock", model)
-        .or_else(|| opencode_models::find("bedrock", model))
 }
 
 // ---------------------------------------------------------------------------

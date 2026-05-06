@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::compaction;
 
-use super::{MAX_FILE_BYTES, SECURITY_INDEX_LIMIT};
+use super::MAX_FILE_BYTES;
 
 #[derive(Debug, Clone)]
 pub(super) struct AuditFile {
@@ -224,7 +224,7 @@ pub(super) fn build_manifest(files: &[AuditFile]) -> String {
     out
 }
 
-pub(super) fn build_security_index(files: &[AuditFile]) -> String {
+pub(super) fn build_security_index(files: &[AuditFile], limit: usize) -> String {
     let keywords = [
         "auth",
         "authorize",
@@ -276,7 +276,7 @@ pub(super) fn build_security_index(files: &[AuditFile]) -> String {
                         crate::ui::truncate_chars(trimmed, 180)
                     );
                     count += 1;
-                    if count >= SECURITY_INDEX_LIMIT {
+                    if count >= limit {
                         break 'files;
                     }
                 }

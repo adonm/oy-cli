@@ -112,7 +112,7 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 oy model openai/gpt-4.1
 ```
 
-GitHub Copilot, Bedrock, Vertex AI, and OpenAI-compatible providers listed by OpenCode are routed through Rig clients where supported. Newer Copilot reasoning models that Rig 0.36 does not yet route through `/responses` are handled by a narrow local compatibility shim and require a Copilot API token.
+GitHub Copilot and OpenAI-compatible providers listed by OpenCode are routed through Rig clients where supported. Newer Copilot reasoning models that Rig 0.36 does not yet route through `/responses` are handled by a narrow local compatibility shim and require a Copilot API token.
 
 The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect the full OpenCode listing or clear the recent history.
 
@@ -189,7 +189,7 @@ Default local paths:
 | `OY_MAX_TOOL_ROUNDS` | Tool-call budget per prompt; default `512` |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible auth/endpoint |
 | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | Copilot auth |
-| `AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Bedrock auth/region |
+
 | `LOCAL_API_KEY` | Optional local `local-<port>` shim key; defaults to `oy-local` |
 
 ## Troubleshooting

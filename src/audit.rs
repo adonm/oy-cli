@@ -22,16 +22,66 @@ pub(crate) use report::default_output_path;
 use report::{transparency_snippet, with_succinct_findings_summary, with_transparency_line};
 use sarif::render_sarif;
 
-const TARGET_CHUNK_TOKENS: usize = 64_000;
-const SMALL_REPO_TOKENS: usize = 80_000;
+const DEFAULT_INPUT_LIMIT: usize = 128_000;
 pub const DEFAULT_MAX_REVIEW_CHUNKS: usize = 80;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
-const SECURITY_INDEX_LIMIT: usize = 160;
-const FINDINGS_PER_CHUNK_LIMIT_TOKENS: usize = 6_000;
-const REDUCE_PROMPT_MAX_TOKENS: usize = 220_000;
-const REDUCE_FINDINGS_TOKEN_RESERVE: usize = 4_000;
-const REDUCE_FINDINGS_MIN_TOKENS: usize = 8_000;
 const DEFAULT_AUDIT_PARALLELISM: usize = 8;
+
+/// All audit sizing constants derived from the current model's token limits.
+#[derive(Debug, Clone, Copy)]
+struct AuditSizing {
+    target_chunk_tokens: usize,
+    small_repo_tokens: usize,
+    reduce_prompt_max_tokens: usize,
+    findings_per_chunk_limit_tokens: usize,
+    security_index_limit: usize,
+    reduce_findings_min_tokens: usize,
+    reduce_findings_token_reserve: usize,
+}
+
+fn audit_constants(model_spec: &str) -> AuditSizing {
+    let input_limit = crate::agent::model::model_limits(model_spec)
+        .map(|l| l.input.unwrap_or(l.context))
+        .unwrap_or(DEFAULT_INPUT_LIMIT)
+        .max(1);
+
+    // reduce prompt: 85% of input window, clamped sensibly
+    let reduce_prompt = (input_limit as f64 * 0.85) as usize;
+    let reduce_prompt = reduce_prompt.clamp(55_000, 2_000_000);
+
+    // chunk size: ~half of input window
+    let target_chunk = (input_limit / 2).min(reduce_prompt / 2);
+    let target_chunk = target_chunk.clamp(8_000, 500_000);
+
+    // small repo: slightly larger than one chunk
+    let small_repo = (target_chunk as f64 * 1.25) as usize;
+
+    // per-chunk findings budget: proportional to chunk size
+    let findings_per_chunk = (target_chunk as f64 * 0.10) as usize;
+    let findings_per_chunk = findings_per_chunk.clamp(1_000, 50_000);
+
+    // security index entries: ~0.2% of input window
+    let security_index = (input_limit as f64 * 0.002) as usize;
+    let security_index = security_index.clamp(40, 500);
+
+    // reduce floor: ~2.5% of input window
+    let reduce_min = (input_limit as f64 * 0.025) as usize;
+    let reduce_min = reduce_min.clamp(2_000, 50_000);
+
+    // reduce overhead reserve: ~3.3% of input window
+    let reduce_reserve = (input_limit as f64 * 0.033) as usize;
+    let reduce_reserve = reduce_reserve.clamp(1_000, 30_000);
+
+    AuditSizing {
+        target_chunk_tokens: target_chunk,
+        small_repo_tokens: small_repo,
+        reduce_prompt_max_tokens: reduce_prompt,
+        findings_per_chunk_limit_tokens: findings_per_chunk,
+        security_index_limit: security_index,
+        reduce_findings_min_tokens: reduce_min,
+        reduce_findings_token_reserve: reduce_reserve,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AuditOptions {
@@ -74,8 +124,9 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
         bail!("no reviewable text files found for audit");
     }
     let manifest = build_manifest(&files);
-    let index = build_security_index(&files);
-    let chunks = chunk_files(files, TARGET_CHUNK_TOKENS);
+    let sizing = audit_constants(&model_spec);
+    let index = build_security_index(&files, sizing.security_index_limit);
+    let chunks = chunk_files(files, sizing.target_chunk_tokens);
     if chunks.len() > options.max_chunks {
         bail!(
             "audit would require {} chunks, above the --max-chunks limit of {}; rerun with a focused path/filter or pass --max-chunks {} to allow this run",
@@ -90,7 +141,7 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     progress.prepared();
 
     let system_prompt = prompts::audit_system_prompt();
-    let report = if chunks.len() == 1 && chunks[0].tokens <= SMALL_REPO_TOKENS {
+    let report = if chunks.len() == 1 && chunks[0].tokens <= sizing.small_repo_tokens {
         let repo_text = chunk_text(&chunks[0]);
         let prompt = prompts::audit_full_prompt(&options.focus, &manifest, &index, &repo_text);
         progress.review_started(None);
@@ -134,9 +185,11 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             &model_spec,
             &options.focus,
             &manifest,
-            REDUCE_PROMPT_MAX_TOKENS,
+            sizing.reduce_prompt_max_tokens,
+            sizing.reduce_findings_min_tokens,
+            sizing.reduce_findings_token_reserve,
         );
-        let per_chunk_findings_limit = FINDINGS_PER_CHUNK_LIMIT_TOKENS.min(
+        let per_chunk_findings_limit = sizing.findings_per_chunk_limit_tokens.min(
             reduce_findings_budget
                 .saturating_div(chunk_findings.len().max(1))
                 .max(1),
@@ -156,7 +209,9 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             &options.focus,
             &manifest,
             &candidate_findings,
-            REDUCE_PROMPT_MAX_TOKENS,
+            sizing.reduce_prompt_max_tokens,
+            sizing.reduce_findings_min_tokens,
+            sizing.reduce_findings_token_reserve,
         );
         let prompt = prompts::audit_reduce_prompt(&options.focus, &manifest, &candidate_findings);
         progress.summarise_started();
@@ -347,7 +402,7 @@ mod tests {
             findings.push_str(&"- Detail: repeated context.\n".repeat(100));
         }
 
-        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 2_000);
+        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 2_000, 8_000, 4_000);
         assert!(bounded.contains("### Medium: issue 1"));
         assert!(bounded.contains("### Medium: issue 15"));
         assert!(bounded.contains("### Medium: issue 30"));
@@ -364,7 +419,7 @@ mod tests {
             findings.push_str(&finding.repeat(200));
         }
 
-        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 20_000);
+        let bounded = bounded_reduce_findings("gpt-4o", "", manifest, &findings, 20_000, 8_000, 4_000);
         let prompt = prompts::audit_reduce_prompt("", manifest, &bounded);
         assert!(compaction::count_tokens("gpt-4o", &prompt) <= 20_000);
         assert!(bounded.contains("truncated"));

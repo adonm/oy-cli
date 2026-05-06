@@ -48,6 +48,8 @@ pub(crate) struct OpenCodeModel {
     capabilities: OpenCodeCapabilities,
     #[serde(default)]
     variants: std::collections::HashMap<String, OpenCodeVariant>,
+    #[serde(default)]
+    limit: OpenCodeModelLimit,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -64,13 +66,24 @@ pub(crate) struct OpenCodeCapabilities {
     pub reasoning: bool,
 }
 
-#[derive(Debug, Default, Clone, Deserialize)]
+/// Token limits reported by OpenCode for a model.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub(crate) struct OpenCodeVariant {
-    #[serde(default, rename = "reasoningEffort")]
-    pub reasoning_effort: Option<String>,
+pub(crate) struct OpenCodeModelLimit {
+    /// Total context window in tokens.
+    #[serde(default)]
+    pub context: usize,
+    /// Max input tokens (may be less than context).
+    #[serde(default)]
+    pub input: Option<usize>,
+    /// Max output tokens.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub output: usize,
 }
+
+// Value type is unused; we only inspect variant keys.
+type OpenCodeVariant = serde_json::Value;
 
 impl OpenCodeModelListing {
     pub(crate) fn load() -> Result<Self> {
@@ -96,12 +109,6 @@ impl OpenCodeModelListing {
                 let spec = format!("{provider}/{model}");
                 self.models.iter().find(|item| item.spec == spec)
             })
-    }
-
-    pub(crate) fn api_id(&self, provider: &str, model: &str) -> String {
-        self.find(provider, model)
-            .map(|model| model.api_id().to_string())
-            .unwrap_or_else(|| model.to_string())
     }
 
     pub(crate) fn into_adapter_models(self) -> Vec<AdapterModels> {
@@ -195,11 +202,15 @@ impl OpenCodeModel {
     }
 
     fn is_supported_by_rig(&self) -> bool {
+        // Explicitly ignore bedrock/vertexai regardless of metadata;
+        // those providers were removed from oy.
+        if matches!(
+            self.provider_id.as_str(),
+            "bedrock" | "amazon-bedrock" | "vertexai"
+        ) {
+            return false;
+        }
         self.is_openai_compatible_api()
-            || matches!(
-                self.provider_id.as_str(),
-                "bedrock" | "amazon-bedrock" | "vertexai"
-            )
     }
 }
 
@@ -268,13 +279,6 @@ pub(crate) fn find(provider: &str, model: &str) -> Option<OpenCodeModel> {
         .cloned()
 }
 
-pub(crate) fn api_id(provider: &str, model: &str) -> String {
-    OpenCodeModelListing::load()
-        .ok()
-        .map(|listing| listing.api_id(provider, model))
-        .unwrap_or_else(|| model.to_string())
-}
-
 /// Look up reasoning metadata for a model from OpenCode.
 /// Returns `None` when the listing can't be loaded or the model isn't found.
 pub(crate) fn lookup_reasoning(provider: &str, model: &str) -> Option<OpenCodeModel> {
@@ -282,6 +286,21 @@ pub(crate) fn lookup_reasoning(provider: &str, model: &str) -> Option<OpenCodeMo
         .ok()?
         .find(provider, model)
         .cloned()
+}
+
+/// Look up token limits for a model from OpenCode.
+/// Returns `None` when the listing can't be loaded or the model isn't found,
+/// or when the model reports no context limit.
+pub(crate) fn lookup_limit(provider: &str, model: &str) -> Option<OpenCodeModelLimit> {
+    let limit = OpenCodeModelListing::load()
+        .ok()?
+        .find(provider, model)?
+        .limit;
+    if limit.context == 0 {
+        None
+    } else {
+        Some(limit)
+    }
 }
 
 #[cfg(test)]
@@ -307,8 +326,6 @@ anthropic/claude-test
         let model = listing.find("github-copilot", "gpt-5.5").unwrap();
         assert_eq!(model.api_id(), "gpt-5.5");
         assert_eq!(model.api_url(), Some("https://api.githubcopilot.com"));
-        assert_eq!(listing.api_id("github-copilot", "gpt-5.5"), "gpt-5.5");
-        assert_eq!(listing.api_id("bedrock", "unknown"), "unknown");
         let groups = listing.into_adapter_models();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);
@@ -316,12 +333,46 @@ anthropic/claude-test
 
     #[test]
     fn falls_back_to_spec_for_missing_ids() {
-        let text = r#"bedrock/anthropic.test
+        let text = r#"anthropic/anthropic.test
 {
   "api": { "id": "anthropic.test" }
 }
 "#;
         let listing = parse_verbose(text).unwrap();
-        assert!(listing.find("bedrock", "anthropic.test").is_some());
+        assert!(listing.find("anthropic", "anthropic.test").is_some());
+    }
+
+    #[test]
+    fn filters_out_bedrock_and_vertexai_models() {
+        let text = r#"bedrock/anthropic.claude-sonnet-4
+{
+  "id": "anthropic.claude-sonnet-4",
+  "providerID": "bedrock",
+  "api": { "id": "anthropic.claude-sonnet-4", "npm": "@ai-sdk/amazon-bedrock" }
+}
+amazon-bedrock/anthropic.claude-opus-4
+{
+  "id": "anthropic.claude-opus-4",
+  "providerID": "amazon-bedrock",
+  "api": { "id": "anthropic.claude-opus-4", "npm": "@ai-sdk/amazon-bedrock" }
+}
+vertexai/gemini-3.1-pro
+{
+  "id": "gemini-3.1-pro",
+  "providerID": "vertexai",
+  "api": { "id": "gemini-3.1-pro", "npm": "@ai-sdk/vertexai" }
+}
+github-copilot/gpt-5.5
+{
+  "id": "gpt-5.5",
+  "providerID": "github-copilot",
+  "api": { "id": "gpt-5.5", "npm": "@ai-sdk/github-copilot" }
+}
+"#;
+        let listing = parse_verbose(text).unwrap();
+        // find() still resolves them, but into_adapter_models filters them out
+        let groups = listing.into_adapter_models();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);
     }
 }

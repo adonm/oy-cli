@@ -44,7 +44,6 @@ pub(crate) fn auth_statuses() -> Vec<AuthStatus> {
         }
     }
     items.push(github_status());
-    items.push(bedrock_status());
     items
         .into_iter()
         .filter(|item| item.availability.is_available())
@@ -150,21 +149,6 @@ fn github_status() -> AuthStatus {
         }
         .to_string(),
         detail,
-    }
-}
-
-fn bedrock_status() -> AuthStatus {
-    let status = crate::bedrock::auth_status();
-    AuthStatus {
-        adapter: "bedrock".to_string(),
-        env_var: Some("AWS_ACCESS_KEY_ID, AWS_PROFILE".to_string()),
-        availability: match status.availability {
-            crate::bedrock::AwsAuthAvailability::Present => AuthAvailability::Present,
-            crate::bedrock::AwsAuthAvailability::AutoConfigured => AuthAvailability::AutoConfigured,
-            crate::bedrock::AwsAuthAvailability::Missing => AuthAvailability::Missing,
-        },
-        source: status.source,
-        detail: status.detail,
     }
 }
 

@@ -11,7 +11,7 @@ mod audit;
 mod cli;
 mod tools;
 
-pub(crate) use agent::{bedrock, compaction, model, session};
+pub(crate) use agent::{compaction, model, session};
 pub(crate) use cli::{chat, config, ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

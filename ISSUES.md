@@ -1,58 +1,127 @@
 # Audit Issues
 
-> Active issue backlog for current `oy-cli` code. Fixed historical findings were removed after the amended 0.8.0 validation pass.
+> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=opencode-go/deepseek-v4-pro oy audit` · 2026-05-06
 
 ## Findings summary
 
-| # | Status | Severity | Finding | Code reference |
-|---|---|---|---|---|
-| 1 | Partially mitigated | High | Audit input can disclose unskipped secret-like repository files to the model provider | `src/audit/input.rs::collect_files`, `src/audit/input.rs::should_skip_path`, `src/audit.rs::run` |
-| 2 | Open | High | PATH-based `gh` / `aws` discovery can execute attacker-controlled binaries | `src/agent/auth.rs::gh_auth_token`, `src/agent/bedrock.rs::aws_cli_available` |
-| 3 | Open | Medium | Terminal escape sequences from repo/model/tool output are printed unsanitized | `src/cli/ui.rs::out`, `src/cli/ui/render.rs::markdown`, `src/cli/ui/progress.rs::tool_result` |
-| 4 | Open | Medium | Workspace/private file writes have symlink TOCTOU windows | `src/cli/config/paths.rs::resolve_workspace_output_path`, `src/cli/config/paths.rs::write_workspace_file`, `src/cli/config/paths.rs::write_private_file` |
+- **High** `src/agent/model.rs::resolve_chat_route` / `src/cli/chat.rs:159` — API key leakage through error reporting
+- **High** `src/cli/ui/render.rs::render_markdown`, `paint` — Terminal ANSI escape injection from unsanitised model output
+- **Medium** `src/tools/network.rs::is_public_ipv4` — Missing IPv4 special‑purpose address range allows non‑public webfetch
+- **Medium** `src/cli/chat/commands.rs:111-114` — Unsafe, non‑thread‑safe process environment mutation
+- **Medium** `src/tools/network.rs::is_public_ipv4` – manual IP classification with high audit burden (complexity)
+- **Low**  `src/tools/shell.rs::tool_bash` — Shell commands inherit full environment including secrets
 
 ## Detailed findings
 
-### 1. Audit input can disclose unskipped secret-like repository files to the model provider
+### High: API key leakage through error reporting
 
-- **Status:** Partially mitigated.
-- **Severity:** High
-- **Category:** Data exposure / unsafe file collection, OWASP ASVS V8/V13
-- **Trust boundary / sink:** Local repository files → model-provider prompt.
-- **Validated evidence:** `src/audit/input.rs::collect_files` collects reviewable files and `src/audit.rs::run` sends chunked file contents to `session::run_prompt_once_no_tools(...)`. `src/audit/input.rs::should_skip_path` skips `.env.*` plus filenames containing `credential`, `secret`, or `token`, with regression coverage for `credentials.json` and `secrets.yaml`.
-- **Residual impact:** This is still not fail-closed. Secret-bearing files with unrecognized names can still be included if not ignored by gitignore and if their extension is reviewable.
-- **Exploitability / preconditions:** User runs `oy audit` in a repository containing secret-bearing files not skipped by gitignore or the hardcoded denylist.
-- **Fix:** Add an explicit sensitive-file policy: conservative default skips for common cloud/kube/service-account credential paths, clear audit transparency about skipped sensitive files, and an explicit `--include-sensitive`/`--include-hidden` opt-in with tests.
+- **Category**: V7 Error Handling & Logging  
+- **Evidence**  
+  - `src/agent/model.rs::resolve_chat_route` loads API keys from environment or files and passes them to the Rig client builder.  
+  - `src/agent/model.rs::execute_chat_route` calls `agent.prompt(…)` and propagates errors via `anyhow`.  
+  - `src/cli/chat.rs:159` prints the full error chain with `{…:#}`:  
+    `crate::ui::err_line(format_args!("model call failed: {err:#}"));`  
+    When the HTTP client includes credential headers in error details (e.g. a `reqwest` failure), the API key appears in the terminal.  
+- **Trust boundary / sink**  
+  Authentication secrets (OpenAI, Copilot, OpenCode keys) cross from environment into the provider client. The error path writes them to stderr.  
+- **Impact**  
+  An attacker who can trigger an authentication‑related chat failure (e.g. by choosing an invalid provider/model combination) may see the raw API key in the output. The key may also persist in shell history or log capture.  
+- **Exploitability / preconditions**  
+  The attacker needs the ability to influence the model spec or prompt such that the resulting API call fails. In a multi‑user or shared environment this could expose credentials to other users.  
+- **Reference**  
+  OWASP ASVS V7.3 – “Verify that error handling logic in security controls denies access by default and does not disclose sensitive information.”  
+- **Fix**  
+  Wrap the rig client or the `exec_chat` result in an error type that redacts `Authorization` and other sensitive headers before the error is surfaced. Avoid printing `{:#}` for errors that may contain secrets; use a safe error representation.
 
-### 2. PATH-based `gh` / `aws` discovery can execute attacker-controlled binaries
+---
 
-- **Status:** Open.
-- **Severity:** High
-- **Category:** Process execution from untrusted PATH, OWASP ASVS V12/V14
-- **Trust boundary / sink:** User environment / current workspace `PATH` → implicit `Command::new(...)` execution.
-- **Validated evidence:** `src/agent/auth.rs::gh_auth_token` runs `Command::new("gh").arg("auth").arg("token").output()`. It is reached through GitHub/Copilot token discovery paths. `src/agent/bedrock.rs::aws_cli_available` runs `Command::new("aws").arg("--version")`.
-- **Impact:** If `PATH` resolves `gh` or `aws` to an attacker-controlled binary, ordinary model/auth/status discovery can execute arbitrary code with the user’s permissions, outside the tool approval flow.
-- **Exploitability / preconditions:** User’s `PATH` contains the workspace or another attacker-writable directory before the real CLI binary.
-- **Fix:** Do not auto-run external CLIs during discovery. Require explicit approval, use configured absolute paths, or use SDK/env credential lookup. At minimum, resolve the binary path first and refuse relative or workspace-contained executables.
+### High: Terminal ANSI escape injection from unsanitised model output
 
-### 3. Terminal escape sequences from repo/model/tool output are printed unsanitized
+- **Category**: V5 Validation (output encoding)  
+- **Evidence**  
+  - `src/cli/ui/render.rs::render_markdown` processes model‑generated text line‑by‑line and adds ANSI colour codes via the `paint` helper.  
+  - The raw model text is never scanned or escaped for existing control sequences.  
+  - `src/cli/ui.rs::paint` wraps text with `\x1b[code m … \x1b[0m`, but if the input already contains `\x1b` sequences those will be passed through.  
+- **Trust boundary / sink**  
+  Model output (untrusted) is written directly to the terminal. A prompt‑injection attack or a malicious model response can embed ANSI escape sequences that reposition the cursor, clear the screen, or trigger terminal‑specific command execution (e.g. OSC 52 clipboard injection).  
+- **Impact**  
+  Terminal manipulation can hide subsequent output, trick the user into approving dangerous actions, or, on vulnerable terminals, achieve arbitrary command execution.  
+- **Exploitability / preconditions**  
+  Any session where the model generates output. An attacker only needs to inject specially crafted text into a prompt or to poison the model’s training data.  
+- **Reference**  
+  CWE-150 (Improper Neutralization of Escape, Meta, or Control Sequences). OWASP ASVS V5.3.4 – “Verify that output encoding is applied to prevent … terminal injection attacks.”  
+- **Fix**  
+  Strip or escape the `\x1b` (ESC) character from every line of model output before adding colour codes. Use a library that sanitises terminal output, or simply replace `\x1b` with a visible placeholder.
 
-- **Status:** Open.
-- **Severity:** Medium
-- **Category:** Output encoding / terminal injection, OWASP ASVS V7
-- **Trust boundary / sink:** Repo file contents, shell/web output, or model text → terminal stdout/stderr.
-- **Validated evidence:** `src/cli/ui.rs::out` / `err` print raw strings. `src/cli/ui/render.rs::markdown`, `diff`, and `numbered_block` render raw content lines. `src/cli/ui/progress.rs::tool_result` prints preview lines directly. `src/cli/ui/text.rs::truncate_width` accounts for ANSI width but does not strip or escape control sequences.
-- **Impact:** Malicious content containing OSC/CSI/control sequences can clear or spoof the terminal, create deceptive hyperlinks, alter window title, or set clipboard contents when previewed or rendered.
-- **Exploitability / preconditions:** User views model/tool/repo output from a malicious repository, fetched page, or command output in a terminal supporting these sequences.
-- **Fix:** Sanitize untrusted text at the UI boundary. Allow only ANSI sequences generated by the renderer; escape or replace C0/C1 controls, CSI, OSC, and BEL/ST-terminated sequences in model/tool/repo-originated strings. Keep generated styling separate from untrusted content so sanitization does not strip `oy`'s own color output.
+---
 
-### 4. Workspace/private file writes have symlink TOCTOU windows
+### Medium: Missing IPv4 special‑purpose address range in webfetch public‑IP filter
 
-- **Status:** Open.
-- **Severity:** Medium
-- **Category:** Filesystem race / symlink write, OWASP ASVS V12
-- **Trust boundary / sink:** Workspace/output path controlled by user/model/local repo state → file write with user permissions.
-- **Validated evidence:** `src/cli/config/paths.rs::write_workspace_file` checks `reject_symlink_destination(path)`, creates parents, then opens with `OpenOptions::create(true).write(true).truncate(true)`. `resolve_workspace_output_path` validates existing ancestors but stops at the first missing component. `write_private_file` uses similar create/truncate behavior for private state.
-- **Impact:** A concurrent local attacker controlling the workspace can replace the checked path or a newly-created ancestor with a symlink after validation and before open, redirecting writes outside the workspace.
-- **Exploitability / preconditions:** Attacker can modify the workspace concurrently during output or replacement writes. For a local single-user CLI this is mainly a hardening issue, but it matters for shared workspaces and untrusted repositories.
-- **Fix:** Use race-safe opens: `O_NOFOLLOW` for the final component on Unix, create/open ancestors relative to directory file descriptors with no-follow checks, and revalidate parent directories after creation. Apply equivalent symlink rejection to private config/session writes.
+- **Category**: V5 Validation (SSRF / network boundary)  
+- **Evidence**  
+  - `src/tools/network.rs::is_public_ipv4` performs manual range checks but does not cover `192.0.0.0/24` (IETF Protocol Assignments).  
+  - Other special‑purpose blocks (e.g. `0.0.0.0/8`, `100.64.0.0/10`, `198.18.0.0/15`) are handled, but the function relies on a custom list rather than an exhaustive source.  
+  - `tool_webfetch` calls `public_socket_addrs`, which calls `is_public_ip` on each resolved address. An address in `192.0.0.0/24` would be classified as public, bypassing the restriction.  
+- **Trust boundary / sink**  
+  Network boundary: the model is allowed to fetch only from **public** IPs. A non‑public address in the `192.0.0.0/24` block can be used to reach internal services (e.g. DNS‑SD proxies).  
+- **Impact**  
+  An attacker‑controlled URL that resolves to `192.0.0.1` (or similar) could cause the agent to interact with local network services, potentially exfiltrating data or triggering side‑effects.  
+- **Exploitability / preconditions**  
+  The model must be persuaded to fetch a URL with a hostname or IP in the missing range. Likelihood is low but not zero, especially on networks where such addresses are reachable.  
+- **Reference**  
+  OWASP ASVS V5.2.6 – “Verify that the application protects against Server‑Side Request Forgery (SSRF) attacks by validating all internal or remote requests.”  
+- **Fix**  
+  Replace the manual IPv4 classification with a well‑tested library (e.g. `ipnet`) that supports the full IANA special‑purpose address registry. At minimum, add the `192.0.0.0/24` block and any other missing reserved ranges (e.g. `240.0.0.0/4` is already covered, but verify).
+
+---
+
+### Medium: Unsafe, non‑thread‑safe process environment mutation in `/thinking` command
+
+- **Category**: V14 Configuration (unsafe defaults) / Code Correctness  
+- **Evidence**  
+  - `src/cli/chat/commands.rs:111-114` uses `unsafe { std::env::set_var("OY_THINKING", …) }` and `remove_var` inside an `async` context.  
+  - Rust’s environment functions are not thread‑safe; concurrent access (e.g. Tokio tasks) can cause data races and undefined behaviour.  
+- **Trust boundary / sink**  
+  No direct security boundary, but the environment is process‑global; improper synchronisation can corrupt the environment used by other parts of the system (e.g. spawned subprocesses).  
+- **Impact**  
+  Subtle bugs, environment inconsistencies, or even crashes when multiple tasks race on the same environment variable. While currently low risk in a single‑user CLI, it introduces undefined behaviour that is hard to diagnose.  
+- **Exploitability / preconditions**  
+  Requires calling `/thinking` while other parts of the application (or Tokio runtime tasks) read `OY_THINKING`.  
+- **Reference**  
+  Rust `std::env::set_var` safety documentation.  
+- **Fix**  
+  Replace direct environment manipulation with a synchronised configuration store (e.g. `OnceCell`/`LazyLock`/`RwLock<HashMap>`). Read the setting from that store in the model routing code instead of depending on the environment after initialisation.
+
+---
+
+### Medium (Complexity): Manual IPv4 range classification in webfetch is fragile and hard to audit
+
+- **Category**: Implementation quality (grugbrain: `local reasoning` deficit)  
+- **Evidence**  
+  `src/tools/network.rs::is_public_ipv4` contains ~20 raw octet comparisons that re‑implement public‑/private‑address classification. The logic duplicates what standard library functions (`ip.is_private()`, `ip.is_loopback()`, etc.) provide, but omits some blocks and requires careful line‑by‑line review to ensure completeness.  
+- **Impact**  
+  Increased chance of missing reserved ranges (as noted in the finding above). Future maintainers are likely to introduce regressions.  
+- **Reference**  
+  grugbrain: “complexity very bad”, “local reasoning”.  
+- **Fix**  
+  Delegate IP classification to a dedicated, tested library (`ipnet`, `cidr-utils`). Remove the custom `is_public_ipv4` and rely on a single source of truth.
+
+---
+
+### Low: Shell commands inherit full process environment, exposing secrets
+
+- **Category**: V2 Authentication / V8 Data Protection (operational risk)  
+- **Evidence**  
+  `src/tools/shell.rs::tool_bash` spawns `bash -c` with `Stdio::null()` for stdin but **does not sanitise the environment**; it inherits the parent process’s entire environment, including `OPENAI_API_KEY`, `COPILOT_GITHUB_TOKEN`, etc.  
+- **Trust boundary / sink**  
+  The model can request arbitrary shell commands. If the model is compromised or the user instructs it to run a command that logs environment variables (e.g. `env`), secrets will be exposed.  
+- **Impact**  
+  Accidental credential leakage to the terminal or to files written by the shell.  
+- **Exploitability / preconditions**  
+  Requires `bash` tool to be enabled (non‑plan mode) and a prompt that causes the model to expose the environment.  
+- **Reference**  
+  OWASP ASVS V8.1.1 – “Verify that the application protects sensitive data from being … inadvertently exposed during processing.”  
+- **Fix**  
+  For the `bash` tool, provide a configuration option to clear or filter environment variables before execution. Set a safe default that removes known credential variables, and document the behaviour.
+
+---

@@ -84,7 +84,7 @@ commit so style/lint noise never reaches CI.
 
 | Path | Role |
 |---|---|
-| `src/agent.rs`, `src/agent/` | Provider integration, model routing, Bedrock support, sessions, transcripts, context compaction, tool loop |
+| `src/agent.rs`, `src/agent/` | Provider integration, model routing, sessions, transcripts, context compaction, tool loop |
 | `src/audit.rs` | Deterministic no-tools audit runner, file collection, chunking, prompts, report post-processing |
 | `src/cli.rs`, `src/cli/` | Config paths, safety modes, terminal UI, chat shell, command handlers |
 | `src/tools.rs` | Tool schemas, tool dispatch, previews, todos, filesystem/network/mutation approval boundaries |

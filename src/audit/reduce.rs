@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use crate::compaction;
 
-use super::{REDUCE_FINDINGS_MIN_TOKENS, REDUCE_FINDINGS_TOKEN_RESERVE, prompts};
+use super::prompts;
 
 pub(super) fn compact_to_tokens<'a>(
     model_spec: &str,
@@ -93,13 +93,15 @@ pub(super) fn reduce_candidate_findings_budget(
     focus: &str,
     manifest: &str,
     max_prompt_tokens: usize,
+    min_tokens: usize,
+    reserve_tokens: usize,
 ) -> usize {
     let prompt_without_findings = prompts::audit_reduce_prompt(focus, manifest, "");
     let overhead_tokens = compaction::count_tokens(model_spec, &prompt_without_findings);
     max_prompt_tokens
         .saturating_sub(overhead_tokens)
-        .saturating_sub(REDUCE_FINDINGS_TOKEN_RESERVE)
-        .max(REDUCE_FINDINGS_MIN_TOKENS)
+        .saturating_sub(reserve_tokens)
+        .max(min_tokens)
 }
 
 pub(super) fn bounded_reduce_findings(
@@ -108,6 +110,8 @@ pub(super) fn bounded_reduce_findings(
     manifest: &str,
     findings: &str,
     max_prompt_tokens: usize,
+    min_tokens: usize,
+    reserve_tokens: usize,
 ) -> String {
     let prompt_tokens = |findings: &str| {
         let prompt = prompts::audit_reduce_prompt(focus, manifest, findings);
@@ -117,14 +121,14 @@ pub(super) fn bounded_reduce_findings(
         return findings.to_string();
     }
 
-    let findings_budget =
-        reduce_candidate_findings_budget(model_spec, focus, manifest, max_prompt_tokens);
+    let findings_budget = reduce_candidate_findings_budget(
+        model_spec, focus, manifest, max_prompt_tokens, min_tokens, reserve_tokens,
+    );
     let mut current_budget = findings_budget;
     let mut bounded = compact_owned_to_tokens(model_spec, findings, current_budget);
 
-    while prompt_tokens(&bounded) > max_prompt_tokens && current_budget > REDUCE_FINDINGS_MIN_TOKENS
-    {
-        current_budget = (current_budget.saturating_mul(3) / 4).max(REDUCE_FINDINGS_MIN_TOKENS);
+    while prompt_tokens(&bounded) > max_prompt_tokens && current_budget > min_tokens {
+        current_budget = (current_budget.saturating_mul(3) / 4).max(min_tokens);
         bounded = compact_owned_to_tokens(model_spec, findings, current_budget);
     }
 
