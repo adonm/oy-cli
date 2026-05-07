@@ -145,7 +145,6 @@ async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -
             }
             Err(err) => {
                 if err.is::<ChatTurnInterrupted>() {
-                    session.transcript.undo_last_turn();
                     crate::ui::warn("interrupted current turn; still in chat");
                     return Ok(());
                 }
@@ -153,11 +152,10 @@ async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -
                     .downcast_ref::<session::ContextBudgetExceeded>()
                     .copied()
                 else {
-                    return Err(err);
+                    return handle_llm_error(session, prompt, err).await;
                 };
                 recovery_attempts += 1;
                 crate::ui::err_line(format_args!("model call failed: {err}"));
-                session.transcript.undo_last_turn();
                 if recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
                     offer_save_after_context_failures(session)?;
                     return Ok(());
@@ -166,6 +164,72 @@ async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -
                     return Ok(());
                 }
             }
+        }
+    }
+}
+
+async fn handle_llm_error(
+    session: &mut Session,
+    prompt: &str,
+    _initial_err: anyhow::Error,
+) -> Result<()> {
+    let mut last_err;
+
+    loop {
+        use backon::BackoffBuilder;
+        let mut backoff = crate::agent::retry::llm_backoff().build();
+
+        loop {
+            match run_prompt_interruptible(session, prompt).await {
+                Ok(answer) => {
+                    if !answer.is_empty() {
+                        crate::ui::markdown(&format!("{answer}\n"));
+                    }
+                    return Ok(());
+                }
+                Err(err) if err.is::<ChatTurnInterrupted>() => {
+                    crate::ui::warn("interrupted current turn; still in chat");
+                    return Ok(());
+                }
+                Err(err) if err.downcast_ref::<session::ContextBudgetExceeded>().is_some() => {
+                    return Err(err);
+                }
+                Err(err) => {
+                    last_err = err;
+
+                    if crate::agent::retry::is_transient_error(&last_err) {
+                        if let Some(dur) = backoff.next() {
+                            crate::ui::err_line(format_args!(
+                                "retrying in {:.0}s…",
+                                dur.as_secs_f64()
+                            ));
+                            tokio::time::sleep(dur).await;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        crate::ui::err_line(format_args!("model call failed: {last_err}"));
+
+        if !config::can_prompt() {
+            return Err(last_err);
+        }
+
+        let choices = vec![
+            "Retry".to_string(),
+            "Return to chat".to_string(),
+            "Exit".to_string(),
+        ];
+
+        let choice = ask("LLM call failed. What do you want to do?", Some(&choices))?;
+
+        match choice.as_str() {
+            "Retry" => continue,
+            "Return to chat" => return Ok(()),
+            _ => return Err(last_err),
         }
     }
 }
