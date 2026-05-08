@@ -340,7 +340,10 @@ pub fn default_reasoning_effort(model_spec: &str) -> Option<String> {
 /// Resolve the reasoning effort value for a model spec,
 /// honouring env-var overrides and falling back to OpenCode model metadata.
 pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
-    if THINKING_OVERRIDE.read().expect("thinking override lock poisoned").is_some()
+    if THINKING_OVERRIDE
+        .read()
+        .expect("thinking override lock poisoned")
+        .is_some()
         || env::var("OY_THINKING").is_ok()
         || env::var("OY_REASONING_EFFORT").is_ok()
     {
@@ -366,7 +369,9 @@ static THINKING_OVERRIDE: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| Rw
 
 /// Set the thinking effort override. Use `None` / `"auto"` to clear.
 pub fn set_thinking_override(value: Option<&str>) {
-    let mut guard = THINKING_OVERRIDE.write().expect("thinking override lock poisoned");
+    let mut guard = THINKING_OVERRIDE
+        .write()
+        .expect("thinking override lock poisoned");
     match value {
         Some("auto") | Some("") | None => *guard = None,
         Some(v) => *guard = Some(v.to_string()),

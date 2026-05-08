@@ -1,4 +1,5 @@
 use anyhow::Result;
+use backon::Retryable;
 use chrono::Utc;
 
 use super::compaction::count_tokens;
@@ -10,6 +11,7 @@ pub use storage::load_saved;
 
 use crate::model;
 use crate::tools::{TodoItem, TodoStatus, ToolContext, ToolPolicy};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 512;
@@ -66,6 +68,16 @@ impl Session {
         }
     }
 
+    pub fn restarted(&self) -> Self {
+        Self::new(
+            self.root.clone(),
+            self.model.clone(),
+            self.interactive,
+            self.mode,
+            self.policy,
+        )
+    }
+
     pub fn tool_context(&self) -> ToolContext {
         ToolContext {
             root: self.root.clone(),
@@ -118,13 +130,18 @@ impl Session {
         let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
         let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
         let config = config::context_config_for_model(input_limit, output_limit);
-        let mut stats = self.transcript.deterministic_compact_old_turns(
-            config.recent_messages,
-            tokens_to_compaction_bytes(config.summary_tokens),
-        );
-        let compacted_tools = self
+        let (base, mut stats) = self
             .transcript
-            .compact_tool_outputs(tokens_to_compaction_bytes(config.tool_output_tokens));
+            .deterministically_compacted(
+                config.recent_messages,
+                tokens_to_compaction_bytes(config.summary_tokens),
+            )
+            .map_or_else(
+                || (self.transcript.clone(), None),
+                |(transcript, stats)| (transcript, Some(stats)),
+            );
+        let (transcript, compacted_tools) =
+            base.with_compacted_tool_outputs(tokens_to_compaction_bytes(config.tool_output_tokens));
         if compacted_tools > 0 {
             match stats.as_mut() {
                 Some(stats) => stats.compacted_tools = compacted_tools,
@@ -136,6 +153,9 @@ impl Session {
                     });
                 }
             }
+        }
+        if stats.is_some() {
+            self.transcript = transcript;
         }
         stats
     }
@@ -212,15 +232,31 @@ pub async fn run_prompt_once_no_tools(
             token_count_text(tokens)
         ));
     }
-    let response = model::exec_chat(
-        &model_spec,
-        system_prompt,
-        vec![rig::completion::Message::user(prompt.to_string())],
-        Vec::new(),
-        config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS),
-    )
+    let response = retry_transient(|| {
+        model::exec_chat(
+            &model_spec,
+            system_prompt,
+            vec![rig::completion::Message::user(prompt.to_string())],
+            Vec::new(),
+            config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS),
+        )
+    })
     .await?;
     Ok(response.output)
+}
+
+async fn retry_transient<T, Fut, F>(operation: F) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+    F: FnMut() -> Fut,
+{
+    operation
+        .retry(super::retry::llm_backoff())
+        .when(super::retry::is_transient_error)
+        .notify(|_, dur| {
+            crate::ui::err_line(format_args!("retrying in {:.0}s…", dur.as_secs_f64()))
+        })
+        .await
 }
 
 async fn run_prompt_with_policy(
@@ -245,18 +281,19 @@ async fn run_prompt_with_policy(
         &session.system_prompt,
         &tool_context.lock().expect("tool context mutex poisoned"),
     );
-    let turn_start = session.transcript.messages.len().saturating_sub(1);
     let messages = session.transcript.to_messages();
     if !crate::ui::is_quiet() {
         crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
     }
-    let response = model::exec_chat(
-        &model_spec,
-        &preamble,
-        messages,
-        crate::tools::rig_tools(tool_context.clone()),
-        max_tool_rounds,
-    )
+    let response = retry_transient(|| {
+        model::exec_chat(
+            &model_spec,
+            &preamble,
+            messages.clone(),
+            crate::tools::rig_tools(tool_context.clone()),
+            max_tool_rounds,
+        )
+    })
     .await?;
     session.todos = tool_context
         .lock()
@@ -264,9 +301,7 @@ async fn run_prompt_with_policy(
         .todos
         .clone();
     if let Some(messages) = response.messages {
-        session
-            .transcript
-            .replace_turn_from_rig(turn_start, messages);
+        session.transcript.messages.extend(messages);
     } else {
         session
             .transcript

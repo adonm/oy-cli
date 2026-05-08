@@ -63,29 +63,24 @@ impl Transcript {
         }
     }
 
-    pub fn undo_last_turn(&mut self) -> bool {
-        for index in (0..self.messages.len()).rev() {
-            if is_user_prompt(&self.messages[index]) {
-                self.messages.truncate(index);
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn force_truncate_oldest_turns(&mut self) -> usize {
+    pub fn oldest_turns_truncated(&self) -> Option<(Self, usize)> {
         if self.messages.len() <= 1 {
-            return 0;
+            return None;
         }
         let remove_count = (self.messages.len() / 4)
             .max(1)
             .min(self.messages.len() - 1);
         let keep_from = self.valid_keep_from(remove_count);
         if keep_from == 0 || keep_from >= self.messages.len() {
-            return 0;
+            return None;
         }
-        self.messages.drain(..keep_from);
-        keep_from
+        Some((
+            Self {
+                summary: self.summary.clone(),
+                messages: self.messages[keep_from..].to_vec(),
+            },
+            keep_from,
+        ))
     }
 
     pub fn token_estimate(
@@ -115,9 +110,10 @@ impl Transcript {
         }
     }
 
-    pub fn compact_tool_outputs(&mut self, max_bytes: usize) -> usize {
+    pub fn with_compacted_tool_outputs(&self, max_bytes: usize) -> (Self, usize) {
+        let mut messages = self.messages.clone();
         let mut compacted = 0;
-        for message in &mut self.messages {
+        for message in &mut messages {
             let Message::User { content } = message else {
                 continue;
             };
@@ -139,14 +135,20 @@ impl Transcript {
                 }
             }
         }
-        compacted
+        (
+            Self {
+                summary: self.summary.clone(),
+                messages,
+            },
+            compacted,
+        )
     }
 
-    pub fn deterministic_compact_old_turns(
-        &mut self,
+    pub fn deterministically_compacted(
+        &self,
         recent_messages: usize,
         summary_bytes: usize,
-    ) -> Option<CompactionStats> {
+    ) -> Option<(Self, CompactionStats)> {
         if self.messages.len() <= 1 {
             return None;
         }
@@ -156,17 +158,14 @@ impl Transcript {
             return None;
         }
         let removed_messages = keep_from;
-        self.truncate_with_note(keep_from, summary_bytes);
-        Some(CompactionStats {
-            removed_messages,
-            compacted_tools: 0,
-            summarized: true,
-        })
-    }
-
-    pub fn replace_turn_from_rig(&mut self, start: usize, messages: Vec<Message>) {
-        self.messages.truncate(start.min(self.messages.len()));
-        self.messages.extend(messages);
+        Some((
+            self.with_truncation_note(keep_from, summary_bytes),
+            CompactionStats {
+                removed_messages,
+                compacted_tools: 0,
+                summarized: true,
+            },
+        ))
     }
 
     pub fn to_messages(&self) -> Vec<Message> {
@@ -201,17 +200,20 @@ impl Transcript {
         keep_from
     }
 
-    fn truncate_with_note(&mut self, keep_from: usize, summary_bytes: usize) {
-        let existing = self.summary.take();
+    fn with_truncation_note(&self, keep_from: usize, summary_bytes: usize) -> Self {
         let note = format!(
             "[context truncated] Removed {keep_from} older messages; retained the most recent conversation window."
         );
-        let merged = existing
+        let merged = self
+            .summary
+            .as_ref()
             .filter(|s| !s.trim().is_empty())
             .map(|summary| format!("{}\n\n{}", summary.trim(), note))
             .unwrap_or(note);
-        self.summary = Some(compact_text(&merged, summary_bytes, "truncated summary"));
-        self.messages = self.messages.split_off(keep_from.min(self.messages.len()));
+        Self {
+            summary: Some(compact_text(&merged, summary_bytes, "truncated summary")),
+            messages: self.messages[keep_from.min(self.messages.len())..].to_vec(),
+        }
     }
 }
 

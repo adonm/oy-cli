@@ -27,7 +27,6 @@ pub(super) async fn handle_slash_command(session: &mut Session, command: &str) -
         }
         "save" => save_command(parts.next(), session),
         "load" => load_command(parts.next(), session),
-        "undo" => undo_command(session),
         "clear" => clear_command(session),
         "quit" | "exit" => Ok(false),
         other => {
@@ -45,7 +44,6 @@ fn normalize_chat_command(command: &str) -> &str {
         "m" => "model",
         "d" => "debug",
         "s" => "status",
-        "u" => "undo",
         "c" => "clear",
         "q" => "quit",
         other => other,
@@ -60,7 +58,7 @@ pub fn chat_help_text() -> String {
         "/model [value] (/m) -- show or switch model",
         "/ask <question> -- research-only query",
         "/save [name], /load [name] -- save or load a session",
-        "/undo (/u), /clear (/c) -- repair conversation state",
+        "/clear (/c) -- restart this chat session",
         "/quit (/q), /exit -- end session",
         "Advanced: /tokens, /compact [llm|deterministic], /thinking [auto|off|effort]",
     ]
@@ -247,18 +245,9 @@ fn load_command(name: Option<&str>, session: &mut Session) -> Result<bool> {
     Ok(true)
 }
 
-fn undo_command(session: &mut Session) -> Result<bool> {
-    if session.transcript.undo_last_turn() {
-        crate::ui::success("undid last turn");
-    } else {
-        crate::ui::warn("nothing to undo");
-    }
-    Ok(true)
-}
-
 fn clear_command(session: &mut Session) -> Result<bool> {
-    session.transcript.messages.clear();
-    crate::ui::success("conversation cleared");
+    *session = session.restarted();
+    crate::ui::success("restarted chat session");
     Ok(true)
 }
 
