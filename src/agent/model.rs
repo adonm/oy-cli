@@ -113,8 +113,8 @@ pub async fn exec_chat(
     tools: Vec<Box<dyn ToolDyn>>,
     max_turns: usize,
 ) -> Result<PromptResponse> {
-    let reasoning_effort = reasoning_effort_json(model_spec);
     let route = resolve_chat_route(model_spec)?;
+    let reasoning_effort = reasoning_effort_json(model_spec, route.uses_responses_api());
     let mut history = messages;
     let prompt = history.pop().unwrap_or_else(|| Message::user(""));
     execute_chat_route(
@@ -136,6 +136,11 @@ enum ChatRoute {
         api_key: String,
         base_url: Option<String>,
     },
+    OpenAiResponses {
+        model: String,
+        api_key: String,
+        base_url: String,
+    },
     GitHubCopilot {
         model: String,
         auth: GitHubCopilotAuth,
@@ -145,6 +150,15 @@ enum ChatRoute {
         api_key: String,
         base_url: String,
     },
+}
+
+impl ChatRoute {
+    fn uses_responses_api(&self) -> bool {
+        matches!(
+            self,
+            ChatRoute::OpenAiResponses { .. } | ChatRoute::GitHubCopilotResponses { .. }
+        )
+    }
 }
 
 fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
@@ -193,22 +207,28 @@ fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
             if !model_info.is_openai_compatible_api() {
                 bail!("OpenCode model `{provider}/{model}` is not OpenAI-compatible");
             }
-            Ok(ChatRoute::OpenAi {
-                model: model_info.api_id().to_string(),
-                api_key: opencode_auth_key(provider).ok_or_else(|| {
-                    anyhow!("OpenCode auth.json has no credentials for `{provider}`")
-                })?,
-                base_url: Some(
-                    model_info
-                        .api_url()
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "OpenCode model `{provider}/{model}` does not expose an API URL"
-                            )
-                        })?
-                        .to_string(),
-                ),
-            })
+            let model_id = model_info.api_id().to_string();
+            let api_key = opencode_auth_key(provider)
+                .ok_or_else(|| anyhow!("OpenCode auth.json has no credentials for `{provider}`"))?;
+            let api_url = model_info
+                .api_url()
+                .ok_or_else(|| {
+                    anyhow!("OpenCode model `{provider}/{model}` does not expose an API URL")
+                })?
+                .to_string();
+            if opencode_requires_responses_api_shim(provider, &model_id) {
+                Ok(ChatRoute::OpenAiResponses {
+                    model: model_id,
+                    api_key,
+                    base_url: api_url,
+                })
+            } else {
+                Ok(ChatRoute::OpenAi {
+                    model: model_id,
+                    api_key,
+                    base_url: Some(api_url),
+                })
+            }
         }
     }
 }
@@ -233,6 +253,28 @@ async fn execute_chat_route(
                 builder = builder.base_url(base_url);
             }
             let client = builder.build()?.completions_api();
+            let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
+            if let Some(ref params) = reasoning_effort {
+                agent_builder = agent_builder.additional_params(params.clone());
+            }
+            let agent = agent_builder.build();
+            agent
+                .prompt(prompt)
+                .with_history(history)
+                .max_turns(max_turns)
+                .extended_details()
+                .await
+                .map_err(Into::into)
+        }
+        ChatRoute::OpenAiResponses {
+            model,
+            api_key,
+            base_url,
+        } => {
+            let client = openai::Client::builder()
+                .api_key(api_key)
+                .base_url(base_url)
+                .build()?;
             let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
             if let Some(ref params) = reasoning_effort {
                 agent_builder = agent_builder.additional_params(params.clone());
@@ -295,16 +337,18 @@ async fn execute_chat_route(
 
 fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
     let (namespace, model) = config::split_model_spec(spec);
+    let (_, base_model) = split_reasoning_effort_suffix(model);
     if namespace.is_some() {
-        return (namespace, model);
+        return (namespace, base_model);
     }
     if let Some((provider, model)) = spec.split_once('/')
         && !provider.trim().is_empty()
         && !model.trim().is_empty()
     {
-        return (Some(provider), model);
+        let (_, base_model) = split_reasoning_effort_suffix(model);
+        return (Some(provider), base_model);
     }
-    (None, spec)
+    (None, base_model)
 }
 
 fn copilot_requires_responses_api_shim(model: &str) -> bool {
@@ -314,6 +358,13 @@ fn copilot_requires_responses_api_shim(model: &str) -> bool {
     // or expands its own Copilot route rule.
     let model = model.to_ascii_lowercase();
     model.contains("codex") || model.starts_with("gpt-5") || model.starts_with("gemini-3")
+}
+
+fn opencode_requires_responses_api_shim(provider: &str, model: &str) -> bool {
+    // OpenCode's `opencode` GPT-5 family returns Responses API payloads from
+    // `https://opencode.ai/zen/v1`; Rig's chat-completions parser fails with
+    // `untagged enum ApiResponse` for these models.
+    provider == "opencode" && model.to_ascii_lowercase().starts_with("gpt-5")
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +404,16 @@ pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
     let (inline_effort, base_model) = split_reasoning_effort_suffix(model);
     if inline_effort.is_some() {
         return None;
+    }
+
+    // Moonshot/Kimi defaults thinking on for this model. Its OpenAI-compatible
+    // chat endpoint rejects follow-up tool requests unless assistant tool-call
+    // messages echo `reasoning_content`. Rig 0.36 only sends that field when the
+    // prior response contained reasoning text, so explicitly disable thinking by
+    // default for reliable tool use. Users can still force it with
+    // `/thinking high`, `OY_THINKING=high`, or a `-high` model suffix.
+    if is_moonshot_kimi_model(model_spec) {
+        return Some("none".to_string());
     }
 
     // Prefer OpenCode metadata when available.
@@ -449,6 +510,11 @@ pub fn reasoning_efforts_for(model_spec: &str) -> Vec<String> {
     ]
 }
 
+fn is_moonshot_kimi_model(model_spec: &str) -> bool {
+    let lower = model_spec.to_ascii_lowercase();
+    lower.contains("moonshot") || lower.contains("kimi")
+}
+
 /// Query OpenCode for the model's default reasoning effort.
 fn opencode_reasoning_effort(model_name: &str) -> Option<String> {
     let (provider, model) = split_model_spec_for_opencode(model_name);
@@ -490,9 +556,13 @@ fn reasoning_capable_fallback(model: &str) -> Option<&'static str> {
 ///
 /// Returns `None` when no reasoning effort should be applied (model doesn't
 /// support it or the resolved value is "auto"/empty).
-fn reasoning_effort_json(model_spec: &str) -> Option<serde_json::Value> {
+fn reasoning_effort_json(model_spec: &str, responses_api: bool) -> Option<serde_json::Value> {
     let effort = default_reasoning_effort(model_spec)?;
-    Some(serde_json::json!({"reasoning_effort": effort}))
+    if responses_api {
+        Some(serde_json::json!({"reasoning": {"effort": effort}}))
+    } else {
+        Some(serde_json::json!({"reasoning_effort": effort}))
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +589,35 @@ mod tests {
     }
 
     #[test]
+    fn opencode_gpt5_routes_to_responses_api() {
+        assert!(opencode_requires_responses_api_shim(
+            "opencode",
+            "gpt-5.4-mini"
+        ));
+        assert!(!opencode_requires_responses_api_shim(
+            "opencode-go",
+            "mimo-v2.5-pro"
+        ));
+        assert!(!opencode_requires_responses_api_shim(
+            "opencode-go",
+            "kimi-k2.6"
+        ));
+    }
+
+    #[test]
+    fn split_model_spec_strips_reasoning_suffix_for_routing() {
+        assert_eq!(split_model_spec("gpt-5.5-high"), (None, "gpt-5.5"));
+        assert_eq!(
+            split_model_spec("copilot::gpt-5.5-low"),
+            (Some("copilot"), "gpt-5.5")
+        );
+        assert_eq!(
+            split_model_spec("opencode-go/kimi-k2.6-high"),
+            (Some("opencode-go"), "kimi-k2.6")
+        );
+    }
+
+    #[test]
     fn reasoning_defaults_to_high_for_capable_models_and_allows_suffix_override() {
         assert_eq!(default_reasoning_effort("gpt-5.5").as_deref(), Some("high"));
         assert_eq!(
@@ -531,7 +630,24 @@ mod tests {
     }
 
     #[test]
+    fn moonshot_kimi_explicitly_disables_reasoning_by_default() {
+        assert_eq!(
+            default_reasoning_effort("opencode-go/kimi-k2.6").as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            default_reasoning_effort("moonshot/kimi-k2.6").as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            default_reasoning_effort("opencode-go/kimi-k2.6-high").as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
     fn reasoning_env_override_can_disable_or_adjust() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         set_thinking_override(Some("none"));
         assert_eq!(default_reasoning_effort("gpt-5.5").as_deref(), Some("none"));
         set_thinking_override(Some("medium"));
@@ -543,10 +659,18 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_json_uses_flat_param() {
+    fn reasoning_effort_json_uses_route_specific_param_shape() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        let json = reasoning_effort_json("gpt-5.5");
-        assert_eq!(json, Some(serde_json::json!({"reasoning_effort": "high"})));
-        assert_eq!(reasoning_effort_json("gpt-4.1-mini"), None);
+        let chat_json = reasoning_effort_json("gpt-5.5", false);
+        assert_eq!(
+            chat_json,
+            Some(serde_json::json!({"reasoning_effort": "high"}))
+        );
+        let responses_json = reasoning_effort_json("gpt-5.5", true);
+        assert_eq!(
+            responses_json,
+            Some(serde_json::json!({"reasoning": {"effort": "high"}}))
+        );
+        assert_eq!(reasoning_effort_json("gpt-4.1-mini", false), None);
     }
 }

@@ -56,6 +56,12 @@ commit so style/lint noise never reaches CI.
 
 ## Finding something to work on
 
+- **Upstream Rig TODO** — OpenAI-compatible reasoning/tool-call roundtrip:
+  preserve empty `reasoning_content`, add an opt-in compatibility flag to emit
+  `reasoning_content: ""` on assistant tool-call messages when a provider
+  requires it, and cover the behavior with default-off and provider-compat tests.
+  This should let Moonshot/Kimi-like models use thinking with tools without
+  requiring `oy` to disable thinking by default.
 - **`docs/GOOD_FIRST_ISSUES.md`** — limited-scope tasks suitable for new
   contributors.
 - **`ISSUES.md`** — the latest audit findings; each finding lists the affected
