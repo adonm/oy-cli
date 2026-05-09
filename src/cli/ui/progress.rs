@@ -1,6 +1,4 @@
-use kdam::Animation;
 use std::fmt::Display;
-use std::num::NonZeroU16;
 use std::time::Duration;
 
 use super::{cyan, err_line, faint, green, is_quiet, line, red};
@@ -48,12 +46,10 @@ fn progress_line(
 fn progress_bar(current: usize, total: usize, width: u16) -> String {
     let total = total.max(1);
     let current = current.min(total);
-    let percentage = current as f32 / total as f32;
-    Animation::FillUp.fmt_render(
-        NonZeroU16::new(width.max(1)).expect("progress bar width is non-zero"),
-        percentage,
-        &None,
-    )
+    let width = width.max(1) as usize;
+    let filled = (current as f64 / total as f64 * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!("|{}{}|", "█".repeat(filled), " ".repeat(empty))
 }
 
 pub fn tool_start(name: &str, detail: &str) {
@@ -128,10 +124,10 @@ mod tests {
     #[test]
     fn progress_line_shows_bar_count_detail_and_elapsed() {
         set_output_mode(OutputMode::Normal);
-        assert_eq!(progress_bar(2, 4, 8), "|████▂   |");
+        assert_eq!(progress_bar(2, 4, 8), "|████    |");
         assert_eq!(
             progress_line("review", 2, 4, "chunk 3", Duration::from_millis(1250)),
-            "  |█████████▂        | 2/4 review · chunk 3 · 1.2s"
+            "  |█████████         | 2/4 review · chunk 3 · 1.2s"
         );
     }
 
