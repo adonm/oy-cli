@@ -196,7 +196,11 @@ impl OpenCodeModel {
         self.api.npm.as_deref().is_some_and(|api| {
             matches!(
                 api,
-                "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/github-copilot"
+                "@ai-sdk/openai"
+                    | "@ai-sdk/openai-compatible"
+                    | "@ai-sdk/github-copilot"
+                    | "@ai-sdk/google"
+                    | "@ai-sdk/anthropic"
             )
         })
     }
@@ -315,11 +319,11 @@ mod tests {
   "providerID": "github-copilot",
   "api": { "id": "gpt-5.5", "url": "https://api.githubcopilot.com", "npm": "@ai-sdk/github-copilot" }
 }
-anthropic/claude-test
+opencode/claude-test
 {
   "id": "claude-test",
-  "providerID": "anthropic",
-  "api": { "id": "claude-test", "url": "https://api.anthropic.com/v1", "npm": "@ai-sdk/anthropic" }
+  "providerID": "opencode",
+  "api": { "id": "claude-test", "url": "https://opencode.ai/zen/v1", "npm": "@ai-sdk/anthropic" }
 }
 "#;
         let listing = parse_verbose(text).unwrap();
@@ -327,8 +331,11 @@ anthropic/claude-test
         assert_eq!(model.api_id(), "gpt-5.5");
         assert_eq!(model.api_url(), Some("https://api.githubcopilot.com"));
         let groups = listing.into_adapter_models();
-        assert_eq!(groups.len(), 1);
+        // Both models are now OpenAI-compatible (github-copilot + opencode proxying anthropic)
+        assert_eq!(groups.len(), 2);
+        // groups are sorted by adapter name
         assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);
+        assert_eq!(groups[1].models(), &["opencode/claude-test".to_string()]);
     }
 
     #[test]

@@ -100,6 +100,7 @@ const SKIP_FILENAMES: &[&str] = &[
     "id_dsa",
     "id_ecdsa",
     "id_ed25519",
+    "issues.md",
 ];
 const SKIP_FILENAME_SUBSTRINGS: &[&str] = &["credential", "secret", "token"];
 const SKIP_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];

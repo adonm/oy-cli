@@ -92,11 +92,12 @@ pub(super) fn reduce_candidate_findings_budget(
     model_spec: &str,
     focus: &str,
     manifest: &str,
+    existing_issues: Option<&str>,
     max_prompt_tokens: usize,
     min_tokens: usize,
     reserve_tokens: usize,
 ) -> usize {
-    let prompt_without_findings = prompts::audit_reduce_prompt(focus, manifest, "");
+    let prompt_without_findings = prompts::audit_reduce_prompt(focus, manifest, "", existing_issues);
     let overhead_tokens = compaction::count_tokens(model_spec, &prompt_without_findings);
     max_prompt_tokens
         .saturating_sub(overhead_tokens)
@@ -109,12 +110,13 @@ pub(super) fn bounded_reduce_findings(
     focus: &str,
     manifest: &str,
     findings: &str,
+    existing_issues: Option<&str>,
     max_prompt_tokens: usize,
     min_tokens: usize,
     reserve_tokens: usize,
 ) -> String {
     let prompt_tokens = |findings: &str| {
-        let prompt = prompts::audit_reduce_prompt(focus, manifest, findings);
+        let prompt = prompts::audit_reduce_prompt(focus, manifest, findings, existing_issues);
         compaction::count_tokens(model_spec, &prompt)
     };
     if prompt_tokens(findings) <= max_prompt_tokens {
@@ -125,6 +127,7 @@ pub(super) fn bounded_reduce_findings(
         model_spec,
         focus,
         manifest,
+        existing_issues,
         max_prompt_tokens,
         min_tokens,
         reserve_tokens,

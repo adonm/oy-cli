@@ -70,7 +70,13 @@ pub fn audit_chunk_prompt(
     prompt
 }
 
-pub fn audit_full_prompt(focus: &str, manifest: &str, index: &str, repo_text: &str) -> String {
+pub fn audit_full_prompt(
+    focus: &str,
+    manifest: &str,
+    index: &str,
+    repo_text: &str,
+    existing_issues: Option<&str>,
+) -> String {
     let mut prompt = String::new();
     prompt.push_str("Conduct a full repository audit and return the final markdown report.\n");
     push_focus(&mut prompt, focus);
@@ -79,18 +85,25 @@ pub fn audit_full_prompt(focus: &str, manifest: &str, index: &str, repo_text: &s
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nSecurity-relevant index:\n");
     prompt.push_str(index.trim());
+    push_existing_issues(&mut prompt, existing_issues);
     prompt.push_str("\n\nRepository contents:\n");
     prompt.push_str(repo_text.trim());
     prompt
 }
 
-pub fn audit_reduce_prompt(focus: &str, manifest: &str, findings: &str) -> String {
+pub fn audit_reduce_prompt(
+    focus: &str,
+    manifest: &str,
+    findings: &str,
+    existing_issues: Option<&str>,
+) -> String {
     let mut prompt = String::new();
     prompt.push_str("Condense candidate audit findings into the final markdown report.\n");
     push_focus(&mut prompt, focus);
     prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding that survives dedupe, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; preserve the shortest evidence needed to prove exploitability or impact, plus category, trust boundary/sink where security-relevant, reference, and fix.\n4. Drop weak/speculative/duplicate items, but do not omit concrete lower-severity findings from the summary.\n\n");
     prompt.push_str("Repository manifest:\n");
     prompt.push_str(manifest.trim());
+    push_existing_issues(&mut prompt, existing_issues);
     prompt.push_str("\n\nCandidate findings:\n");
     prompt.push_str(findings.trim());
     prompt
@@ -100,6 +113,16 @@ fn push_focus(out: &mut String, focus: &str) {
     let focus = focus.trim();
     if !focus.is_empty() {
         let _ = writeln!(out, "Additional focus: {focus}");
+    }
+}
+
+fn push_existing_issues(out: &mut String, existing_issues: Option<&str>) {
+    if let Some(issues) = existing_issues
+        && !issues.trim().is_empty()
+    {
+        out.push_str("\n\nExisting audit file (ISSUES.md) — use this to prioritise, deduplicate, and carry forward still-relevant findings:\n\n");
+        out.push_str(issues.trim());
+        out.push('\n');
     }
 }
 
@@ -126,19 +149,19 @@ mod tests {
 
     #[test]
     fn audit_prompts_include_focus_when_present() {
-        let prompt = audit_full_prompt("auth paths", "files: 1", "- hit", "src/lib.rs");
+        let prompt = audit_full_prompt("auth paths", "files: 1", "- hit", "src/lib.rs", None);
         assert!(prompt.contains("Additional focus: auth paths"));
         assert!(prompt.contains("# Audit Issues"));
     }
 
     #[test]
     fn final_audit_prompts_request_succinct_summary_and_limited_details() {
-        let full = audit_full_prompt("", "files: 1", "- hit", "src/lib.rs");
+        let full = audit_full_prompt("", "files: 1", "- hit", "src/lib.rs", None);
         assert!(full.contains("## Findings summary"));
         assert!(full.contains("every concrete finding"));
         assert!(full.contains("most severe 10-20"));
 
-        let reduce = audit_reduce_prompt("", "files: 1", "### High\nEvidence: src/lib.rs:1");
+        let reduce = audit_reduce_prompt("", "files: 1", "### High\nEvidence: src/lib.rs:1", None);
         assert!(reduce.contains("## Findings summary"));
         assert!(reduce.contains("do not omit concrete lower-severity findings"));
         assert!(reduce.contains("most severe 10-20"));

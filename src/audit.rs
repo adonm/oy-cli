@@ -1,6 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt as _, stream};
 use std::fmt::Write as _;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -140,10 +141,31 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     let progress = AuditProgress::new(started, file_count, chunk_count);
     progress.prepared();
 
+    let existing_issues_path = options.root.join("ISSUES.md");
+    let existing_issues = if existing_issues_path.exists() {
+        fs::read_to_string(&existing_issues_path)
+            .with_context(|| {
+                format!(
+                    "failed to read existing audit file: {}",
+                    existing_issues_path.display()
+                )
+            })
+            .ok()
+            .filter(|content| !content.trim().is_empty())
+    } else {
+        None
+    };
+
     let system_prompt = prompts::audit_system_prompt();
     let report = if chunks.len() == 1 && chunks[0].tokens <= sizing.small_repo_tokens {
         let repo_text = chunk_text(&chunks[0]);
-        let prompt = prompts::audit_full_prompt(&options.focus, &manifest, &index, &repo_text);
+        let prompt = prompts::audit_full_prompt(
+            &options.focus,
+            &manifest,
+            &index,
+            &repo_text,
+            existing_issues.as_deref(),
+        );
         progress.review_started(None);
         let report =
             session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?;
@@ -185,6 +207,7 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             &model_spec,
             &options.focus,
             &manifest,
+            existing_issues.as_deref(),
             sizing.reduce_prompt_max_tokens,
             sizing.reduce_findings_min_tokens,
             sizing.reduce_findings_token_reserve,
@@ -209,11 +232,17 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             &options.focus,
             &manifest,
             &candidate_findings,
+            existing_issues.as_deref(),
             sizing.reduce_prompt_max_tokens,
             sizing.reduce_findings_min_tokens,
             sizing.reduce_findings_token_reserve,
         );
-        let prompt = prompts::audit_reduce_prompt(&options.focus, &manifest, &candidate_findings);
+        let prompt = prompts::audit_reduce_prompt(
+            &options.focus,
+            &manifest,
+            &candidate_findings,
+            existing_issues.as_deref(),
+        );
         progress.summarise_started();
         let report =
             session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?;
@@ -381,6 +410,8 @@ mod tests {
         assert!(should_skip_path("k8s/secrets.yaml"));
         assert!(should_skip_path("keys/id_ed25519"));
         assert!(should_skip_path("certs/prod.pem"));
+        assert!(should_skip_path("ISSUES.md"));
+        assert!(should_skip_path("issues.md"));
         assert!(!should_skip_path("src/main.rs"));
     }
 
@@ -403,7 +434,7 @@ mod tests {
         }
 
         let bounded =
-            bounded_reduce_findings("gpt-4o", "", manifest, &findings, 2_000, 8_000, 4_000);
+            bounded_reduce_findings("gpt-4o", "", manifest, &findings, None, 2_000, 8_000, 4_000);
         assert!(bounded.contains("### Medium: issue 1"));
         assert!(bounded.contains("### Medium: issue 15"));
         assert!(bounded.contains("### Medium: issue 30"));
@@ -421,8 +452,8 @@ mod tests {
         }
 
         let bounded =
-            bounded_reduce_findings("gpt-4o", "", manifest, &findings, 20_000, 8_000, 4_000);
-        let prompt = prompts::audit_reduce_prompt("", manifest, &bounded);
+            bounded_reduce_findings("gpt-4o", "", manifest, &findings, None, 20_000, 8_000, 4_000);
+        let prompt = prompts::audit_reduce_prompt("", manifest, &bounded, None);
         assert!(compaction::count_tokens("gpt-4o", &prompt) <= 20_000);
         assert!(bounded.contains("truncated"));
     }
