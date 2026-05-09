@@ -1,137 +1,66 @@
 # Audit Issues
 
-> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=opencode-go/deepseek-v4-pro oy audit` · 2026-05-06
->
-> **Status**: 4 of 6 findings fixed in [v0.8.7](https://github.com/wagov-dtt/oy-cli/releases/tag/v0.8.7).
+> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=opencode-go/deepseek-v4-pro oy audit` · 2026-05-09
 
 ## Findings summary
 
-- **High** ~~`src/agent/model.rs::resolve_chat_route` / `src/cli/chat.rs:159` — API key leakage through error reporting~~ ✅ Fixed v0.8.7
-- **High** ~~`src/cli/ui/render.rs::render_markdown`, `paint` — Terminal ANSI escape injection from unsanitised model output~~ ✅ Fixed v0.8.7
-- **Medium** ~~`src/tools/network.rs::is_public_ipv4` — Missing IPv4 special‑purpose address range allows non‑public webfetch~~ ✅ Fixed v0.8.7
-- **Medium** ~~`src/cli/chat/commands.rs:111-114` — Unsafe, non‑thread‑safe process environment mutation~~ ✅ Fixed v0.8.7
-- **Medium** `src/tools/network.rs::is_public_ipv4` – manual IP classification with high audit burden (complexity)
-- **Low**  `src/tools/shell.rs::tool_bash` — Shell commands inherit full environment including secrets
+- **Medium** `src/tools/output.rs::note_tool` / `src/cli/ui/progress.rs::tool_start`, `tool_result` — Terminal ANSI escape injection via unsanitised tool call previews and tool output
+- **Medium** `src/tools/network.rs::is_public_ipv4` — Manual IPv4 classification remains fragile and hard to audit (unresolved from prior audit)
+- **Low**  `src/tools/shell.rs::tool_bash` — Shell commands inherit full environment including secrets (unresolved from prior audit)
 
 ## Detailed findings
 
-### High: API key leakage through error reporting
+### Medium: Terminal ANSI escape injection via unsanitised tool call previews and tool output
 
-- **Category**: V7 Error Handling & Logging  
-- **Evidence**  
-  - `src/agent/model.rs::resolve_chat_route` loads API keys from environment or files and passes them to the Rig client builder.  
-  - `src/agent/model.rs::execute_chat_route` calls `agent.prompt(…)` and propagates errors via `anyhow`.  
-  - `src/cli/chat.rs:159` prints the full error chain with `{…:#}`:  
-    `crate::ui::err_line(format_args!("model call failed: {err:#}"));`  
-    When the HTTP client includes credential headers in error details (e.g. a `reqwest` failure), the API key appears in the terminal.  
-- **Trust boundary / sink**  
-  Authentication secrets (OpenAI, Copilot, OpenCode keys) cross from environment into the provider client. The error path writes them to stderr.  
-- **Impact**  
-  An attacker who can trigger an authentication‑related chat failure (e.g. by choosing an invalid provider/model combination) may see the raw API key in the output. The key may also persist in shell history or log capture.  
-- **Exploitability / preconditions**  
-  The attacker needs the ability to influence the model spec or prompt such that the resulting API call fails. In a multi‑user or shared environment this could expose credentials to other users.  
-- **Reference**  
-  OWASP ASVS V7.3 – “Verify that error handling logic in security controls denies access by default and does not disclose sensitive information.”  
-- **Fix**  
-  Wrap the rig client or the `exec_chat` result in an error type that redacts `Authorization` and other sensitive headers before the error is surfaced. Avoid printing `{:#}` for errors that may contain secrets; use a safe error representation.
-- **Resolution** (v0.8.7)  
-  Replaced `{err:#}` with `{err}` in `src/main.rs`, `src/cli/chat.rs`, and `src/cli/ui/progress.rs`.
+- **Category**: V5 Validation (output encoding) / CWE-150
+- **Evidence**
+  - `src/tools/output.rs::note_tool` builds a summary string from model-supplied tool arguments and passes it to `crate::ui::tool_start`, which writes to stderr via `err_line()` without escape-filtering.
+  - `src/cli/ui/progress.rs::tool_result` and `tool_error` similarly emit preview text and error messages to `err_line()` without sanitisation.
+  - Existing sanitisation (`strip_escapes` in `render_markdown`, `sanitize_terminal` in `paint`) covers only model text response and colour-wrapped text; raw strings passed to `err_line` bypass it.
+  - Attacker-controlled strings appear early in the pipeline: the tool call summary is displayed *before* any approval.
+- **Trust boundary / sink**
+  Model → tool call arguments / tool output → `err_line()` → terminal.
+- **Impact**
+  A malicious model (or a prompt injection) can embed ANSI escape sequences in a tool’s arguments or in the output of a tool (e.g. `bash` stdout/stderr). These are printed to the user’s terminal without filtering, allowing screen-clearing, cursor manipulation, or terminal-specific command injection (OSC 52 clipboard write, etc.). The user could be deceived into approving dangerous actions or lose visibility of true agent activity.
+- **Exploitability / preconditions**
+  The model needs to invoke any tool that accepts text arguments (e.g. `bash`, `search`, `replace`) or produce output that contains escape sequences. No user approval is required for the tool-start message; the injection is executed as soon as the tool call is processed. The attack works even in modes where the tool itself is denied, because the summary is printed before the policy check.
+- **Reference**
+  OWASP ASVS V5.3.4 – “Verify that output encoding is applied to prevent … terminal injection attacks.” CWE-150.
+- **Fix**
+  Sanitise all untrusted strings immediately before they enter the terminal. Apply the existing `sanitize_terminal` function (strip `\x1b`) to every piece of user/model-controlled data that is interpolated into a string passed to `err_line` or `line`. This includes tool argument summaries, tool output previews, and tool error messages. A systematic approach is to add a sanitisation step inside `note_tool`, `tool_start`, `tool_result`, and `tool_error` (e.g. call `sanitize_terminal` on the summary/preview before the final `format!`).
 
 ---
 
-### High: Terminal ANSI escape injection from unsanitised model output
+### Medium: Manual IPv4 classification remains fragile and hard to audit (unresolved)
 
-- **Category**: V5 Validation (output encoding)  
-- **Evidence**  
-  - `src/cli/ui/render.rs::render_markdown` processes model‑generated text line‑by‑line and adds ANSI colour codes via the `paint` helper.  
-  - The raw model text is never scanned or escaped for existing control sequences.  
-  - `src/cli/ui.rs::paint` wraps text with `\x1b[code m … \x1b[0m`, but if the input already contains `\x1b` sequences those will be passed through.  
-- **Trust boundary / sink**  
-  Model output (untrusted) is written directly to the terminal. A prompt‑injection attack or a malicious model response can embed ANSI escape sequences that reposition the cursor, clear the screen, or trigger terminal‑specific command execution (e.g. OSC 52 clipboard injection).  
-- **Impact**  
-  Terminal manipulation can hide subsequent output, trick the user into approving dangerous actions, or, on vulnerable terminals, achieve arbitrary command execution.  
-- **Exploitability / preconditions**  
-  Any session where the model generates output. An attacker only needs to inject specially crafted text into a prompt or to poison the model’s training data.  
-- **Reference**  
-  CWE-150 (Improper Neutralization of Escape, Meta, or Control Sequences). OWASP ASVS V5.3.4 – “Verify that output encoding is applied to prevent … terminal injection attacks.”  
-- **Fix**  
-  Strip or escape the `\x1b` (ESC) character from every line of model output before adding colour codes. Use a library that sanitises terminal output, or simply replace `\x1b` with a visible placeholder.
-- **Resolution** (v0.8.7)  
-  Added `strip_escapes()` in `render_markdown` and a defense-in-depth check in `paint()` — both replace `\x1b` with `␛` before any terminal output.
+- **Category**: Implementation quality / security maintainability
+- **Evidence**
+  - `src/tools/network.rs::is_public_ipv4` still uses a custom combination of standard library methods and manual octet comparisons to decide whether an address is public.
+  - While the specific `192.0.0.0/24` omission was fixed (v0.8.7), the function remains a hand-rolled list that must be revised whenever the IANA registry changes.
+  - Auditors and maintainers must manually verify the complete block set.
+- **Impact**
+  Future oversight when adding or removing reserved ranges could reintroduce an SSRF bypass (public-only webfetch restriction).
+- **Exploitability / preconditions**
+  Requires a new special-purpose range to be assigned that is not caught by the current code (currently low probability, but the risk grows over time).
+- **Reference**
+  OWASP ASVS V5.2.6; grugbrain “local reasoning” deficit.
+- **Fix**
+  Replace the manual classification with an authoritative, maintained IP classification library (e.g. `ipnet` + the official IANA registry, or a crate that provides `is_global` semantics). This removes the need for future manual updates.
 
 ---
 
-### Medium: Missing IPv4 special‑purpose address range in webfetch public‑IP filter
+### Low: Shell commands inherit full process environment exposing secrets (unresolved)
 
-- **Category**: V5 Validation (SSRF / network boundary)  
-- **Evidence**  
-  - `src/tools/network.rs::is_public_ipv4` performs manual range checks but does not cover `192.0.0.0/24` (IETF Protocol Assignments).  
-  - Other special‑purpose blocks (e.g. `0.0.0.0/8`, `100.64.0.0/10`, `198.18.0.0/15`) are handled, but the function relies on a custom list rather than an exhaustive source.  
-  - `tool_webfetch` calls `public_socket_addrs`, which calls `is_public_ip` on each resolved address. An address in `192.0.0.0/24` would be classified as public, bypassing the restriction.  
-- **Trust boundary / sink**  
-  Network boundary: the model is allowed to fetch only from **public** IPs. A non‑public address in the `192.0.0.0/24` block can be used to reach internal services (e.g. DNS‑SD proxies).  
-- **Impact**  
-  An attacker‑controlled URL that resolves to `192.0.0.1` (or similar) could cause the agent to interact with local network services, potentially exfiltrating data or triggering side‑effects.  
-- **Exploitability / preconditions**  
-  The model must be persuaded to fetch a URL with a hostname or IP in the missing range. Likelihood is low but not zero, especially on networks where such addresses are reachable.  
-- **Reference**  
-  OWASP ASVS V5.2.6 – “Verify that the application protects against Server‑Side Request Forgery (SSRF) attacks by validating all internal or remote requests.”  
-- **Fix**  
-  Replace the manual IPv4 classification with a well‑tested library (e.g. `ipnet`) that supports the full IANA special‑purpose address registry. At minimum, add the `192.0.0.0/24` block and any other missing reserved ranges (e.g. `240.0.0.0/4` is already covered, but verify).
-- **Resolution** (v0.8.7)  
-  Added `192.0.0.0/24` (IETF Protocol Assignments) to the `is_public_ipv4` blocklist. The manual classification remains for now but the missing range is covered.
-
----
-
-### Medium: Unsafe, non‑thread‑safe process environment mutation in `/thinking` command
-
-- **Category**: V14 Configuration (unsafe defaults) / Code Correctness  
-- **Evidence**  
-  - `src/cli/chat/commands.rs:111-114` uses `unsafe { std::env::set_var("OY_THINKING", …) }` and `remove_var` inside an `async` context.  
-  - Rust’s environment functions are not thread‑safe; concurrent access (e.g. Tokio tasks) can cause data races and undefined behaviour.  
-- **Trust boundary / sink**  
-  No direct security boundary, but the environment is process‑global; improper synchronisation can corrupt the environment used by other parts of the system (e.g. spawned subprocesses).  
-- **Impact**  
-  Subtle bugs, environment inconsistencies, or even crashes when multiple tasks race on the same environment variable. While currently low risk in a single‑user CLI, it introduces undefined behaviour that is hard to diagnose.  
-- **Exploitability / preconditions**  
-  Requires calling `/thinking` while other parts of the application (or Tokio runtime tasks) read `OY_THINKING`.  
-- **Reference**  
-  Rust `std::env::set_var` safety documentation.  
-- **Fix**  
-  Replace direct environment manipulation with a synchronised configuration store (e.g. `OnceCell`/`LazyLock`/`RwLock<HashMap>`). Read the setting from that store in the model routing code instead of depending on the environment after initialisation.
-- **Resolution** (v0.8.7)  
-  Replaced `unsafe { std::env::set_var/remove_var }` in `commands.rs` with `model::set_thinking_override()`, backed by a `LazyLock<RwLock<Option<String>>>`. Updated `configured_reasoning_effort()` and `reasoning_effort_option()` to check the override before environment variables.
-
----
-
-### Medium (Complexity): Manual IPv4 range classification in webfetch is fragile and hard to audit
-
-- **Category**: Implementation quality (grugbrain: `local reasoning` deficit)  
-- **Evidence**  
-  `src/tools/network.rs::is_public_ipv4` contains ~20 raw octet comparisons that re‑implement public‑/private‑address classification. The logic duplicates what standard library functions (`ip.is_private()`, `ip.is_loopback()`, etc.) provide, but omits some blocks and requires careful line‑by‑line review to ensure completeness.  
-- **Impact**  
-  Increased chance of missing reserved ranges (as noted in the finding above). Future maintainers are likely to introduce regressions.  
-- **Reference**  
-  grugbrain: “complexity very bad”, “local reasoning”.  
-- **Fix**  
-  Delegate IP classification to a dedicated, tested library (`ipnet`, `cidr-utils`). Remove the custom `is_public_ipv4` and rely on a single source of truth.
-
----
-
-### Low: Shell commands inherit full process environment, exposing secrets
-
-- **Category**: V2 Authentication / V8 Data Protection (operational risk)  
-- **Evidence**  
-  `src/tools/shell.rs::tool_bash` spawns `bash -c` with `Stdio::null()` for stdin but **does not sanitise the environment**; it inherits the parent process’s entire environment, including `OPENAI_API_KEY`, `COPILOT_GITHUB_TOKEN`, etc.  
-- **Trust boundary / sink**  
-  The model can request arbitrary shell commands. If the model is compromised or the user instructs it to run a command that logs environment variables (e.g. `env`), secrets will be exposed.  
-- **Impact**  
-  Accidental credential leakage to the terminal or to files written by the shell.  
-- **Exploitability / preconditions**  
-  Requires `bash` tool to be enabled (non‑plan mode) and a prompt that causes the model to expose the environment.  
-- **Reference**  
-  OWASP ASVS V8.1.1 – “Verify that the application protects sensitive data from being … inadvertently exposed during processing.”  
-- **Fix**  
-  For the `bash` tool, provide a configuration option to clear or filter environment variables before execution. Set a safe default that removes known credential variables, and document the behaviour.
-
----
+- **Category**: V8 Data Protection / Configuration
+- **Evidence**
+  - `src/tools/shell.rs::tool_bash` spawns `bash -c` with `Stdio::null()` for stdin but does not filter the subprocess environment; it inherits the parent environment, including `OPENAI_API_KEY`, `COPILOT_GITHUB_TOKEN`, etc.
+- **Trust boundary / sink**
+  The model can request arbitrary shell commands. A crafted command (e.g. `env`) will dump all environment variables to stdout/stderr, exposing secrets to the transcript and terminal.
+- **Impact**
+  Accidental credential leakage to the terminal, log files, or saved sessions.
+- **Exploitability / preconditions**
+  The `bash` tool must be enabled (non‑plan mode). The model could be tricked into running `env` or the user may not notice the exposure.
+- **Reference**
+  OWASP ASVS V8.1.1 – “Verify that the application protects sensitive data from being … inadvertently exposed during processing.”
+- **Fix**
+  Provide a configuration option (or environment variable) to clear or selectively filter environment variables before shell execution. Set a safe default that removes known credential variables. Document the risk explicitly.
