@@ -18,7 +18,10 @@ mod sarif;
 
 use input::{build_manifest, build_security_index, chunk_files, chunk_text, collect_files};
 use progress::AuditProgress;
-use reduce::{bounded_reduce_findings, compact_to_tokens, reduce_candidate_findings_budget};
+use reduce::{
+    ReducePromptLimits, bounded_reduce_findings, compact_to_tokens,
+    reduce_candidate_findings_budget,
+};
 pub(crate) use report::default_output_path;
 use report::{transparency_snippet, with_succinct_findings_summary, with_transparency_line};
 use sarif::render_sarif;
@@ -233,9 +236,11 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
             &manifest,
             &candidate_findings,
             existing_issues.as_deref(),
-            sizing.reduce_prompt_max_tokens,
-            sizing.reduce_findings_min_tokens,
-            sizing.reduce_findings_token_reserve,
+            ReducePromptLimits {
+                max_prompt_tokens: sizing.reduce_prompt_max_tokens,
+                min_tokens: sizing.reduce_findings_min_tokens,
+                reserve_tokens: sizing.reduce_findings_token_reserve,
+            },
         );
         let prompt = prompts::audit_reduce_prompt(
             &options.focus,
@@ -270,7 +275,7 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
 mod tests {
     use super::*;
     use crate::audit::input::{AuditFile, chunk_files, should_skip_path};
-    use crate::audit::reduce::{bounded_reduce_findings, compact_to_tokens};
+    use crate::audit::reduce::{ReducePromptLimits, bounded_reduce_findings, compact_to_tokens};
     use crate::compaction;
 
     #[test]
@@ -433,8 +438,18 @@ mod tests {
             findings.push_str(&"- Detail: repeated context.\n".repeat(100));
         }
 
-        let bounded =
-            bounded_reduce_findings("gpt-4o", "", manifest, &findings, None, 2_000, 8_000, 4_000);
+        let bounded = bounded_reduce_findings(
+            "gpt-4o",
+            "",
+            manifest,
+            &findings,
+            None,
+            ReducePromptLimits {
+                max_prompt_tokens: 2_000,
+                min_tokens: 8_000,
+                reserve_tokens: 4_000,
+            },
+        );
         assert!(bounded.contains("### Medium: issue 1"));
         assert!(bounded.contains("### Medium: issue 15"));
         assert!(bounded.contains("### Medium: issue 30"));
@@ -452,7 +467,16 @@ mod tests {
         }
 
         let bounded = bounded_reduce_findings(
-            "gpt-4o", "", manifest, &findings, None, 20_000, 8_000, 4_000,
+            "gpt-4o",
+            "",
+            manifest,
+            &findings,
+            None,
+            ReducePromptLimits {
+                max_prompt_tokens: 20_000,
+                min_tokens: 8_000,
+                reserve_tokens: 4_000,
+            },
         );
         let prompt = prompts::audit_reduce_prompt("", manifest, &bounded, None);
         assert!(compaction::count_tokens("gpt-4o", &prompt) <= 20_000);

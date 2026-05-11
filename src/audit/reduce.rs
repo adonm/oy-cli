@@ -106,21 +106,26 @@ pub(super) fn reduce_candidate_findings_budget(
         .max(min_tokens)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReducePromptLimits {
+    pub(super) max_prompt_tokens: usize,
+    pub(super) min_tokens: usize,
+    pub(super) reserve_tokens: usize,
+}
+
 pub(super) fn bounded_reduce_findings(
     model_spec: &str,
     focus: &str,
     manifest: &str,
     findings: &str,
     existing_issues: Option<&str>,
-    max_prompt_tokens: usize,
-    min_tokens: usize,
-    reserve_tokens: usize,
+    limits: ReducePromptLimits,
 ) -> String {
     let prompt_tokens = |findings: &str| {
         let prompt = prompts::audit_reduce_prompt(focus, manifest, findings, existing_issues);
         compaction::count_tokens(model_spec, &prompt)
     };
-    if prompt_tokens(findings) <= max_prompt_tokens {
+    if prompt_tokens(findings) <= limits.max_prompt_tokens {
         return findings.to_string();
     }
 
@@ -129,15 +134,15 @@ pub(super) fn bounded_reduce_findings(
         focus,
         manifest,
         existing_issues,
-        max_prompt_tokens,
-        min_tokens,
-        reserve_tokens,
+        limits.max_prompt_tokens,
+        limits.min_tokens,
+        limits.reserve_tokens,
     );
     let mut current_budget = findings_budget;
     let mut bounded = compact_owned_to_tokens(model_spec, findings, current_budget);
 
-    while prompt_tokens(&bounded) > max_prompt_tokens && current_budget > min_tokens {
-        current_budget = (current_budget.saturating_mul(3) / 4).max(min_tokens);
+    while prompt_tokens(&bounded) > limits.max_prompt_tokens && current_budget > limits.min_tokens {
+        current_budget = (current_budget.saturating_mul(3) / 4).max(limits.min_tokens);
         bounded = compact_owned_to_tokens(model_spec, findings, current_budget);
     }
 
