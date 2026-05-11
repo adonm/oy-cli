@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
+use diffy::patch_set::{FileOperation, FilePatch, ParseOptions, PatchSet};
+use diffy::{apply, create_patch};
 use glob::glob;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use grep_regex::RegexMatcher;
@@ -8,8 +10,7 @@ use ignore::WalkBuilder;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
-use similar::{ChangeTag, TextDiff};
-use std::fmt::Write as _;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use tokei::{Config as TokeiConfig, Languages as TokeiLanguages, Sort as TokeiSort};
@@ -17,7 +18,8 @@ use tokei::{Config as TokeiConfig, Languages as TokeiLanguages, Sort as TokeiSor
 use crate::config;
 
 use super::args::{
-    ExcludeArg, ListArgs, ReadArgs, ReplaceArgs, ReplaceMode, SearchArgs, SearchMode, SlocArgs,
+    ExcludeArg, ListArgs, PatchArgs, ReadArgs, ReplaceArgs, ReplaceMode, SearchArgs, SearchMode,
+    SlocArgs,
 };
 use super::{Approval, PREVIEW_ITEMS, ToolContext, require_mutation_approval};
 
@@ -97,6 +99,28 @@ pub(super) struct ReplaceOutput {
     pub exclude: Option<Vec<String>>,
     pub skipped: Vec<SkippedFileOutput>,
     pub errors: Vec<ToolErrorItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct PatchChangedFileOutput {
+    pub path: String,
+    pub diff: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct PatchOutput {
+    pub patch_count: usize,
+    pub changed_file_count: usize,
+    pub changed_files: Vec<PatchChangedFileOutput>,
+    pub diff: String,
+    pub truncated: bool,
+}
+
+struct PatchPlan {
+    path: PathBuf,
+    display_path: String,
+    updated: String,
+    diff: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,6 +367,38 @@ pub(super) fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value
         exclude: args.exclude.as_ref().map(ExcludeArg::patterns),
         skipped,
         errors,
+    })?)
+}
+
+pub(super) fn tool_patch(ctx: &ToolContext, args: PatchArgs) -> Result<Value> {
+    let (patch_count, plans) = plan_patch(ctx, &args)?;
+    let approval_preview = if ctx.policy.approval("patch") == Approval::Ask && ctx.interactive {
+        Some(combined_patch_diff(&plans))
+    } else {
+        None
+    };
+    require_mutation_approval(ctx, "patch", approval_preview.as_deref())?;
+
+    for plan in &plans {
+        config::write_workspace_file(&plan.path, plan.updated.as_bytes())?;
+    }
+
+    let shown = args.limit.max(1);
+    let changed_file_count = plans.len();
+    let diff = combined_patch_diff(&plans);
+    Ok(serde_json::to_value(PatchOutput {
+        patch_count,
+        changed_file_count,
+        changed_files: plans
+            .into_iter()
+            .take(shown)
+            .map(|plan| PatchChangedFileOutput {
+                path: plan.display_path,
+                diff: plan.diff,
+            })
+            .collect(),
+        diff,
+        truncated: changed_file_count > shown,
     })?)
 }
 
@@ -609,6 +665,114 @@ pub(super) fn search_file(
     Ok(search_file_limited(root, path, matcher, column_regex, usize::MAX)?.matches)
 }
 
+fn parse_patch_set(text: &str) -> Result<Vec<FilePatch<'_, str>>> {
+    let git =
+        PatchSet::parse(text, ParseOptions::gitdiff()).collect::<std::result::Result<Vec<_>, _>>();
+    match git {
+        Ok(patches) if !patches.is_empty() => Ok(patches),
+        _ => PatchSet::parse(text, ParseOptions::unidiff())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("invalid patch"),
+    }
+}
+
+fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPlan>)> {
+    let patches = parse_patch_set(args.patch.as_str())?;
+    if patches.is_empty() {
+        bail!("patch did not contain any file changes");
+    }
+
+    let patch_count = patches.len();
+    let mut seen = BTreeSet::new();
+    let mut plans = Vec::new();
+    for file_patch in patches {
+        let operation = file_patch.operation().strip_prefix(args.strip);
+        let patch_path = patch_path_from_operation(&operation)?;
+        let text_patch = file_patch
+            .patch()
+            .as_text()
+            .ok_or_else(|| anyhow!("binary patches are not supported: {patch_path}"))?;
+        let path = resolve_existing_path(ctx, &patch_path)?;
+        if path.is_dir() {
+            bail!("cannot patch directory: {patch_path}");
+        }
+        if ctx.root.join(&patch_path).is_symlink() || path.is_symlink() {
+            bail!("cannot patch symlink: {patch_path}");
+        }
+        if fs::metadata(&path)?.len() > MAX_WORKSPACE_FILE_BYTES {
+            bail!("cannot patch file over workspace read cap: {patch_path}");
+        }
+
+        let raw = fs::read(&path)?;
+        let text = match crate::decode_utf8(raw) {
+            Ok(text) => text,
+            Err(crate::TextDecodeError::Binary) => bail!("cannot patch binary file: {patch_path}"),
+            Err(crate::TextDecodeError::NonUtf8) => bail!("cannot decode utf-8: {patch_path}"),
+        };
+        let updated = apply(&text, text_patch)
+            .with_context(|| format!("failed applying patch for {patch_path}"))?;
+        if updated == text {
+            continue;
+        }
+
+        let display_path = rel_path(&ctx.root, &path);
+        if !seen.insert(display_path.clone()) {
+            bail!("patch contains multiple changes for the same file: {display_path}");
+        }
+        let diff = unified_diff(&display_path, &text, &updated);
+        plans.push(PatchPlan {
+            path,
+            display_path,
+            updated,
+            diff,
+        });
+    }
+    Ok((patch_count, plans))
+}
+
+fn patch_path_from_operation(operation: &FileOperation<'_, str>) -> Result<String> {
+    match operation {
+        FileOperation::Modify { original, modified } if original == modified => {
+            let path = original.as_ref();
+            if path.trim().is_empty() {
+                bail!("patch path is empty");
+            }
+            Ok(path.to_string())
+        }
+        FileOperation::Modify { original, modified } => bail!(
+            "rename-style modify patches are not supported: {} -> {}",
+            original.as_ref(),
+            modified.as_ref()
+        ),
+        FileOperation::Create(path) => {
+            bail!("file creation patches are not supported: {}", path.as_ref())
+        }
+        FileOperation::Delete(path) => {
+            bail!("file deletion patches are not supported: {}", path.as_ref())
+        }
+        FileOperation::Rename { from, to } => bail!(
+            "file rename patches are not supported: {} -> {}",
+            from.as_ref(),
+            to.as_ref()
+        ),
+        FileOperation::Copy { from, to } => bail!(
+            "file copy patches are not supported: {} -> {}",
+            from.as_ref(),
+            to.as_ref()
+        ),
+    }
+}
+
+fn combined_patch_diff(files: &[PatchPlan]) -> String {
+    let text = files
+        .iter()
+        .map(|item| item.diff.as_str())
+        .filter(|diff| !diff.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::ui::head_tail(&text, 12000).0
+}
+
 enum ReplaceOutcome {
     Changed { count: usize, diff: String },
     Unchanged,
@@ -641,23 +805,12 @@ fn replace_file(path: &Path, regex: &Regex, replacement: &str) -> Result<Replace
 }
 
 fn unified_diff(path: &str, old: &str, new: &str) -> String {
-    let diff = TextDiff::from_lines(old, new);
-    let mut out = String::new();
-    let _ = writeln!(out, "--- {path}");
-    let _ = writeln!(out, "+++ {path}");
-    for group in diff.grouped_ops(3) {
-        for op in group {
-            for change in diff.iter_changes(&op) {
-                let sign = match change.tag() {
-                    ChangeTag::Delete => '-',
-                    ChangeTag::Insert => '+',
-                    ChangeTag::Equal => ' ',
-                };
-                let _ = write!(out, "{sign}{change}");
-            }
-        }
-    }
-    crate::ui::head_tail(&out, 12000).0
+    let diff = create_patch(old, new).to_string();
+    let diff = diff
+        .strip_prefix("--- original\n+++ modified\n")
+        .map(|body| format!("--- {path}\n+++ {path}\n{body}"))
+        .unwrap_or(diff);
+    crate::ui::head_tail(&diff, 12000).0
 }
 
 fn combined_diff(files: &[ChangedFileOutput]) -> String {

@@ -238,6 +238,20 @@ pub(super) fn schema_replace() -> Value {
         .build()
 }
 
+pub(super) fn schema_patch() -> Value {
+    Schema::object()
+        .property(
+            "patch",
+            Schema::string().describe(
+                "Unified or git diff to apply. Existing UTF-8 files only; create/delete/rename/copy/binary patches are rejected.",
+            ),
+        )
+        .property("strip", Schema::integer().default(1).describe("Path components to strip, like patch -p. Git diffs usually use 1."))
+        .property("limit", Schema::integer().default(DEFAULT_LIMIT))
+        .required(&["patch"])
+        .build()
+}
+
 pub(super) fn schema_bash() -> Value {
     Schema::object()
         .property("command", Schema::string())

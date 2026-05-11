@@ -1,6 +1,6 @@
 use super::args::{
-    BashArgs, HeaderPolicy, ListArgs, ReadArgs, RedirectPolicy, ReplaceArgs, ReplaceMode,
-    SearchArgs, SearchMode, SlocArgs, TodoArgs, TodoItemInput, WebfetchArgs,
+    BashArgs, HeaderPolicy, ListArgs, PatchArgs, ReadArgs, RedirectPolicy, ReplaceArgs,
+    ReplaceMode, SearchArgs, SearchMode, SlocArgs, TodoArgs, TodoItemInput, WebfetchArgs,
 };
 use super::network::{is_public_ip, tool_webfetch, validated_webfetch_headers};
 use super::todo::tool_todo;
@@ -169,10 +169,37 @@ fn schemas_document_lenient_numbers_and_match_modes() {
         json!(["regex", "literal"])
     );
 
+    let patch = schema_for("patch");
+    assert_eq!(patch["properties"]["strip"]["default"], json!(1));
+    assert_eq!(
+        patch["properties"]["limit"]["type"],
+        json!(["integer", "string"])
+    );
+
     let bash = schema_for("bash");
     assert_eq!(
         bash["properties"]["timeout_seconds"]["type"],
         json!(["integer", "string"])
+    );
+}
+
+#[test]
+fn non_interactive_default_denies_patch() {
+    let (dir, ctx) = test_context(ToolPolicy::with_write(Approval::Ask, Approval::Ask), false);
+    fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    let err = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n".into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("requires interactive approval"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "one\n"
     );
 }
 
@@ -313,6 +340,77 @@ fn file_tools_deny_out_of_workspace_paths_in_all_modes() {
 }
 
 #[test]
+fn auto_policy_allows_patch() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    fs::write(dir.path().join("b.txt"), "alpha\n").unwrap();
+    let value = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-alpha\n+beta\n".into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(value["patch_count"], 2);
+    assert_eq!(value["changed_file_count"], 2);
+    assert!(value["diff"].as_str().unwrap().contains("--- a.txt"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "two\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+        "beta\n"
+    );
+}
+
+#[test]
+fn patch_rejects_create_and_leaves_workspace_unchanged() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    let err = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\ndiff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n".into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("file creation patches are not supported")
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(!dir.path().join("new.txt").exists());
+}
+
+#[test]
+fn patch_rejects_parent_directory_paths() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    let err = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "--- a/../a.txt\n+++ b/../a.txt\n@@ -1 +1 @@\n-one\n+two\n".into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("path outside workspace"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+}
+
+#[test]
 fn auto_policy_allows_replace() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::write(dir.path().join("a.txt"), "one").unwrap();
@@ -345,7 +443,7 @@ fn read_only_exposes_research_tools_but_not_mutation_tools() {
             "missing {expected}"
         );
     }
-    for denied in ["replace", "bash"] {
+    for denied in ["replace", "patch", "bash"] {
         assert!(
             !names.iter().any(|name| name.as_str() == denied),
             "exposed {denied}"

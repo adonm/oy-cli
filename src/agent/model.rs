@@ -698,7 +698,10 @@ mod tests {
         let prompt = "Say hello in exactly one word.";
         match crate::session::run_prompt_once_no_tools(model, system, prompt).await {
             Ok(result) => {
-                assert!(!result.trim().is_empty(), "{label} response should not be empty");
+                assert!(
+                    !result.trim().is_empty(),
+                    "{label} response should not be empty"
+                );
                 eprintln!("{label} response: {result}");
             }
             Err(err) if is_auth_error(&err) => {
@@ -827,7 +830,10 @@ mod tests {
         // Live smoke test: the API call with a tool definition must succeed.
         // Some small models may reply directly instead of invoking the tool;
         // either outcome proves the tool plumbing works.
-        assert!(!output.is_empty(), "{label}: tool response should not be empty");
+        assert!(
+            !output.is_empty(),
+            "{label}: tool response should not be empty"
+        );
     }
 
     #[tokio::test]

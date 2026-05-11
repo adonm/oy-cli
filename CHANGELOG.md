@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.0] - 2026-05-11
+
+### Added
+- Added a `patch` workspace tool for applying unified/git diffs to existing UTF-8 files, with file-write policy gating, approval previews, output summaries, and focused coverage for rejected unsafe patch shapes.
+
+### Changed
+- Switched workspace diff generation from `similar` to `diffy` so tool previews emit applyable unified diffs.
+- Retried transient Rig `ApiResponse` parse failures through the normal LLM backoff path.
+
 ## [0.8.10] - 2026-05-08
 
 ### Added

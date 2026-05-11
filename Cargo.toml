@@ -1,6 +1,6 @@
 [package]
 name = "oy-cli"
-version = "0.8.10"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.91.1"
 description = "Local AI coding CLI for inspecting, editing, running commands, and auditing repositories"
@@ -42,7 +42,7 @@ html2md = "0.2"
 ignore = "0.4"
 reedline-repl-rs = { version = "1.3", features = ["async", "shlex"] }
 dialoguer = { version = "0.12", default-features = false }
-similar = "3.1"
+diffy = "0.5"
 strip-ansi-escapes = "0.2"
 terminal_size = "0.4"
 unicode-width = "0.2"

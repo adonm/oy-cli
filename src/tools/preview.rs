@@ -44,6 +44,10 @@ pub(super) fn summary_replace(args: &Value) -> String {
     )
 }
 
+pub(super) fn summary_patch(args: &Value) -> String {
+    compact_kvs(args, &[("strip", 8), ("limit", 12), ("patch", 100)])
+}
+
 pub(super) fn summary_sloc(args: &Value) -> String {
     compact_kvs(args, &[("path", 70), ("exclude", 40)])
 }
@@ -374,6 +378,54 @@ pub(super) fn preview_replace(value: &Value) -> String {
         out.trim_start().to_string()
     })
 }
+pub(super) fn preview_patch(value: &Value) -> String {
+    let changed = value
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let total_files = value_usize(value, "changed_file_count");
+    let files = total_files.max(changed.len());
+    let patches = value_usize(value, "patch_count");
+    let summary = format!(
+        "{} patch{} applied · {} file{} changed · returned={} · truncated={}",
+        patches,
+        plural(patches),
+        files,
+        plural(files),
+        changed.len(),
+        truncation_flag(value)
+    );
+    with_verbose(summary, || {
+        let mut out = String::new();
+        if changed.is_empty() {
+            out.push_str("  <no changes>");
+        } else {
+            for item in changed.iter().take(PREVIEW_ITEMS) {
+                let _ = write!(out, "\n  {}", value_str(item, "path"));
+            }
+            if value_bool(value, "truncated") || files > changed.len() {
+                let _ = write!(
+                    out,
+                    "\n  … {} more files",
+                    files.saturating_sub(changed.len())
+                );
+            }
+        }
+        if let Some(diff) = value
+            .get("diff")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&crate::ui::diff(diff));
+        }
+        out.trim_start().to_string()
+    })
+}
+
 pub(super) fn preview_bash(value: &Value) -> String {
     let code = value
         .get("returncode")

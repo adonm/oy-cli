@@ -103,6 +103,7 @@ async fn invoke_inner(ctx: &mut ToolContext, name: &str, args: Value) -> Result<
         "read" => parse_tool_args(args).and_then(|args| workspace::tool_read(ctx, args)),
         "search" => parse_tool_args(args).and_then(|args| workspace::tool_search(ctx, args)),
         "replace" => parse_tool_args(args).and_then(|args| workspace::tool_replace(ctx, args)),
+        "patch" => parse_tool_args(args).and_then(|args| workspace::tool_patch(ctx, args)),
         "sloc" => parse_tool_args(args).and_then(|args| workspace::tool_sloc(ctx, args)),
         "bash" => match parse_tool_args(args) {
             Ok(args) => tool_bash(ctx, args).await,

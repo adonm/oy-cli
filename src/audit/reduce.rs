@@ -97,7 +97,8 @@ pub(super) fn reduce_candidate_findings_budget(
     min_tokens: usize,
     reserve_tokens: usize,
 ) -> usize {
-    let prompt_without_findings = prompts::audit_reduce_prompt(focus, manifest, "", existing_issues);
+    let prompt_without_findings =
+        prompts::audit_reduce_prompt(focus, manifest, "", existing_issues);
     let overhead_tokens = compaction::count_tokens(model_spec, &prompt_without_findings);
     max_prompt_tokens
         .saturating_sub(overhead_tokens)

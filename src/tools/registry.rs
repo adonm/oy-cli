@@ -99,6 +99,13 @@ const TOOL_DEFS: &[ToolDef] = &[
         output: preview::preview_replace,
     },
     ToolDef {
+        name: "patch",
+        gate: ToolGate::FilesWrite,
+        schema: super::schema::schema_patch,
+        summary: preview::summary_patch,
+        output: preview::preview_patch,
+    },
+    ToolDef {
         name: "bash",
         gate: ToolGate::Shell,
         schema: super::schema::schema_bash,

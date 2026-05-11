@@ -25,6 +25,11 @@ const STATUS_RETRY_PATTERNS: &[&str] = &[
     "request timeout",
     "dns error",
     "network error",
+    // Rig parses successful OpenAI-compatible responses through an untagged
+    // ApiResponse enum. Some proxies occasionally return a transient 2xx body
+    // that is neither a chat completion nor Rig's top-level error shape; retry
+    // those through the normal LLM backoff instead of failing immediately.
+    "data did not match any variant of untagged enum ApiResponse",
 ];
 
 /// Returns `true` when the error chain contains a transient failure worth
@@ -64,5 +69,14 @@ mod tests {
         assert_eq!(delays[1], Duration::from_secs(2));
         assert_eq!(delays[2], Duration::from_secs(4));
         assert_eq!(delays[6], Duration::from_secs(60));
+    }
+
+    #[test]
+    fn rig_api_response_parse_failures_are_retried() {
+        let err = anyhow::anyhow!(
+            "CompletionError: JsonError: data did not match any variant of untagged enum ApiResponse"
+        );
+
+        assert!(is_transient_error(&err));
     }
 }

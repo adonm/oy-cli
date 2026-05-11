@@ -61,6 +61,10 @@ fn default_replace_mode() -> ReplaceMode {
     ReplaceMode::Regex
 }
 
+fn default_patch_strip() -> usize {
+    1
+}
+
 fn deserialize_usize<'de, D>(deserializer: D) -> std::result::Result<usize, D::Error>
 where
     D: Deserializer<'de>,
@@ -151,6 +155,19 @@ pub(super) struct ReplaceArgs {
     pub(super) limit: usize,
     #[serde(default = "default_replace_mode")]
     pub(super) mode: ReplaceMode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct PatchArgs {
+    #[serde(alias = "diff")]
+    pub(super) patch: String,
+    #[serde(
+        default = "default_patch_strip",
+        deserialize_with = "deserialize_usize"
+    )]
+    pub(super) strip: usize,
+    #[serde(default = "default_limit", deserialize_with = "deserialize_usize")]
+    pub(super) limit: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

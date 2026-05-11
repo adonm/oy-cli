@@ -59,7 +59,7 @@ impl ToolPolicy {
     pub fn approval(self, tool: &str) -> Approval {
         match tool {
             "todo" => Approval::Auto,
-            "replace" | "todo_persist" => self.files_write(),
+            "replace" | "patch" | "todo_persist" => self.files_write(),
             "bash" => self.shell,
             _ => Approval::Deny,
         }

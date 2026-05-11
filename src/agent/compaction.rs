@@ -1,5 +1,5 @@
-use rig::completion::message::{AssistantContent, Message, ToolResultContent, UserContent};
 use regex::Regex;
+use rig::completion::message::{AssistantContent, Message, ToolResultContent, UserContent};
 use std::sync::LazyLock;
 use tiktoken_rs::{bpe_for_model, cl100k_base_singleton};
 
@@ -127,7 +127,8 @@ fn dedup_repeated_lines(text: &str) -> String {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut run_start = 0usize;
     for i in 1..=lines.len() {
-        let run_ended = i == lines.len() || lines[i] != lines[i - 1] || lines[i - 1].trim().is_empty();
+        let run_ended =
+            i == lines.len() || lines[i] != lines[i - 1] || lines[i - 1].trim().is_empty();
         if run_ended {
             let run_len = i - run_start;
             if run_len == 1 {
@@ -196,14 +197,21 @@ fn preserve_head_tail(text: &str, max_bytes: usize) -> String {
 /// and tail buffer, then joins.
 fn partition_error_aware(text: &str, half: usize) -> (String, String) {
     static ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)(\b(?:error|FAILED|panicked at|fatal:|FAIL|ABORTED)\b)|(^error\[)").unwrap()
+        Regex::new(r"(?i)(\b(?:error|FAILED|panicked at|fatal:|FAIL|ABORTED)\b)|(^error\[)")
+            .unwrap()
     });
 
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= 2 {
         let head: String = text.chars().take(half).collect();
-        let tail: String = text.chars().rev().take(half).collect::<Vec<_>>()
-            .into_iter().rev().collect();
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(half)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         return (head, tail);
     }
 
@@ -346,7 +354,10 @@ mod tests {
     fn dedup_repeated_lines_collapses_runs() {
         let input = "error\nwarning\nerror\nerror\nerror\nerror\nfatal";
         let result = dedup_repeated_lines(input);
-        assert!(result.contains("more identical lines"), "expected count; got: {result}");
+        assert!(
+            result.contains("more identical lines"),
+            "expected count; got: {result}"
+        );
         assert!(result.contains("fatal"));
     }
 
@@ -382,7 +393,13 @@ mod tests {
         lines.push("fatal: unrecoverable".into());
         let input = lines.join("\n");
         let (result, _) = compress(&input, 512, CompressionMode::Aggressive);
-        assert!(result.contains("error: something broke"), "error line was dropped");
-        assert!(result.contains("fatal: unrecoverable"), "fatal line was dropped");
+        assert!(
+            result.contains("error: something broke"),
+            "error line was dropped"
+        );
+        assert!(
+            result.contains("fatal: unrecoverable"),
+            "fatal line was dropped"
+        );
     }
 }

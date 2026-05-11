@@ -13,7 +13,7 @@ Work inspect → edit → verify. Use the cheapest sufficient tool:
 1. `list` for discovery.
 2. `search` for symbols, paths, and strings.
 3. `read` only narrow file slices you need.
-4. `replace` for surgical edits.
+4. `replace` for surgical edits; `patch` for coordinated multi-file edits.
 5. `bash` only when file tools are insufficient or when you must run/check something.
 Batch independent reads/searches. Stop when enough evidence exists.
 `search` and `sloc` accept whitespace-separated paths (e.g. `src/app.rs src/ui.rs`).
@@ -55,6 +55,7 @@ pub fn tool_description(name: &str) -> String {
     "read" => "Read one UTF-8 text file. Prefer narrow `offset`/`limit` slices over full-file reads.",
     "search" => "Search workspace text with ripgrep-style Rust regex. Use `mode=literal` for exact strings.",
     "replace" => "Replace workspace text with Rust regex captures, or exact text with `mode=literal`. Inspect/search before changing.",
+    "patch" => "Apply a unified/git diff to existing UTF-8 workspace files. Use for coordinated multi-file edits; inspect first and keep patches focused.",
     "sloc" => "Count source lines with tokei for repository sizing. `path` may be one path or whitespace-separated paths.",
     "bash" => "Run a shell command in the workspace. Use only when file tools are insufficient or when you must run/check something.",
     "ask" => "Ask the user in interactive runs. Reserve for genuine ambiguity or irreversible choices.",

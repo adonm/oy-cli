@@ -451,8 +451,9 @@ mod tests {
             findings.push_str(&finding.repeat(200));
         }
 
-        let bounded =
-            bounded_reduce_findings("gpt-4o", "", manifest, &findings, None, 20_000, 8_000, 4_000);
+        let bounded = bounded_reduce_findings(
+            "gpt-4o", "", manifest, &findings, None, 20_000, 8_000, 4_000,
+        );
         let prompt = prompts::audit_reduce_prompt("", manifest, &bounded, None);
         assert!(compaction::count_tokens("gpt-4o", &prompt) <= 20_000);
         assert!(bounded.contains("truncated"));
