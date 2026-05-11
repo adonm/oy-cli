@@ -370,7 +370,13 @@ pub(super) fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value
     })?)
 }
 
-pub(super) fn tool_patch(ctx: &ToolContext, args: PatchArgs) -> Result<Value> {
+pub(super) fn tool_patch(ctx: &ToolContext, mut args: PatchArgs) -> Result<Value> {
+    // diffy parses incorrectly when the patch doesn't end with a newline:
+    // Insert lines lack trailing \n (silent corruption) and context lines
+    // fail to match (apply error).
+    if !args.patch.ends_with('\n') {
+        args.patch.push('\n');
+    }
     let (patch_count, plans) = plan_patch(ctx, &args)?;
     let approval_preview = if ctx.policy.approval("patch") == Approval::Ask && ctx.interactive {
         Some(combined_patch_diff(&plans))

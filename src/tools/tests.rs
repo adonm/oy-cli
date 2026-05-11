@@ -367,6 +367,49 @@ fn auto_policy_allows_patch() {
 }
 
 #[test]
+fn patch_without_trailing_newline() {
+    // diffy parses incorrectly when the patch lacks a trailing newline.
+    // This test covers both: last line is an insert (silent corruption),
+    // and last line is context (apply error).
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("f.txt"), "apple\nbanana\ncherry\ndate\n").unwrap();
+
+    // Case 1: last hunk line is an insert, no trailing newline
+    let _value = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "--- a/f.txt\n+++ b/f.txt\n@@ -3 +3 @@\n-cherry\n+CHERRY".into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "apple\nbanana\nCHERRY\ndate\n",
+        "insert without trailing newline should not corrupt subsequent lines"
+    );
+
+    // Case 2: last hunk line is a context line, no trailing newline
+    fs::write(dir.path().join("g.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+    let _value = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "--- a/g.txt\n+++ b/g.txt\n@@ -2,3 +2,3 @@\n beta\n-gamma\n+GAMMA\n delta"
+                .into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("g.txt")).unwrap(),
+        "alpha\nbeta\nGAMMA\ndelta\n",
+        "context without trailing newline should apply cleanly"
+    );
+}
+
+#[test]
 fn patch_rejects_create_and_leaves_workspace_unchanged() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::write(dir.path().join("a.txt"), "one\n").unwrap();
