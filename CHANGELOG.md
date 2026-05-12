@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.4] - 2026-05-13
+
+### Fixed
+- Reissued the release so GitHub Actions can publish the expected CI-built binary assets without the duplicate immutable-release state from v0.9.3.
+
 ## [0.9.3] - 2026-05-12
 
 ### Changed
