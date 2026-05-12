@@ -692,13 +692,7 @@ fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPl
     let mut seen = BTreeSet::new();
     let mut plans = Vec::new();
     for file_patch in patches {
-        let operation = file_patch.operation().strip_prefix(args.strip);
-        let patch_path = patch_path_from_operation(&operation)?;
-        let text_patch = file_patch
-            .patch()
-            .as_text()
-            .ok_or_else(|| anyhow!("binary patches are not supported: {patch_path}"))?;
-        let path = resolve_existing_path(ctx, &patch_path)?;
+        let (patch_path, path) = resolve_patch_target(ctx, &file_patch, args.strip)?;
         if path.is_dir() {
             bail!("cannot patch directory: {patch_path}");
         }
@@ -715,8 +709,16 @@ fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPl
             Err(crate::TextDecodeError::Binary) => bail!("cannot patch binary file: {patch_path}"),
             Err(crate::TextDecodeError::NonUtf8) => bail!("cannot decode utf-8: {patch_path}"),
         };
-        let updated = apply(&text, text_patch)
-            .with_context(|| format!("failed applying patch for {patch_path}"))?;
+        let text_patch = file_patch
+            .patch()
+            .as_text()
+            .ok_or_else(|| anyhow!("binary patches are not supported: {patch_path}"))?;
+        let updated = match apply(&text, text_patch) {
+            Ok(updated) => updated,
+            Err(err) => bail!(
+                "failed applying patch for {patch_path}: {err}; re-read the file and regenerate the hunk with current context"
+            ),
+        };
         if updated == text {
             continue;
         }
@@ -734,6 +736,45 @@ fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPl
         });
     }
     Ok((patch_count, plans))
+}
+
+fn resolve_patch_target(
+    ctx: &ToolContext,
+    file_patch: &FilePatch<'_, str>,
+    strip: usize,
+) -> Result<(String, PathBuf)> {
+    let mut errors = Vec::new();
+    for candidate_strip in patch_strip_candidates(strip) {
+        let operation = file_patch.operation().strip_prefix(candidate_strip);
+        let patch_path = match patch_path_from_operation(&operation) {
+            Ok(path) => path,
+            Err(err) => {
+                errors.push(format!("strip {candidate_strip}: {err}"));
+                continue;
+            }
+        };
+        match resolve_existing_path(ctx, &patch_path) {
+            Ok(path) => return Ok((patch_path, path)),
+            Err(err) => errors.push(format!("strip {candidate_strip}: {err}")),
+        }
+    }
+
+    if errors.len() == 1 {
+        return Err(anyhow!(errors.remove(0)));
+    }
+    bail!(
+        "could not resolve patch path after trying strip values {}: {}",
+        patch_strip_candidates(strip)
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        errors.join("; ")
+    );
+}
+
+fn patch_strip_candidates(strip: usize) -> Vec<usize> {
+    if strip == 1 { vec![1, 0] } else { vec![strip] }
 }
 
 fn patch_path_from_operation(operation: &FileOperation<'_, str>) -> Result<String> {

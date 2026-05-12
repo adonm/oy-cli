@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.3] - 2026-05-12
+
+### Changed
+- Made the `patch` tool more tolerant of LLM-generated diffs by retrying raw unprefixed paths when the default `strip = 1` target does not resolve.
+
+### Fixed
+- Improved failed patch-application errors with the failing hunk number and guidance to re-read the file before regenerating stale hunks.
+
 ## [0.9.0] - 2026-05-11
 
 ### Added

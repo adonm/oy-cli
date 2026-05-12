@@ -410,6 +410,49 @@ fn patch_without_trailing_newline() {
 }
 
 #[test]
+fn patch_default_strip_falls_back_to_raw_paths() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("raw.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let value = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "--- raw.txt\n+++ raw.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+                .into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value["changed_file_count"], 1);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("raw.txt")).unwrap(),
+        "alpha\nBETA\ngamma\n"
+    );
+}
+
+#[test]
+fn patch_apply_error_mentions_hunk_and_reread_hint() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("stale.txt"), "left\nactual\nright\n").unwrap();
+
+    let err = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "--- a/stale.txt\n+++ b/stale.txt\n@@ -1,3 +1,3 @@\n left\n-expected\n+EXPECTED\n right\n".into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap_err();
+    let err = err.to_string();
+    assert!(err.contains("failed applying patch for stale.txt"));
+    assert!(err.contains("error applying hunk #1"));
+    assert!(err.contains("re-read the file"));
+}
+
+#[test]
 fn patch_rejects_create_and_leaves_workspace_unchanged() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::write(dir.path().join("a.txt"), "one\n").unwrap();

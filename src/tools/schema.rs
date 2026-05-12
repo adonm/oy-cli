@@ -246,7 +246,12 @@ pub(super) fn schema_patch() -> Value {
                 "Unified or git diff to apply. Existing UTF-8 files only; create/delete/rename/copy/binary patches are rejected.",
             ),
         )
-        .property("strip", Schema::integer().default(1).describe("Path components to strip, like patch -p. Git diffs usually use 1."))
+        .property(
+            "strip",
+            Schema::integer().default(1).describe(
+                "Path components to strip, like patch -p. Git diffs usually use 1; with strip=1, raw unprefixed paths are retried automatically if the stripped path does not resolve.",
+            ),
+        )
         .property("limit", Schema::integer().default(DEFAULT_LIMIT))
         .required(&["patch"])
         .build()
