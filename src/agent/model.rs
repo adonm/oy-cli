@@ -630,6 +630,20 @@ mod tests {
     }
 
     #[test]
+    fn miri_smoke_model_routing_and_reasoning_defaults() {
+        assert_eq!(
+            split_model_spec("opencode-go/kimi-k2.6-high"),
+            (Some("opencode-go"), "kimi-k2.6")
+        );
+        assert!(copilot_requires_responses_api_shim("gpt-5.5"));
+        assert_eq!(reasoning_capable_fallback("gpt-5.5"), Some("high"));
+        assert_eq!(
+            default_reasoning_effort("moonshot/kimi-k2.6").as_deref(),
+            Some("none")
+        );
+    }
+
+    #[test]
     fn moonshot_kimi_explicitly_disables_reasoning_by_default() {
         assert_eq!(
             default_reasoning_effort("opencode-go/kimi-k2.6").as_deref(),
@@ -675,8 +689,8 @@ mod tests {
     }
 
     // ── Live integration tests (network + OpenCode required) ──
-    // Run all with:  cargo test -- --ignored live_
-    // Run one with: cargo test -- --ignored live_<name>
+    // Run all with:  cargo nextest run --run-ignored ignored-only live_
+    // Run one with: cargo nextest run --run-ignored ignored-only live_<name>
 
     // ---------------------------------------------------------------
     // Simple text-response tests (no tools)

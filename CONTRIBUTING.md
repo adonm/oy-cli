@@ -5,7 +5,7 @@ Keep `oy` small, boring, and useful.
 ## Quick start
 
 ```bash
-just check          # run all CI checks locally (fmt, clippy, test, rustdoc, smoke)
+just check          # run all CI checks locally (fmt, clippy, nextest, doc tests, miri smoke, rustdoc, smoke)
 just fix            # auto-format and apply clippy suggestions, then check
 just run -- chat    # run oy with arguments during development
 ```
@@ -14,6 +14,14 @@ If you don't have [`just`](https://github.com/casey/just), install it
 (`cargo install just`, `brew install just`, etc.) or run the individual
 commands listed below.
 
+`just check` also requires [`cargo-nextest`](https://nexte.st/) and nightly
+Rust with [`miri`](https://github.com/rust-lang/miri/#using-miri):
+
+```bash
+cargo install cargo-nextest --locked --version 0.9.135
+rustup toolchain install nightly --profile minimal --component miri --component rust-src
+```
+
 ## Local checks
 
 Run these before opening a PR. `just check` runs them all.
@@ -21,7 +29,9 @@ Run these before opening a PR. `just check` runs them all.
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo nextest run --all-targets --locked --profile ci
+cargo test --doc --locked
+cargo +nightly miri test --locked miri_smoke
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo run --locked -- --help
 ```
@@ -29,6 +39,12 @@ cargo run --locked -- --help
 Run clippy after formatting so its suggestions apply cleanly. Keep
 `--all-targets --locked -- -D warnings` intact: it checks tests/examples as
 well as the binary and treats every lint as something to fix before review.
+Use nextest for non-doc tests: it runs all targets, does not fail fast, reports
+slow tests, and writes a JUnit report in CI via `.config/nextest.toml`. Keep
+`cargo test --doc --locked` because nextest does not run rustdoc tests.
+Run the Miri smoke tests on nightly so interpreter checks catch undefined
+behavior that normal tests and lints can miss without making the default suite
+prohibitively slow.
 
 For release-adjacent changes, also run:
 
@@ -96,7 +112,7 @@ commit so style/lint noise never reaches CI.
 | `src/tools.rs` | Tool schemas, tool dispatch, previews, todos, filesystem/network/mutation approval boundaries |
 | `src/lib.rs`, `src/main.rs` | Public facade and binary entry point |
 | `tests/` | Integration and snapshot tests |
-| `.github/workflows/ci.yml` | CI checks (fmt, clippy, test, rustdoc, help smoke, doc drift, package) |
+| `.github/workflows/ci.yml` | CI checks (fmt, clippy, nextest, doc tests, miri smoke, rustdoc, help smoke, doc drift, package) |
 | `.github/workflows/release.yml` | Release builds, artifact attestation, and crate publishing |
 | `justfile` | Local dev task runner; `just check` / `just fix` / `just run` |
 

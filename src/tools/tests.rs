@@ -689,6 +689,7 @@ async fn invoke_accepts_numeric_strings_and_aliases() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn bash_returns_full_output_and_bounded_preview() {
     let (_dir, ctx) = test_context(auto_policy(), false);
     let value = tool_bash(

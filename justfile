@@ -8,7 +8,7 @@
 #   just fix            # auto-fix formatting and clippy lints
 #   just run -- "summarize this repo"
 #
-# Requires: cargo, rustc >= 1.91.1
+# Requires: cargo, cargo-nextest, rustc >= 1.91.1; `just check` also needs nightly Miri
 
 _default:
     @just --list
@@ -20,8 +20,8 @@ dev: _fmt-check
     cargo check --locked
 
 # Full local CI suite. Slow because each cargo subcommand invalidates previous
-# compilation artifacts. Use `just dev` for quick feedback during development.
-check: _fmt-check _clippy _test _rustdoc _help-smoke
+# compilation artifacts. Requires nightly Miri. Use `just dev` for quick feedback.
+check: _fmt-check _clippy _test _miri _rustdoc _help-smoke
     @echo "✓ all checks passed"
 
 # Auto-format and apply clippy suggestions, then run the full suite.
@@ -46,9 +46,14 @@ _clippy:
 _clippy-fix:
     cargo clippy --all-targets --locked --fix --allow-dirty --allow-staged
 
-# Run all tests (unit + integration + doc tests).
+# Run all non-doc tests with nextest, then run rustdoc examples/tests.
 _test:
-    cargo test --locked
+    cargo nextest run --all-targets --locked --profile ci
+    cargo test --doc --locked
+
+# Run focused smoke tests under Miri on nightly to catch undefined behavior.
+_miri:
+    cargo +nightly miri test --locked miri_smoke
 
 # Build docs with deny-warnings (no deps).
 _rustdoc:

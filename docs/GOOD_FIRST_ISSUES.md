@@ -53,7 +53,7 @@ tool names. Add exhaustive table-driven tests covering:
 **Why:** The approval matrix is a trust boundary. It must be correct for every
 mode, and table-driven tests are the easiest way to prove it.
 
-**Check:** `just check` (includes `cargo test --locked`)
+**Check:** `just check` (includes `cargo nextest run --all-targets --locked --profile ci`)
 
 ## 4. Add regression tests for `webfetch` URL/IP classification
 
@@ -82,7 +82,7 @@ tool-preview snapshots.
 **Why:** Doctor output changes should be visible in diff form during review.
 Snapshot coverage catches accidental changes to the setup/status UX.
 
-**Check:** `just check` (includes `cargo test --locked`)
+**Check:** `just check` (includes `cargo nextest run --all-targets --locked --profile ci`)
 
 ---
 

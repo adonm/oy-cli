@@ -19,12 +19,20 @@ jobs:
       - uses: jdx/mise-action@v4
       - name: Install Rust components
         run: rustup component add rustfmt clippy
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked --version 0.9.135
+      - name: Install Miri toolchain
+        run: rustup toolchain install nightly --profile minimal --component miri --component rust-src
       - name: Format
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --all-targets --locked
+        run: |
+          cargo nextest run --all-targets --locked --profile ci
+          cargo test --doc --locked
+      - name: Miri smoke
+        run: cargo +nightly miri test --locked miri_smoke
       - name: Rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
       - name: CLI help smoke

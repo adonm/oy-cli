@@ -258,6 +258,15 @@ mod tests {
     }
 
     #[test]
+    fn miri_smoke_ui_color_decisions() {
+        assert_eq!(color_mode_name(color_mode_from_values(false, None)), "auto");
+        assert_eq!(color_mode_name(color_mode_from_values(true, None)), "never");
+        assert!(!color_enabled_for_mode(ColorMode::Auto, false));
+        assert!(color_enabled_for_mode(ColorMode::Auto, true));
+        assert!(color_enabled_for_mode(ColorMode::Always, false));
+    }
+
+    #[test]
     fn color_auto_requires_terminal() {
         assert!(!color_enabled_for_mode(ColorMode::Auto, false));
         assert!(color_enabled_for_mode(ColorMode::Auto, true));

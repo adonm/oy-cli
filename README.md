@@ -225,7 +225,9 @@ Checks:
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo nextest run --all-targets --locked --profile ci
+cargo test --doc --locked
+cargo +nightly miri test --locked miri_smoke
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo run --locked -- --help
 ```

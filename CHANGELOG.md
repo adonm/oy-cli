@@ -26,7 +26,7 @@
 
 ### Added
 - Google Gemini (`opencode/gemini-3-flash`, `opencode/gemini-3.1-pro`) and Anthropic Claude models via OpenCode are now visible in `oy model` and usable for chat/audit.
-- Live integration tests for Google, Anthropic, DeepSeek, and Kimi models including tool-calling smoke tests. Run with `cargo test -- --ignored`.
+- Live integration tests for Google, Anthropic, DeepSeek, and Kimi models including tool-calling smoke tests. Run with `cargo nextest run --run-ignored ignored-only live_`.
 
 ### Changed
 - `ISSUES.md` is always excluded from the initial audit collection context; existing `ISSUES.md` content is included in the final prioritise/rewrite step so the model can carry forward still-relevant findings.
