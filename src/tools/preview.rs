@@ -1,3 +1,8 @@
+//! Human-readable tool call and tool result previews.
+//!
+//! The registry calls these helpers for approval prompts and progress output;
+//! keep them concise, bounded, and free of side effects.
+
 use serde_json::Value;
 use std::fmt::Write as _;
 

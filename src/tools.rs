@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 mod args;
+mod llm;
 mod network;
 mod output;
 mod policy;
@@ -18,13 +19,12 @@ mod todo;
 mod workspace;
 
 use args::AskArgs;
+pub(crate) use llm::llm_tools;
 use output::note_tool;
 pub(crate) use output::{encode_tool_output, preview_tool_output};
 pub(crate) use policy::{
     Approval, FileAccess, NetworkAccess, ToolPolicy, require_mutation_approval,
 };
-pub(crate) use registry::rig_tools;
-#[cfg(test)]
 pub(crate) use registry::tool_specs;
 use shell::tool_bash;
 

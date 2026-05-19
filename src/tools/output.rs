@@ -1,3 +1,8 @@
+//! Tool output encoding and progress hooks.
+//!
+//! This module is the narrow handoff from tool invocation into human previews
+//! and transcript-safe encoded values.
+
 use serde_json::Value;
 use toon_format::encode_default;
 

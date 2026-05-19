@@ -231,6 +231,11 @@ mod audit_tests {
     }
 
     #[test]
+    fn doctor_help_snapshot() {
+        insta::assert_snapshot!(command_help_for_test("doctor"));
+    }
+
+    #[test]
     fn audit_accepts_sarif_format() {
         let cli = parse_cli_for_test(&["oy", "audit", "--format", "sarif", "auth paths"]);
         let Some(Command::Audit { format, out, .. }) = cli.command else {

@@ -4,11 +4,12 @@
 #
 # Quick start:
 #   just dev            # fast checks (fmt + cargo check)
-#   just check          # full CI suite (slow — uses multiple cargo subcommands)
-#   just fix            # auto-fix formatting and clippy lints
+#   just check          # standard local checks using only stable Cargo
+#   just fix            # auto-fix formatting and clippy lints, then check
 #   just run -- "summarize this repo"
 #
-# Requires: cargo, cargo-nextest, rustc >= 1.91.1; `just check` also needs nightly Miri
+# Requires: cargo, rustc >= 1.91.1, and just. Optional CI-parity recipes below
+# require cargo-nextest and/or nightly Miri.
 
 _default:
     @just --list
@@ -19,12 +20,15 @@ _default:
 dev: _fmt-check
     cargo check --locked
 
-# Full local CI suite. Slow because each cargo subcommand invalidates previous
-# compilation artifacts. Requires nightly Miri. Use `just dev` for quick feedback.
-check: _fmt-check _clippy _test _miri _rustdoc _help-smoke
-    @echo "✓ all checks passed"
+# Standard local check suite. Uses stable Cargo only so it works after `mise install`.
+check: _fmt-check _clippy _test _rustdoc _help-smoke
+    @echo "✓ local checks passed"
 
-# Auto-format and apply clippy suggestions, then run the full suite.
+# Optional CI-parity suite. Requires cargo-nextest and nightly Miri.
+ci: _fmt-check _clippy _nextest _miri _rustdoc _help-smoke
+    @echo "✓ CI-parity checks passed"
+
+# Auto-format and apply clippy suggestions, then run the local suite.
 fix: _fmt _clippy-fix
     @just check
 
@@ -46,10 +50,14 @@ _clippy:
 _clippy-fix:
     cargo clippy --all-targets --locked --fix --allow-dirty --allow-staged
 
-# Run all non-doc tests with nextest, then run rustdoc examples/tests.
+# Run all non-doc tests with stable Cargo, then run rustdoc examples/tests.
 _test:
-    cargo nextest run --all-targets --locked --profile ci
+    cargo test --all-targets --locked
     cargo test --doc --locked
+
+# Run all non-doc tests with nextest, matching CI's test runner.
+_nextest:
+    cargo nextest run --all-targets --locked --profile ci
 
 # Run focused smoke tests under Miri on nightly to catch undefined behavior.
 _miri:

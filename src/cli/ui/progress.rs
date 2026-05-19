@@ -1,7 +1,10 @@
 use std::fmt::Display;
 use std::time::Duration;
 
-use super::{cyan, err_line, faint, green, is_quiet, line, red};
+use super::{
+    cyan, err_line, faint, green, is_quiet, line, red, sanitize_terminal,
+    sanitize_terminal_for_display,
+};
 
 pub fn progress(
     label: &str,
@@ -13,13 +16,8 @@ pub fn progress(
     if is_quiet() {
         return;
     }
-    line(progress_line(
-        label,
-        current,
-        total,
-        &detail.to_string(),
-        elapsed,
-    ));
+    let detail = sanitize_terminal(&detail.to_string());
+    line(progress_line(label, current, total, &detail, elapsed));
 }
 
 fn progress_line(
@@ -56,15 +54,19 @@ pub fn tool_start(name: &str, detail: &str) {
     if is_quiet() {
         return;
     }
-    err_line(tool_start_line(name, detail));
+    err_line(tool_start_line(
+        &sanitize_terminal(name),
+        &sanitize_terminal(detail),
+    ));
 }
 
 pub fn tool_result(name: &str, elapsed: Duration, preview: &str) {
     if is_quiet() {
         return;
     }
+    let preview = sanitize_terminal_for_display(preview);
     let preview = preview.trim_end();
-    let head = tool_result_head(name, elapsed);
+    let head = tool_result_head(&sanitize_terminal(name), elapsed);
     let Some((first, rest)) = preview.split_once('\n') else {
         if preview.is_empty() {
             err_line(head);
@@ -83,6 +85,8 @@ pub fn tool_error(name: &str, elapsed: Duration, err: impl Display) {
     if is_quiet() {
         return;
     }
+    let name = sanitize_terminal(name);
+    let err = sanitize_terminal(&err.to_string());
     err_line(format_args!(
         "  {} {name} {} · {err}",
         red("✗"),
@@ -142,5 +146,15 @@ mod tests {
             tool_result_head("read", Duration::from_millis(42)),
             "  ✓ read 42ms"
         );
+    }
+
+    #[test]
+    fn tool_progress_sanitizes_untrusted_terminal_escapes() {
+        set_output_mode(OutputMode::Normal);
+        assert_eq!(
+            tool_start_line("read", &sanitize_terminal("path=\x1b[2JREADME.md")),
+            "  → read · path=␛[2JREADME.md"
+        );
+        assert_eq!(sanitize_terminal("ok\n\x1b]52;c;bad"), "ok\n␛]52;c;bad");
     }
 }

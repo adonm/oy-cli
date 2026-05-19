@@ -1,0 +1,16 @@
+---
+source: src/cli/app.rs
+expression: "command_help_for_test(\"doctor\")"
+---
+Check setup, auth, paths, and safety-relevant defaults
+
+Usage: doctor [OPTIONS]
+
+Options:
+      --mode <MODE>
+          Safety mode to inspect (default: balanced): plan, ask, edit, or auto
+          
+          [default: default]
+
+  -h, --help
+          Print help

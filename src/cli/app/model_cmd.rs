@@ -123,7 +123,7 @@ fn print_model_listing(listing: &model::ModelListing) {
     }
     if !listing.auth.is_empty() {
         crate::ui::line("");
-        crate::ui::section("Auth / shims");
+        crate::ui::section("Auth");
         for item in &listing.auth {
             let env_var = item.env_var.as_deref().unwrap_or("-");
             crate::ui::line(format_args!(

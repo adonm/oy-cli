@@ -1,3 +1,8 @@
+//! Public-only HTTP fetch tool and network trust boundary.
+//!
+//! URL validation, DNS resolution, redirect handling, header filtering, and
+//! response caps live here so `webfetch` fails closed before making requests.
+
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt as _;
 use reqwest::StatusCode;
@@ -285,38 +290,17 @@ fn ensure_public_ip(ip: IpAddr) -> Result<()> {
 
 pub(super) fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V4(_) => ip_rfc::global(&ip) && !ip.is_multicast(),
         IpAddr::V6(ip) => ip
             .to_ipv4_mapped()
-            .map(is_public_ipv4)
-            .unwrap_or_else(|| is_public_ipv6(ip)),
+            .map(|mapped| is_public_ip(IpAddr::V4(mapped)))
+            .unwrap_or_else(|| ip_rfc::global(&IpAddr::V6(ip)) && !is_denied_ipv6(ip)),
     }
 }
 
-fn is_public_ipv4(ip: std::net::Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    !(ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_broadcast()
-        || ip.is_documentation()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || octets[0] == 0
-        || octets[0] >= 240
-        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-        || (octets[0] == 198 && (18..=19).contains(&octets[1]))
-        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)) // 192.0.0.0/24 – IETF Protocol Assignments
-}
-
-fn is_public_ipv6(ip: std::net::Ipv6Addr) -> bool {
+fn is_denied_ipv6(ip: std::net::Ipv6Addr) -> bool {
     let segments = ip.segments();
-    !(ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_unique_local()
-        || ip.is_unicast_link_local()
-        || ip.is_multicast()
-        || (segments[0] & 0xffc0) == 0xfec0)
+    ip.is_multicast() || (segments[0] & 0xffc0) == 0xfec0
 }
 
 fn is_text_content_type(content_type: &str) -> bool {

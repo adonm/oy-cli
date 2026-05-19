@@ -6,7 +6,7 @@
 
 Sensitive data can appear in prompts, source snippets, tool output, command output, saved sessions, and chat history. Treat `~/.config/oy-rust/` as sensitive local data.
 
-Shell commands inherit your environment. Credentials available to your shell, such as Git, SSH, cloud, package registry, and Docker credentials, may be available to commands the model asks to run.
+Shell commands run with your user permissions. `oy` removes credential-like environment variables (for example names containing `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, `ACCESS_KEY`, or `AUTH`) before launching `bash`, but this is not a sandbox: commands can still read credential files, sockets, agent state, and other local resources available to your user.
 
 ## Safer use for untrusted repositories
 

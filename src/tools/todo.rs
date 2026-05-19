@@ -1,3 +1,8 @@
+//! In-memory todo tool and explicit `TODO.md` persistence.
+//!
+//! Todo updates are always available for planning; writing the file is a
+//! separate file-mutation boundary guarded by `todo_persist` approval.
+
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;

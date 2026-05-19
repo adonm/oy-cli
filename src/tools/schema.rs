@@ -1,3 +1,8 @@
+//! JSON schema builders for model-visible tool arguments.
+//!
+//! Schemas are closed objects by default so invalid or misspelled arguments are
+//! rejected near the tool boundary.
+
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 

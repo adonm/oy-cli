@@ -102,7 +102,7 @@ If you don't have a model provider yet, [OpenCode Go](https://opencode.ai/go) is
 `oy model` uses `opencode models --verbose` as the model metadata source. That keeps provider/model listings in OpenCode instead of duplicating a local registry in `oy`. Install and configure OpenCode credentials for the providers you want listed, then run:
 
 ```bash
-oy model                 # list Rig-supported models from opencode models --verbose
+oy model                 # list currently routable models from opencode models --verbose
 oy model <provider/model-from-list>
 ```
 
@@ -114,7 +114,7 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 oy model openai/gpt-4.1
 ```
 
-GitHub Copilot and OpenAI-compatible providers listed by OpenCode are routed through Rig clients where supported. Newer Copilot reasoning models that Rig 0.36 does not yet route through `/responses` are handled by a narrow local compatibility shim and require a Copilot API token.
+GitHub Copilot and OpenAI-compatible providers listed by OpenCode are routed through `oy`'s native OpenAI-compatible Chat/Responses backend. Transcripts, tool schemas, and tool execution use `oy`-owned types. Newer reasoning models that require `/responses` are handled by narrow local compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
 
 The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect the full OpenCode listing or clear the recent history.
 
@@ -190,8 +190,7 @@ Default local paths:
 | `OY_COLOR` | `auto`, `always`, or `never`; `NO_COLOR` disables color |
 | `OY_MAX_TOOL_ROUNDS` | Tool-call budget per prompt; default `512` |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible auth/endpoint |
-| `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | Copilot auth |
-
+| `GITHUB_COPILOT_API_KEY`, `COPILOT_API_KEY` | Copilot API-token auth |
 | `LOCAL_API_KEY` | Optional local `local-<port>` shim key; defaults to `oy-local` |
 
 ## Troubleshooting

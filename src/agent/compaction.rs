@@ -1,5 +1,5 @@
+use crate::llm::{Message, MessageContent, ToolResultContent};
 use regex::Regex;
-use rig::completion::message::{AssistantContent, Message, ToolResultContent, UserContent};
 use std::sync::LazyLock;
 use tiktoken_rs::{bpe_for_model, cl100k_base_singleton};
 
@@ -289,48 +289,46 @@ pub(super) fn compact_text(text: &str, max_bytes: usize, label: &str) -> String 
 pub(super) fn message_content_text(message: &Message) -> String {
     match message {
         Message::System { content } => content.clone(),
-        Message::User { content } => content
+        Message::User { content } | Message::Assistant { content, .. } => content
             .iter()
-            .map(user_content_text)
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Message::Assistant { content, .. } => content
-            .iter()
-            .map(assistant_content_text)
+            .map(message_content_part_text)
             .collect::<Vec<_>>()
             .join("\n"),
     }
 }
 
-fn user_content_text(content: &UserContent) -> String {
+fn message_content_part_text(content: &MessageContent) -> String {
     match content {
-        UserContent::Text(text) => text.text.clone(),
-        UserContent::ToolResult(result) => result
-            .content
+        MessageContent::Text { text } => text.clone(),
+        MessageContent::ToolCall {
+            name, arguments, ..
+        } => format!("{name} {arguments}"),
+        MessageContent::ToolResult { content, .. } => content
             .iter()
             .map(tool_result_content_text)
             .collect::<Vec<_>>()
             .join("\n"),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
-fn assistant_content_text(content: &AssistantContent) -> String {
-    match content {
-        AssistantContent::Text(text) => text.text.clone(),
-        AssistantContent::ToolCall(call) => {
-            format!("{} {}", call.function.name, call.function.arguments)
+        MessageContent::Reasoning { value } | MessageContent::Opaque { value } => {
+            value_to_text(value)
         }
-        AssistantContent::Reasoning(reasoning) => reasoning.display_text(),
-        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
 fn tool_result_content_text(content: &ToolResultContent) -> String {
     match content {
-        ToolResultContent::Text(text) => text.text.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
+        ToolResultContent::Text { text } => text.clone(),
+        ToolResultContent::Opaque { value } => value_to_text(value),
     }
+}
+
+fn value_to_text(value: &serde_json::Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
+        return text.to_string();
+    }
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -4,14 +4,19 @@
 
 ## Findings summary
 
+No unresolved findings are currently tracked from this audit.
+
+Fixed in `Unreleased`:
+
 - **Medium** `src/tools/output.rs::note_tool` / `src/cli/ui/progress.rs::tool_start`, `tool_result` — Terminal ANSI escape injection via unsanitised tool call previews and tool output
-- **Medium** `src/tools/network.rs::is_public_ipv4` — Manual IPv4 classification remains fragile and hard to audit (unresolved from prior audit)
-- **Low**  `src/tools/shell.rs::tool_bash` — Shell commands inherit full environment including secrets (unresolved from prior audit)
+- **Medium** `src/tools/network.rs::is_public_ip` — Manual IPv4 classification remained fragile and hard to audit
+- **Low**  `src/tools/shell.rs::tool_bash` — Shell commands inherited credential-like environment variables
 
 ## Detailed findings
 
 ### Medium: Terminal ANSI escape injection via unsanitised tool call previews and tool output
 
+- **Status**: Fixed in `Unreleased` — terminal-bound tool progress, result previews, errors, markdown, and diff previews now sanitize escape bytes before display.
 - **Category**: V5 Validation (output encoding) / CWE-150
 - **Evidence**
   - `src/tools/output.rs::note_tool` builds a summary string from model-supplied tool arguments and passes it to `crate::ui::tool_start`, which writes to stderr via `err_line()` without escape-filtering.
@@ -31,13 +36,14 @@
 
 ---
 
-### Medium: Manual IPv4 classification remains fragile and hard to audit (unresolved)
+### Medium: Manual IPv4 classification remains fragile and hard to audit
 
+- **Status**: Fixed in `Unreleased` — `webfetch` now delegates global address classification to `ip_rfc`, keeps explicit multicast/site-local denials for this public-fetch boundary, and has expanded regression coverage.
 - **Category**: Implementation quality / security maintainability
-- **Evidence**
-  - `src/tools/network.rs::is_public_ipv4` still uses a custom combination of standard library methods and manual octet comparisons to decide whether an address is public.
-  - While the specific `192.0.0.0/24` omission was fixed (v0.8.7), the function remains a hand-rolled list that must be revised whenever the IANA registry changes.
-  - Auditors and maintainers must manually verify the complete block set.
+- **Original evidence**
+  - `src/tools/network.rs::is_public_ipv4` used a custom combination of standard library methods and manual octet comparisons to decide whether an address was public.
+  - While the specific `192.0.0.0/24` omission was fixed (v0.8.7), the function remained a hand-rolled list that had to be revised whenever the IANA registry changed.
+  - Auditors and maintainers had to manually verify the complete block set.
 - **Impact**
   Future oversight when adding or removing reserved ranges could reintroduce an SSRF bypass (public-only webfetch restriction).
 - **Exploitability / preconditions**
@@ -49,11 +55,12 @@
 
 ---
 
-### Low: Shell commands inherit full process environment exposing secrets (unresolved)
+### Low: Shell commands inherit full process environment exposing secrets
 
+- **Status**: Fixed in `Unreleased` — `bash` child processes now remove credential-like environment variables before launch, with regression coverage and updated security docs.
 - **Category**: V8 Data Protection / Configuration
-- **Evidence**
-  - `src/tools/shell.rs::tool_bash` spawns `bash -c` with `Stdio::null()` for stdin but does not filter the subprocess environment; it inherits the parent environment, including `OPENAI_API_KEY`, `COPILOT_GITHUB_TOKEN`, etc.
+- **Original evidence**
+  - `src/tools/shell.rs::tool_bash` spawned `bash -c` with `Stdio::null()` for stdin but did not filter the subprocess environment; it inherited the parent environment, including `OPENAI_API_KEY`, `COPILOT_GITHUB_TOKEN`, etc.
 - **Trust boundary / sink**
   The model can request arbitrary shell commands. A crafted command (e.g. `env`) will dump all environment variables to stdout/stderr, exposing secrets to the transcript and terminal.
 - **Impact**

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+## [0.9.6] - 2026-05-19
+
+### Fixed
+- Preserved trusted syntax-highlighting/color ANSI in tool previews while still neutralizing untrusted terminal escape bytes from tool output and file content.
+- Accepted `*** Begin Patch` / `*** Update File:` patch tool input for existing UTF-8 files while continuing to reject create/delete, symlink, binary, non-UTF8, and out-of-workspace patches.
+- Stopped sending unsupported `previous_response_id` in native OpenAI Responses tool loops by replaying function calls/results in `input`.
+- Round-tripped DeepSeek `reasoning_content` through native OpenAI-compatible Chat Completions tool loops.
+- Sanitized terminal-bound tool progress, previews, errors, markdown, and diff previews to neutralize model/tool-supplied escape bytes before display.
+- Replaced local public IPv4 classification logic for `webfetch` with `ip_rfc` global-address classification plus explicit public-fetch denials for multicast and deprecated IPv6 site-local addresses.
+- Removed credential-like environment variables from `bash` child processes by default and documented the remaining shell trust boundary.
+- Added focused maintenance coverage for the tool approval matrix, expanded webfetch IP cases, shell environment filtering, and `oy doctor --help` snapshots.
+- Simplified local tooling so `mise install` plus `just check` uses only the pinned stable Rust toolchain and `just`; `just ci` keeps optional nextest/Miri parity checks.
+
+### Changed
+- Completed Month 4 of the LLM internals roadmap: the native OpenAI-compatible Chat/Responses backend is now the default for OpenAI, Copilot API-token, and OpenCode-compatible routes; `src/tools/llm.rs` adapts tools directly to `oy`'s `llm::LlmTool` boundary; and the previous external backend dependency, adapters, native-backend feature flag, and GitHub-token Copilot shim were removed.
+- Completed Month 3 of the LLM internals roadmap: native OpenAI Chat and Responses requests route through a non-streaming backend with focused request/response goldens, while auth lookup and provider metadata stay in `agent::auth`/OpenCode.
+- Completed Month 2 of the LLM internals roadmap: transcripts now store `oy`-owned `llm::Message` values, `agent::model` accepts those messages directly, tool schema exposure stays in one `oy` registry, and previous backend-specific message/tool conversions live in adapter modules only.
+- Added the Month 1 `src/llm/` facade for `oy`-owned LLM request/response, message, tool-spec, route, and backend-trait types while keeping the then-current backend behind one adapter seam.
+
 ## [0.9.4] - 2026-05-13
 
 ### Fixed

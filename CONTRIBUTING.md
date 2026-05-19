@@ -5,17 +5,19 @@ Keep `oy` small, boring, and useful.
 ## Quick start
 
 ```bash
-just check          # run all CI checks locally (fmt, clippy, nextest, doc tests, miri smoke, rustdoc, smoke)
+mise install        # optional: installs the Rust MSRV toolchain and just
+just check          # stable local checks (fmt, clippy, tests, docs, help smoke)
+just ci             # optional CI-parity checks; requires nextest and nightly Miri
 just fix            # auto-format and apply clippy suggestions, then check
 just run -- chat    # run oy with arguments during development
 ```
 
-If you don't have [`just`](https://github.com/casey/just), install it
-(`cargo install just`, `brew install just`, etc.) or run the individual
-commands listed below.
+If you don't have [`mise`](https://mise.jdx.dev/), install Rust and
+[`just`](https://github.com/casey/just) yourself (`cargo install just`,
+`brew install just`, etc.) or run the individual commands listed below.
 
-`just check` also requires [`cargo-nextest`](https://nexte.st/) and nightly
-Rust with [`miri`](https://github.com/rust-lang/miri/#using-miri):
+Optional CI-parity checks require [`cargo-nextest`](https://nexte.st/) and
+nightly Rust with [`miri`](https://github.com/rust-lang/miri/#using-miri):
 
 ```bash
 cargo install cargo-nextest --locked --version 0.9.135
@@ -24,14 +26,13 @@ rustup toolchain install nightly --profile minimal --component miri --component 
 
 ## Local checks
 
-Run these before opening a PR. `just check` runs them all.
+Run these before opening a PR. `just check` runs them all with stable Cargo.
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo nextest run --all-targets --locked --profile ci
+cargo test --all-targets --locked
 cargo test --doc --locked
-cargo +nightly miri test --locked miri_smoke
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo run --locked -- --help
 ```
@@ -39,12 +40,10 @@ cargo run --locked -- --help
 Run clippy after formatting so its suggestions apply cleanly. Keep
 `--all-targets --locked -- -D warnings` intact: it checks tests/examples as
 well as the binary and treats every lint as something to fix before review.
-Use nextest for non-doc tests: it runs all targets, does not fail fast, reports
-slow tests, and writes a JUnit report in CI via `.config/nextest.toml`. Keep
+CI uses nextest for non-doc tests because it does not fail fast, reports slow
+tests, and writes a JUnit report via `.config/nextest.toml`; `just ci` runs
+that optional path locally when nextest and nightly Miri are installed. Keep
 `cargo test --doc --locked` because nextest does not run rustdoc tests.
-Run the Miri smoke tests on nightly so interpreter checks catch undefined
-behavior that normal tests and lints can miss without making the default suite
-prohibitively slow.
 
 For release-adjacent changes, also run:
 
@@ -72,12 +71,8 @@ commit so style/lint noise never reaches CI.
 
 ## Finding something to work on
 
-- **Upstream Rig TODO** — OpenAI-compatible reasoning/tool-call roundtrip:
-  preserve empty `reasoning_content`, add an opt-in compatibility flag to emit
-  `reasoning_content: ""` on assistant tool-call messages when a provider
-  requires it, and cover the behavior with default-off and provider-compat tests.
-  This should let Moonshot/Kimi-like models use thinking with tools without
-  requiring `oy` to disable thinking by default.
+- **LLM internals roadmap** — help keep `oy` on its smaller owned LLM boundary;
+  see the month-by-month plan below.
 - **`docs/GOOD_FIRST_ISSUES.md`** — limited-scope tasks suitable for new
   contributors.
 - **`ISSUES.md`** — the latest audit findings; each finding lists the affected
@@ -87,6 +82,25 @@ commit so style/lint noise never reaches CI.
 
 [gfi]: https://github.com/wagov-dtt/oy-cli/labels/good-first-issue
 [hw]: https://github.com/wagov-dtt/oy-cli/labels/help-wanted
+
+## LLM internals roadmap
+
+Goal: reduce code and improve quality by owning the small LLM boundary `oy`
+actually needs, while keeping behavior stable. Port OpenCode's shape
+(`request -> route -> protocol -> transport -> tool loop`), not its full
+provider surface.
+
+| Month | Outcome | Keep it small by |
+|---|---|---|
+| 1 | **Done:** added `src/llm/` facade with `LlmRequest`, `LlmResponse`, `Message`, `ToolSpec`, `ModelRoute`, and a `ChatBackend` trait. | No wire-protocol rewrite; request/response conversion goldens covered the adapter seam. |
+| 2 | **Done:** moved transcript storage and tool definitions to `oy`-owned types. `agent::model` accepts `llm::Message` directly, and `src/tools/registry.rs` remains the single tool schema registry. | One tool schema registry, one message shape, no provider traits. |
+| 3 | **Done:** added non-streaming native OpenAI Chat and OpenAI Responses backends, reusing `agent::auth`, OpenCode route metadata, and the existing tool schema registry/tool loop boundary. | No new providers, credential paths, or streaming surface. |
+| 4 | **Done:** made the native backend the default, removed the previous external backend and compatibility shims, and kept only OpenAI-compatible Chat/Responses routes. | Keep only OpenAI-compatible protocols unless a concrete user need justifies more. |
+
+Every month: delete obsolete compatibility code, add focused request/response
+goldens, keep auth lookup in `agent::auth`, and do not add new providers,
+process execution, or credential paths just to make the abstraction look
+complete.
 
 ## Design rules
 
@@ -114,7 +128,7 @@ commit so style/lint noise never reaches CI.
 | `tests/` | Integration and snapshot tests |
 | `.github/workflows/ci.yml` | CI checks (fmt, clippy, nextest, doc tests, miri smoke, rustdoc, help smoke, doc drift, package) |
 | `.github/workflows/release.yml` | Release builds, artifact attestation, and crate publishing |
-| `justfile` | Local dev task runner; `just check` / `just fix` / `just run` |
+| `justfile` | Local dev task runner; `just check` / `just ci` / `just fix` / `just run` |
 
 See also:
 

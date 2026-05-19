@@ -131,8 +131,12 @@ fn webfetch_custom_headers_override_defaults_but_sensitive_headers_stay_denied()
 #[test]
 fn webfetch_ip_filter_rejects_non_public_ranges() {
     for ip in [
+        "0.0.0.0",
         "127.0.0.1",
         "10.0.0.1",
+        "172.16.0.1",
+        "172.31.255.255",
+        "192.168.0.1",
         "100.64.0.1",
         "198.18.0.1",
         "224.0.0.1",
@@ -143,10 +147,11 @@ fn webfetch_ip_filter_rejects_non_public_ranges() {
         "fec0::1",
         "ff00::1",
         "::ffff:127.0.0.1",
+        "::ffff:10.0.0.1",
     ] {
         assert!(!is_public_ip(ip.parse().unwrap()), "{ip} should be denied");
     }
-    for ip in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+    for ip in ["1.1.1.1", "8.8.8.8", "192.0.0.9", "2606:4700:4700::1111"] {
         assert!(is_public_ip(ip.parse().unwrap()), "{ip} should be allowed");
     }
 }
@@ -364,6 +369,60 @@ fn auto_policy_allows_patch() {
         fs::read_to_string(dir.path().join("b.txt")).unwrap(),
         "beta\n"
     );
+}
+
+#[test]
+fn patch_accepts_apply_patch_update_file_format() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(
+        dir.path().join("engine.rs"),
+        "impl BrowserEngine {\n    /// The full browser request.\n    pub fn request(&self) {}\n\n    /// Register a callback.\n    pub fn response(&self) {}\n}\n",
+    )
+    .unwrap();
+
+    let value = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "*** Begin Patch\n*** Update File: engine.rs\n@@\n-    /// The full browser request.\n+    /// The full browser URI request.\n     pub fn request(&self) {}\n@@ Register a callback\n-    /// Register a callback.\n+    /// Register a response callback.\n     pub fn response(&self) {}\n*** End Patch\n"
+                .into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value["patch_count"], 1);
+    assert_eq!(value["changed_file_count"], 1);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("engine.rs")).unwrap(),
+        "impl BrowserEngine {\n    /// The full browser URI request.\n    pub fn request(&self) {}\n\n    /// Register a response callback.\n    pub fn response(&self) {}\n}\n"
+    );
+}
+
+#[test]
+fn apply_patch_rejects_add_file_and_leaves_workspace_unchanged() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+
+    let err = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "*** Begin Patch\n*** Add File: new.txt\n+new\n*** End Patch\n".into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("file creation patches are not supported")
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(!dir.path().join("new.txt").exists());
 }
 
 #[test]
@@ -709,6 +768,42 @@ async fn bash_returns_full_output_and_bounded_preview() {
     );
     assert_eq!(value["stdout_truncated"], true);
     assert_eq!(value["stdout_capped"], false);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn bash_filters_credential_like_environment_variables() {
+    let old_secret = std::env::var("OY_TEST_SECRET_TOKEN").ok();
+    let old_public = std::env::var("OY_TEST_PUBLIC_VALUE").ok();
+    unsafe {
+        std::env::set_var("OY_TEST_SECRET_TOKEN", "do-not-leak");
+        std::env::set_var("OY_TEST_PUBLIC_VALUE", "visible");
+    }
+
+    let (_dir, ctx) = test_context(auto_policy(), false);
+    let value = tool_bash(
+        &ctx,
+        BashArgs {
+            command:
+                "printf '%s:%s' \"${OY_TEST_SECRET_TOKEN-unset}\" \"${OY_TEST_PUBLIC_VALUE-unset}\""
+                    .into(),
+            timeout_seconds: 5,
+        },
+    )
+    .await
+    .unwrap();
+
+    match old_secret {
+        Some(value) => unsafe { std::env::set_var("OY_TEST_SECRET_TOKEN", value) },
+        None => unsafe { std::env::remove_var("OY_TEST_SECRET_TOKEN") },
+    }
+    match old_public {
+        Some(value) => unsafe { std::env::set_var("OY_TEST_PUBLIC_VALUE", value) },
+        None => unsafe { std::env::remove_var("OY_TEST_PUBLIC_VALUE") },
+    }
+
+    assert_eq!(value["returncode"], 0);
+    assert_eq!(value["stdout"].as_str().unwrap(), "unset:visible");
 }
 
 #[test]

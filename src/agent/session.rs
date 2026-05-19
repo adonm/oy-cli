@@ -9,6 +9,7 @@ use crate::config::{self, SafetyMode, SessionFile};
 mod storage;
 pub use storage::load_saved;
 
+use crate::llm::Message;
 use crate::model;
 use crate::tools::{TodoItem, TodoStatus, ToolContext, ToolPolicy};
 use std::future::Future;
@@ -234,7 +235,8 @@ pub async fn run_prompt_once_no_tools(
         model::exec_chat(
             &model_spec,
             system_prompt,
-            vec![rig::completion::Message::user(prompt.to_string())],
+            vec![Message::user_text(prompt)],
+            Vec::new(),
             Vec::new(),
             config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS),
         )
@@ -262,10 +264,7 @@ async fn run_prompt_with_policy(
     prompt: &str,
     policy_override: Option<ToolPolicy>,
 ) -> Result<String> {
-    session
-        .transcript
-        .messages
-        .push(rig::completion::Message::user(prompt.to_string()));
+    session.transcript.messages.push(Message::user_text(prompt));
     let max_tool_rounds = config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS);
 
     let mut tool_context = session.tool_context();
@@ -280,6 +279,10 @@ async fn run_prompt_with_policy(
         &tool_context.lock().expect("tool context mutex poisoned"),
     );
     let messages = session.transcript.to_messages();
+    let tool_specs = {
+        let ctx = tool_context.lock().expect("tool context mutex poisoned");
+        crate::tools::tool_specs(&ctx)
+    };
     if !crate::ui::is_quiet() {
         crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
     }
@@ -288,7 +291,8 @@ async fn run_prompt_with_policy(
             &model_spec,
             &preamble,
             messages.clone(),
-            crate::tools::rig_tools(tool_context.clone()),
+            tool_specs.clone(),
+            crate::tools::llm_tools(tool_context.clone()),
             max_tool_rounds,
         )
     })
@@ -304,7 +308,7 @@ async fn run_prompt_with_policy(
         session
             .transcript
             .messages
-            .push(rig::completion::Message::assistant(response.output.clone()));
+            .push(Message::assistant_text(response.output.clone()));
     }
     Ok(response.output)
 }

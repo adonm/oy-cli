@@ -1,3 +1,8 @@
+//! Workspace filesystem tools and path trust boundary.
+//!
+//! Listing, reading, searching, line counting, replacement, and patching all
+//! validate paths against the configured workspace before touching the host.
+
 use anyhow::{Context, Result, anyhow, bail};
 use diffy::patch_set::{FileOperation, FilePatch, ParseOptions, PatchSet};
 use diffy::{apply, create_patch};
@@ -121,6 +126,17 @@ struct PatchPlan {
     display_path: String,
     updated: String,
     diff: String,
+}
+
+struct ApplyPatchFile {
+    path: String,
+    hunks: Vec<ApplyPatchHunk>,
+}
+
+struct ApplyPatchHunk {
+    anchor: Option<String>,
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -683,6 +699,9 @@ fn parse_patch_set(text: &str) -> Result<Vec<FilePatch<'_, str>>> {
 }
 
 fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPlan>)> {
+    if is_apply_patch_format(args.patch.as_str()) {
+        return plan_apply_patch(ctx, args.patch.as_str());
+    }
     let patches = parse_patch_set(args.patch.as_str())?;
     if patches.is_empty() {
         bail!("patch did not contain any file changes");
@@ -736,6 +755,236 @@ fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPl
         });
     }
     Ok((patch_count, plans))
+}
+
+fn is_apply_patch_format(text: &str) -> bool {
+    text.trim_start().starts_with("*** Begin Patch")
+}
+
+fn plan_apply_patch(ctx: &ToolContext, text: &str) -> Result<(usize, Vec<PatchPlan>)> {
+    let files = parse_apply_patch(text)?;
+    let patch_count = files.len();
+    let mut seen = BTreeSet::new();
+    let mut plans = Vec::new();
+
+    for file in files {
+        let path = resolve_existing_path(ctx, &file.path)?;
+        if path.is_dir() {
+            bail!("cannot patch directory: {}", file.path);
+        }
+        if ctx.root.join(&file.path).is_symlink() || path.is_symlink() {
+            bail!("cannot patch symlink: {}", file.path);
+        }
+        if fs::metadata(&path)?.len() > MAX_WORKSPACE_FILE_BYTES {
+            bail!("cannot patch file over workspace read cap: {}", file.path);
+        }
+
+        let raw = fs::read(&path)?;
+        let text = match crate::decode_utf8(raw) {
+            Ok(text) => text,
+            Err(crate::TextDecodeError::Binary) => bail!("cannot patch binary file: {}", file.path),
+            Err(crate::TextDecodeError::NonUtf8) => bail!("cannot decode utf-8: {}", file.path),
+        };
+        let updated = apply_context_hunks(&text, &file)?;
+        if updated == text {
+            continue;
+        }
+
+        let display_path = rel_path(&ctx.root, &path);
+        if !seen.insert(display_path.clone()) {
+            bail!("patch contains multiple changes for the same file: {display_path}");
+        }
+        let diff = unified_diff(&display_path, &text, &updated);
+        plans.push(PatchPlan {
+            path,
+            display_path,
+            updated,
+            diff,
+        });
+    }
+
+    Ok((patch_count, plans))
+}
+
+fn parse_apply_patch(text: &str) -> Result<Vec<ApplyPatchFile>> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    while lines.get(index).is_some_and(|line| line.trim().is_empty()) {
+        index += 1;
+    }
+    if lines.get(index).map(|line| line.trim()) != Some("*** Begin Patch") {
+        bail!("invalid patch");
+    }
+    index += 1;
+
+    let mut files = Vec::new();
+    let mut saw_end = false;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        if trimmed == "*** End Patch" {
+            saw_end = true;
+            index += 1;
+            break;
+        }
+        if trimmed.is_empty() {
+            index += 1;
+            continue;
+        }
+        if line.starts_with("*** Add File:") {
+            bail!("file creation patches are not supported");
+        }
+        if line.starts_with("*** Delete File:") {
+            bail!("file deletion patches are not supported");
+        }
+        let Some(path) = line.strip_prefix("*** Update File:") else {
+            bail!("invalid patch");
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            bail!("patch path is empty");
+        }
+        index += 1;
+
+        let mut hunks = Vec::new();
+        while index < lines.len() {
+            let line = lines[index];
+            if line.trim() == "*** End Patch" || line.starts_with("*** Update File:") {
+                break;
+            }
+            if line.starts_with("*** Add File:") {
+                bail!("file creation patches are not supported");
+            }
+            if line.starts_with("*** Delete File:") {
+                bail!("file deletion patches are not supported");
+            }
+            if line.trim().is_empty() {
+                index += 1;
+                continue;
+            }
+            let Some(anchor) = line.strip_prefix("@@") else {
+                bail!("invalid patch");
+            };
+            index += 1;
+            let anchor = anchor
+                .trim()
+                .trim_matches('@')
+                .trim()
+                .strip_prefix(' ')
+                .unwrap_or_else(|| anchor.trim().trim_matches('@').trim())
+                .trim()
+                .to_string();
+            let anchor = (!anchor.is_empty()).then_some(anchor);
+            let mut old_lines = Vec::new();
+            let mut new_lines = Vec::new();
+
+            while index < lines.len() {
+                let line = lines[index];
+                if line.starts_with("@@")
+                    || line.trim() == "*** End Patch"
+                    || line.starts_with("*** Update File:")
+                    || line.starts_with("*** Add File:")
+                    || line.starts_with("*** Delete File:")
+                {
+                    break;
+                }
+                if line == r"\ No newline at end of file" {
+                    index += 1;
+                    continue;
+                }
+                let Some(prefix) = line.chars().next() else {
+                    bail!("invalid patch");
+                };
+                let content = format!("{}\n", &line[prefix.len_utf8()..]);
+                match prefix {
+                    ' ' => {
+                        old_lines.push(content.clone());
+                        new_lines.push(content);
+                    }
+                    '-' => old_lines.push(content),
+                    '+' => new_lines.push(content),
+                    _ => bail!("invalid patch"),
+                }
+                index += 1;
+            }
+            if old_lines.is_empty() && new_lines.is_empty() {
+                bail!("invalid patch");
+            }
+            hunks.push(ApplyPatchHunk {
+                anchor,
+                old_lines,
+                new_lines,
+            });
+        }
+        if hunks.is_empty() {
+            bail!("patch did not contain any file changes");
+        }
+        files.push(ApplyPatchFile {
+            path: path.to_string(),
+            hunks,
+        });
+    }
+
+    if !saw_end {
+        bail!("invalid patch");
+    }
+    if lines[index..].iter().any(|line| !line.trim().is_empty()) {
+        bail!("invalid patch");
+    }
+    if files.is_empty() {
+        bail!("patch did not contain any file changes");
+    }
+    Ok(files)
+}
+
+fn apply_context_hunks(text: &str, file: &ApplyPatchFile) -> Result<String> {
+    let mut lines = split_preserving_newlines(text);
+    let mut cursor = 0;
+    for (idx, hunk) in file.hunks.iter().enumerate() {
+        let anchor_start = hunk
+            .anchor
+            .as_ref()
+            .and_then(|anchor| find_anchor_line(&lines, anchor, cursor))
+            .unwrap_or(cursor);
+        let start = find_line_sequence(&lines, &hunk.old_lines, anchor_start)
+            .or_else(|| find_line_sequence(&lines, &hunk.old_lines, cursor))
+            .or_else(|| find_line_sequence(&lines, &hunk.old_lines, 0))
+            .ok_or_else(|| {
+                anyhow!(
+                    "failed applying patch for {}: context hunk #{} did not match; re-read the file and regenerate the hunk with current context",
+                    file.path,
+                    idx + 1
+                )
+            })?;
+        lines.splice(start..start + hunk.old_lines.len(), hunk.new_lines.clone());
+        cursor = start + hunk.new_lines.len();
+    }
+    Ok(lines.concat())
+}
+
+fn split_preserving_newlines(text: &str) -> Vec<String> {
+    text.split_inclusive('\n').map(str::to_string).collect()
+}
+
+fn find_anchor_line(lines: &[String], anchor: &str, start: usize) -> Option<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .skip(start.min(lines.len()))
+        .find(|(_, line)| line.trim_end_matches(['\r', '\n']).contains(anchor))
+        .map(|(idx, _)| idx)
+}
+
+fn find_line_sequence(lines: &[String], needle: &[String], start: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > lines.len() {
+        return None;
+    }
+    lines
+        .windows(needle.len())
+        .enumerate()
+        .skip(start.min(lines.len()))
+        .find(|(_, window)| *window == needle)
+        .map(|(idx, _)| idx)
 }
 
 fn resolve_patch_target(

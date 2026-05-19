@@ -27,12 +27,6 @@ pub struct AuthStatus {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GitHubCopilotAuth {
-    ApiKey(String),
-    GitHubAccessToken(String),
-}
-
 pub(crate) fn auth_statuses() -> Vec<AuthStatus> {
     let mut items = Vec::new();
     if let Some(status) = openai_status() {
@@ -64,10 +58,8 @@ pub(crate) fn opencode_auth_key(provider: &str) -> Option<String> {
         .or_else(|| opencode_auth_key_from_path(provider, opencode_auth_path()))
 }
 
-pub(crate) fn github_copilot_auth() -> Option<GitHubCopilotAuth> {
+pub(crate) fn github_copilot_api_key() -> Option<String> {
     copilot_api_key()
-        .map(GitHubCopilotAuth::ApiKey)
-        .or_else(|| github_access_token().map(GitHubCopilotAuth::GitHubAccessToken))
 }
 
 fn copilot_api_key() -> Option<String> {
@@ -76,16 +68,6 @@ fn copilot_api_key() -> Option<String> {
         || env_value("COPILOT_API_KEY"),
         || env_value("OPENCODE_API_KEY"),
         || opencode_auth_key_from_path("github-copilot", opencode_auth_path()),
-    ])
-}
-
-fn github_access_token() -> Option<String> {
-    first_nonempty([
-        || env_value("COPILOT_GITHUB_ACCESS_TOKEN"),
-        || env_value("COPILOT_GITHUB_TOKEN"),
-        || env_value("GH_TOKEN"),
-        || env_value("GITHUB_TOKEN"),
-        gh_auth_token,
     ])
 }
 
@@ -122,41 +104,29 @@ fn openai_status() -> Option<AuthStatus> {
 }
 
 fn github_status() -> AuthStatus {
-    let auth = github_copilot_auth();
-    let auto = github_token_auto_configured();
     let api_key = copilot_api_key();
-    let present = auth.is_some();
-    let availability = match (present, auto) {
-        (true, _) => AuthAvailability::Present,
-        (false, true) => AuthAvailability::AutoConfigured,
-        (false, false) => AuthAvailability::Missing,
-    };
-    let detail = if api_key.is_some() {
-        "Copilot API token detected; direct Copilot auth available.".to_string()
-    } else if auth.is_some() && auto {
-        "GitHub token available from `gh auth token`.".to_string()
-    } else if auth.is_some() {
-        "GitHub token detected; copilot-compatible auth available.".to_string()
-    } else {
-        "No GitHub auth token detected.".to_string()
-    };
     AuthStatus {
         adapter: "github-copilot".to_string(),
         env_var: Some(
-            "GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, COPILOT_GITHUB_ACCESS_TOKEN, COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN, OpenCode auth.json".to_string(),
+            "GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, OPENCODE_API_KEY, OpenCode auth.json"
+                .to_string(),
         ),
-        availability,
+        availability: if api_key.is_some() {
+            AuthAvailability::Present
+        } else {
+            AuthAvailability::Missing
+        },
         source: if api_key.is_some() {
             "copilot api token"
-        } else if auto {
-            "gh"
-        } else if auth.is_some() {
-            "env"
         } else {
             "missing"
         }
         .to_string(),
-        detail,
+        detail: if api_key.is_some() {
+            "Copilot API token detected; native OpenAI-compatible auth available.".to_string()
+        } else {
+            "No Copilot API token detected.".to_string()
+        },
     }
 }
 
@@ -233,28 +203,6 @@ fn provider_alias(provider: &str) -> Option<&'static str> {
         "opencode-go" => Some("opencode"),
         _ => None,
     }
-}
-
-fn github_token_auto_configured() -> bool {
-    copilot_api_key().is_none()
-        && env_value("COPILOT_GITHUB_ACCESS_TOKEN").is_none()
-        && env_value("COPILOT_GITHUB_TOKEN").is_none()
-        && env_value("GH_TOKEN").is_none()
-        && env_value("GITHUB_TOKEN").is_none()
-        && gh_auth_token().is_some()
-}
-
-fn gh_auth_token() -> Option<String> {
-    let output = std::process::Command::new("gh")
-        .arg("auth")
-        .arg("token")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!token.is_empty()).then_some(token)
 }
 
 #[cfg(test)]

@@ -9,14 +9,16 @@ use syntect::util::as_24_bit_terminal_escaped;
 use unicode_width::UnicodeWidthChar;
 
 use super::text::{ansi_stripped_width, truncate_width};
-use super::{bold, color_enabled, cyan, faint, green, path, red, terminal_width};
+use super::{
+    bold, color_enabled, cyan, faint, green, path, red, sanitize_terminal, terminal_width,
+};
 
 pub fn markdown(text: &str) {
     super::out(&render_markdown(text));
 }
 
 fn render_markdown(text: &str) -> String {
-    let text = strip_escapes(text);
+    let text = sanitize_terminal(text);
     if !color_enabled() {
         return text;
     }
@@ -42,14 +44,6 @@ fn render_markdown(text: &str) -> String {
         out
     } else {
         out.trim_end_matches('\n').to_string()
-    }
-}
-
-fn strip_escapes(text: &str) -> String {
-    if text.contains('\x1b') {
-        text.replace('\x1b', "␛")
-    } else {
-        text.to_string()
     }
 }
 
@@ -118,6 +112,7 @@ fn normalize_code_preview_text(text: &str) -> Cow<'_, str> {
 
 fn numbered_block(title: &str, text: &str, first_line: usize) -> String {
     let title = if title.is_empty() { "text" } else { title };
+    let text = sanitize_terminal(text);
     let line_count = text.lines().count().max(1);
     let width = first_line
         .saturating_add(line_count.saturating_sub(1))
@@ -194,8 +189,9 @@ fn terminal_theme() -> Option<&'static Theme> {
 }
 
 pub fn diff(text: &str) -> String {
+    let text = sanitize_terminal(text);
     if !color_enabled() {
-        return text.to_string();
+        return text;
     }
     let mut out = String::new();
     for line in text.lines() {
@@ -267,5 +263,17 @@ mod tests {
                 "line exceeded {max_width}: {line}"
             );
         }
+    }
+
+    #[test]
+    fn diff_preview_sanitizes_escape_bytes_even_without_color() {
+        set_output_mode(OutputMode::Normal);
+        assert_eq!(diff(" context \x1b[2J\n"), " context ␛[2J\n");
+    }
+
+    #[test]
+    fn code_preview_sanitizes_escape_bytes_before_highlighting() {
+        set_output_mode(OutputMode::Normal);
+        assert!(code("README.md", "# ok\n\x1b[2J", 1).contains("␛[2J"));
     }
 }

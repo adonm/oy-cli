@@ -14,7 +14,7 @@
 | `ask` | Asks the user in interactive runs | No | Interactive only | Use only for genuine ambiguity |
 | `webfetch` | Fetches public web pages/files | No local mutation | Network policy | Blocks sensitive headers and non-public targets by validation |
 | `replace` | Replaces text in workspace files | Yes | File-write approval | Inspect/search before changing |
-| `bash` | Runs a shell command in workspace | Process side effects | Shell approval | Inherits environment and user permissions |
+| `bash` | Runs a shell command in workspace | Process side effects | Shell approval | Filters credential-like env vars; still uses user permissions |
 
 ## Approval modes
 
@@ -51,7 +51,7 @@ Workspace tools should only operate within `OY_ROOT` or the current directory. W
 
 ## Shell boundary
 
-`bash` is the highest-risk tool. It can read credentials, modify files, contact networks, start processes, and affect the host outside the repo. Keep shell use explicit:
+`bash` is the highest-risk tool. It can read credential files, modify files, contact networks, start processes, and affect the host outside the repo. `oy` removes credential-like environment variables from child processes by default, but shell is still not sandboxed. Keep shell use explicit:
 
 - ask by default,
 - deny in read-only modes,

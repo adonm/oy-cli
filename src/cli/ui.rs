@@ -148,9 +148,75 @@ pub fn paint(code: &str, text: impl Display) -> String {
     }
 }
 
-/// Strip terminal escape sequences to prevent injection from untrusted input.
-fn sanitize_terminal(text: &str) -> String {
+/// Strip terminal escape bytes to prevent injection from untrusted input.
+pub(crate) fn sanitize_terminal(text: &str) -> String {
     text.replace('\x1b', "␛")
+}
+
+/// Strip terminal escape bytes after rendering while preserving the SGR color
+/// sequences emitted by our own UI/highlighter.
+pub(crate) fn sanitize_terminal_for_display(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        if let Some(len) = safe_sgr_sequence_len(rest) {
+            out.push_str(&rest[..len]);
+            index += len;
+            continue;
+        }
+
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '\x1b' {
+            out.push('␛');
+        } else {
+            out.push(ch);
+        }
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn safe_sgr_sequence_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if !bytes.starts_with(b"\x1b[") {
+        return None;
+    }
+    let end = 2 + bytes[2..]
+        .iter()
+        .position(|byte| (b'@'..=b'~').contains(byte))?;
+    if bytes[end] != b'm' || end > 24 {
+        return None;
+    }
+    let params = &text[2..end];
+    if !params
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b';')
+    {
+        return None;
+    }
+    if is_safe_sgr_params(params) {
+        Some(end + 1)
+    } else {
+        None
+    }
+}
+
+fn is_safe_sgr_params(params: &str) -> bool {
+    matches!(
+        params,
+        "" | "0" | "1" | "2" | "31" | "32" | "33" | "36" | "1;35" | "1;36"
+    ) || params
+        .strip_prefix("38;2;")
+        .and_then(|rgb| {
+            rgb.split(';')
+                .map(str::parse::<u8>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+        .is_some_and(|rgb| rgb.len() == 3)
 }
 
 pub fn faint(text: impl Display) -> String {
@@ -272,5 +338,23 @@ mod tests {
         assert!(color_enabled_for_mode(ColorMode::Auto, true));
         assert!(color_enabled_for_mode(ColorMode::Always, false));
         assert!(!color_enabled_for_mode(ColorMode::Never, true));
+    }
+
+    #[test]
+    fn display_sanitizer_preserves_only_safe_color_sgr() {
+        assert_eq!(
+            sanitize_terminal_for_display("\x1b[1;36mREADME\x1b[0m"),
+            "\x1b[1;36mREADME\x1b[0m"
+        );
+        assert_eq!(
+            sanitize_terminal_for_display("\x1b[38;2;192;197;206mtext\x1b[0m"),
+            "\x1b[38;2;192;197;206mtext\x1b[0m"
+        );
+        assert_eq!(sanitize_terminal_for_display("bad\x1b[2J"), "bad␛[2J");
+        assert_eq!(
+            sanitize_terminal_for_display("bad\x1b]52;c;x"),
+            "bad␛]52;c;x"
+        );
+        assert_eq!(sanitize_terminal_for_display("hide\x1b[8m"), "hide␛[8m");
     }
 }

@@ -1,8 +1,8 @@
-use rig::completion::message::{Message, ToolResultContent, UserContent};
 use serde::{Deserialize, Serialize};
 
 use super::compaction::{compact_text, count_tokens, message_content_text};
 use crate::config;
+use crate::llm::{Message, MessageContent, ToolResultContent};
 use crate::tools::{TodoItem, ToolContext};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,18 +118,18 @@ impl Transcript {
                 continue;
             };
             for item in content.iter_mut() {
-                let UserContent::ToolResult(result) = item else {
+                let MessageContent::ToolResult { content, .. } = item else {
                     continue;
                 };
-                for part in result.content.iter_mut() {
-                    let ToolResultContent::Text(text) = part else {
+                for part in content.iter_mut() {
+                    let ToolResultContent::Text { text } = part else {
                         continue;
                     };
-                    if text.text.contains("[tool output compacted]") {
+                    if text.contains("[tool output compacted]") {
                         continue;
                     }
-                    text.text = compact_text(&text.text, max_bytes, "tool output compacted");
-                    if text.text.contains("[tool output compacted]") {
+                    *text = compact_text(text, max_bytes, "tool output compacted");
+                    if text.contains("[tool output compacted]") {
                         compacted += 1;
                     }
                 }
@@ -171,7 +171,7 @@ impl Transcript {
     pub fn to_messages(&self) -> Vec<Message> {
         let mut messages = Vec::new();
         if let Some(summary) = self.summary.as_ref().filter(|s| !s.trim().is_empty()) {
-            messages.push(Message::user(format!(
+            messages.push(Message::user_text(format!(
                 "[Compacted earlier conversation]\n{}",
                 summary.trim()
             )));
@@ -223,5 +223,5 @@ fn is_user_prompt(message: &Message) -> bool {
     };
     content
         .iter()
-        .any(|item| matches!(item, UserContent::Text(text) if !text.text.trim().is_empty()))
+        .any(|item| matches!(item, MessageContent::Text { text } if !text.trim().is_empty()))
 }

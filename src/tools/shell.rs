@@ -1,6 +1,12 @@
+//! `bash` tool implementation and process trust boundary.
+//!
+//! Shell execution is policy-gated, timeout-bound, output-capped, and launched
+//! with credential-like environment variables removed by default.
+
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
+use std::ffi::OsStr;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt as _;
@@ -41,7 +47,9 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
         args.command.trim()
     );
     require_mutation_approval(ctx, "bash", Some(&approval_preview))?;
-    let mut child = Command::new("bash")
+    let mut command = Command::new("bash");
+    remove_sensitive_child_env(&mut command);
+    let mut child = command
         .arg("-c")
         .arg(&args.command)
         .current_dir(&ctx.root)
@@ -78,6 +86,30 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
         stdout_capped: stdout_truncated,
         stderr_capped: stderr_truncated,
     })?)
+}
+
+fn remove_sensitive_child_env(command: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if is_sensitive_env_name(&name) {
+            command.env_remove(name);
+        }
+    }
+}
+
+fn is_sensitive_env_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return true;
+    };
+    let name = name.to_ascii_uppercase();
+    name.contains("API_KEY")
+        || name.contains("ACCESS_KEY")
+        || name.contains("PRIVATE_KEY")
+        || name.contains("SECRET")
+        || name.contains("TOKEN")
+        || name.contains("PASSWORD")
+        || name.contains("PASSWD")
+        || name.contains("CREDENTIAL")
+        || name.contains("AUTH")
 }
 
 async fn read_child_output<R>(mut reader: R, max_bytes: usize) -> Result<(String, bool)>

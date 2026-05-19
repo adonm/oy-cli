@@ -12,7 +12,9 @@ user argv/stdin
   -> cli::app::{session_cmd, model_cmd, doctor_cmd, audit_cmd}
   -> agent::session in src/agent/session.rs
   -> agent::{chat, transcript, compaction, model, auth, opencode_models}
-  -> model provider / tool loop
+  -> llm::{LlmRequest, Message, ToolSpec, ModelRoute, ChatBackend, NativeOpenAiBackend, LlmTool}
+  -> tools::{registry, native LLM tool adapter}
+  -> model provider / native tool loop
   -> src/tools.rs and src/tools/ for local capabilities
 ```
 
@@ -20,32 +22,56 @@ user argv/stdin
 2. `src/lib.rs` keeps the public crate surface small.
 3. `cli::app` parses commands, restores legacy argument shapes, and delegates command bodies to `cli::app/*_cmd.rs`.
 4. `cli::config` is a facade over focused config modules for modes, paths, prompts, model config, environment knobs, and saved sessions.
-5. `agent::session` owns session orchestration and saved sessions; transcript storage, context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
-6. `agent::model` resolves a small chat route, then uses Rig clients for execution. `agent::opencode_models` is the only source of OpenCode verbose model metadata; do not add local provider/model registries. The only accepted provider-routing shim is the narrow Copilot `/responses` workaround for Rig versions that route only Codex models correctly.
-7. `agent::auth` owns environment/OpenCode/GitHub credential lookup; callers should not duplicate provider auth probing.
-8. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries.
+5. `agent::session` owns session orchestration and saved sessions; transcript storage uses `llm::Message`, while context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
+6. `agent::model` resolves a small chat route, builds an `llm::LlmRequest` from `oy`-owned messages/tool specs, and executes it through `llm::NativeOpenAiBackend`. OpenAI direct routes, GitHub Copilot API-token routes, and OpenAI-compatible providers listed by OpenCode use only Chat Completions or Responses protocols. `agent::opencode_models` remains the only source of OpenCode verbose model metadata; do not add local provider/model registries. Any provider-routing shim must be narrow, metadata-backed, and covered by focused tests.
+7. `agent::auth` owns environment/OpenCode/Copilot API-token credential lookup; callers should not duplicate provider auth probing.
+8. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries. `src/tools/registry.rs` is the single `oy` tool schema registry; `src/tools/llm.rs` adapts enabled tools to the native `llm::LlmTool` trait.
 10. `src/audit.rs` is separate from the tool loop: it orchestrates collection, chunk review/reduce, rendering, and report writing through focused `src/audit/` modules.
 
 ## Main modules
 
 | Path | Responsibility |
 |---|---|
-| `src/agent.rs`, `src/agent/` | Provider integration, model selection, auth discovery, OpenCode model metadata, sessions, transcripts, context compaction, chat/tool loop |
+| `src/agent.rs`, `src/agent/` | Model selection, auth discovery, OpenCode model metadata, sessions, `llm::Message` transcripts, context compaction, chat/tool loop orchestration |
+| `src/llm/` | `oy`-owned LLM request/response, message, tool-spec, route, backend seam, and native OpenAI-compatible transport/tool loop |
 | `src/audit.rs`, `src/audit/` | Deterministic no-tools audit orchestration, input collection, chunking, prompt construction, report/SARIF writing |
 | `src/cli.rs`, `src/cli/` | Command parsing/dispatch, command handlers, config paths, safety modes, terminal UI, interactive chat shell |
-| `src/tools.rs`, `src/tools/` | Tool schemas, tool dispatch, previews, todos, workspace filesystem boundary, webfetch boundary, mutation approval |
+| `src/tools.rs`, `src/tools/` | Tool schema registry, native LLM tool adapter, tool dispatch, previews, todos, workspace filesystem boundary, webfetch boundary, mutation approval |
 | `src/lib.rs` | Small public facade used by the binary and tests |
 | `src/main.rs` | Tokio entry point and process exit handling |
 | `tests/snapshots.rs` | Snapshot tests for chat help and tool preview UX |
 
 The current layout keeps top-level Rust files as facades/orchestrators where practical. When splitting files, prefer mechanical extraction with no behavior changes, keep trust-boundary validation near entry points, and keep `src/lib.rs` stable.
 
+## LLM transition target
+
+The desired LLM boundary is OpenCode-shaped but `oy`-sized:
+
+```text
+transcript/tools -> LlmRequest -> ModelRoute -> Protocol -> Transport -> LlmResponse
+                                      ^                         |
+                                      |                         v
+                              OpenCode metadata             tool loop
+```
+
+Months 1 through 4 are in place: `src/llm/mod.rs` owns request/response, message, tool-spec, route, backend-trait, and native tool types; transcripts store `llm::Message`; `agent::model` accepts `oy` messages directly; `src/tools/registry.rs` is the single tool schema registry; `src/tools/llm.rs` adapts enabled tools to `llm::LlmTool`; and `src/llm/openai.rs` is the default non-streaming OpenAI Chat/Responses transport and tool loop.
+
+Rules for that transition:
+
+- own `LlmRequest`, `LlmResponse`, messages, tool definitions, and model routes in `oy`;
+- do not reintroduce provider adapters without a concrete user need;
+- keep native OpenAI Chat and OpenAI Responses as the only model wire protocols unless a concrete user need justifies more;
+- keep provider metadata in OpenCode, auth in `agent::auth`, and policy checks in `tools`;
+- prefer request/response golden tests over broad live-provider tests.
+
+See `CONTRIBUTING.md` for the month-by-month roadmap.
+
 ## Trust boundaries
 
 | Boundary | Entry point | Sink | Required posture |
 |---|---|---|---|
 | Workspace files | Tool paths, `OY_ROOT`, audit collector, `--out` | Reads/writes under the workspace | Validate near path resolution; fail closed outside workspace; test symlinks and traversal |
-| Shell/process | `bash` tool, provider helper CLIs | User shell/process environment | Ask or deny by mode; avoid implicit process execution; add timeouts |
+| Shell/process | `bash` tool, provider helper CLIs | User shell/process environment | Ask or deny by mode; filter credential-like child env vars; avoid implicit process execution; add timeouts |
 | Network | `webfetch`, model providers, routing shims | HTTP requests and provider APIs | Separate model egress from tool egress; validate public-only fetches strictly |
 | Model provider | Prompts, snippets, tool output, audit chunks | External or local model endpoint | Treat sent text as disclosed to that provider; avoid secrets by default |
 | Local state | Config, sessions, history, `TODO.md` persistence | `~/.config/oy-rust/` and workspace files | Store only intentionally; use private local files; document sensitivity |

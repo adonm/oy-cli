@@ -114,7 +114,7 @@ impl OpenCodeModelListing {
     pub(crate) fn into_adapter_models(self) -> Vec<AdapterModels> {
         let mut groups = std::collections::BTreeMap::<String, Vec<String>>::new();
         for model in self.models {
-            if !model.is_supported_by_rig() {
+            if !model.is_supported_by_native_openai() {
                 continue;
             }
             groups
@@ -205,7 +205,7 @@ impl OpenCodeModel {
         })
     }
 
-    fn is_supported_by_rig(&self) -> bool {
+    fn is_supported_by_native_openai(&self) -> bool {
         // Explicitly ignore bedrock/vertexai regardless of metadata;
         // those providers were removed from oy.
         if matches!(
@@ -331,7 +331,7 @@ opencode/claude-test
         assert_eq!(model.api_id(), "gpt-5.5");
         assert_eq!(model.api_url(), Some("https://api.githubcopilot.com"));
         let groups = listing.into_adapter_models();
-        // Both models are now OpenAI-compatible (github-copilot + opencode proxying anthropic)
+        // Both models are OpenAI-compatible (github-copilot + opencode proxying anthropic)
         assert_eq!(groups.len(), 2);
         // groups are sorted by adapter name
         assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);

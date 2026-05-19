@@ -83,7 +83,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         "  Treat local state as sensitive: prompts, source snippets, tool output, and command output may be saved.",
     );
     crate::ui::line("");
-    crate::ui::section("Auth / shims");
+    crate::ui::section("Auth");
     if listing.auth.is_empty() {
         crate::ui::warn("no provider auth detected");
     } else {

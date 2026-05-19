@@ -1,3 +1,8 @@
+//! Deserializers for model-supplied tool arguments.
+//!
+//! This module keeps lenient JSON shapes, aliases, and defaults close to the
+//! tool boundary so implementations can work with typed arguments.
+
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use std::collections::BTreeMap;

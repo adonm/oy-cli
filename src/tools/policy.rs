@@ -1,3 +1,8 @@
+//! Tool approval policy and mutation approval boundary.
+//!
+//! Safety modes reduce to this matrix: read tools are exposed elsewhere, while
+//! file writes, todo persistence, and shell commands are allowed, asked, or denied here.
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -97,12 +102,74 @@ fn approve_tool(tool: &str, preview: Option<&str>) -> Result<()> {
     crate::ui::kv("tool", display_tool);
     crate::ui::kv("default", "deny");
     if tool == "bash" {
-        crate::ui::warn("shell commands run with your user permissions and inherited environment");
+        crate::ui::warn(
+            "shell commands run with your user permissions; credential-like env vars are removed",
+        );
     }
     let choices = ["no".to_string(), "yes".to_string()];
     if crate::chat::ask(&format!("Approve {display_tool}?"), Some(&choices))? == "yes" {
         Ok(())
     } else {
         bail!("tool denied by user")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SafetyMode;
+
+    #[test]
+    fn safety_modes_map_to_expected_tool_policies() {
+        let cases = [
+            (SafetyMode::Plan, ToolPolicy::read_only()),
+            (
+                SafetyMode::Default,
+                ToolPolicy::with_write(Approval::Ask, Approval::Ask),
+            ),
+            (
+                SafetyMode::AutoEdits,
+                ToolPolicy::with_write(Approval::Auto, Approval::Ask),
+            ),
+            (
+                SafetyMode::AutoAll,
+                ToolPolicy::with_write(Approval::Auto, Approval::Auto),
+            ),
+        ];
+
+        for (mode, policy) in cases {
+            assert_eq!(mode.policy(), policy, "{}", mode.name());
+        }
+    }
+
+    #[test]
+    fn approval_matrix_is_explicit_for_mutating_tools() {
+        let cases = [
+            (ToolPolicy::read_only(), Approval::Deny, Approval::Deny),
+            (
+                ToolPolicy::with_write(Approval::Ask, Approval::Ask),
+                Approval::Ask,
+                Approval::Ask,
+            ),
+            (
+                ToolPolicy::with_write(Approval::Auto, Approval::Ask),
+                Approval::Auto,
+                Approval::Ask,
+            ),
+            (
+                ToolPolicy::with_write(Approval::Auto, Approval::Auto),
+                Approval::Auto,
+                Approval::Auto,
+            ),
+        ];
+
+        for (policy, file_approval, shell_approval) in cases {
+            assert_eq!(policy.approval("replace"), file_approval);
+            assert_eq!(policy.approval("patch"), file_approval);
+            assert_eq!(policy.approval("todo_persist"), file_approval);
+            assert_eq!(policy.approval("bash"), shell_approval);
+            assert_eq!(policy.approval("todo"), Approval::Auto);
+            assert_eq!(policy.approval("unknown"), Approval::Deny);
+        }
     }
 }
