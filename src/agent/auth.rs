@@ -54,6 +54,10 @@ pub(crate) fn env_value(name: &str) -> Option<String> {
     env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+fn first_nonempty<const N: usize>(candidates: [fn() -> Option<String>; N]) -> Option<String> {
+    candidates.into_iter().find_map(|candidate| candidate())
+}
+
 pub(crate) fn opencode_auth_key(provider: &str) -> Option<String> {
     provider_api_key(provider)
         .or_else(|| env_value("OPENCODE_API_KEY"))
@@ -67,18 +71,22 @@ pub(crate) fn github_copilot_auth() -> Option<GitHubCopilotAuth> {
 }
 
 fn copilot_api_key() -> Option<String> {
-    provider_api_key("github-copilot")
-        .or_else(|| env_value("COPILOT_API_KEY"))
-        .or_else(|| env_value("OPENCODE_API_KEY"))
-        .or_else(|| opencode_auth_key_from_path("github-copilot", opencode_auth_path()))
+    first_nonempty([
+        || provider_api_key("github-copilot"),
+        || env_value("COPILOT_API_KEY"),
+        || env_value("OPENCODE_API_KEY"),
+        || opencode_auth_key_from_path("github-copilot", opencode_auth_path()),
+    ])
 }
 
 fn github_access_token() -> Option<String> {
-    env_value("COPILOT_GITHUB_ACCESS_TOKEN")
-        .or_else(|| env_value("COPILOT_GITHUB_TOKEN"))
-        .or_else(|| env_value("GH_TOKEN"))
-        .or_else(|| env_value("GITHUB_TOKEN"))
-        .or_else(gh_auth_token)
+    first_nonempty([
+        || env_value("COPILOT_GITHUB_ACCESS_TOKEN"),
+        || env_value("COPILOT_GITHUB_TOKEN"),
+        || env_value("GH_TOKEN"),
+        || env_value("GITHUB_TOKEN"),
+        gh_auth_token,
+    ])
 }
 
 fn opencode_status(provider: &str) -> Option<AuthStatus> {

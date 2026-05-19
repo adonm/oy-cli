@@ -85,13 +85,9 @@ pub(crate) struct ProviderInfo {
 
 /// Extract provider info from a model spec string.
 pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
-    let (provider, model) = split_model_spec(model_spec.trim());
-    let provider = provider
-        .map(config::canonical_provider)
-        .unwrap_or("openai")
-        .to_string();
-    let model = model.to_string();
-    let model_info = opencode_models::find(&provider, &model);
+    let parsed = ParsedModelSpec::parse(model_spec);
+    let provider = parsed.provider_or_openai().to_string();
+    let model_info = opencode_models::find(&provider, parsed.base_model);
     let endpoint = model_info
         .as_ref()
         .and_then(|info| info.api_url().map(|s| s.trim_end_matches('/').to_string()));
@@ -101,9 +97,9 @@ pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
 /// Look up token limits for a model spec from OpenCode metadata.
 /// Returns `None` when OpenCode isn't available or the model isn't found.
 pub(crate) fn model_limits(model_spec: &str) -> Option<opencode_models::OpenCodeModelLimit> {
-    let (provider, model) = split_model_spec(model_spec.trim());
-    let provider = provider.map(config::canonical_provider)?;
-    opencode_models::lookup_limit(provider, model)
+    let parsed = ParsedModelSpec::parse(model_spec);
+    let provider = parsed.provider.map(config::canonical_provider)?;
+    opencode_models::lookup_limit(provider, parsed.base_model)
 }
 
 pub async fn exec_chat(
@@ -113,148 +109,169 @@ pub async fn exec_chat(
     tools: Vec<Box<dyn ToolDyn>>,
     max_turns: usize,
 ) -> Result<PromptResponse> {
-    let route = resolve_chat_route(model_spec)?;
-    let reasoning_effort = reasoning_effort_json(model_spec, route.uses_responses_api());
+    let chat = prepare_chat(model_spec)?;
     let mut history = messages;
     let prompt = history.pop().unwrap_or_else(|| Message::user(""));
-    execute_chat_route(
-        route,
-        preamble,
-        history,
-        prompt,
-        tools,
-        max_turns,
-        reasoning_effort,
-    )
-    .await
+    execute_prepared_chat(chat, preamble, history, prompt, tools, max_turns).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatApi {
+    OpenAiChat,
+    OpenAiResponses,
+    GitHubCopilotChat,
+}
+
+impl ChatApi {
+    fn uses_responses_api(self) -> bool {
+        matches!(self, Self::OpenAiResponses)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ChatRoute {
-    OpenAi {
-        model: String,
-        api_key: String,
-        base_url: Option<String>,
-    },
-    OpenAiResponses {
-        model: String,
-        api_key: String,
-        base_url: String,
-    },
-    GitHubCopilot {
-        model: String,
-        auth: GitHubCopilotAuth,
-    },
-    GitHubCopilotResponses {
-        model: String,
-        api_key: String,
-        base_url: String,
-    },
+enum ChatAuth {
+    ApiKey(String),
+    GitHubCopilot(GitHubCopilotAuth),
 }
 
-impl ChatRoute {
-    fn uses_responses_api(&self) -> bool {
-        matches!(
-            self,
-            ChatRoute::OpenAiResponses { .. } | ChatRoute::GitHubCopilotResponses { .. }
-        )
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedChat {
+    api: ChatApi,
+    model: String,
+    auth: ChatAuth,
+    base_url: Option<String>,
+    reasoning_effort: Option<serde_json::Value>,
+}
+
+fn prepare_chat(model_spec: &str) -> Result<PreparedChat> {
+    let parsed = ParsedModelSpec::parse(model_spec);
+    let provider = parsed.provider_or_openai();
+    let (api, model, auth, base_url) = match provider {
+        "github-copilot" => prepare_github_copilot_chat(parsed.base_model)?,
+        "openai" => (
+            ChatApi::OpenAiChat,
+            parsed.base_model.to_string(),
+            ChatAuth::ApiKey(env_value("OPENAI_API_KEY").context("OpenAI auth is not configured")?),
+            env_value("OPENAI_BASE_URL"),
+        ),
+        provider => prepare_opencode_compatible_chat(provider, parsed.base_model)?,
+    };
+    let reasoning_effort = reasoning_effort_json(model_spec, api.uses_responses_api());
+    Ok(PreparedChat {
+        api,
+        model,
+        auth,
+        base_url,
+        reasoning_effort,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenCodeRouteProfile {
+    model_id: String,
+    base_url: String,
+    api: ChatApi,
+}
+
+impl OpenCodeRouteProfile {
+    fn from_model(
+        provider: &str,
+        model: &str,
+        info: &opencode_models::OpenCodeModel,
+    ) -> Result<Self> {
+        if !info.is_openai_compatible_api() {
+            bail!("OpenCode model `{provider}/{model}` is not OpenAI-compatible");
+        }
+        let model_id = info.api_id().to_string();
+        let base_url = info
+            .api_url()
+            .ok_or_else(|| {
+                anyhow!("OpenCode model `{provider}/{model}` does not expose an API URL")
+            })?
+            .to_string();
+        let api = if opencode_requires_responses_api_shim(provider, &model_id) {
+            ChatApi::OpenAiResponses
+        } else {
+            ChatApi::OpenAiChat
+        };
+        Ok(Self {
+            model_id,
+            base_url,
+            api,
+        })
     }
 }
 
-fn resolve_chat_route(model_spec: &str) -> Result<ChatRoute> {
-    let (provider, model) = split_model_spec(model_spec.trim());
-    let provider = provider.map(config::canonical_provider).unwrap_or("openai");
-    match provider {
-        "github-copilot" => {
-            let model_info = opencode_models::find("github-copilot", model);
-            let model_id = model_info
-                .as_ref()
-                .map(|model| model.api_id().to_string())
-                .unwrap_or_else(|| model.to_string());
-            let auth = github_copilot_auth().context("GitHub Copilot auth is not configured")?;
-            if copilot_requires_responses_api_shim(&model_id) {
-                let GitHubCopilotAuth::ApiKey(api_key) = auth else {
-                    bail!(
-                        "GitHub Copilot model `{model}` requires a Copilot API token, but only a GitHub token is configured"
-                    );
-                };
-                Ok(ChatRoute::GitHubCopilotResponses {
-                    model: model_id,
-                    api_key,
-                    base_url: model_info
-                        .as_ref()
-                        .and_then(|model| model.api_url())
-                        .unwrap_or("https://api.githubcopilot.com")
-                        .trim_end_matches("/v1")
-                        .trim_end_matches('/')
-                        .to_string(),
-                })
-            } else {
-                Ok(ChatRoute::GitHubCopilot {
-                    model: model_id,
-                    auth,
-                })
-            }
-        }
-        "openai" => Ok(ChatRoute::OpenAi {
-            model: model.to_string(),
-            api_key: env_value("OPENAI_API_KEY").context("OpenAI auth is not configured")?,
-            base_url: env_value("OPENAI_BASE_URL"),
-        }),
-        provider => {
-            let model_info = opencode_models::find(provider, model)
-                .ok_or_else(|| anyhow!("unknown OpenCode model `{provider}/{model}`"))?;
-            if !model_info.is_openai_compatible_api() {
-                bail!("OpenCode model `{provider}/{model}` is not OpenAI-compatible");
-            }
-            let model_id = model_info.api_id().to_string();
-            let api_key = opencode_auth_key(provider)
-                .ok_or_else(|| anyhow!("OpenCode auth.json has no credentials for `{provider}`"))?;
-            let api_url = model_info
-                .api_url()
-                .ok_or_else(|| {
-                    anyhow!("OpenCode model `{provider}/{model}` does not expose an API URL")
-                })?
-                .to_string();
-            if opencode_requires_responses_api_shim(provider, &model_id) {
-                Ok(ChatRoute::OpenAiResponses {
-                    model: model_id,
-                    api_key,
-                    base_url: api_url,
-                })
-            } else {
-                Ok(ChatRoute::OpenAi {
-                    model: model_id,
-                    api_key,
-                    base_url: Some(api_url),
-                })
-            }
-        }
+fn prepare_github_copilot_chat(model: &str) -> Result<(ChatApi, String, ChatAuth, Option<String>)> {
+    let model_info = opencode_models::find("github-copilot", model);
+    let profile = model_info
+        .as_ref()
+        .map(|info| OpenCodeRouteProfile::from_model("github-copilot", model, info))
+        .transpose()?;
+    let model_id = profile
+        .as_ref()
+        .map(|profile| profile.model_id.clone())
+        .unwrap_or_else(|| model.to_string());
+    let auth = github_copilot_auth().context("GitHub Copilot auth is not configured")?;
+    if !copilot_requires_responses_api_shim(&model_id) {
+        return Ok((
+            ChatApi::GitHubCopilotChat,
+            model_id,
+            ChatAuth::GitHubCopilot(auth),
+            None,
+        ));
     }
+    let GitHubCopilotAuth::ApiKey(api_key) = auth else {
+        bail!(
+            "GitHub Copilot model `{model}` requires a Copilot API token, but only a GitHub token is configured"
+        );
+    };
+    Ok((
+        ChatApi::OpenAiResponses,
+        model_id,
+        ChatAuth::ApiKey(api_key),
+        Some(copilot_base_url(profile.as_ref())),
+    ))
 }
 
-async fn execute_chat_route(
-    route: ChatRoute,
+fn copilot_base_url(profile: Option<&OpenCodeRouteProfile>) -> String {
+    profile
+        .map(|profile| profile.base_url.as_str())
+        .unwrap_or("https://api.githubcopilot.com")
+        .trim_end_matches("/v1")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn prepare_opencode_compatible_chat(
+    provider: &str,
+    model: &str,
+) -> Result<(ChatApi, String, ChatAuth, Option<String>)> {
+    let model_info = opencode_models::find(provider, model)
+        .ok_or_else(|| anyhow!("unknown OpenCode model `{provider}/{model}`"))?;
+    let profile = OpenCodeRouteProfile::from_model(provider, model, &model_info)?;
+    let api_key = opencode_auth_key(provider)
+        .ok_or_else(|| anyhow!("OpenCode auth.json has no credentials for `{provider}`"))?;
+    Ok((
+        profile.api,
+        profile.model_id,
+        ChatAuth::ApiKey(api_key),
+        Some(profile.base_url),
+    ))
+}
+
+async fn execute_prepared_chat(
+    chat: PreparedChat,
     preamble: &str,
     history: Vec<Message>,
     prompt: Message,
     tools: Vec<Box<dyn ToolDyn>>,
     max_turns: usize,
-    reasoning_effort: Option<serde_json::Value>,
 ) -> Result<PromptResponse> {
-    match route {
-        ChatRoute::OpenAi {
-            model,
-            api_key,
-            base_url,
-        } => {
-            let mut builder = openai::Client::builder().api_key(api_key);
-            if let Some(base_url) = base_url {
-                builder = builder.base_url(base_url);
-            }
-            let client = builder.build()?.completions_api();
-            let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
-            if let Some(ref params) = reasoning_effort {
+    macro_rules! run_agent {
+        ($builder:expr) => {{
+            let mut agent_builder = $builder;
+            if let Some(ref params) = chat.reasoning_effort {
                 agent_builder = agent_builder.additional_params(params.clone());
             }
             let agent = agent_builder.build();
@@ -265,30 +282,38 @@ async fn execute_chat_route(
                 .extended_details()
                 .await
                 .map_err(Into::into)
+        }};
+    }
+
+    match chat.api {
+        ChatApi::OpenAiChat => {
+            let ChatAuth::ApiKey(api_key) = chat.auth else {
+                bail!("OpenAI-compatible chat requires API-key auth");
+            };
+            let mut builder = openai::Client::builder().api_key(api_key);
+            if let Some(base_url) = chat.base_url {
+                builder = builder.base_url(base_url);
+            }
+            let client = builder.build()?.completions_api();
+            run_agent!(client.agent(&chat.model).preamble(preamble).tools(tools))
         }
-        ChatRoute::OpenAiResponses {
-            model,
-            api_key,
-            base_url,
-        } => {
+        ChatApi::OpenAiResponses => {
+            let ChatAuth::ApiKey(api_key) = chat.auth else {
+                bail!("OpenAI Responses chat requires API-key auth");
+            };
+            let base_url = chat
+                .base_url
+                .context("OpenAI Responses chat requires a base URL")?;
             let client = openai::Client::builder()
                 .api_key(api_key)
                 .base_url(base_url)
                 .build()?;
-            let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
-            if let Some(ref params) = reasoning_effort {
-                agent_builder = agent_builder.additional_params(params.clone());
-            }
-            let agent = agent_builder.build();
-            agent
-                .prompt(prompt)
-                .with_history(history)
-                .max_turns(max_turns)
-                .extended_details()
-                .await
-                .map_err(Into::into)
+            run_agent!(client.agent(&chat.model).preamble(preamble).tools(tools))
         }
-        ChatRoute::GitHubCopilot { model, auth } => {
+        ChatApi::GitHubCopilotChat => {
+            let ChatAuth::GitHubCopilot(auth) = chat.auth else {
+                bail!("GitHub Copilot chat requires Copilot auth");
+            };
             let client = match auth {
                 GitHubCopilotAuth::ApiKey(api_key) => {
                     copilot::Client::builder().api_key(api_key).build()?
@@ -297,58 +322,56 @@ async fn execute_chat_route(
                     .github_access_token(token)
                     .build()?,
             };
-            let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
-            if let Some(ref params) = reasoning_effort {
-                agent_builder = agent_builder.additional_params(params.clone());
-            }
-            let agent = agent_builder.build();
-            agent
-                .prompt(prompt)
-                .with_history(history)
-                .max_turns(max_turns)
-                .extended_details()
-                .await
-                .map_err(Into::into)
-        }
-        ChatRoute::GitHubCopilotResponses {
-            model,
-            api_key,
-            base_url,
-        } => {
-            let client = openai::Client::builder()
-                .api_key(api_key)
-                .base_url(base_url)
-                .build()?;
-            let mut agent_builder = client.agent(&model).preamble(preamble).tools(tools);
-            if let Some(ref params) = reasoning_effort {
-                agent_builder = agent_builder.additional_params(params.clone());
-            }
-            let agent = agent_builder.build();
-            agent
-                .prompt(prompt)
-                .with_history(history)
-                .max_turns(max_turns)
-                .extended_details()
-                .await
-                .map_err(Into::into)
+            run_agent!(client.agent(&chat.model).preamble(preamble).tools(tools))
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedModelSpec<'a> {
+    provider: Option<&'a str>,
+    model: &'a str,
+    base_model: &'a str,
+    reasoning_effort: Option<&'static str>,
+}
+
+impl<'a> ParsedModelSpec<'a> {
+    fn parse(spec: &'a str) -> Self {
+        let spec = spec.trim();
+        let (namespace, model) = config::split_model_spec(spec);
+        if let Some(provider) = namespace {
+            return Self::from_parts(Some(provider), model);
+        }
+        if let Some((provider, model)) = spec.split_once('/')
+            && !provider.trim().is_empty()
+            && !model.trim().is_empty()
+        {
+            return Self::from_parts(Some(provider), model);
+        }
+        Self::from_parts(None, model)
+    }
+
+    fn from_parts(provider: Option<&'a str>, model: &'a str) -> Self {
+        let (reasoning_effort, base_model) = split_reasoning_effort_suffix(model);
+        Self {
+            provider,
+            model,
+            base_model,
+            reasoning_effort,
+        }
+    }
+
+    fn provider_or_openai(self) -> &'a str {
+        self.provider
+            .map(config::canonical_provider)
+            .unwrap_or("openai")
+    }
+}
+
+#[cfg(test)]
 fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
-    let (namespace, model) = config::split_model_spec(spec);
-    let (_, base_model) = split_reasoning_effort_suffix(model);
-    if namespace.is_some() {
-        return (namespace, base_model);
-    }
-    if let Some((provider, model)) = spec.split_once('/')
-        && !provider.trim().is_empty()
-        && !model.trim().is_empty()
-    {
-        let (_, base_model) = split_reasoning_effort_suffix(model);
-        return (Some(provider), base_model);
-    }
-    (None, base_model)
+    let parsed = ParsedModelSpec::parse(spec);
+    (parsed.provider, parsed.base_model)
 }
 
 fn copilot_requires_responses_api_shim(model: &str) -> bool {
@@ -380,9 +403,8 @@ fn opencode_requires_responses_api_shim(provider: &str, model: &str) -> bool {
 /// 4. Static fallback for known reasoning-capable models
 /// 5. `None` otherwise
 pub fn default_reasoning_effort(model_spec: &str) -> Option<String> {
-    let (_, model) = config::split_model_spec(model_spec);
-    let (inline_effort, _) = split_reasoning_effort_suffix(model);
-    if let Some(effort) = inline_effort.map(|s| s.to_string()) {
+    let parsed = ParsedModelSpec::parse(model_spec);
+    if let Some(effort) = parsed.reasoning_effort.map(str::to_string) {
         return Some(effort);
     }
     reasoning_effort_option(model_spec)
@@ -400,11 +422,11 @@ pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
     {
         return configured_reasoning_effort();
     }
-    let (_, model) = config::split_model_spec(model_spec);
-    let (inline_effort, base_model) = split_reasoning_effort_suffix(model);
-    if inline_effort.is_some() {
+    let parsed = ParsedModelSpec::parse(model_spec);
+    if parsed.reasoning_effort.is_some() {
         return None;
     }
+    let base_model = parsed.base_model;
 
     // Moonshot/Kimi defaults thinking on for this model. Its OpenAI-compatible
     // chat endpoint rejects follow-up tool requests unless assistant tool-call
@@ -487,9 +509,8 @@ fn split_reasoning_effort_suffix(model: &str) -> (Option<&'static str>, &str) {
 /// Supported reasoning effort values for `model_spec` according to OpenCode.
 /// Falls back to the universal set when OpenCode is unavailable.
 pub fn reasoning_efforts_for(model_spec: &str) -> Vec<String> {
-    let (_, model) = config::split_model_spec(model_spec);
-    let (_, base_model) = split_reasoning_effort_suffix(model);
-    let (provider, model_name) = split_model_spec_for_opencode(base_model);
+    let parsed = ParsedModelSpec::parse(model_spec);
+    let (provider, model_name) = split_model_spec_for_opencode(parsed.base_model);
     if let Some(info) = opencode_models::lookup_reasoning(provider, model_name) {
         let efforts = info.reasoning_efforts();
         if !efforts.is_empty() {
@@ -572,6 +593,37 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|(name, _)| (*name, env::var(name).ok()))
+                .collect::<Vec<_>>();
+            for (name, value) in vars {
+                match value {
+                    Some(value) => unsafe { env::set_var(name, value) },
+                    None => unsafe { env::remove_var(name) },
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => unsafe { env::set_var(name, value) },
+                    None => unsafe { env::remove_var(name) },
+                }
+            }
+        }
+    }
+
     #[test]
     fn model_listing_only_includes_introspected_models() {
         let models = collect_all_models(&[]);
@@ -614,6 +666,53 @@ mod tests {
         assert_eq!(
             split_model_spec("opencode-go/kimi-k2.6-high"),
             (Some("opencode-go"), "kimi-k2.6")
+        );
+    }
+
+    #[test]
+    fn parsed_model_spec_captures_provider_model_and_reasoning_suffix() {
+        let parsed = ParsedModelSpec::parse(" copilot::gpt-5.5-low ");
+        assert_eq!(parsed.provider, Some("copilot"));
+        assert_eq!(parsed.model, "gpt-5.5-low");
+        assert_eq!(parsed.base_model, "gpt-5.5");
+        assert_eq!(parsed.reasoning_effort, Some("low"));
+        assert_eq!(parsed.provider_or_openai(), "github-copilot");
+    }
+
+    #[test]
+    fn prepare_chat_builds_openai_chat_plan() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", Some("test-openai-key")),
+            ("OPENAI_BASE_URL", Some("https://openai.example/v1")),
+        ]);
+        let chat = prepare_chat("openai::gpt-4.1-mini").unwrap();
+        assert_eq!(chat.api, ChatApi::OpenAiChat);
+        assert_eq!(chat.model, "gpt-4.1-mini");
+        assert_eq!(chat.auth, ChatAuth::ApiKey("test-openai-key".to_string()));
+        assert_eq!(chat.base_url.as_deref(), Some("https://openai.example/v1"));
+        assert_eq!(chat.reasoning_effort, None);
+    }
+
+    #[test]
+    fn prepare_chat_routes_copilot_reasoning_models_to_responses_with_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[
+            ("GITHUB_COPILOT_API_KEY", Some("test-copilot-key")),
+            ("COPILOT_API_KEY", None),
+            ("OPENCODE_API_KEY", None),
+        ]);
+        let chat = prepare_chat("github-copilot/gpt-5.5-low").unwrap();
+        assert_eq!(chat.api, ChatApi::OpenAiResponses);
+        assert_eq!(chat.model, "gpt-5.5");
+        assert_eq!(chat.auth, ChatAuth::ApiKey("test-copilot-key".to_string()));
+        assert_eq!(
+            chat.base_url.as_deref(),
+            Some("https://api.githubcopilot.com")
+        );
+        assert_eq!(
+            chat.reasoning_effort,
+            Some(serde_json::json!({"reasoning": {"effort": "low"}}))
         );
     }
 
