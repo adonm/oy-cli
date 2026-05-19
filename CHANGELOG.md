@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.9.8] - 2026-05-19
 
 ### Changed
 - Completed Month 6 of the LLM internals roadmap: prompt-level provider retries are now side-effect aware, transient retry backoff uses fewer jittered attempts, Chat/Responses share tool-round budget handling, and model-visible schemas better describe common risky or malformed tool arguments.
