@@ -198,6 +198,24 @@ pub(super) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<Au
     chunks
 }
 
+pub(super) fn ensure_chunks_fit_prompt(chunks: &[AuditChunk], target_tokens: usize) -> Result<()> {
+    if let Some(chunk) = chunks.iter().find(|chunk| chunk.tokens > target_tokens) {
+        let files = chunk
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "audit chunk would exceed the model input budget without truncating review input ({} tokens > {} target tokens): {}; rerun with a more focused repository/path or a larger-context model",
+            chunk.tokens,
+            target_tokens,
+            files
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn build_manifest(files: &[AuditFile]) -> String {
     let mut languages = BTreeSet::new();
     let total_tokens = files.iter().map(|file| file.tokens).sum::<usize>();

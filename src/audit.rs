@@ -16,7 +16,10 @@ mod reduce;
 mod report;
 mod sarif;
 
-use input::{build_manifest, build_security_index, chunk_files, chunk_text, collect_files};
+use input::{
+    build_manifest, build_security_index, chunk_files, chunk_text, collect_files,
+    ensure_chunks_fit_prompt,
+};
 use progress::AuditProgress;
 use reduce::{
     ReducePromptLimits, bounded_reduce_findings, compact_to_tokens,
@@ -131,6 +134,7 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     let sizing = audit_constants(&model_spec);
     let index = build_security_index(&files, sizing.security_index_limit);
     let chunks = chunk_files(files, sizing.target_chunk_tokens);
+    ensure_chunks_fit_prompt(&chunks, sizing.target_chunk_tokens)?;
     if chunks.len() > options.max_chunks {
         bail!(
             "audit would require {} chunks, above the --max-chunks limit of {}; rerun with a focused path/filter or pass --max-chunks {} to allow this run",
@@ -402,6 +406,44 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].tokens, 12);
         assert_eq!(chunks[1].tokens, 4);
+    }
+
+    #[test]
+    fn audit_chunk_text_preserves_full_file_input() {
+        let text = format!("{}\nIMPORTANT_TAIL_SENTINEL\n", "line\n".repeat(2_000));
+        let files = vec![AuditFile {
+            path: "src/large.rs".into(),
+            language: "Rust",
+            bytes: text.len() as u64,
+            tokens: 20_000,
+            text: text.clone(),
+        }];
+
+        let chunks = chunk_files(files, 8_000);
+        let rendered = chunk_text(&chunks[0]);
+
+        assert!(rendered.contains("## src/large.rs"));
+        assert!(rendered.contains("IMPORTANT_TAIL_SENTINEL"));
+        assert_eq!(rendered.matches("line").count(), 2_000);
+    }
+
+    #[test]
+    fn audit_oversize_single_file_fails_instead_of_truncating() {
+        let chunks = vec![crate::audit::input::AuditChunk {
+            tokens: 20_000,
+            files: vec![AuditFile {
+                path: "src/huge.rs".into(),
+                language: "Rust",
+                bytes: 1,
+                tokens: 20_000,
+                text: "huge".into(),
+            }],
+        }];
+
+        let err = crate::audit::input::ensure_chunks_fit_prompt(&chunks, 8_000).unwrap_err();
+
+        assert!(err.to_string().contains("without truncating review input"));
+        assert!(err.to_string().contains("src/huge.rs"));
     }
 
     #[test]
