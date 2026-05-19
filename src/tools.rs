@@ -68,6 +68,7 @@ pub struct ToolContext {
     pub interactive: bool,
     pub policy: ToolPolicy,
     pub todos: Vec<TodoItem>,
+    pub external_side_effects: bool,
 }
 
 // === Invocation, summaries, and previews ===
@@ -89,14 +90,19 @@ pub async fn invoke_shared(
 ) -> Result<Value> {
     let mut ctx = shared.lock().expect("tool context mutex poisoned").clone();
     let result = invoke_inner(&mut ctx, name, args).await;
+    let mut shared = shared.lock().expect("tool context mutex poisoned");
     if result.is_ok() {
-        shared.lock().expect("tool context mutex poisoned").todos = ctx.todos;
+        shared.todos = ctx.todos;
     }
+    shared.external_side_effects |= ctx.external_side_effects;
     result
 }
 
 async fn invoke_inner(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
     note_tool(name, &args);
+    if tool_may_have_external_side_effect(name, &args) {
+        ctx.external_side_effects = true;
+    }
     let started = std::time::Instant::now();
     let result = match name {
         "list" => parse_tool_args(args).and_then(|args| workspace::tool_list(ctx, args)),
@@ -123,6 +129,17 @@ async fn invoke_inner(ctx: &mut ToolContext, name: &str, args: Value) -> Result<
         crate::ui::tool_error(name, started.elapsed(), err);
     }
     result
+}
+
+fn tool_may_have_external_side_effect(name: &str, args: &Value) -> bool {
+    match name {
+        "bash" | "replace" | "patch" => true,
+        "todo" => args
+            .get("persist")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 pub(crate) use todo::format_todos;

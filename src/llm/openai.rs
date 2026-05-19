@@ -75,9 +75,7 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
                 messages: Some(transcript),
             });
         }
-        if turn >= request.max_turns {
-            bail!("native OpenAI chat exceeded the tool round budget");
-        }
+        ensure_tool_round_budget(turn, request.max_turns, "chat")?;
         loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
 
         messages.push(chat_assistant_wire_message(
@@ -127,9 +125,7 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
                 messages: Some(transcript),
             });
         }
-        if turn >= request.max_turns {
-            bail!("native OpenAI Responses chat exceeded the tool round budget");
-        }
+        ensure_tool_round_budget(turn, request.max_turns, "Responses")?;
         loop_state.note_assistant_turn(&response.text, &response.tool_calls)?;
 
         append_responses_assistant_output(&mut input, &response.text, &response.tool_calls);
@@ -142,6 +138,13 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
     }
 
     unreachable!("bounded tool loop exits from inside the loop")
+}
+
+fn ensure_tool_round_budget(turn: usize, max_turns: usize, protocol: &str) -> Result<()> {
+    if turn >= max_turns {
+        bail!("native OpenAI {protocol} exceeded the tool round budget");
+    }
+    Ok(())
 }
 
 fn api_key(auth: &RouteAuth) -> &str {
@@ -994,6 +997,23 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("no text progress"));
+    }
+
+    #[test]
+    fn shared_tool_round_budget_helper_preserves_protocol_messages() {
+        assert!(ensure_tool_round_budget(0, 1, "chat").is_ok());
+
+        let chat = ensure_tool_round_budget(1, 1, "chat").unwrap_err();
+        assert_eq!(
+            chat.to_string(),
+            "native OpenAI chat exceeded the tool round budget"
+        );
+
+        let responses = ensure_tool_round_budget(1, 1, "Responses").unwrap_err();
+        assert_eq!(
+            responses.to_string(),
+            "native OpenAI Responses exceeded the tool round budget"
+        );
     }
 
     #[test]

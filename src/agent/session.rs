@@ -92,6 +92,7 @@ impl Session {
             interactive: self.interactive,
             policy: self.policy,
             todos: self.todos.clone(),
+            external_side_effects: false,
         }
     }
 
@@ -250,9 +251,18 @@ where
     Fut: Future<Output = Result<T>>,
     F: FnMut() -> Fut,
 {
+    retry_transient_when(operation, || true).await
+}
+
+async fn retry_transient_when<T, Fut, F, R>(operation: F, mut retry_allowed: R) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+    F: FnMut() -> Fut,
+    R: FnMut() -> bool,
+{
     operation
         .retry(super::retry::llm_backoff())
-        .when(super::retry::is_transient_error)
+        .when(move |err| retry_allowed() && super::retry::is_transient_error(err))
         .notify(|_, dur| {
             crate::ui::err_line(format_args!("retrying in {:.0}s…", dur.as_secs_f64()))
         })
@@ -286,16 +296,24 @@ async fn run_prompt_with_policy(
     if !crate::ui::is_quiet() {
         crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
     }
-    let response = retry_transient(|| {
-        model::exec_chat(
-            &model_spec,
-            &preamble,
-            messages.clone(),
-            tool_specs.clone(),
-            crate::tools::llm_tools(tool_context.clone()),
-            max_tool_rounds,
-        )
-    })
+    let response = retry_transient_when(
+        || {
+            model::exec_chat(
+                &model_spec,
+                &preamble,
+                messages.clone(),
+                tool_specs.clone(),
+                crate::tools::llm_tools(tool_context.clone()),
+                max_tool_rounds,
+            )
+        },
+        || {
+            !tool_context
+                .lock()
+                .expect("tool context mutex poisoned")
+                .external_side_effects
+        },
+    )
     .await?;
     session.todos = tool_context
         .lock()

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Completed Month 6 of the LLM internals roadmap: prompt-level provider retries are now side-effect aware, transient retry backoff uses fewer jittered attempts, Chat/Responses share tool-round budget handling, and model-visible schemas better describe common risky or malformed tool arguments.
 - Completed Month 5 of the LLM internals roadmap: native OpenAI-compatible Chat/Responses tool loops now mark tool failures with `TOOL_ERROR`/`RECOVERY`, hint enabled tools for unknown names, block repeated identical failed calls, cap model-visible tool output with head/tail preservation, and stop long tool-only churn without lowering the default tool-round budget.
 - Made audit input handling fail before truncating review chunks that exceed the model budget, and escaped terminal/control sequences in `bash` stdout/stderr before they enter tool output or previews.
 - Added fuzzy path suggestions to missing `read` tool errors while keeping `read` exact-only and requiring a follow-up explicit path.

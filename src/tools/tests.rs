@@ -18,6 +18,7 @@ fn test_context(policy: ToolPolicy, interactive: bool) -> (tempfile::TempDir, To
         interactive,
         policy,
         todos: Vec::new(),
+        external_side_effects: false,
     };
     (dir, ctx)
 }
@@ -103,6 +104,12 @@ fn tool_schema_helpers_preserve_aliases_defaults_and_nullable_shapes() {
     assert_eq!(
         webfetch["properties"]["headers"]["type"],
         json!(["object", "null"])
+    );
+    assert!(
+        webfetch["properties"]["headers"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("credential headers are rejected")
     );
 }
 
@@ -234,6 +241,12 @@ fn schemas_document_lenient_numbers_and_match_modes() {
         bash["properties"]["timeout_seconds"]["type"],
         json!(["integer", "string"])
     );
+    assert!(
+        bash["properties"]["command"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Inspect first")
+    );
 }
 
 #[test]
@@ -253,6 +266,52 @@ fn non_interactive_default_denies_patch() {
     assert_eq!(
         fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "one\n"
+    );
+}
+
+#[tokio::test]
+async fn invoke_shared_records_external_side_effect_attempts() {
+    let (dir, ctx) = test_context(ToolPolicy::read_only(), false);
+    fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(ctx));
+
+    let err = invoke_shared(
+        shared.clone(),
+        "replace",
+        json!({"pattern": "one", "replacement": "two", "path": "a.txt", "mode": "literal"}),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("tool denied by policy: replace"));
+    assert!(
+        shared
+            .lock()
+            .expect("tool context mutex poisoned")
+            .external_side_effects
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+}
+
+#[tokio::test]
+async fn invoke_shared_read_only_tools_do_not_mark_external_side_effects() {
+    let (dir, ctx) = test_context(ToolPolicy::read_only(), false);
+    fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(ctx));
+
+    let value = invoke_shared(shared.clone(), "read", json!({"path": "a.txt"}))
+        .await
+        .unwrap();
+
+    assert_eq!(value["path"], "a.txt");
+    assert!(
+        !shared
+            .lock()
+            .expect("tool context mutex poisoned")
+            .external_side_effects
     );
 }
 
@@ -1154,6 +1213,7 @@ fn todo_tool_persists_markdown_when_requested() {
         interactive: false,
         policy: ToolPolicy::with_write(Approval::Auto, Approval::Auto),
         todos: Vec::new(),
+        external_side_effects: false,
     };
     let value = tool_todo(
         &mut ctx,

@@ -1,6 +1,8 @@
 use backon::ExponentialBuilder;
 
-const TRANSIENT_RETRY_ATTEMPTS: usize = 10;
+const TRANSIENT_RETRY_ATTEMPTS: usize = 4;
+#[cfg(test)]
+const RETRY_JITTER_SEED: u64 = 0x0bad_f00d;
 
 const STATUS_RETRY_PATTERNS: &[&str] = &[
     "500",
@@ -44,9 +46,19 @@ pub fn is_transient_error(err: &anyhow::Error) -> bool {
 /// Exponential backoff for transient LLM API failures.
 ///
 /// Uses [`backon::ExponentialBuilder`] defaults (1s minimum delay, factor 2,
-/// 60s maximum delay, no jitter) with a project-wide 10 retry attempts.
+/// 60s maximum delay) with jitter and a small project-wide retry budget.
 pub fn llm_backoff() -> ExponentialBuilder {
-    ExponentialBuilder::default().with_max_times(TRANSIENT_RETRY_ATTEMPTS)
+    ExponentialBuilder::default()
+        .with_max_times(TRANSIENT_RETRY_ATTEMPTS)
+        .with_jitter()
+}
+
+#[cfg(test)]
+fn deterministic_llm_backoff() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_max_times(TRANSIENT_RETRY_ATTEMPTS)
+        .with_jitter()
+        .with_jitter_seed(RETRY_JITTER_SEED)
 }
 
 #[cfg(test)]
@@ -56,13 +68,15 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn llm_backoff_uses_backon_defaults_with_ten_attempts() {
-        let delays: Vec<_> = llm_backoff().build().collect();
+    fn llm_backoff_uses_jittered_four_attempt_budget() {
+        let delays: Vec<_> = deterministic_llm_backoff().build().collect();
 
-        assert_eq!(delays.len(), 10);
-        assert_eq!(delays[0], Duration::from_secs(1));
-        assert_eq!(delays[1], Duration::from_secs(2));
-        assert_eq!(delays[2], Duration::from_secs(4));
-        assert_eq!(delays[6], Duration::from_secs(60));
+        assert_eq!(delays.len(), 4);
+        assert!(delays[0] >= Duration::from_secs(1));
+        assert!(delays[0] < Duration::from_secs(2));
+        assert!(delays[1] >= Duration::from_secs(2));
+        assert!(delays[1] < Duration::from_secs(4));
+        assert!(delays[2] >= Duration::from_secs(4));
+        assert!(delays[2] < Duration::from_secs(8));
     }
 }

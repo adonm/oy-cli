@@ -54,7 +54,7 @@ transcript/tools -> LlmRequest -> ModelRoute -> Protocol -> Transport -> LlmResp
                               OpenCode metadata             tool loop
 ```
 
-Months 1 through 5 are in place: `src/llm/mod.rs` owns request/response, message, tool-spec, route, backend-trait, and native tool types; transcripts store `llm::Message`; `agent::model` accepts `oy` messages directly; `src/tools/registry.rs` is the single tool schema registry; `src/tools/llm.rs` adapts enabled tools to `llm::LlmTool`; and `src/llm/openai.rs` is the default non-streaming OpenAI Chat/Responses transport and hardened tool loop. The native loop returns recoverable `TOOL_ERROR`/`RECOVERY` text for tool failures, hints enabled tools for unknown names, blocks repeated identical failed calls, caps model-visible tool output before it enters the next provider request, and stops tool-only churn before the broader tool-round budget is exhausted.
+Months 1 through 6 are in place: `src/llm/mod.rs` owns request/response, message, tool-spec, route, backend-trait, and native tool types; transcripts store `llm::Message`; `agent::model` accepts `oy` messages directly; `src/tools/registry.rs` is the single tool schema registry; `src/tools/llm.rs` adapts enabled tools to `llm::LlmTool`; and `src/llm/openai.rs` is the default non-streaming OpenAI Chat/Responses transport and hardened tool loop. The native loop returns recoverable `TOOL_ERROR`/`RECOVERY` text for tool failures, hints enabled tools for unknown names, blocks repeated identical failed calls, caps model-visible tool output before it enters the next provider request, stops tool-only churn before the broader tool-round budget is exhausted, and shares tool-round budget checks across Chat/Responses. Prompt-level provider retries use a small jittered backoff and stop once `tools::invoke_inner` records a write, shell, or persistent todo side-effect attempt.
 
 Rules for that transition:
 
@@ -76,6 +76,7 @@ See `CONTRIBUTING.md` for the month-by-month roadmap.
 | Model provider | Prompts, snippets, tool output, audit chunks | External or local model endpoint | Treat sent text as disclosed to that provider; avoid secrets by default |
 | Local state | Config, sessions, history, `TODO.md` persistence | `~/.config/oy-rust/` and workspace files | Store only intentionally; use private local files; document sensitivity |
 | Approval | Tool call from model | File writes and shell commands | Default-deny where non-interactive or read-only; preview before asking |
+| Retry | Provider transient failure after tool execution | Replayed prompt/tool loop | Retry only before external side-effect attempts; fail closed after write/shell/persistent todo attempts |
 
 ## Modes and policies
 

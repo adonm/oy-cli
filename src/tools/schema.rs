@@ -166,8 +166,18 @@ pub(super) fn schema_read() -> Value {
                 "Exact workspace file path to read. Missing paths may return fuzzy suggestions, but read never resolves them implicitly.",
             ),
         )
-        .property("offset", Schema::integer().default(1))
-        .property("limit", Schema::integer().default(DEFAULT_LIMIT))
+        .property(
+            "offset",
+            Schema::integer()
+                .default(1)
+                .describe("1-based starting line number; use small slices instead of full-file reads."),
+        )
+        .property(
+            "limit",
+            Schema::integer().default(DEFAULT_LIMIT).describe(
+                "Maximum lines to return from offset; prefer the narrowest slice needed.",
+            ),
+        )
         .required(&["path"])
         .build()
 }
@@ -251,13 +261,33 @@ pub(super) fn schema_ask() -> Value {
 
 pub(super) fn schema_webfetch() -> Value {
     Schema::object()
-        .property("url", Schema::string())
-        .property("method", Schema::string().default("GET"))
-        .property("headers", Schema::nullable_open_object(Schema::string()))
-        .property("follow_redirects", Schema::boolean().default(true))
+        .property(
+            "url",
+            Schema::string().describe("Public http(s) URL only; localhost and private IP targets are denied."),
+        )
+        .property(
+            "method",
+            Schema::string()
+                .default("GET")
+                .describe("HTTP method; use GET unless the public documentation endpoint requires another safe method."),
+        )
+        .property(
+            "headers",
+            Schema::nullable_open_object(Schema::string()).describe(
+                "Optional non-sensitive headers. Authorization, cookies, tokens, and other credential headers are rejected.",
+            ),
+        )
+        .property(
+            "follow_redirects",
+            Schema::boolean()
+                .default(true)
+                .describe("Follow redirects only while every hop remains public."),
+        )
         .property(
             "timeout_seconds",
-            Schema::integer().default(DEFAULT_WEBFETCH_TIMEOUT_SECONDS),
+            Schema::integer().default(DEFAULT_WEBFETCH_TIMEOUT_SECONDS).describe(
+                "Request timeout in seconds; capped by the tool even if a larger value is supplied.",
+            ),
         )
         .required(&["url"])
         .build()
@@ -325,8 +355,18 @@ pub(super) fn schema_patch() -> Value {
 
 pub(super) fn schema_bash() -> Value {
     Schema::object()
-        .property("command", Schema::string())
-        .property("timeout_seconds", Schema::integer().default(120))
+        .property(
+            "command",
+            Schema::string().describe(
+                "Shell command to run from the workspace. Inspect first; avoid credential, network, and destructive commands unless necessary.",
+            ),
+        )
+        .property(
+            "timeout_seconds",
+            Schema::integer()
+                .default(120)
+                .describe("Command timeout in seconds; capped by the tool."),
+        )
         .required(&["command"])
         .build()
 }
