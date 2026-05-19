@@ -39,6 +39,8 @@ Workspace tools should only operate within `OY_ROOT` or the current directory. W
 - keep final writes inside the workspace,
 - add tests for traversal, symlinks, and missing parents.
 
+`read` intentionally requires an exact existing file path. Missing-path errors may include fuzzy path suggestions, but the suggested file is not read until the model/user sends a follow-up `read` call with that exact path.
+
 ## Network boundary
 
 `webfetch` is for public documentation and public API research. It follows redirects by default and sends an honest `oy-cli/<version>` `User-Agent` plus document-friendly `Accept` headers so common docs URLs work without model-supplied header tuning. It should still fail closed for localhost, private, link-local, reserved, multicast, and ambiguous address forms. When changing it:

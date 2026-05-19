@@ -194,7 +194,7 @@ pub(super) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
 }
 
 pub(super) fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
-    let path = resolve_existing_path(ctx, &args.path)?;
+    let path = resolve_read_path(ctx, &args.path)?;
     if path.is_dir() {
         bail!("read path is a directory: {}", args.path);
     }
@@ -489,6 +489,38 @@ fn resolve_existing_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+fn resolve_read_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
+    reject_out_of_workspace_path(&ctx.root, path, None)?;
+    match resolve_existing_path(ctx, path) {
+        Ok(path) => Ok(path),
+        Err(err) => Err(read_path_error_with_suggestions(ctx, path, err)),
+    }
+}
+
+fn read_path_error_with_suggestions(
+    ctx: &ToolContext,
+    path: &str,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    let suggestions = read_path_suggestions(ctx, path).unwrap_or_default();
+    if suggestions.is_empty() {
+        anyhow!(
+            "{err}; read requires an exact existing workspace file path; use list for fuzzy discovery"
+        )
+    } else {
+        anyhow!(
+            "{err}; did you mean {}? read requires an exact existing workspace file path; use one of the suggested paths in a follow-up read call",
+            suggestions.join(", ")
+        )
+    }
+}
+
+fn read_path_suggestions(ctx: &ToolContext, path: &str) -> Result<Vec<String>> {
+    let exclude = build_exclude_set(None)?;
+    let (items, _) = fff_fuzzy_workspace_paths_with_limit(&ctx.root, path, &exclude, 3)?;
+    Ok(items)
+}
+
 fn resolve_existing_paths(ctx: &ToolContext, path: &str) -> Result<Vec<PathBuf>> {
     match resolve_existing_path(ctx, path) {
         Ok(path) => Ok(vec![path]),
@@ -542,6 +574,15 @@ fn fff_fuzzy_workspace_paths(
     query: &str,
     exclude: &GlobSet,
 ) -> Result<(Vec<String>, usize)> {
+    fff_fuzzy_workspace_paths_with_limit(root, query, exclude, MAX_SEARCH_MATCHES)
+}
+
+fn fff_fuzzy_workspace_paths_with_limit(
+    root: &Path,
+    query: &str,
+    exclude: &GlobSet,
+    limit: usize,
+) -> Result<(Vec<String>, usize)> {
     let picker = fff_picker(root)?;
     let parser = QueryParser::default();
     let query = parser.parse(query);
@@ -550,10 +591,7 @@ fn fff_fuzzy_workspace_paths(
         None,
         FuzzySearchOptions {
             project_path: Some(root),
-            pagination: PaginationArgs {
-                offset: 0,
-                limit: MAX_SEARCH_MATCHES,
-            },
+            pagination: PaginationArgs { offset: 0, limit },
             ..FuzzySearchOptions::default()
         },
     );

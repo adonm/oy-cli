@@ -160,7 +160,12 @@ pub(super) fn schema_list() -> Value {
 
 pub(super) fn schema_read() -> Value {
     Schema::object()
-        .property("path", Schema::string())
+        .property(
+            "path",
+            Schema::string().describe(
+                "Exact workspace file path to read. Missing paths may return fuzzy suggestions, but read never resolves them implicitly.",
+            ),
+        )
         .property("offset", Schema::integer().default(1))
         .property("limit", Schema::integer().default(DEFAULT_LIMIT))
         .required(&["path"])

@@ -812,6 +812,34 @@ fn list_supports_fuzzy_file_queries() {
 }
 
 #[test]
+fn read_missing_path_suggests_fuzzy_matches_without_reading_them() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::create_dir_all(dir.path().join("src/tools")).unwrap();
+    fs::write(
+        dir.path().join("src/tools/workspace.rs"),
+        "SECRET_SENTINEL\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("README.md"), "readme\n").unwrap();
+
+    let err = workspace::tool_read(
+        &ctx,
+        ReadArgs {
+            path: "wrkspc".into(),
+            offset: 1,
+            limit: 10,
+        },
+    )
+    .unwrap_err();
+    let message = err.to_string();
+
+    assert!(message.contains("path does not exist: wrkspc"));
+    assert!(message.contains("did you mean src/tools/workspace.rs"));
+    assert!(message.contains("exact existing workspace file path"));
+    assert!(!message.contains("SECRET_SENTINEL"));
+}
+
+#[test]
 fn directory_exclude_applies_to_search_and_replace_file_targets() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::create_dir(dir.path().join("generated")).unwrap();
