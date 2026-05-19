@@ -72,6 +72,8 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
     };
     let (stdout, stdout_truncated) = stdout_task.await??;
     let (stderr, stderr_truncated) = stderr_task.await??;
+    let stdout = escape_bash_output(&stdout);
+    let stderr = escape_bash_output(&stderr);
     let (stdout_preview, stdout_preview_truncated) = crate::ui::head_tail(&stdout, 12_000);
     let (stderr_preview, stderr_preview_truncated) = crate::ui::head_tail(&stderr, 8_000);
     Ok(serde_json::to_value(BashOutput {
@@ -86,6 +88,21 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
         stdout_capped: stdout_truncated,
         stderr_capped: stderr_truncated,
     })?)
+}
+
+fn escape_bash_output(text: &str) -> String {
+    crate::ui::sanitize_terminal(text)
+        .chars()
+        .map(|ch| match ch {
+            '\u{0008}' => '␈',
+            '\u{000b}' => '␋',
+            '\u{000c}' => '␌',
+            '\u{000e}' => '␎',
+            '\u{000f}' => '␏',
+            ch if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') => '�',
+            ch => ch,
+        })
+        .collect()
 }
 
 fn remove_sensitive_child_env(command: &mut Command) {

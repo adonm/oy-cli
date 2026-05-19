@@ -920,6 +920,27 @@ async fn bash_returns_full_output_and_bounded_preview() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn bash_output_escapes_terminal_sequences_before_returning() {
+    let (_dir, ctx) = test_context(auto_policy(), false);
+    let value = tool_bash(
+        &ctx,
+        BashArgs {
+            command: "printf '\\033[31mred\\033(B\\033[m\\a\\b\\v\\f\\016\\017\\n'".into(),
+            timeout_seconds: 5,
+        },
+    )
+    .await
+    .unwrap();
+
+    let stdout = value["stdout"].as_str().unwrap();
+    assert!(!stdout.contains('\x1b'));
+    assert!(!stdout.contains('\x07'));
+    assert_eq!(stdout, "␛[31mred␛(B␛[m�␈␋␌␎␏\n");
+    assert_eq!(value["stdout_preview"], stdout);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn bash_filters_credential_like_environment_variables() {
     let old_secret = std::env::var("OY_TEST_SECRET_TOKEN").ok();
     let old_public = std::env::var("OY_TEST_PUBLIC_VALUE").ok();

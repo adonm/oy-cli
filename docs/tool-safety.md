@@ -53,7 +53,7 @@ Workspace tools should only operate within `OY_ROOT` or the current directory. W
 
 ## Shell boundary
 
-`bash` is the highest-risk tool. It can read credential files, modify files, contact networks, start processes, and affect the host outside the repo. `oy` removes credential-like environment variables from child processes by default, but shell is still not sandboxed. Keep shell use explicit:
+`bash` is the highest-risk tool. It can read credential files, modify files, contact networks, start processes, and affect the host outside the repo. `oy` removes credential-like environment variables from child processes by default and escapes terminal/control sequences from stdout/stderr before returning tool output, but shell is still not sandboxed. Keep shell use explicit:
 
 - ask by default,
 - deny in read-only modes,
@@ -64,3 +64,5 @@ Workspace tools should only operate within `OY_ROOT` or the current directory. W
 ## Audit disclosure boundary
 
 `oy audit` has no model tools, but it sends collected file text to the model provider. Audit collection should skip build outputs, dependencies, lockfiles, hidden or likely-secret files by default, and should explain any option that includes more data.
+
+Audit review input is not compacted or truncated to fit model context. If a file/chunk is too large for the derived budget, audit fails closed and asks for a narrower scope or larger-context model.
