@@ -49,23 +49,6 @@ pub fn session_text_value(section: &str, key: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-pub fn tool_description(name: &str) -> String {
-    match name {
-    "list" => "List workspace paths. Use first for discovery. `path` is a workspace-relative glob and defaults to `*`. Returns items, count, and truncation state.",
-    "read" => "Read one UTF-8 text file. Prefer narrow `offset`/`limit` slices over full-file reads.",
-    "search" => "Search workspace text with ripgrep-style Rust regex. Use `mode=literal` for exact strings.",
-    "replace" => "Replace workspace text with Rust regex captures, or exact text with `mode=literal`. Inspect/search before changing.",
-    "patch" => "Apply a unified/git diff to existing UTF-8 workspace files. Use for coordinated multi-file edits; inspect first and keep patches focused.",
-    "sloc" => "Count source lines with tokei for repository sizing. `path` may be one path or whitespace-separated paths.",
-    "bash" => "Run a shell command in the workspace. Use only when file tools are insufficient or when you must run/check something.",
-    "ask" => "Ask the user in interactive runs. Reserve for genuine ambiguity or irreversible choices.",
-    "webfetch" => "Fetch public web pages/files. Follows public redirects by default; blocks localhost/private IPs and sensitive headers.",
-    "todo" => "Manage the in-memory todo list. Available in read-only modes; persistence to TODO.md is opt-in and requires write approval.",
-    other => other,
-}
-.to_string()
-}
-
 pub fn system_prompt(interactive: bool, mode: SafetyMode) -> String {
     let mut prompt = BASE_SYSTEM.to_string();
     prompt.push('\n');

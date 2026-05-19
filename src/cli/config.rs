@@ -6,7 +6,8 @@ mod prompt;
 mod sessions;
 
 pub use env_config::{
-    can_prompt, context_config_for_model, max_bash_cmd_bytes, max_tool_rounds, non_interactive,
+    ContextConfig, can_prompt, context_config_for_model, max_bash_cmd_bytes, max_tool_rounds,
+    non_interactive,
 };
 pub use mode::{SafetyMode, policy_risk_label, tool_policy};
 pub use model_config::{
@@ -17,7 +18,7 @@ pub use paths::{
     config_dir_path, config_root, create_private_dir_all, oy_root, resolve_workspace_output_path,
     sessions_dir, write_private_file, write_workspace_file,
 };
-pub use prompt::{ask_system_prompt, session_text_value, system_prompt, tool_description};
+pub use prompt::{ask_system_prompt, session_text_value, system_prompt};
 pub use sessions::{SessionFile, load_session_file, resolve_saved_session, save_session_file};
 
 #[cfg(test)]

@@ -35,6 +35,13 @@ fn tokens_to_compaction_bytes(tokens: usize) -> usize {
     tokens.saturating_mul(4).max(512)
 }
 
+fn context_config_for_model(model_spec: &str) -> config::ContextConfig {
+    let limits = crate::agent::model::model_limits(model_spec);
+    let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
+    let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
+    config::context_config_for_model(input_limit, output_limit)
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub root: std::path::PathBuf,
@@ -110,10 +117,7 @@ impl Session {
 
     pub fn context_status(&self) -> ContextStatus {
         let model_spec = self.model.trim().to_string();
-        let limits = crate::agent::model::model_limits(&model_spec);
-        let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
-        let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
-        let config = config::context_config_for_model(input_limit, output_limit);
+        let config = context_config_for_model(&model_spec);
         ContextStatus {
             estimate: self
                 .transcript
@@ -126,10 +130,7 @@ impl Session {
     }
 
     pub fn compact_deterministic(&mut self) -> Option<CompactionStats> {
-        let limits = crate::agent::model::model_limits(&self.model);
-        let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
-        let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
-        let config = config::context_config_for_model(input_limit, output_limit);
+        let config = context_config_for_model(&self.model);
         let (base, mut stats) = self
             .transcript
             .deterministically_compacted(
@@ -174,10 +175,7 @@ impl Session {
 }
 
 async fn ensure_context_budget(session: &mut Session, model_spec: &str) -> Result<()> {
-    let limits = crate::agent::model::model_limits(model_spec);
-    let input_limit = limits.map(|l| l.input.unwrap_or(l.context));
-    let output_limit = limits.and_then(|l| if l.output > 0 { Some(l.output) } else { None });
-    let config = config::context_config_for_model(input_limit, output_limit);
+    let config = context_config_for_model(model_spec);
     let estimate =
         session
             .transcript
