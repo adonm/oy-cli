@@ -281,7 +281,12 @@ pub(super) fn preview_search(value: &Value) -> String {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let total = value_usize(value, "match_count");
-    let files = count_files_in_matches(matches);
+    let files = value
+        .get("file_count")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or_else(|| count_files_in_matches(matches));
+    let read_path = value_str(value, "read_path");
     let summary = if total == 0 {
         format!(
             "pattern=/{}/ · path={} · 0 matches · truncated={}",
@@ -304,6 +309,9 @@ pub(super) fn preview_search(value: &Value) -> String {
     };
     with_verbose(summary, || {
         let mut out = String::new();
+        if !read_path.is_empty() {
+            let _ = write!(out, "\n  → Read {read_path}");
+        }
         for item in matches.iter().take(PREVIEW_ITEMS) {
             let _ = write!(out, "\n  {}", format_search_hit(item));
         }

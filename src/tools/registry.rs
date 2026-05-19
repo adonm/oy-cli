@@ -48,7 +48,7 @@ use super::preview;
 const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "list",
-        description: "List workspace paths. Use first for discovery. `path` is a workspace-relative glob and defaults to `*`. Returns items, count, and truncation state.",
+        description: "Find workspace paths with fff-style file discovery. Use first for discovery. Exact files/dirs and globs are honored; a non-existing non-glob `path` is treated as a fuzzy file query. Returns items, total count, and truncation state.",
         gate: ToolGate::Always,
         schema: super::schema::schema_list,
         summary: preview::summary_list,
@@ -64,7 +64,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "search",
-        description: "Search workspace text with ripgrep-style Rust regex. Use `mode=literal` for exact strings.",
+        description: "Search workspace text with fff grep over indexed files. `path` may be an exact file/dir or whitespace-separated exact paths. Respects gitignore/exclude and skips binary/oversized files. Auto mode uses literal for plain text and Rust regex for regex-looking patterns; use `mode=literal` for exact strings.",
         gate: ToolGate::Always,
         schema: super::schema::schema_search,
         summary: preview::summary_search,
@@ -104,7 +104,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "replace",
-        description: "Replace workspace text with Rust regex captures, or exact text with `mode=literal`. Inspect/search before changing.",
+        description: "Replace text across fff-indexed workspace files under an exact file/dir. Default mode is Rust regex with captures; use `mode=literal` for exact text. Respects gitignore/exclude, skips unsafe/unreadable files, and reports diffs. Inspect/search before changing.",
         gate: ToolGate::FilesWrite,
         schema: super::schema::schema_replace,
         summary: preview::summary_replace,

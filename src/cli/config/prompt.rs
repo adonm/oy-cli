@@ -25,6 +25,7 @@ Do not add file, process, network, credential, or persistence capability unless 
 For 3+ step work, keep a short in-memory todo; persist `TODO.md` only on explicit request or quit prompt.
 Use `webfetch` for public docs/API research when useful; prefer it over guessing.
 Tool arguments are schemas, not prose: use documented names, numeric `limit`/`offset`/timeouts.
+If a tool result says it failed, treat that as evidence. Do not retry the same call unchanged; fix arguments, use a different tool, or explain the blocker.
 Manage context aggressively: keep only key facts and paths. Prefer narrow `path`, `offset`, `limit`, and `exclude`; use `sloc` if you need a repo-size snapshot.
 Tools return up to 2000 items by default; set `limit` only when you want fewer.
 Before mutating files or running commands, state the next action briefly. After finishing, report changed files and checks.

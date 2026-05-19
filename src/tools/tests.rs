@@ -1,13 +1,11 @@
 use super::args::{
-    BashArgs, HeaderPolicy, ListArgs, PatchArgs, ReadArgs, RedirectPolicy, ReplaceArgs,
+    BashArgs, ExcludeArg, HeaderPolicy, ListArgs, PatchArgs, ReadArgs, RedirectPolicy, ReplaceArgs,
     ReplaceMode, SearchArgs, SearchMode, SlocArgs, TodoArgs, TodoItemInput, WebfetchArgs,
 };
 use super::network::{is_public_ip, tool_webfetch, validated_webfetch_headers};
 use super::todo::tool_todo;
-use super::workspace::{self, search_file};
+use super::workspace;
 use super::*;
-use grep_regex::RegexMatcher;
-use regex::Regex;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -35,6 +33,15 @@ fn schema_for(name: &str) -> Value {
         .find(|tool| tool.name.as_str() == name)
         .map(|tool| tool.parameters)
         .unwrap_or_else(|| panic!("missing schema for {name}"))
+}
+
+fn tool_description(name: &str) -> String {
+    let (_dir, ctx) = test_context(auto_policy(), true);
+    tool_specs(&ctx)
+        .into_iter()
+        .find(|tool| tool.name.as_str() == name)
+        .map(|tool| tool.description)
+        .unwrap_or_else(|| panic!("missing tool description for {name}"))
 }
 
 #[test]
@@ -79,6 +86,12 @@ fn tool_schema_helpers_preserve_aliases_defaults_and_nullable_shapes() {
 
     let list = schema_for("list");
     assert_eq!(list["properties"]["path"]["default"], "*");
+    assert!(
+        list["properties"]["path"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("fuzzy file query")
+    );
     assert_eq!(
         list["properties"]["exclude"]["anyOf"][1]["items"],
         json!({"type": "string"})
@@ -90,6 +103,41 @@ fn tool_schema_helpers_preserve_aliases_defaults_and_nullable_shapes() {
     assert_eq!(
         webfetch["properties"]["headers"]["type"],
         json!(["object", "null"])
+    );
+}
+
+#[test]
+fn fff_backed_tooldefs_document_path_semantics() {
+    assert!(tool_description("list").contains("fff-style file discovery"));
+    assert!(tool_description("search").contains("fff grep over indexed files"));
+    assert!(tool_description("replace").contains("fff-indexed workspace files"));
+
+    let search = schema_for("search");
+    assert!(
+        search["properties"]["path"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Globs and fuzzy paths are not accepted")
+    );
+    assert!(
+        search["properties"]["exclude"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("fff-indexed search paths")
+    );
+
+    let replace = schema_for("replace");
+    assert!(
+        replace["properties"]["path"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("fff-indexed files")
+    );
+    assert!(
+        replace["properties"]["limit"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("replacement still applies to all matched files")
     );
 }
 
@@ -704,6 +752,106 @@ fn search_auto_falls_back_to_literal_for_invalid_regex() {
 }
 
 #[test]
+fn search_auto_treats_plain_identifier_as_literal_and_suggests_read_path() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("a.txt"), "foo.bar\nfooXbar\n").unwrap();
+    fs::write(dir.path().join("b.txt"), "foo.bar\n").unwrap();
+
+    let value = workspace::tool_search(
+        &ctx,
+        SearchArgs {
+            pattern: "foo.bar".into(),
+            path: ".".into(),
+            exclude: None,
+            limit: 10,
+            mode: SearchMode::Auto,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value["mode"], "regex");
+    assert_eq!(value["match_count"], 3);
+    assert_eq!(value["read_path"], "a.txt");
+    assert_eq!(value["file_count"], 2);
+
+    let value = workspace::tool_search(
+        &ctx,
+        SearchArgs {
+            pattern: "foo_bar".into(),
+            path: ".".into(),
+            exclude: None,
+            limit: 10,
+            mode: SearchMode::Auto,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value["mode"], "literal");
+    assert_eq!(value["match_count"], 0);
+}
+
+#[test]
+fn list_supports_fuzzy_file_queries() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::create_dir_all(dir.path().join("src/tools")).unwrap();
+    fs::write(dir.path().join("src/tools/workspace.rs"), "").unwrap();
+    fs::write(dir.path().join("README.md"), "").unwrap();
+
+    let value = workspace::tool_list(
+        &ctx,
+        ListArgs {
+            path: "wrkspc".into(),
+            exclude: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+
+    let items = value["items"].as_array().unwrap();
+    assert_eq!(items.first().unwrap(), "src/tools/workspace.rs");
+}
+
+#[test]
+fn directory_exclude_applies_to_search_and_replace_file_targets() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::create_dir(dir.path().join("generated")).unwrap();
+    fs::write(dir.path().join("generated/a.txt"), "hit\n").unwrap();
+    fs::write(dir.path().join("keep.txt"), "hit\n").unwrap();
+
+    let value = workspace::tool_search(
+        &ctx,
+        SearchArgs {
+            pattern: "hit".into(),
+            path: ".".into(),
+            exclude: Some(ExcludeArg::String("generated/".into())),
+            limit: 10,
+            mode: SearchMode::Literal,
+        },
+    )
+    .unwrap();
+    assert_eq!(value["match_count"], 1);
+    assert_eq!(value["matches"][0]["path"], "keep.txt");
+
+    let value = workspace::tool_replace(
+        &ctx,
+        ReplaceArgs {
+            pattern: "hit".into(),
+            replacement: "miss".into(),
+            path: "generated/a.txt".into(),
+            exclude: Some(ExcludeArg::String("generated/".into())),
+            limit: 10,
+            mode: ReplaceMode::Literal,
+        },
+    )
+    .unwrap();
+    assert_eq!(value["replacement_count"], 0);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("generated/a.txt")).unwrap(),
+        "hit\n"
+    );
+}
+
+#[test]
 fn replace_literal_treats_pattern_and_dollars_as_plain_text() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::write(dir.path().join("a.txt"), "a+b $1\n").unwrap();
@@ -875,13 +1023,20 @@ fn replace_skips_oversized_workspace_file() {
 
 #[test]
 fn search_file_treats_zip_as_binary_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let zip_path = dir.path().join("sample.zip");
-    fs::write(&zip_path, b"PK\0\0not searched").unwrap();
-    let matcher = RegexMatcher::new_line_matcher("not searched").unwrap();
-    let column_regex = Regex::new("not searched").unwrap();
-    let found = search_file(dir.path(), &zip_path, &matcher, &column_regex).unwrap();
-    assert!(found.is_empty());
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(dir.path().join("sample.zip"), b"PK\0\0not searched").unwrap();
+    let value = workspace::tool_search(
+        &ctx,
+        SearchArgs {
+            pattern: "not searched".into(),
+            path: "sample.zip".into(),
+            exclude: None,
+            limit: 10,
+            mode: SearchMode::Literal,
+        },
+    )
+    .unwrap();
+    assert_eq!(value["match_count"], 0);
 }
 
 #[test]

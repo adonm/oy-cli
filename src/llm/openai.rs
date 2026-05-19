@@ -84,7 +84,7 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
         )?);
         transcript.push(assistant_message);
         for call in assistant.tool_calls {
-            let output = call_tool(&tools_by_name, &call).await?;
+            let output = call_tool(&tools_by_name, &call).await;
             let result = tool_result_message(&call, output.clone());
             messages.push(json!({
                 "role": "tool",
@@ -134,7 +134,7 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
         append_responses_assistant_output(&mut input, &response.text, &response.tool_calls);
         transcript.push(assistant_message);
         for call in response.tool_calls {
-            let output = call_tool(&tools_by_name, &call).await?;
+            let output = call_tool(&tools_by_name, &call).await;
             transcript.push(tool_result_message(&call, output.clone()));
             input.push(json!({
                 "type": "function_call_output",
@@ -221,13 +221,27 @@ fn tools_by_name(tools: LlmTools) -> ToolMap {
         .collect()
 }
 
-async fn call_tool(tools: &ToolMap, call: &NativeToolCall) -> Result<String> {
-    let tool = tools
-        .get(&call.name)
-        .ok_or_else(|| anyhow!("model requested unknown tool `{}`", call.name))?;
-    tool.call(call.arguments.clone())
-        .await
-        .map_err(|err| anyhow!("tool `{}` failed: {err}", call.name))
+async fn call_tool(tools: &ToolMap, call: &NativeToolCall) -> String {
+    let result = async {
+        let tool = tools
+            .get(&call.name)
+            .ok_or_else(|| anyhow!("model requested unknown tool `{}`", call.name))?;
+        tool.call(call.arguments.clone())
+            .await
+            .map_err(|err| anyhow!("tool `{}` failed: {err}", call.name))
+    }
+    .await;
+
+    match result {
+        Ok(output) => output,
+        Err(err) => tool_failure_output(&call.name, &err),
+    }
+}
+
+fn tool_failure_output(name: &str, err: &anyhow::Error) -> String {
+    format!(
+        "tool `{name}` failed: {err}\nDo not retry the same tool call unchanged. Fix the arguments, choose another tool, or report this blocker."
+    )
 }
 
 fn chat_request_body(
@@ -559,11 +573,17 @@ fn assistant_message_from_calls(
         });
     }
     for call in tool_calls {
+        let arguments = call.arguments_value().unwrap_or_else(|err| {
+            json!({
+                "invalid_json_arguments": call.arguments,
+                "error": err.to_string(),
+            })
+        });
         content.push(MessageContent::ToolCall {
             id: call.id.clone(),
             call_id: Some(call.call_id.clone()),
             name: call.name.clone(),
-            arguments: call.arguments_value()?,
+            arguments,
             signature: None,
             additional_params: None,
         });
@@ -733,6 +753,7 @@ fn string_or_json(value: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn read_tool_spec() -> ToolSpec {
         ToolSpec {
@@ -744,6 +765,77 @@ mod tests {
                 "required": ["path"]
             }),
         }
+    }
+
+    struct FailingTool;
+
+    impl LlmTool for FailingTool {
+        fn name(&self) -> &str {
+            "fail"
+        }
+
+        fn call<'a>(&'a self, _args: String) -> crate::llm::LlmToolFuture<'a> {
+            Box::pin(async move { Err(anyhow!("boom")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_failure_is_returned_to_model_as_tool_output() {
+        let tools: ToolMap = HashMap::from([(
+            "fail".to_string(),
+            Box::new(FailingTool) as Box<dyn LlmTool>,
+        )]);
+        let call = NativeToolCall {
+            id: "call-1".to_string(),
+            call_id: "call-1".to_string(),
+            name: "fail".to_string(),
+            arguments: "{}".to_string(),
+        };
+
+        let output = call_tool(&tools, &call).await;
+
+        assert!(output.contains("tool `fail` failed: boom"));
+        assert!(output.contains("Do not retry the same tool call unchanged"));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_returned_to_model_as_tool_output() {
+        let tools: ToolMap = HashMap::new();
+        let call = NativeToolCall {
+            id: "call-1".to_string(),
+            call_id: "call-1".to_string(),
+            name: "missing".to_string(),
+            arguments: "{}".to_string(),
+        };
+
+        let output = call_tool(&tools, &call).await;
+
+        assert!(output.contains("model requested unknown tool `missing`"));
+        assert!(output.contains("Fix the arguments"));
+    }
+
+    #[test]
+    fn invalid_tool_arguments_still_round_trip_in_transcript() {
+        let message = assistant_message_from_calls(
+            "",
+            None,
+            &[NativeToolCall {
+                id: "call-1".to_string(),
+                call_id: "call-1".to_string(),
+                name: "read".to_string(),
+                arguments: "{not-json".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let Message::Assistant { content, .. } = message else {
+            panic!("expected assistant message");
+        };
+        assert!(matches!(
+            &content[0],
+            MessageContent::ToolCall { arguments, .. }
+                if arguments["invalid_json_arguments"] == json!("{not-json")
+        ));
     }
 
     #[test]

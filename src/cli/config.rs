@@ -163,11 +163,9 @@ mod tests {
 
     #[test]
     fn session_text_loads_base_prompt() {
-        assert!(
-            session_text_value("system", "base")
-                .unwrap()
-                .contains("You are oy")
-        );
+        let prompt = session_text_value("system", "base").unwrap();
+        assert!(prompt.contains("You are oy"));
+        assert!(prompt.contains("Do not retry the same call unchanged"));
     }
 
     #[test]

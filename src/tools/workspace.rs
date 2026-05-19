@@ -6,12 +6,12 @@
 use anyhow::{Context, Result, anyhow, bail};
 use diffy::patch_set::{FileOperation, FilePatch, ParseOptions, PatchSet};
 use diffy::{apply, create_patch};
+use fff_search::{
+    AiGrepConfig, FFFMode, FilePicker, FilePickerOptions, FuzzySearchOptions, GrepMode,
+    GrepSearchOptions, PaginationArgs, QueryParser, has_regex_metacharacters,
+};
 use glob::glob;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use grep_regex::RegexMatcher;
-use grep_searcher::SearcherBuilder;
-use grep_searcher::sinks::UTF8;
-use ignore::WalkBuilder;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -69,6 +69,8 @@ pub(super) struct SearchOutput {
     pub pattern: String,
     pub mode: &'static str,
     pub warning: Option<String>,
+    pub read_path: Option<String>,
+    pub file_count: usize,
     pub path: String,
     pub match_count: usize,
     pub matches: Vec<SearchHit>,
@@ -152,18 +154,20 @@ pub(super) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
     reject_out_of_workspace_path(&ctx.root, &args.path, None)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let shown_limit = args.limit.max(1);
-    let items = if args.path == "." || args.path == "./" {
-        let mut out = Vec::new();
-        for entry in fs::read_dir(&ctx.root)? {
-            let path = entry?.path();
-            let rel = rel_path(&ctx.root, &path);
-            if exclude.is_match(rel.as_str()) {
-                continue;
+    let (items, count) = if args.path == "." || args.path == "./" || args.path == "*" {
+        let items = list_dir_children(&ctx.root, &ctx.root, &exclude)?;
+        let count = items.len();
+        (items, count)
+    } else if !glob_has_meta(&args.path) {
+        match resolve_existing_path(ctx, &args.path) {
+            Ok(path) if path.is_dir() => {
+                let items = list_dir_children(&ctx.root, &path, &exclude)?;
+                let count = items.len();
+                (items, count)
             }
-            out.push(display_path(&ctx.root, &path));
+            Ok(path) => (vec![display_path(&ctx.root, &path)], 1),
+            Err(_) => fff_fuzzy_workspace_paths(&ctx.root, &args.path, &exclude)?,
         }
-        out.sort();
-        out
     } else {
         let pattern = if Path::new(&args.path).is_absolute() {
             args.path.clone()
@@ -177,13 +181,14 @@ pub(super) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
             .collect::<Vec<_>>();
         out.sort();
         out.dedup();
-        out
+        let count = out.len();
+        (out, count)
     };
     Ok(serde_json::to_value(ListOutput {
         path: args.path,
         items: items.iter().take(shown_limit).cloned().collect(),
-        count: items.len(),
-        truncated: items.len() > shown_limit,
+        count,
+        truncated: count > shown_limit,
         exclude: args.exclude.as_ref().map(ExcludeArg::patterns),
     })?)
 }
@@ -222,46 +227,28 @@ pub(super) fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
     })?)
 }
 
-fn search_matchers(
+fn search_mode(
     pattern: &str,
     mode: SearchMode,
-) -> Result<(RegexMatcher, Regex, &'static str, Option<String>)> {
+) -> Result<(GrepMode, &'static str, Option<String>)> {
     match mode {
-        SearchMode::Regex => Ok((
-            RegexMatcher::new_line_matcher(pattern)
-                .with_context(|| format!("invalid regex: {pattern}"))?,
-            Regex::new(pattern).with_context(|| format!("invalid regex: {pattern}"))?,
-            "regex",
-            None,
-        )),
-        SearchMode::Literal => {
-            let escaped = regex::escape(pattern);
-            Ok((
-                RegexMatcher::new_line_matcher(&escaped)?,
-                Regex::new(&escaped)?,
-                "literal",
-                None,
-            ))
+        SearchMode::Regex => {
+            Regex::new(pattern).with_context(|| format!("invalid regex: {pattern}"))?;
+            Ok((GrepMode::Regex, "regex", None))
+        }
+        SearchMode::Literal => Ok((GrepMode::PlainText, "literal", None)),
+        SearchMode::Auto if !has_regex_metacharacters(pattern) => {
+            Ok((GrepMode::PlainText, "literal", None))
         }
         SearchMode::Auto => match Regex::new(pattern) {
-            Ok(regex) => Ok((
-                RegexMatcher::new_line_matcher(pattern)
-                    .with_context(|| format!("invalid regex: {pattern}"))?,
-                regex,
-                "regex",
-                None,
+            Ok(_) => Ok((GrepMode::Regex, "regex", None)),
+            Err(err) => Ok((
+                GrepMode::PlainText,
+                "literal",
+                Some(format!(
+                    "pattern looked like regex but was invalid; searched literally: {err}"
+                )),
             )),
-            Err(err) => {
-                let escaped = regex::escape(pattern);
-                Ok((
-                    RegexMatcher::new_line_matcher(&escaped)?,
-                    Regex::new(&escaped)?,
-                    "literal",
-                    Some(format!(
-                        "pattern was not valid regex; searched literally: {err}"
-                    )),
-                ))
-            }
         },
     }
 }
@@ -283,7 +270,7 @@ fn replace_matcher_and_replacement(args: &ReplaceArgs) -> Result<(Regex, String,
 }
 
 pub(super) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> {
-    let (matcher, column_regex, mode, warning) = search_matchers(&args.pattern, args.mode)?;
+    let (grep_mode, mode, warning) = search_mode(&args.pattern, args.mode)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let targets = resolve_existing_paths(ctx, &args.path)?;
     let shown = args.limit.max(1);
@@ -292,38 +279,40 @@ pub(super) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> 
     let mut errors = Vec::new();
     let mut truncated = false;
     for target in &targets {
-        for path in walk_files(&ctx.root, target, &exclude)? {
-            match search_file_limited(
-                &ctx.root,
-                &path,
-                &matcher,
-                &column_regex,
-                cap.saturating_sub(matches.len()),
-            ) {
-                Ok(SearchFileMatches {
-                    matches: mut found,
-                    truncated: file_truncated,
-                }) => {
-                    matches.append(&mut found);
-                    if file_truncated || matches.len() >= cap {
-                        truncated = true;
-                        break;
-                    }
+        match fff_search_target(
+            &ctx.root,
+            target,
+            &args.pattern,
+            grep_mode,
+            &exclude,
+            cap.saturating_sub(matches.len()),
+        ) {
+            Ok(SearchTargetMatches {
+                matches: mut found,
+                truncated: target_truncated,
+            }) => {
+                matches.append(&mut found);
+                if target_truncated || matches.len() >= cap {
+                    truncated = true;
+                    break;
                 }
-                Err(err) => errors.push(ToolErrorItem {
-                    path: rel_path(&ctx.root, &path),
+            }
+            Err(err) => {
+                errors.push(ToolErrorItem {
+                    path: rel_path(&ctx.root, target),
                     message: err.to_string(),
-                }),
+                });
             }
         }
-        if truncated {
-            break;
-        }
     }
+    let read_path = best_read_path(&matches);
+    let file_count = count_match_files(&matches);
     Ok(serde_json::to_value(SearchOutput {
         pattern: args.pattern,
         mode,
         warning,
+        read_path,
+        file_count,
         path: args.path,
         match_count: matches.len(),
         matches,
@@ -346,7 +335,7 @@ pub(super) fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
     let mut replacement_count = 0usize;
-    for path in walk_files(&ctx.root, &target, &exclude)? {
+    for path in fff_indexed_files(&ctx.root, &target, &exclude)? {
         match replace_file(&path, &regex, &replacement) {
             Ok(ReplaceOutcome::Changed { count, diff }) => {
                 changed_files.push(ChangedFileOutput {
@@ -519,6 +508,171 @@ fn resolve_existing_paths(ctx: &ToolContext, path: &str) -> Result<Vec<PathBuf>>
     }
 }
 
+fn glob_has_meta(pattern: &str) -> bool {
+    pattern.chars().any(|c| matches!(c, '*' | '?' | '[' | '{'))
+}
+
+fn list_dir_children(root: &Path, dir: &Path, exclude: &GlobSet) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let rel = rel_path(root, &path);
+        if exclude.is_match(rel.as_str()) {
+            continue;
+        }
+        out.push(display_path(root, &path));
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn fff_picker(base: &Path) -> Result<FilePicker> {
+    let mut picker = FilePicker::new(FilePickerOptions {
+        base_path: base.to_string_lossy().to_string(),
+        mode: FFFMode::Ai,
+        watch: false,
+        ..FilePickerOptions::default()
+    })?;
+    picker.collect_files()?;
+    Ok(picker)
+}
+
+fn fff_fuzzy_workspace_paths(
+    root: &Path,
+    query: &str,
+    exclude: &GlobSet,
+) -> Result<(Vec<String>, usize)> {
+    let picker = fff_picker(root)?;
+    let parser = QueryParser::default();
+    let query = parser.parse(query);
+    let results = picker.fuzzy_search(
+        &query,
+        None,
+        FuzzySearchOptions {
+            project_path: Some(root),
+            pagination: PaginationArgs {
+                offset: 0,
+                limit: MAX_SEARCH_MATCHES,
+            },
+            ..FuzzySearchOptions::default()
+        },
+    );
+
+    let mut items = Vec::new();
+    for item in results.items {
+        let path = item.relative_path(&picker).replace('\\', "/");
+        if !exclude.is_match(path.as_str()) {
+            items.push(path);
+        }
+    }
+    let count = items.len();
+    Ok((items, count))
+}
+
+fn fff_indexed_files(root: &Path, target: &Path, exclude: &GlobSet) -> Result<Vec<PathBuf>> {
+    if target.is_file() {
+        let rel = rel_path(root, target);
+        return Ok((!exclude.is_match(rel.as_str()))
+            .then(|| target.to_path_buf())
+            .into_iter()
+            .collect());
+    }
+
+    let picker = fff_picker(target)?;
+    let mut files = Vec::new();
+    for item in picker.get_files() {
+        let rel_to_target = item.relative_path(&picker).replace('\\', "/");
+        let path = target.join(&rel_to_target);
+        let rel_to_root = rel_path(root, &path);
+        if !exclude.is_match(rel_to_root.as_str()) {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+struct SearchTargetMatches {
+    matches: Vec<SearchHit>,
+    truncated: bool,
+}
+
+fn grep_options(mode: GrepMode, limit: usize) -> GrepSearchOptions {
+    GrepSearchOptions {
+        max_file_size: MAX_WORKSPACE_FILE_BYTES,
+        max_matches_per_file: 0,
+        page_limit: limit,
+        mode,
+        ..GrepSearchOptions::default()
+    }
+}
+
+fn fff_search_target(
+    root: &Path,
+    target: &Path,
+    pattern: &str,
+    mode: GrepMode,
+    exclude: &GlobSet,
+    limit: usize,
+) -> Result<SearchTargetMatches> {
+    if limit == 0 {
+        return Ok(SearchTargetMatches {
+            matches: Vec::new(),
+            truncated: true,
+        });
+    }
+
+    let base = if target.is_file() {
+        target.parent().unwrap_or(root)
+    } else {
+        target
+    };
+    let picker = fff_picker(base)?;
+    let parser = QueryParser::new(AiGrepConfig);
+    let query = parser.parse(pattern);
+    let result = picker.grep(&query, &grep_options(mode, limit));
+
+    let exact_target = target.is_file().then(|| rel_path(root, target));
+    let mut matches = Vec::new();
+    let mut truncated = result.next_file_offset > 0;
+    for item in result.matches {
+        let file = result.files[item.file_index];
+        let display = display_path_from_base(root, base, file.relative_path(&picker).as_str());
+        if exact_target
+            .as_deref()
+            .is_some_and(|target| target != display)
+        {
+            continue;
+        }
+        if exclude.is_match(display.as_str()) {
+            continue;
+        }
+        if matches.len() >= limit {
+            truncated = true;
+            break;
+        }
+        matches.push(SearchHit {
+            path: display,
+            line_number: item.line_number as usize,
+            column: item.col + 1,
+            text: crate::ui::truncate_chars(item.line_content.trim_end_matches(['\r', '\n']), 1000),
+        });
+    }
+
+    Ok(SearchTargetMatches { matches, truncated })
+}
+
+fn display_path_from_base(root: &Path, base: &Path, rel_to_base: &str) -> String {
+    let rel_to_base = rel_to_base.replace('\\', "/");
+    let base_rel = rel_path(root, base);
+    if base_rel.is_empty() {
+        rel_to_base
+    } else if rel_to_base.is_empty() {
+        base_rel
+    } else {
+        format!("{}/{rel_to_base}", base_rel.trim_end_matches('/'))
+    }
+}
+
 fn build_exclude_set(exclude: Option<&ExcludeArg>) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     if let Some(exclude) = exclude {
@@ -526,6 +680,13 @@ fn build_exclude_set(exclude: Option<&ExcludeArg>) -> Result<GlobSet> {
             builder.add(
                 Glob::new(&pattern).with_context(|| format!("invalid exclude glob: {pattern}"))?,
             );
+            if pattern.ends_with('/') {
+                let children = format!("{pattern}**");
+                builder.add(
+                    Glob::new(&children)
+                        .with_context(|| format!("invalid exclude glob: {children}"))?,
+                );
+            }
         }
     }
     Ok(builder.build()?)
@@ -557,34 +718,6 @@ fn within_root(root: &Path, path: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
-fn walk_files(root: &Path, target: &Path, exclude: &GlobSet) -> Result<Vec<PathBuf>> {
-    if target.is_file() {
-        return Ok(vec![target.to_path_buf()]);
-    }
-    let mut out = Vec::new();
-    let mut builder = WalkBuilder::new(target);
-    builder
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(false)
-        .git_exclude(true);
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(err) => return Err(anyhow!(err)),
-        };
-        let path = entry.path();
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            let rel = rel_path(root, path);
-            if exclude.is_match(rel.as_str()) {
-                continue;
-            }
-            out.push(path.to_path_buf());
-        }
-    }
-    Ok(out)
-}
-
 struct SearchText {
     display_path: String,
     text: String,
@@ -605,86 +738,32 @@ fn read_text_file(root: &Path, path: &Path) -> Result<Option<SearchText>> {
     }))
 }
 
-fn push_match(
-    display_path: &str,
-    line_number: usize,
-    line: &str,
-    column: usize,
-    out: &mut Vec<SearchHit>,
-) {
-    out.push(SearchHit {
-        path: display_path.to_string(),
-        line_number,
-        column,
-        text: crate::ui::truncate_chars(line.trim_end_matches(['\r', '\n']), 1000),
-    });
-}
-
-fn search_text_grep(
-    display_path: &str,
-    text: &str,
-    matcher: &RegexMatcher,
-    column_regex: &Regex,
-    limit: usize,
-    out: &mut Vec<SearchHit>,
-) -> Result<bool> {
-    if limit == 0 {
-        return Ok(true);
+fn best_read_path(matches: &[SearchHit]) -> Option<String> {
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    let mut first = std::collections::BTreeMap::<&str, usize>::new();
+    for (idx, hit) in matches.iter().enumerate() {
+        *counts.entry(hit.path.as_str()).or_insert(0) += 1;
+        first.entry(hit.path.as_str()).or_insert(idx);
     }
-    let mut truncated = false;
-    let mut searcher = SearcherBuilder::new().line_number(true).build();
-    let mut sink = UTF8(|line_number, line: &str| {
-        if out.len() >= limit {
-            truncated = true;
-            return Ok(false);
-        }
-        let column = column_regex.find(line).map(|m| m.start() + 1).unwrap_or(1);
-        push_match(display_path, line_number as usize, line, column, out);
-        if out.len() >= limit {
-            truncated = true;
-            return Ok(false);
-        }
-        Ok(true)
-    });
-    searcher.search_reader(matcher, text.as_bytes(), &mut sink)?;
-    Ok(truncated)
+    counts
+        .into_iter()
+        .max_by(|(path_a, count_a), (path_b, count_b)| {
+            let first_a = first.get(path_a).copied().unwrap_or(usize::MAX);
+            let first_b = first.get(path_b).copied().unwrap_or(usize::MAX);
+            count_a
+                .cmp(count_b)
+                .then_with(|| first_b.cmp(&first_a))
+                .then_with(|| path_b.cmp(path_a))
+        })
+        .map(|(path, _)| path.to_string())
 }
 
-pub(super) struct SearchFileMatches {
-    pub(super) matches: Vec<SearchHit>,
-    pub(super) truncated: bool,
-}
-
-pub(super) fn search_file_limited(
-    root: &Path,
-    path: &Path,
-    matcher: &RegexMatcher,
-    column_regex: &Regex,
-    limit: usize,
-) -> Result<SearchFileMatches> {
-    let mut matches = Vec::new();
-    let mut truncated = false;
-    if let Some(item) = read_text_file(root, path)? {
-        truncated = search_text_grep(
-            &item.display_path,
-            &item.text,
-            matcher,
-            column_regex,
-            limit,
-            &mut matches,
-        )?;
-    }
-    Ok(SearchFileMatches { matches, truncated })
-}
-
-#[cfg(test)]
-pub(super) fn search_file(
-    root: &Path,
-    path: &Path,
-    matcher: &RegexMatcher,
-    column_regex: &Regex,
-) -> Result<Vec<SearchHit>> {
-    Ok(search_file_limited(root, path, matcher, column_regex, usize::MAX)?.matches)
+fn count_match_files(matches: &[SearchHit]) -> usize {
+    matches
+        .iter()
+        .map(|hit| hit.path.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 fn parse_patch_set(text: &str) -> Result<Vec<FilePatch<'_, str>>> {
@@ -1128,7 +1207,7 @@ fn preview_replace_plan(
     exclude: &GlobSet,
 ) -> Result<String> {
     let mut changed = Vec::new();
-    for path in walk_files(&ctx.root, target, exclude)? {
+    for path in fff_indexed_files(&ctx.root, target, exclude)? {
         if path.is_symlink() {
             continue;
         }

@@ -139,9 +139,22 @@ fn todo_item_schema() -> Schema {
 
 pub(super) fn schema_list() -> Value {
     Schema::object()
-        .property("path", Schema::string().default("*"))
-        .property("exclude", exclude_schema())
-        .property("limit", Schema::integer().default(DEFAULT_LIMIT))
+        .property(
+            "path",
+            Schema::string().default("*").describe(
+                "Directory/file/glob to list, or a fuzzy file query when the non-glob path does not exist. Use `*` or `.` for workspace root discovery.",
+            ),
+        )
+        .property(
+            "exclude",
+            exclude_schema().describe("Glob or array of globs to omit from returned workspace-relative paths."),
+        )
+        .property(
+            "limit",
+            Schema::integer().default(DEFAULT_LIMIT).describe(
+                "Maximum items to return; count still reports total matches before truncation.",
+            ),
+        )
         .build()
 }
 
@@ -156,15 +169,34 @@ pub(super) fn schema_read() -> Value {
 
 pub(super) fn schema_search() -> Value {
     Schema::object()
-        .property("pattern", Schema::string())
-        .property("path", Schema::string().default("."))
-        .property("exclude", exclude_schema())
-        .property("limit", Schema::integer().default(DEFAULT_LIMIT))
+        .property(
+            "pattern",
+            Schema::string().describe(
+                "Text or Rust regex to search for. In auto mode, plain text is literal and regex-looking text is regex.",
+            ),
+        )
+        .property(
+            "path",
+            Schema::string().default(".").describe(
+                "Exact file/dir to search, or whitespace-separated exact paths. Globs and fuzzy paths are not accepted here; use list first.",
+            ),
+        )
+        .property(
+            "exclude",
+            exclude_schema().describe("Glob or array of globs to omit from fff-indexed search paths."),
+        )
+        .property(
+            "limit",
+            Schema::integer().default(DEFAULT_LIMIT).describe(
+                "Maximum matches to return; search stops once this limit is reached.",
+            ),
+        )
         .property(
             "mode",
             Schema::string()
                 .enum_values(&["auto", "regex", "literal"])
-                .default("auto"),
+                .default("auto")
+                .describe("Pattern mode: auto, regex, or literal. Prefer literal for exact strings."),
         )
         .required(&["pattern"])
         .build()
@@ -228,16 +260,40 @@ pub(super) fn schema_webfetch() -> Value {
 
 pub(super) fn schema_replace() -> Value {
     Schema::object()
-        .property("pattern", Schema::string())
-        .property("replacement", Schema::string())
-        .property("path", Schema::string().default("."))
-        .property("exclude", exclude_schema())
-        .property("limit", Schema::integer().default(DEFAULT_LIMIT))
+        .property(
+            "pattern",
+            Schema::string().describe(
+                "Rust regex by default, or exact text when mode=literal.",
+            ),
+        )
+        .property(
+            "replacement",
+            Schema::string().describe(
+                "Replacement text. In regex mode, Rust regex captures like $1 are expanded; in literal mode dollars are plain text.",
+            ),
+        )
+        .property(
+            "path",
+            Schema::string().default(".").describe(
+                "Exact file or directory whose fff-indexed files should be edited. Globs and fuzzy paths are not accepted.",
+            ),
+        )
+        .property(
+            "exclude",
+            exclude_schema().describe("Glob or array of globs to omit from replacement paths."),
+        )
+        .property(
+            "limit",
+            Schema::integer().default(DEFAULT_LIMIT).describe(
+                "Maximum changed files to show in the result; replacement still applies to all matched files.",
+            ),
+        )
         .property(
             "mode",
             Schema::string()
                 .enum_values(&["regex", "literal"])
-                .default("regex"),
+                .default("regex")
+                .describe("Use regex for captures, literal for exact text replacement."),
         )
         .required(&["pattern", "replacement"])
         .build()
