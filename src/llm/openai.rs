@@ -8,6 +8,7 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const TOOL_ONLY_CHURN_LIMIT: usize = 64;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct NativeOpenAiBackend;
@@ -50,6 +51,7 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
     let tools_by_name = tools_by_name(tools);
     let mut messages = chat_messages_from_llm(&request.system_prompt, request.messages)?;
     let mut transcript = Vec::new();
+    let mut loop_state = ToolLoopState::default();
 
     for turn in 0..=request.max_turns {
         let body = chat_request_body(
@@ -76,6 +78,7 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
         if turn >= request.max_turns {
             bail!("native OpenAI chat exceeded the tool round budget");
         }
+        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
 
         messages.push(chat_assistant_wire_message(
             &assistant.text,
@@ -84,13 +87,9 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
         )?);
         transcript.push(assistant_message);
         for call in assistant.tool_calls {
-            let output = call_tool(&tools_by_name, &call).await;
-            let result = tool_result_message(&call, output.clone());
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": call.call_id,
-                "content": output,
-            }));
+            let outcome = execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
+            let result = tool_result_message(&call, outcome.output.clone());
+            messages.push(chat_tool_result_wire_message(&call, &outcome.output));
             transcript.push(result);
         }
     }
@@ -106,6 +105,7 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
     let tools_by_name = tools_by_name(tools);
     let mut input = responses_input_from_llm(request.messages)?;
     let mut transcript = Vec::new();
+    let mut loop_state = ToolLoopState::default();
 
     for turn in 0..=request.max_turns {
         let body = responses_request_body(
@@ -130,17 +130,14 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
         if turn >= request.max_turns {
             bail!("native OpenAI Responses chat exceeded the tool round budget");
         }
+        loop_state.note_assistant_turn(&response.text, &response.tool_calls)?;
 
         append_responses_assistant_output(&mut input, &response.text, &response.tool_calls);
         transcript.push(assistant_message);
         for call in response.tool_calls {
-            let output = call_tool(&tools_by_name, &call).await;
-            transcript.push(tool_result_message(&call, output.clone()));
-            input.push(json!({
-                "type": "function_call_output",
-                "call_id": call.call_id,
-                "output": output,
-            }));
+            let outcome = execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
+            transcript.push(tool_result_message(&call, outcome.output.clone()));
+            input.push(responses_tool_result_input(&call, &outcome.output));
         }
     }
 
@@ -221,27 +218,143 @@ fn tools_by_name(tools: LlmTools) -> ToolMap {
         .collect()
 }
 
-async fn call_tool(tools: &ToolMap, call: &NativeToolCall) -> String {
-    let result = async {
-        let tool = tools
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("model requested unknown tool `{}`", call.name))?;
-        tool.call(call.arguments.clone())
-            .await
-            .map_err(|err| anyhow!("tool `{}` failed: {err}", call.name))
-    }
-    .await;
+#[derive(Debug, Default)]
+struct ToolLoopState {
+    failed_calls: HashMap<ToolCallFingerprint, usize>,
+    tool_only_turns: usize,
+}
 
-    match result {
-        Ok(output) => output,
-        Err(err) => tool_failure_output(&call.name, &err),
+impl ToolLoopState {
+    fn note_assistant_turn(&mut self, text: &str, tool_calls: &[NativeToolCall]) -> Result<()> {
+        if !tool_calls.is_empty() && text.trim().is_empty() {
+            self.tool_only_turns += 1;
+        } else {
+            self.tool_only_turns = 0;
+        }
+        if self.tool_only_turns > TOOL_ONLY_CHURN_LIMIT {
+            bail!(
+                "native OpenAI tool loop made no text progress for {TOOL_ONLY_CHURN_LIMIT} consecutive tool-only rounds"
+            );
+        }
+        Ok(())
+    }
+
+    fn previous_failures(&self, call: &NativeToolCall) -> Option<usize> {
+        self.failed_calls
+            .get(&ToolCallFingerprint::from(call))
+            .copied()
+    }
+
+    fn note_tool_result(&mut self, call: &NativeToolCall, failed: bool) {
+        let fingerprint = ToolCallFingerprint::from(call);
+        if failed {
+            *self.failed_calls.entry(fingerprint).or_insert(0) += 1;
+        } else {
+            self.failed_calls.remove(&fingerprint);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolCallFingerprint {
+    name: String,
+    arguments: String,
+}
+
+impl From<&NativeToolCall> for ToolCallFingerprint {
+    fn from(call: &NativeToolCall) -> Self {
+        Self {
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCallOutcome {
+    output: String,
+    failed: bool,
+}
+
+impl ToolCallOutcome {
+    fn success(output: String) -> Self {
+        Self {
+            output,
+            failed: false,
+        }
+    }
+
+    fn failure(output: String) -> Self {
+        Self {
+            output,
+            failed: true,
+        }
+    }
+}
+
+async fn execute_tool_call(
+    tools: &ToolMap,
+    state: &mut ToolLoopState,
+    call: &NativeToolCall,
+) -> ToolCallOutcome {
+    let outcome = if let Some(previous_failures) = state.previous_failures(call) {
+        ToolCallOutcome::failure(repeated_failed_tool_call_output(call, previous_failures))
+    } else {
+        call_tool(tools, call).await
+    };
+    state.note_tool_result(call, outcome.failed);
+    outcome
+}
+
+async fn call_tool(tools: &ToolMap, call: &NativeToolCall) -> ToolCallOutcome {
+    let Some(tool) = tools.get(&call.name) else {
+        return ToolCallOutcome::failure(unknown_tool_output(&call.name, tools));
+    };
+
+    match tool.call(call.arguments.clone()).await {
+        Ok(output) => ToolCallOutcome::success(output),
+        Err(err) => ToolCallOutcome::failure(tool_failure_output(&call.name, &err)),
     }
 }
 
 fn tool_failure_output(name: &str, err: &anyhow::Error) -> String {
-    format!(
-        "tool `{name}` failed: {err}\nDo not retry the same tool call unchanged. Fix the arguments, choose another tool, or report this blocker."
+    tool_error_output(
+        &format!("tool `{name}` failed: {err}"),
+        "Do not retry the same tool call unchanged. Fix the arguments, choose another tool, or report this blocker.",
     )
+}
+
+fn unknown_tool_output(name: &str, tools: &ToolMap) -> String {
+    tool_error_output(
+        &format!("model requested unknown tool `{name}`"),
+        &format!(
+            "Use one of the enabled tools and documented argument schemas. {}",
+            enabled_tools_hint(tools)
+        ),
+    )
+}
+
+fn repeated_failed_tool_call_output(call: &NativeToolCall, previous_failures: usize) -> String {
+    tool_error_output(
+        &format!(
+            "repeated identical failed tool call `{}` after {previous_failures} failure(s)",
+            call.name
+        ),
+        "Do not retry the same tool call unchanged. Change the arguments, choose another tool, or explain the blocker to the user.",
+    )
+}
+
+fn tool_error_output(summary: &str, recovery: &str) -> String {
+    format!("TOOL_ERROR: {summary}\nRECOVERY: {recovery}")
+}
+
+fn enabled_tools_hint(tools: &ToolMap) -> String {
+    if tools.is_empty() {
+        return "No tools are currently enabled.".to_string();
+    }
+    let mut names = tools.keys().map(String::as_str).collect::<Vec<_>>();
+    names.sort_unstable();
+    format!("Enabled tools: {}.", names.join(", "))
 }
 
 fn chat_request_body(
@@ -606,6 +719,22 @@ fn tool_result_message(call: &NativeToolCall, output: String) -> Message {
     }
 }
 
+fn chat_tool_result_wire_message(call: &NativeToolCall, output: &str) -> Value {
+    json!({
+        "role": "tool",
+        "tool_call_id": call.call_id,
+        "content": output,
+    })
+}
+
+fn responses_tool_result_input(call: &NativeToolCall, output: &str) -> Value {
+    json!({
+        "type": "function_call_output",
+        "call_id": call.call_id,
+        "output": output,
+    })
+}
+
 fn tool_result_text(content: Vec<ToolResultContent>) -> Result<String> {
     content
         .into_iter()
@@ -792,15 +921,19 @@ mod tests {
             arguments: "{}".to_string(),
         };
 
-        let output = call_tool(&tools, &call).await;
+        let output = call_tool(&tools, &call).await.output;
 
-        assert!(output.contains("tool `fail` failed: boom"));
+        assert!(output.contains("TOOL_ERROR: tool `fail` failed: boom"));
+        assert!(output.contains("RECOVERY:"));
         assert!(output.contains("Do not retry the same tool call unchanged"));
     }
 
     #[tokio::test]
-    async fn unknown_tool_is_returned_to_model_as_tool_output() {
-        let tools: ToolMap = HashMap::new();
+    async fn unknown_tool_is_returned_to_model_with_enabled_tool_hint() {
+        let tools: ToolMap = HashMap::from([(
+            "fail".to_string(),
+            Box::new(FailingTool) as Box<dyn LlmTool>,
+        )]);
         let call = NativeToolCall {
             id: "call-1".to_string(),
             call_id: "call-1".to_string(),
@@ -808,10 +941,85 @@ mod tests {
             arguments: "{}".to_string(),
         };
 
-        let output = call_tool(&tools, &call).await;
+        let output = call_tool(&tools, &call).await.output;
 
-        assert!(output.contains("model requested unknown tool `missing`"));
-        assert!(output.contains("Fix the arguments"));
+        assert!(output.contains("TOOL_ERROR: model requested unknown tool `missing`"));
+        assert!(output.contains("RECOVERY:"));
+        assert!(output.contains("Enabled tools: fail."));
+    }
+
+    #[tokio::test]
+    async fn repeated_identical_failed_tool_call_is_not_reinvoked() {
+        let tools: ToolMap = HashMap::from([(
+            "fail".to_string(),
+            Box::new(FailingTool) as Box<dyn LlmTool>,
+        )]);
+        let call = NativeToolCall {
+            id: "call-1".to_string(),
+            call_id: "call-1".to_string(),
+            name: "fail".to_string(),
+            arguments: "{\"path\":\"missing\"}".to_string(),
+        };
+        let mut state = ToolLoopState::default();
+
+        let first = execute_tool_call(&tools, &mut state, &call).await;
+        let second = execute_tool_call(&tools, &mut state, &call).await;
+
+        assert!(first.output.contains("tool `fail` failed: boom"));
+        assert!(
+            second
+                .output
+                .contains("repeated identical failed tool call `fail` after 1 failure(s)")
+        );
+        assert!(second.output.contains("RECOVERY:"));
+    }
+
+    #[test]
+    fn tool_only_churn_guard_fails_before_default_round_budget() {
+        let call = NativeToolCall {
+            id: "call-1".to_string(),
+            call_id: "call-1".to_string(),
+            name: "read".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let mut state = ToolLoopState::default();
+
+        for _ in 0..TOOL_ONLY_CHURN_LIMIT {
+            state
+                .note_assistant_turn("", std::slice::from_ref(&call))
+                .unwrap();
+        }
+        let err = state
+            .note_assistant_turn("", std::slice::from_ref(&call))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("no text progress"));
+    }
+
+    #[test]
+    fn chat_and_responses_tool_error_wire_payloads_match_transcript() {
+        let call = NativeToolCall {
+            id: "fc_1".to_string(),
+            call_id: "call-1".to_string(),
+            name: "read".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let output = "TOOL_ERROR: blocked\nRECOVERY: choose another tool";
+
+        let chat = chat_tool_result_wire_message(&call, output);
+        let responses = responses_tool_result_input(&call, output);
+        let transcript = tool_result_message(&call, output.to_string());
+
+        assert_eq!(chat["content"], json!(output));
+        assert_eq!(responses["output"], json!(output));
+        let Message::User { content } = transcript else {
+            panic!("expected tool result transcript message");
+        };
+        assert!(matches!(
+            &content[0],
+            MessageContent::ToolResult { content, .. }
+                if content == &vec![ToolResultContent::Text { text: output.to_string() }]
+        ));
     }
 
     #[test]

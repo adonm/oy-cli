@@ -54,7 +54,7 @@ transcript/tools -> LlmRequest -> ModelRoute -> Protocol -> Transport -> LlmResp
                               OpenCode metadata             tool loop
 ```
 
-Months 1 through 4 are in place: `src/llm/mod.rs` owns request/response, message, tool-spec, route, backend-trait, and native tool types; transcripts store `llm::Message`; `agent::model` accepts `oy` messages directly; `src/tools/registry.rs` is the single tool schema registry; `src/tools/llm.rs` adapts enabled tools to `llm::LlmTool`; and `src/llm/openai.rs` is the default non-streaming OpenAI Chat/Responses transport and tool loop.
+Months 1 through 5 are in place: `src/llm/mod.rs` owns request/response, message, tool-spec, route, backend-trait, and native tool types; transcripts store `llm::Message`; `agent::model` accepts `oy` messages directly; `src/tools/registry.rs` is the single tool schema registry; `src/tools/llm.rs` adapts enabled tools to `llm::LlmTool`; and `src/llm/openai.rs` is the default non-streaming OpenAI Chat/Responses transport and hardened tool loop. The native loop returns recoverable `TOOL_ERROR`/`RECOVERY` text for tool failures, hints enabled tools for unknown names, blocks repeated identical failed calls, caps model-visible tool output before it enters the next provider request, and stops tool-only churn before the broader tool-round budget is exhausted.
 
 Rules for that transition:
 

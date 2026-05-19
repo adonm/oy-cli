@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Completed Month 5 of the LLM internals roadmap: native OpenAI-compatible Chat/Responses tool loops now mark tool failures with `TOOL_ERROR`/`RECOVERY`, hint enabled tools for unknown names, block repeated identical failed calls, cap model-visible tool output with head/tail preservation, and stop long tool-only churn without lowering the default tool-round budget.
+
 ## [0.9.6] - 2026-05-19
 
 ### Fixed

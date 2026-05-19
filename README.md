@@ -145,6 +145,8 @@ In `oy chat`:
 
 For multi-step work, `oy` keeps an in-memory todo list. It writes `TODO.md` only when you explicitly ask and the current mode allows it.
 
+The native OpenAI-compatible tool loop treats tool results as a recovery boundary: failures are returned to the model with `TOOL_ERROR`/`RECOVERY` guidance, unknown tool names include enabled-tool hints, repeated identical failed calls are blocked, and oversized model-visible tool output is truncated with head/tail preservation.
+
 ## Safety modes
 
 `oy` is not a sandbox. It can run commands and edit files with your user permissions. Command output, file snippets, and prompts may be sent to your model provider.

@@ -2,6 +2,8 @@
 
 `oy` tools run on the user's machine, inside the configured workspace unless noted. Tools are not a sandbox; they use the current user permissions and may expose snippets or command output to the model transcript.
 
+Native OpenAI-compatible tool loops fail closed for repeated identical failed tool calls and long tool-only churn. Tool failures sent back to the model use `TOOL_ERROR` and `RECOVERY` markers, and large model-visible tool outputs are truncated with head/tail preservation before the next provider request.
+
 ## Capability matrix
 
 | Tool | Capability | Mutation | Main gate | Notes |

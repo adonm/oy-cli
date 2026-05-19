@@ -46,5 +46,7 @@ async fn call_tool(ctx: Arc<Mutex<ToolContext>>, name: &str, args: String) -> Re
     let args = serde_json::from_str::<Value>(&args)
         .with_context(|| format!("tool `{name}` supplied invalid JSON arguments"))?;
     let value = super::invoke_shared(ctx, name, args).await?;
-    Ok(super::encode_tool_output(&value))
+    Ok(super::output::cap_model_visible_tool_output(
+        &super::encode_tool_output(&value),
+    ))
 }
