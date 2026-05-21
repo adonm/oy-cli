@@ -54,13 +54,13 @@ transcript/tools -> LlmRequest -> ModelRoute -> Protocol -> Transport -> LlmResp
                               OpenCode metadata             tool loop
 ```
 
-Months 1 through 6 are in place, and the current native backend now mirrors more of `packages/llm`: `src/llm/mod.rs` owns request/response, message, cache, tool-spec, route, backend-trait, and native tool types; `src/llm/providers.rs` owns narrow provider profiles for OpenAI, Copilot, OpenAI-compatible families, xAI, OpenRouter, Azure, Cloudflare, and Bedrock; `src/llm/protocols/` contains OpenAI Chat, OpenAI Responses, and Bedrock Converse lowering/parsing; `src/llm/route/` contains endpoint, auth, framing, and HTTP transport helpers; and `src/llm/tool_runtime.rs` owns the hardened tool loop. Cache policy follows OpenCode's tools/system/latest-user defaults for inline-cache protocols while OpenAI-family protocols skip inline markers. Prompt-level provider retries use a small jittered backoff and stop once `tools::invoke_inner` records a write, shell, or persistent todo side-effect attempt.
+Months 1 through 6 are in place, and the current native backend now mirrors more of `packages/llm`: `src/llm/mod.rs` owns request/response, message, cache, tool-spec, route, backend-trait, and native tool types; `src/llm/providers.rs` owns narrow provider profiles for OpenAI, Copilot, OpenAI-compatible families, xAI, OpenRouter, Azure, Cloudflare, and Bedrock; `src/llm/protocols/` contains OpenAI Chat, OpenAI Responses, Anthropic Messages, and Bedrock Converse lowering/parsing; `src/llm/route/` contains endpoint, auth, framing, and HTTP transport helpers; and `src/llm/tool_runtime.rs` owns the hardened tool loop. Cache policy follows OpenCode's tools/system/latest-user defaults for inline-cache protocols while OpenAI-family protocols skip inline markers. Prompt-level provider retries use a small jittered backoff and stop once `tools::invoke_inner` records a write, shell, or persistent todo side-effect attempt.
 
 Rules for that transition:
 
 - own `LlmRequest`, `LlmResponse`, messages, tool definitions, and model routes in `oy`;
 - keep provider profiles narrow and covered by route/default/auth tests;
-- add protocol support incrementally; unsupported Anthropic/Gemini routes must fail closed until their native protocols are ported;
+- add protocol support incrementally; unsupported Gemini routes must fail closed until their native protocols are ported;
 - keep model listing/limits in OpenCode, provider auth lookup in `agent::auth`/route auth helpers, and policy checks in `tools`;
 - prefer request/response golden tests over broad live-provider tests.
 

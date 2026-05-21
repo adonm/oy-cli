@@ -97,6 +97,53 @@ impl Usage {
             provider_metadata: Some(serde_json::json!({"bedrock": usage.clone()})),
         }
     }
+
+    pub(crate) fn from_anthropic(usage: &Value) -> Option<Self> {
+        let non_cached = u64_at(usage, "/input_tokens");
+        let output = u64_at(usage, "/output_tokens");
+        let cache_read = u64_at(usage, "/cache_read_input_tokens");
+        let cache_write = u64_at(usage, "/cache_creation_input_tokens");
+        let input = sum_tokens(non_cached, sum_tokens(cache_read, cache_write));
+        if input.is_none() && output.is_none() && cache_read.is_none() && cache_write.is_none() {
+            return None;
+        }
+        Some(Self {
+            input_tokens: input,
+            output_tokens: output,
+            non_cached_input_tokens: non_cached,
+            cache_read_input_tokens: cache_read,
+            cache_write_input_tokens: cache_write,
+            reasoning_tokens: None,
+            total_tokens: total_tokens(input, output, None),
+            provider_metadata: Some(serde_json::json!({"anthropic": usage.clone()})),
+        })
+    }
+
+    pub(crate) fn merge_prefer_defined(self, fallback: Self) -> Self {
+        let input = self.input_tokens.or(fallback.input_tokens);
+        let output = self.output_tokens.or(fallback.output_tokens);
+        Self {
+            input_tokens: input,
+            output_tokens: output,
+            non_cached_input_tokens: self
+                .non_cached_input_tokens
+                .or(fallback.non_cached_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .or(fallback.cache_read_input_tokens),
+            cache_write_input_tokens: self
+                .cache_write_input_tokens
+                .or(fallback.cache_write_input_tokens),
+            reasoning_tokens: self.reasoning_tokens.or(fallback.reasoning_tokens),
+            total_tokens: self
+                .total_tokens
+                .or_else(|| total_tokens(input, output, fallback.total_tokens)),
+            provider_metadata: merge_provider_metadata(
+                fallback.provider_metadata,
+                self.provider_metadata,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +241,18 @@ impl StepAccumulator {
             | LlmEvent::ToolResult { .. } => {}
         }
         Ok(())
+    }
+}
+
+fn merge_provider_metadata(left: Option<Value>, right: Option<Value>) -> Option<Value> {
+    match (left, right) {
+        (Some(Value::Object(mut left)), Some(Value::Object(right))) => {
+            left.extend(right);
+            Some(Value::Object(left))
+        }
+        (_, Some(right)) => Some(right),
+        (Some(left), None) => Some(left),
+        (None, None) => None,
     }
 }
 

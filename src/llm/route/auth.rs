@@ -22,6 +22,10 @@ pub(crate) fn apply_json_headers(
                 HeaderName::from_bytes(name.as_bytes()).context("invalid auth header name")?,
                 HeaderValue::from_str(value).context("invalid auth header value")?,
             )),
+        RouteAuth::Headers(headers) => apply_header_pairs(
+            builder.header(CONTENT_TYPE, HeaderValue::from_static("application/json")),
+            headers,
+        ),
         RouteAuth::Composite(auths) => {
             let mut builder =
                 builder.header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -33,6 +37,7 @@ pub(crate) fn apply_json_headers(
                             .context("invalid auth header name")?,
                         HeaderValue::from_str(value).context("invalid auth header value")?,
                     ),
+                    RouteAuth::Headers(headers) => apply_header_pairs(builder, headers)?,
                     RouteAuth::Composite(_) => apply_json_headers(builder, auth, endpoint, body)?,
                     RouteAuth::AwsSigV4(credentials) => {
                         builder.headers(sigv4_headers(endpoint, body, credentials)?)
@@ -45,6 +50,19 @@ pub(crate) fn apply_json_headers(
             Ok(builder.headers(sigv4_headers(endpoint, body, credentials)?))
         }
     }
+}
+
+fn apply_header_pairs(
+    mut builder: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> Result<reqwest::RequestBuilder> {
+    for (name, value) in headers {
+        builder = builder.header(
+            HeaderName::from_bytes(name.as_bytes()).context("invalid auth header name")?,
+            HeaderValue::from_str(value).context("invalid auth header value")?,
+        );
+    }
+    Ok(builder)
 }
 
 fn sigv4_headers(endpoint: &str, body: &str, credentials: &AwsCredentials) -> Result<HeaderMap> {

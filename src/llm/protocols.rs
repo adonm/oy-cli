@@ -1,3 +1,4 @@
+pub(crate) mod anthropic_messages;
 pub(crate) mod bedrock_converse;
 pub(crate) mod bedrock_event_stream;
 pub(crate) mod openai_chat;

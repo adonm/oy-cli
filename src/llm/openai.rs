@@ -16,7 +16,9 @@ use backon::Retryable;
 use serde_json::{Value, json};
 use std::future::Future;
 
-use super::protocols::{bedrock_converse, bedrock_event_stream, openai_chat, openai_responses};
+use super::protocols::{
+    anthropic_messages, bedrock_converse, bedrock_event_stream, openai_chat, openai_responses,
+};
 use super::schema::{StepAccumulator, ToolCall as NativeToolCall};
 use super::tool_runtime;
 
@@ -38,14 +40,58 @@ async fn execute_native_chat(request: LlmRequest, tools: LlmTools) -> Result<Llm
     match request.route.protocol {
         Protocol::OpenAiChat => run_chat_completions(request, tools).await,
         Protocol::OpenAiResponses => run_responses(request, tools).await,
+        Protocol::AnthropicMessages => run_anthropic_messages(request, tools).await,
         Protocol::BedrockConverse => run_bedrock_converse(request, tools).await,
-        Protocol::AnthropicMessages => {
-            bail!(
-                "protocol {:?} is not implemented by the native OpenAI backend",
-                request.route.protocol
-            )
+    }
+}
+
+async fn run_anthropic_messages(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
+    let endpoint = super::route::endpoint::render_with_query(
+        request.route.base_url.as_deref(),
+        "https://api.anthropic.com/v1",
+        "messages",
+        request.route.query_params.as_deref(),
+    )?;
+    let client = reqwest::Client::new();
+    let tools_by_name = tool_runtime::tools_by_name(tools);
+    let mut request = request;
+    let mut transcript = Vec::new();
+    let mut loop_state = tool_runtime::ToolLoopState::default();
+
+    for turn in 0..=request.max_turns {
+        let body = anthropic_messages::request_body(&request)?;
+        let assistant = retry_transient_http_call(|| {
+            stream_anthropic_assistant(&client, &endpoint, &request.route.auth, &body)
+        })
+        .await?;
+        let assistant_message = assistant_message_from_calls(
+            &assistant.text,
+            assistant.reasoning_content.as_ref(),
+            &assistant.tool_calls,
+        )?;
+
+        if assistant.tool_calls.is_empty() {
+            transcript.push(assistant_message);
+            return Ok(LlmResponse {
+                output: assistant.text,
+                messages: Some(transcript),
+            });
+        }
+        ensure_tool_round_budget(turn, request.max_turns, "Anthropic Messages")?;
+        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
+
+        request.messages.push(assistant_message.clone());
+        transcript.push(assistant_message);
+        for call in assistant.tool_calls {
+            let outcome =
+                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
+            let result = tool_result_message(&call, outcome.output.clone());
+            request.messages.push(result.clone());
+            transcript.push(result);
         }
     }
+
+    unreachable!("bounded tool loop exits from inside the loop")
 }
 
 async fn run_bedrock_converse(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
@@ -233,6 +279,24 @@ where
             ))
         })
         .await
+}
+
+async fn stream_anthropic_assistant(
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth: &RouteAuth,
+    body: &Value,
+) -> Result<ParsedAssistant> {
+    let response =
+        super::route::transport::post_json_streaming(client, endpoint, auth, body).await?;
+    let step = super::route::transport::stream_json_sse_events(
+        response,
+        anthropic_messages::StreamState::default(),
+        |state, event| anthropic_messages::parse_stream_event(state, &event),
+        anthropic_messages::finish_stream,
+    )
+    .await?;
+    Ok(parsed_assistant_from_step(step))
 }
 
 async fn stream_chat_assistant(

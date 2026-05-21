@@ -178,6 +178,7 @@ fn prepare_chat(model_spec: &str) -> Result<ModelRoute> {
         "openai" => prepare_openai_chat(parsed.base_model)?,
         "xai" => prepare_xai_chat(parsed.base_model)?,
         "openrouter" => prepare_openrouter_chat(parsed.base_model)?,
+        "anthropic" => prepare_anthropic_chat(parsed.base_model)?,
         "azure" => prepare_azure_chat(parsed.base_model)?,
         "cloudflare-ai-gateway" => prepare_cloudflare_ai_gateway_chat(parsed.base_model)?,
         "cloudflare-workers-ai" => prepare_cloudflare_workers_ai_chat(parsed.base_model)?,
@@ -192,13 +193,25 @@ fn prepare_chat(model_spec: &str) -> Result<ModelRoute> {
             &route.model,
             route.protocol,
         ),
-        "openrouter" => None,
-        _ if route.protocol == Protocol::BedrockConverse => None,
+        "openrouter" | "anthropic" => None,
+        _ if matches!(
+            route.protocol,
+            Protocol::AnthropicMessages | Protocol::BedrockConverse
+        ) =>
+        {
+            None
+        }
         _ => crate::llm::providers::gpt5_default_provider_options(&route.model, route.protocol),
     };
+    let reasoning_overlay = if route.protocol == Protocol::AnthropicMessages {
+        None
+    } else {
+        reasoning_effort_json(model_spec, route.protocol.uses_responses_api())
+    };
+    let route_params = route.additional_params.take();
     route.additional_params = merge_additional_params(
-        provider_defaults,
-        reasoning_effort_json(model_spec, route.protocol.uses_responses_api()),
+        merge_additional_params(provider_defaults, route_params),
+        reasoning_overlay,
     );
     Ok(route)
 }
@@ -293,6 +306,33 @@ fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
         base_url: Some(profile.base_url),
         query_params: None,
         additional_params: None,
+    })
+}
+
+fn prepare_anthropic_chat(model: &str) -> Result<ModelRoute> {
+    let model_id = opencode_models::find("anthropic", model)
+        .as_ref()
+        .map(|info| info.api_id().to_string())
+        .unwrap_or_else(|| model.to_string());
+    let profile =
+        crate::llm::providers::anthropic_profile(&model_id, env_value("ANTHROPIC_BASE_URL"));
+    Ok(ModelRoute {
+        protocol: profile.protocol,
+        model: profile.model_id,
+        auth: RouteAuth::Headers(vec![
+            (
+                "x-api-key".to_string(),
+                env_value("ANTHROPIC_API_KEY")
+                    .context("Anthropic auth is not configured; set ANTHROPIC_API_KEY")?,
+            ),
+            (
+                "anthropic-version".to_string(),
+                env_value("ANTHROPIC_VERSION").unwrap_or_else(|| "2023-06-01".to_string()),
+            ),
+        ]),
+        base_url: Some(profile.base_url),
+        query_params: None,
+        additional_params: env_json("ANTHROPIC_PROVIDER_OPTIONS"),
     })
 }
 
@@ -926,6 +966,40 @@ mod tests {
         assert_eq!(chat.model, "grok-4");
         assert_eq!(chat.auth, RouteAuth::ApiKey("test-xai-key".to_string()));
         assert_eq!(chat.base_url.as_deref(), Some("https://api.x.ai/v1"));
+    }
+
+    #[test]
+    fn prepare_chat_routes_anthropic_messages_with_version_header() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[
+            ("ANTHROPIC_API_KEY", Some("test-anthropic-key")),
+            ("ANTHROPIC_BASE_URL", Some("https://anthropic.example/v1")),
+            ("ANTHROPIC_VERSION", Some("2024-01-01")),
+            (
+                "ANTHROPIC_PROVIDER_OPTIONS",
+                Some("{\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}"),
+            ),
+        ]);
+
+        let chat = prepare_chat("anthropic/claude-sonnet-4-5").unwrap();
+
+        assert_eq!(chat.protocol, Protocol::AnthropicMessages);
+        assert_eq!(chat.model, "claude-sonnet-4-5");
+        assert_eq!(
+            chat.base_url.as_deref(),
+            Some("https://anthropic.example/v1")
+        );
+        assert_eq!(
+            chat.auth,
+            RouteAuth::Headers(vec![
+                ("x-api-key".to_string(), "test-anthropic-key".to_string()),
+                ("anthropic-version".to_string(), "2024-01-01".to_string()),
+            ])
+        );
+        assert_eq!(
+            chat.additional_params,
+            Some(serde_json::json!({"thinking":{"type":"enabled","budget_tokens":1024}}))
+        );
     }
 
     #[test]

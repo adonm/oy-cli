@@ -151,6 +151,7 @@ pub(crate) struct GenerationOptions {
 pub(crate) enum RouteAuth {
     ApiKey(String),
     Header { name: String, value: String },
+    Headers(Vec<(String, String)>),
     Composite(Vec<RouteAuth>),
     AwsSigV4(AwsCredentials),
 }
@@ -163,6 +164,10 @@ impl std::fmt::Debug for RouteAuth {
                 .debug_struct("Header")
                 .field("name", name)
                 .field("value", &"<redacted>")
+                .finish(),
+            Self::Headers(headers) => f
+                .debug_tuple("Headers")
+                .field(&format_args!("{} headers", headers.len()))
                 .finish(),
             Self::Composite(auths) => f
                 .debug_tuple("Composite")

@@ -139,9 +139,9 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     ProviderMetadata {
         id: "anthropic",
         family: ProviderFamily::Anthropic,
-        default_base_url: None,
+        default_base_url: Some("https://api.anthropic.com/v1"),
         auth_env: &["ANTHROPIC_API_KEY"],
-        supported: false,
+        supported: true,
     },
     ProviderMetadata {
         id: "google",
@@ -270,11 +270,21 @@ pub(crate) fn opencode_profile(provider: &str, model_id: &str, base_url: &str) -
         base_url: base_url.to_string(),
         protocol: if is_bedrock_provider(provider) {
             Protocol::BedrockConverse
+        } else if provider == "anthropic" {
+            Protocol::AnthropicMessages
         } else if opencode_should_use_responses_api(provider, model_id) {
             Protocol::OpenAiResponses
         } else {
             Protocol::OpenAiChat
         },
+    }
+}
+
+pub(crate) fn anthropic_profile(model: &str, base_url: Option<String>) -> RouteProfile {
+    RouteProfile {
+        model_id: model.to_string(),
+        base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com/v1".to_string()),
+        protocol: Protocol::AnthropicMessages,
     }
 }
 
@@ -466,7 +476,7 @@ mod tests {
         assert!(ids.contains(&"anthropic"));
         assert!(ids.contains(&"google"));
         assert!(ids.contains(&"amazon-bedrock"));
-        assert!(!provider_metadata("anthropic").unwrap().supported);
+        assert!(provider_metadata("anthropic").unwrap().supported);
         assert_eq!(
             provider_metadata("deepseek").unwrap().family,
             ProviderFamily::OpenAiCompatible

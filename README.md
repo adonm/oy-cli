@@ -114,7 +114,7 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 oy model openai/gpt-4.1
 ```
 
-GitHub Copilot, OpenAI-compatible providers listed by OpenCode, xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse route through `oy`'s Rust-native LLM backend. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Anthropic and Google/Gemini provider entries are detected but fail closed until their native protocols are ported. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
+GitHub Copilot, OpenAI-compatible providers listed by OpenCode, Anthropic Messages, xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse route through `oy`'s Rust-native LLM backend. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Google/Gemini provider entries are detected but fail closed until their native protocol is ported. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
 
 Provider-specific direct environment variables:
 
@@ -127,6 +127,7 @@ Provider-specific direct environment variables:
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`; optional `AZURE_OPENAI_API_VERSION` |
 | Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN` or `CF_AIG_TOKEN`, plus `CLOUDFLARE_AI_GATEWAY_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID`; optional `CLOUDFLARE_AI_GATEWAY_ID` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` or `CLOUDFLARE_WORKERS_AI_TOKEN`, plus `CLOUDFLARE_WORKERS_AI_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID` |
+| Anthropic | `ANTHROPIC_API_KEY`; optional `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION`, `ANTHROPIC_PROVIDER_OPTIONS` |
 | Amazon Bedrock | `BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`, or SigV4 via `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; optional `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `BEDROCK_BASE_URL` |
 
 The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect the full OpenCode listing or clear the recent history.
@@ -206,7 +207,7 @@ Default local paths:
 | `OY_MAX_TOOL_ROUNDS` | Tool-call budget per prompt; default `512` |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI auth/endpoint |
 | `GITHUB_COPILOT_API_KEY`, `COPILOT_API_KEY` | Copilot API-token auth |
-| `OPENROUTER_API_KEY`, `XAI_API_KEY`, `AZURE_OPENAI_API_KEY` | Direct provider auth for OpenRouter, xAI, and Azure OpenAI |
+| `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `AZURE_OPENAI_API_KEY` | Direct provider auth for Anthropic, OpenRouter, xAI, and Azure OpenAI |
 | `BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Amazon Bedrock auth |
 | `OY_TITLE` | Terminal title/zellij pane progress: `off`, `never`, `0` disable; `on`, `always`, `1` force in human output modes |
 | `LOCAL_API_KEY` | Optional local `local-<port>` shim key; defaults to `oy-local` |
