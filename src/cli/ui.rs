@@ -1,3 +1,6 @@
+//! Terminal UI: output mode selection, ANSI-stripping guards,
+//! color helpers, and direct stdout/stderr writers.
+
 use std::fmt::Display;
 use std::io::IsTerminal as _;
 use std::sync::LazyLock;
@@ -6,10 +9,12 @@ use std::sync::atomic::{AtomicU8, Ordering};
 mod progress;
 mod render;
 mod text;
+mod title;
 
 pub use progress::{format_duration, progress, tool_error, tool_result, tool_start};
 pub use render::{block_title, code, diff, markdown, text_block};
 pub use text::{clamp_lines, compact_preview, compact_spaces, head_tail, truncate_chars};
+pub use title::{title_progress, title_scope};
 
 /// Controls how much user-facing output `oy` writes while it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

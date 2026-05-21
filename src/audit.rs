@@ -1,3 +1,11 @@
+//! Deterministic no-tools audit pipeline: file collection, chunking,
+//! map/reduce prompt construction, report/SARIF rendering, and output
+//! writing.
+//!
+//! `oy audit` does not expose tools to the model. It collects reviewable
+//! text files, chunks large repositories, runs one or more no-tools model
+//! prompts, post-processes the report, and writes the output.
+
 use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt as _, stream};
 use std::fmt::Write as _;
@@ -125,6 +133,11 @@ pub struct AuditResult {
 pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     let started = Instant::now();
     let model_spec = options.model.trim().to_string();
+    let _title = crate::ui::title_scope(format_args!(
+        "oy audit · {}",
+        crate::ui::compact_preview(&options.focus, 48)
+    ));
+    let _ = crate::agent::model::cache_model_limits(&model_spec).await;
     let output_path = config::resolve_workspace_output_path(&options.root, &options.out)?;
     let files = collect_files(&options.root, Some(&output_path), &model_spec)?;
     if files.is_empty() {

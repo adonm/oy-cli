@@ -1,3 +1,6 @@
+//! `oy run` and `oy chat` subcommands: one-shot task execution
+//! and interactive chat session startup.
+
 use anyhow::Result;
 use clap::Args;
 use std::io::IsTerminal as _;
@@ -68,6 +71,12 @@ pub(super) async fn run_command(args: RunArgs) -> Result<i32> {
         args.shared.continue_session,
         &args.shared.resume,
     )?;
+    let _ = crate::agent::model::cache_model_limits(&session.model).await;
+    let _title = crate::ui::title_scope(format_args!(
+        "oy run · {} · {}",
+        session.mode.name(),
+        crate::ui::compact_preview(&task, 48)
+    ));
     print_session_intro("run", &session, Some(&task));
     let answer = session::run_prompt(&mut session, &task).await?;
     if crate::ui::is_json() {
@@ -104,6 +113,8 @@ pub(super) async fn chat_command(args: ChatArgs) -> Result<i32> {
         args.shared.continue_session,
         &args.shared.resume,
     )?;
+    let _ = crate::agent::model::cache_model_limits(&session.model).await;
+    let _title = crate::ui::title_scope(format_args!("oy chat · {}", session.mode.name()));
     print_session_intro("chat", &session, None);
     crate::chat::run_chat(&mut session).await
 }

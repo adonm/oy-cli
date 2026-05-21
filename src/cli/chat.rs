@@ -1,3 +1,6 @@
+//! Interactive chat shell: REPL, slash commands, model switching,
+//! history, and approval prompts.
+
 use anyhow::{Context as _, Result, bail};
 use dialoguer::{Confirm, theme::ColorfulTheme};
 use std::fmt::Display;
@@ -106,9 +109,18 @@ async fn handle_chat_line(session: &mut Session, line: &str) -> Result<bool> {
         return Ok(true);
     }
     if let Some(command) = line.strip_prefix('/') {
+        crate::ui::title_progress(format_args!(
+            "oy chat · /{}",
+            crate::ui::compact_preview(command.trim(), 48)
+        ));
         return handle_slash_command(session, command.trim()).await;
     }
+    crate::ui::title_progress(format_args!(
+        "oy chat · {}",
+        crate::ui::compact_preview(line, 56)
+    ));
     run_prompt_with_context_recovery(session, line).await?;
+    crate::ui::title_progress(format_args!("oy chat · {}", session.mode.name()));
     Ok(true)
 }
 

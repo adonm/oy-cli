@@ -1,3 +1,6 @@
+//! Tool progress output: call announcements, elapsed time,
+//! result summaries, and error reporting.
+
 use std::fmt::Display;
 use std::time::Duration;
 
@@ -17,6 +20,7 @@ pub fn progress(
         return;
     }
     let detail = sanitize_terminal(&detail.to_string());
+    super::title_progress(format_args!("oy {label} {current}/{total} · {detail}"));
     line(progress_line(label, current, total, &detail, elapsed));
 }
 
@@ -54,6 +58,7 @@ pub fn tool_start(name: &str, detail: &str) {
     if is_quiet() {
         return;
     }
+    super::title_progress(format_args!("oy tool · {name}"));
     err_line(tool_start_line(
         &sanitize_terminal(name),
         &sanitize_terminal(detail),
@@ -64,6 +69,7 @@ pub fn tool_result(name: &str, elapsed: Duration, preview: &str) {
     if is_quiet() {
         return;
     }
+    super::title_progress(format_args!("oy tool ✓ {name}"));
     let preview = sanitize_terminal_for_display(preview);
     let preview = preview.trim_end();
     let head = tool_result_head(&sanitize_terminal(name), elapsed);
@@ -85,6 +91,7 @@ pub fn tool_error(name: &str, elapsed: Duration, err: impl Display) {
     if is_quiet() {
         return;
     }
+    super::title_progress(format_args!("oy tool ✗ {name}"));
     let name = sanitize_terminal(name);
     let err = sanitize_terminal(&err.to_string());
     err_line(format_args!(

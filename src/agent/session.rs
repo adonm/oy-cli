@@ -1,3 +1,10 @@
+//! Session orchestration: context management, tool loop driving,
+//! compaction triggers, and saved-session persistence.
+//!
+//! [`Session`] is the main state machine — it manages transcript
+//! messages, runs the chat/tool loop, and signals compaction when
+//! the context budget is exceeded.
+
 use anyhow::Result;
 use chrono::Utc;
 
@@ -222,6 +229,10 @@ pub async fn run_prompt_once_no_tools(
     prompt: &str,
 ) -> Result<String> {
     let model_spec = model.trim().to_string();
+    let _title = crate::ui::title_scope(format_args!(
+        "oy · {} · no tools",
+        display_model(&model_spec)
+    ));
     if !crate::ui::is_quiet() {
         let tokens = count_tokens(&model_spec, system_prompt) + count_tokens(&model_spec, prompt);
         crate::ui::err_line(format_args!(
@@ -266,6 +277,7 @@ async fn run_prompt_with_policy(
         let ctx = tool_context.lock().expect("tool context mutex poisoned");
         crate::tools::tool_specs(&ctx)
     };
+    crate::ui::title_progress(session.wait_status(&model_spec));
     if !crate::ui::is_quiet() {
         crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
     }
