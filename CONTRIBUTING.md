@@ -87,8 +87,8 @@ commit so style/lint noise never reaches CI.
 
 Goal: reduce code and improve quality by owning the small LLM boundary `oy`
 actually needs, while keeping behavior stable. Port OpenCode's shape
-(`request -> route -> protocol -> transport -> tool loop`), not its full
-provider surface.
+(`request -> route -> protocol -> transport -> tool loop`) and tested provider
+behavior where the Rust-native backend supports the protocol.
 
 | Month | Outcome | Keep it small by |
 |---|---|---|
@@ -98,11 +98,11 @@ provider surface.
 | 4 | **Done:** made the native backend the default, removed the previous external backend and compatibility shims, and kept only OpenAI-compatible Chat/Responses routes. | Keep only OpenAI-compatible protocols unless a concrete user need justifies more. |
 | 5 | **Done:** hardened the native tool loop without widening capability: repeated identical failed tool calls are blocked, unknown tools return enabled-tool hints, tool failures use consistent `TOOL_ERROR`/`RECOVERY` markers, model-visible tool output is capped with head/tail preservation, and tool-only churn has a progress guard. | Changes stay local to `src/llm/openai.rs` and `src/tools/output.rs`; Chat and Responses share focused coverage; the default tool-round budget is unchanged. |
 | 6 | **Done:** made retries side-effect aware and trimmed duplicated loop code: whole-prompt retries now stop after write/shell/persistent todo side-effect attempts, provider retry backoff uses fewer jittered attempts, Chat/Responses share tool-round budget handling, and common bad tool-call arguments have clearer schema descriptions. | One explicit side-effect signal near `tools::invoke_inner`; retry policy stayed in `agent::retry`; repeated loop mechanics were extracted without adding a new framework or provider abstraction. |
+| 7 | **Done:** reorganized the native backend toward OpenCode `packages/llm`: provider profiles, route auth/framing/transport, protocol modules, schema/events, cache policy, and tool runtime are split and tested. OpenAI Chat, OpenAI Responses, and Bedrock Converse are native protocols; xAI, OpenRouter, Azure, Cloudflare, OpenAI-compatible families, Copilot, and Bedrock have provider routing. | Keep provider profiles as data plus focused quirks; unsupported Anthropic/Gemini entries fail closed until their protocols are native. |
 
 Every month: delete obsolete compatibility code, add focused request/response
-goldens, keep auth lookup in `agent::auth`, and do not add new providers,
-process execution, or credential paths just to make the abstraction look
-complete.
+goldens, keep auth lookup centralized, and do not add process execution,
+credential paths, or protocol claims just to make the abstraction look complete.
 
 ## Design rules
 
@@ -112,11 +112,11 @@ complete.
 - Keep public docs aligned with implemented CLI help.
 - For security-sensitive work, name the trust boundary, validate near it, fail
   closed, and add focused tests.
-- For `webfetch` changes, keep model use simple: public docs should work by
-  default with redirects and non-credentialed document-friendly headers, while
-  every request/redirect remains public-only and sensitive headers stay denied.
-- Do not add providers, persistence, process, file, network, or credential
-  handling without a concrete user need and focused tests.
+- For `webfetch` changes, keep model use simple: public docs should work
+  through Spider's default HTTP crawler setup, while omitted Chrome/wait/proxy
+  fields do not reappear without a concrete need.
+- Do not add provider behavior, persistence, process, file, network, or
+  credential handling without a concrete user need and focused tests.
 
 ## Important paths
 

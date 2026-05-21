@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Reorganized the Rust-native LLM backend toward OpenCode `packages/llm`: schema/events, provider profiles, route auth/framing/transport, protocol modules, cache policy, and tool runtime are now separated and covered by focused tests.
+- Expanded native provider routing for xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse while keeping Anthropic/Gemini providers fail-closed until their protocols are ported.
+- Added OpenCode-style cache policy placement for inline-cache protocols and Bedrock Converse cache-point lowering with AWS event-stream decoding and SigV4/bearer auth support.
+- Added terminal title/zellij pane progress updates for human-mode sessions while keeping quiet/JSON output clean.
+
 ## [0.9.8] - 2026-05-19
 
 ### Changed

@@ -99,7 +99,7 @@ OY_ROOT=../my-project oy "summarize this repo"
 
 If you don't have a model provider yet, [OpenCode Go](https://opencode.ai/go) is a decent starting subscription for open-weight models — it provides access to DeepSeek V4, Qwen, Kimi, GLM, and others for $10/month. Install and configure OpenCode, subscribe to Go, then `oy` will pick up the credentials automatically.
 
-`oy model` uses `opencode models --verbose` as the model metadata source. That keeps provider/model listings in OpenCode instead of duplicating a local registry in `oy`. Install and configure OpenCode credentials for the providers you want listed, then run:
+`oy model` uses `opencode models --verbose` as the model metadata source. That keeps provider/model listings in OpenCode; `oy` only keeps the small route/profile metadata needed by its Rust-native backend. Install and configure OpenCode credentials for the providers you want listed, then run:
 
 ```bash
 oy model                 # list currently routable models from opencode models --verbose
@@ -114,7 +114,20 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 oy model openai/gpt-4.1
 ```
 
-GitHub Copilot and OpenAI-compatible providers listed by OpenCode are routed through `oy`'s native OpenAI-compatible Chat/Responses backend. Transcripts, tool schemas, and tool execution use `oy`-owned types. Newer reasoning models that require `/responses` are handled by narrow local compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
+GitHub Copilot, OpenAI-compatible providers listed by OpenCode, xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse route through `oy`'s Rust-native LLM backend. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Anthropic and Google/Gemini provider entries are detected but fail closed until their native protocols are ported. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
+
+Provider-specific direct environment variables:
+
+| Provider | Variables |
+|---|---|
+| OpenAI | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL` |
+| GitHub Copilot | `GITHUB_COPILOT_API_KEY` or `COPILOT_API_KEY` |
+| xAI | `XAI_API_KEY`, optional `XAI_BASE_URL` |
+| OpenRouter | `OPENROUTER_API_KEY`, optional `OPENROUTER_BASE_URL` |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`; optional `AZURE_OPENAI_API_VERSION` |
+| Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN` or `CF_AIG_TOKEN`, plus `CLOUDFLARE_AI_GATEWAY_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID`; optional `CLOUDFLARE_AI_GATEWAY_ID` |
+| Cloudflare Workers AI | `CLOUDFLARE_API_KEY` or `CLOUDFLARE_WORKERS_AI_TOKEN`, plus `CLOUDFLARE_WORKERS_AI_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID` |
+| Amazon Bedrock | `BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`, or SigV4 via `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; optional `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `BEDROCK_BASE_URL` |
 
 The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect the full OpenCode listing or clear the recent history.
 
@@ -141,11 +154,11 @@ In `oy chat`:
 - `/help` lists commands
 - `/status` shows model, workspace, mode, context, and todos
 - `/ask <question>` is read-only research; it cannot edit files or run `bash`
-- `webfetch` can fetch public docs/API pages and follows redirects by default; it sends an honest `oy-cli/<version>` user agent plus doc-friendly `Accept` headers, while still blocking private/local targets and sensitive headers
+- `webfetch` can fetch public docs/API pages and return markdown, text, HTML, or XML using the Spider MCP scrape shape; this build uses Spider's default HTTP crawler setup without Chrome/wait/proxy support
 
 For multi-step work, `oy` keeps an in-memory todo list. It writes `TODO.md` only when you explicitly ask and the current mode allows it.
 
-The native OpenAI-compatible tool loop treats tool results as a recovery boundary: failures are returned to the model with `TOOL_ERROR`/`RECOVERY` guidance, unknown tool names include enabled-tool hints, repeated identical failed calls are blocked, and oversized model-visible tool output is truncated with head/tail preservation.
+The native tool loop treats tool results as a recovery boundary: failures are returned to the model with `TOOL_ERROR`/`RECOVERY` guidance, unknown tool names include enabled-tool hints, repeated identical failed calls are blocked, hosted/provider-executed tool events are not dispatched locally, and oversized model-visible tool output is truncated with head/tail preservation.
 
 ## Safety modes
 
@@ -191,8 +204,11 @@ Default local paths:
 | `OY_CONFIG` | Override config file path |
 | `OY_COLOR` | `auto`, `always`, or `never`; `NO_COLOR` disables color |
 | `OY_MAX_TOOL_ROUNDS` | Tool-call budget per prompt; default `512` |
-| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible auth/endpoint |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI auth/endpoint |
 | `GITHUB_COPILOT_API_KEY`, `COPILOT_API_KEY` | Copilot API-token auth |
+| `OPENROUTER_API_KEY`, `XAI_API_KEY`, `AZURE_OPENAI_API_KEY` | Direct provider auth for OpenRouter, xAI, and Azure OpenAI |
+| `BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Amazon Bedrock auth |
+| `OY_TITLE` | Terminal title/zellij pane progress: `off`, `never`, `0` disable; `on`, `always`, `1` force in human output modes |
 | `LOCAL_API_KEY` | Optional local `local-<port>` shim key; defaults to `oy-local` |
 
 ## Troubleshooting
