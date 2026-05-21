@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.10.0] - 2026-05-21
+
 ### Changed
 - Reorganized the Rust-native LLM backend toward OpenCode `packages/llm`: schema/events, provider profiles, route auth/framing/transport, protocol modules, cache policy, and tool runtime are now separated and covered by focused tests.
 - Expanded native provider routing for xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse while keeping Anthropic/Gemini providers fail-closed until their protocols are ported.
