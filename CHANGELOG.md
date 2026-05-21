@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.10.3] - 2026-05-21
+
+### Fixed
+- Restored `webfetch` public IP classification to maintained `ip_rfc` global-address semantics, with explicit denials for multicast and deprecated IPv6 site-local ranges.
+
 ## [0.10.1] - 2026-05-21
 
 ### Changed

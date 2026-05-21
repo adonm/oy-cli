@@ -1718,6 +1718,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ip_rfc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b8a253fc120dd6c624b7beb0a82330fc0135e0a9cec685bf039a07ba032af1e"
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2186,7 +2192,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oy-cli"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "backon",
@@ -2205,6 +2211,7 @@ dependencies = [
  "html2md",
  "ignore",
  "insta",
+ "ip_rfc",
  "reedline-repl-rs",
  "regex",
  "reqwest",

@@ -1,6 +1,6 @@
 //! Minimal reqwest-backed webfetch tool.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
@@ -122,37 +122,9 @@ fn validate_public_ip(ip: IpAddr) -> Result<()> {
 }
 
 fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_public_ipv4(ip),
-        IpAddr::V6(ip) => is_public_ipv6(ip),
-    }
-}
-
-fn is_public_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    !(a == 0
-        || a == 10
-        || a == 127
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 169 && b == 254)
-        || (a == 172 && (16..=31).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
-        || (a == 192 && b == 168)
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a >= 224)
-}
-
-fn is_public_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    let first = segments[0];
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || (first & 0xfe00) == 0xfc00
-        || (first & 0xffc0) == 0xfe80
-        || (first & 0xff00) == 0xff00)
+    ip_rfc::global(&ip)
+        && !ip.is_multicast()
+        && !matches!(ip, IpAddr::V6(ip) if (ip.segments()[0] & 0xffc0) == 0xfec0)
 }
 
 fn normalize_scrape_url(input: &str) -> String {
@@ -236,20 +208,35 @@ mod tests {
     #[test]
     fn public_ip_filter_blocks_local_and_private_ranges() {
         for ip in [
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)),
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            "0.0.0.0".parse().unwrap(),
+            "10.0.0.1".parse().unwrap(),
+            "100.64.0.1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "169.254.1.1".parse().unwrap(),
+            "172.16.0.1".parse().unwrap(),
+            "192.0.0.1".parse().unwrap(),
+            "192.0.2.1".parse().unwrap(),
+            "192.168.0.1".parse().unwrap(),
+            "198.18.0.1".parse().unwrap(),
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.1".parse().unwrap(),
+            "224.0.0.1".parse().unwrap(),
+            "240.0.0.1".parse().unwrap(),
+            "::".parse().unwrap(),
+            "::1".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
             "fc00::1".parse().unwrap(),
             "fe80::1".parse().unwrap(),
+            "fec0::1".parse().unwrap(),
+            "ff0e::1".parse().unwrap(),
         ] {
             assert!(!is_public_ip(ip), "{ip} should be blocked");
         }
 
         for ip in [
-            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            "93.184.216.34".parse().unwrap(),
+            "192.0.0.9".parse().unwrap(),
+            "192.0.0.10".parse().unwrap(),
             "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
         ] {
             assert!(is_public_ip(ip), "{ip} should be allowed");
