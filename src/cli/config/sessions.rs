@@ -1,3 +1,6 @@
+//! Session-file persistence: [`SessionFile`] shape, save/load/list
+//! helpers, and session-name sanitisation.
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,6 @@
+//! Audit prompt templates: system prompt, chunk/reduce/full
+//! prompt construction, and prompt-related constants.
+
 use std::fmt::Write as _;
 
 pub const AUDIT_REPORT_TITLE: &str = "# Audit Issues";

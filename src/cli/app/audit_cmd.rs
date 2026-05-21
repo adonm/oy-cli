@@ -1,3 +1,6 @@
+//! `oy audit` subcommand: argument parsing and delegation
+//! to the deterministic no-tools audit pipeline.
+
 use anyhow::Result;
 use clap::ValueEnum;
 use std::path::PathBuf;

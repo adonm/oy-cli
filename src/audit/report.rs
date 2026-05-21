@@ -1,3 +1,6 @@
+//! Report post-processing: transparency lines, succinct findings
+//! summaries, finding extraction, and shell quoting.
+
 use chrono::Utc;
 use regex::Regex;
 use std::path::PathBuf;

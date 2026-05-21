@@ -1,3 +1,6 @@
+//! System prompt construction: static prompt bodies, session
+//! text lookups, and ask-mode wrapper.
+
 use anyhow::{Result, bail};
 use std::env;
 use std::fs;

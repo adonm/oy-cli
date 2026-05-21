@@ -1,3 +1,6 @@
+//! SARIF 2.1.0 renderer: converts extracted findings into
+//! static-analysis-results-format JSON.
+
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::Path;

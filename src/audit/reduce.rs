@@ -1,3 +1,6 @@
+//! Findings reduction: per-chunk candidate compaction and
+//! bounded reduce-prompt assembly for large repositories.
+
 use std::fmt::Write as _;
 
 use crate::compaction;

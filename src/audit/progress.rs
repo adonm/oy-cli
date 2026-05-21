@@ -1,3 +1,6 @@
+//! Audit progress output: phase announcements, chunk counts,
+//! elapsed time, and write confirmation.
+
 use std::path::Path;
 use std::time::Instant;
 

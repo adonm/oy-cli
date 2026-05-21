@@ -1,3 +1,6 @@
+//! CLI entry point: argument parsing, command dispatch, and
+//! legacy argument compatibility.
+
 use crate::audit;
 use crate::config;
 use anyhow::Result;

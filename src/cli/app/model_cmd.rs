@@ -1,3 +1,6 @@
+//! `oy model` subcommand: list, select, and save model
+//! identifiers and provider routing shims.
+
 use anyhow::{Result, bail};
 use clap::Args;
 

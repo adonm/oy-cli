@@ -1,3 +1,7 @@
+//! Config and workspace paths: `~/.config/oy-rust/` layout,
+//! private file helpers, workspace output resolution, and
+//! symlink-destination rejection.
+
 use anyhow::{Context, Result, bail};
 use dirs::config_dir;
 use std::env;

@@ -1,3 +1,8 @@
+//! Saved-session persistence via config-path helpers.
+//!
+//! Sessions are serialised to private files in `~/.config/oy-rust/sessions/`.
+//! [`load_saved`] restores a previous session with compaction applied.
+
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 

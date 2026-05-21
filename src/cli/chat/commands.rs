@@ -1,3 +1,6 @@
+//! Slash-command handlers and interactive prompts: /help, /model,
+//! /compact, /thinking, /safety, /save, /audit, /exit, and `ask`.
+
 use anyhow::Result;
 use dialoguer::{Input, Select, theme::ColorfulTheme};
 

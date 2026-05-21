@@ -1,3 +1,6 @@
+//! Audit file collection: walking, skip rules, manifest building,
+//! security-index construction, and chunk assignment.
+
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
 use std::collections::BTreeSet;

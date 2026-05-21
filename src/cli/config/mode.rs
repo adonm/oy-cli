@@ -1,3 +1,6 @@
+//! Safety modes: [`SafetyMode`] enum and conversion to [`ToolPolicy`]
+//! with ask/edit/plan/auto variants.
+
 use crate::tools::{Approval, FileAccess, ToolPolicy};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};

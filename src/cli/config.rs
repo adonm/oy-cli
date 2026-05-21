@@ -1,3 +1,7 @@
+//! Configuration facade: re-exports from focused config modules
+//! for safety modes, paths, prompts, model config, environment knobs,
+//! and saved sessions.
+
 mod env_config;
 mod mode;
 mod model_config;

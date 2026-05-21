@@ -1,3 +1,6 @@
+//! Saved model config: [`SavedModelConfig`] serialisation,
+//! model-spec splitting/canonicalisation, and recent-model tracking.
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;

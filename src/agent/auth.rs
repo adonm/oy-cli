@@ -1,3 +1,10 @@
+//! Environment, OpenCode, and GitHub Copilot API-token credential
+//! lookup for model providers.
+//!
+//! This module is the single source of provider auth probing. Callers
+//! check availability with [`auth_statuses`] or the narrower helpers
+//! without duplicating credential paths.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;

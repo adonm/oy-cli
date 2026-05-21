@@ -1,3 +1,5 @@
+//! Chat history file path resolution.
+
 use anyhow::Result;
 use std::path::PathBuf;
 

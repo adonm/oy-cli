@@ -1,3 +1,6 @@
+//! Environment-driven config: context-limit knobs, non-interactive
+//! detection, and tool-round/budget overrides.
+
 use std::env;
 use std::io::IsTerminal as _;
 
