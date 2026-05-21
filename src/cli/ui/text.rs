@@ -1,3 +1,6 @@
+//! Text shaping helpers: space compaction, char/width truncation,
+//! line clamping, and head/tail splitting.
+
 use std::fmt::Write as _;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -14,18 +17,28 @@ pub fn truncate_width(text: &str, max_width: usize) -> String {
     if ansi_stripped_width(text) <= max_width {
         return text.to_string();
     }
-    truncate_plain_width(text, max_width)
+    truncate_ansi_width(text, max_width)
 }
 
-fn truncate_plain_width(text: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
+fn truncate_ansi_width(text: &str, max_width: usize) -> String {
     let ellipsis = "…";
     let limit = max_width.saturating_sub(UnicodeWidthStr::width(ellipsis));
     let mut out = String::new();
     let mut width = 0usize;
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            out.push(ch);
+            out.push(chars.next().expect("peeked CSI introducer"));
+            for next in chars.by_ref() {
+                out.push(next);
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+
         let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width + ch_width > limit {
             break;
@@ -34,6 +47,9 @@ fn truncate_plain_width(text: &str, max_width: usize) -> String {
         out.push(ch);
     }
     out.push_str(ellipsis);
+    if text.contains("\u{1b}[") {
+        out.push_str("\u{1b}[0m");
+    }
     out
 }
 
@@ -97,4 +113,26 @@ pub fn head_tail(text: &str, max_chars: usize) -> (String, bool) {
         format!("{head}\n… [truncated {hidden} chars] …\n{tail}"),
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_width_preserves_ansi_prefix_and_resets() {
+        let text = "\u{1b}[31mabcdef\u{1b}[0m";
+        let truncated = truncate_width(text, 4);
+        assert_eq!(ansi_stripped_width(&truncated), 4);
+        assert!(truncated.starts_with("\u{1b}[31mabc…"), "{truncated:?}");
+        assert!(truncated.ends_with("\u{1b}[0m"), "{truncated:?}");
+    }
+
+    #[test]
+    fn truncate_width_counts_wide_chars_after_ansi_codes() {
+        let text = "\u{1b}[32m你好world\u{1b}[0m";
+        let truncated = truncate_width(text, 5);
+        assert!(ansi_stripped_width(&truncated) <= 5, "{truncated:?}");
+        assert!(truncated.ends_with("\u{1b}[0m"), "{truncated:?}");
+    }
 }
