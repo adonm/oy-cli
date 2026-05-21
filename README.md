@@ -205,6 +205,7 @@ Default local paths:
 | `OY_CONFIG` | Override config file path |
 | `OY_COLOR` | `auto`, `always`, or `never`; `NO_COLOR` disables color |
 | `OY_MAX_TOOL_ROUNDS` | Tool-call budget per prompt; default `512` |
+| `OY_MAX_BASH_CMD_BYTES` | Maximum `bash` command size in bytes; default `1048576` |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI auth/endpoint |
 | `GITHUB_COPILOT_API_KEY`, `COPILOT_API_KEY` | Copilot API-token auth |
 | `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `AZURE_OPENAI_API_KEY` | Direct provider auth for Anthropic, OpenRouter, xAI, and Azure OpenAI |

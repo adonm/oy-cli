@@ -16,7 +16,7 @@ mod cache_policy;
 mod openai;
 mod protocols;
 pub(crate) mod providers;
-mod route;
+pub(crate) mod route;
 mod schema;
 mod tool_runtime;
 

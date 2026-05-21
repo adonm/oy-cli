@@ -7,16 +7,15 @@
 
 use crate::config;
 use crate::llm::{
-    AwsCredentials, ChatBackend, LlmRequest, LlmResponse, LlmTools, Message, ModelRoute,
-    NativeOpenAiBackend, Protocol, RouteAuth, ToolSpec,
+    ChatBackend, LlmRequest, LlmResponse, LlmTools, Message, NativeOpenAiBackend, ToolSpec,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::{LazyLock, RwLock};
 
 pub(crate) use super::auth::AuthStatus;
-use super::auth::{env_value, github_copilot_api_key, opencode_auth_key};
+use super::auth::env_value;
 use super::opencode_models;
 pub(crate) use super::opencode_models::AdapterModels;
 
@@ -90,7 +89,7 @@ static MODEL_INFO_CACHE: LazyLock<std::sync::RwLock<Option<CachedModelInfo>>> =
     LazyLock::new(|| std::sync::RwLock::new(None));
 
 pub async fn cache_model_limits(model_spec: &str) -> Result<()> {
-    let parsed = ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
     let provider = parsed.provider_or_openai();
     if let Some(metadata) = crate::llm::providers::provider_metadata(provider)
         && !metadata.supported
@@ -126,7 +125,7 @@ pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
     if let Some(info) = lock.as_ref() {
         info.provider_info.clone()
     } else {
-        let parsed = ParsedModelSpec::parse(model_spec);
+        let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
         ProviderInfo {
             provider: parsed.provider_or_openai().to_string(),
             endpoint: None,
@@ -170,386 +169,13 @@ pub async fn exec_chat(
     BACKEND.chat(request, tools).await
 }
 
-fn prepare_chat(model_spec: &str) -> Result<ModelRoute> {
-    let parsed = ParsedModelSpec::parse(model_spec);
-    let provider = parsed.provider_or_openai();
-    let mut route = match provider {
-        "github-copilot" => prepare_github_copilot_chat(parsed.base_model)?,
-        "openai" => prepare_openai_chat(parsed.base_model)?,
-        "xai" => prepare_xai_chat(parsed.base_model)?,
-        "openrouter" => prepare_openrouter_chat(parsed.base_model)?,
-        "anthropic" => prepare_anthropic_chat(parsed.base_model)?,
-        "azure" => prepare_azure_chat(parsed.base_model)?,
-        "cloudflare-ai-gateway" => prepare_cloudflare_ai_gateway_chat(parsed.base_model)?,
-        "cloudflare-workers-ai" => prepare_cloudflare_workers_ai_chat(parsed.base_model)?,
-        "bedrock" | "amazon-bedrock" => prepare_bedrock_chat(provider, parsed.base_model)?,
-        provider => prepare_opencode_compatible_chat(provider, parsed.base_model)?,
-    };
-    let provider_defaults = match provider {
-        "openai" => {
-            crate::llm::providers::openai_default_provider_options(&route.model, route.protocol)
-        }
-        "github-copilot" => crate::llm::providers::github_copilot_default_provider_options(
-            &route.model,
-            route.protocol,
-        ),
-        "openrouter" | "anthropic" => None,
-        _ if matches!(
-            route.protocol,
-            Protocol::AnthropicMessages | Protocol::BedrockConverse
-        ) =>
-        {
-            None
-        }
-        _ => crate::llm::providers::gpt5_default_provider_options(&route.model, route.protocol),
-    };
-    let reasoning_overlay = if route.protocol == Protocol::AnthropicMessages {
-        None
-    } else {
-        reasoning_effort_json(model_spec, route.protocol.uses_responses_api())
-    };
-    let route_params = route.additional_params.take();
-    route.additional_params = merge_additional_params(
-        merge_additional_params(provider_defaults, route_params),
-        reasoning_overlay,
-    );
-    Ok(route)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OpenCodeRouteProfile {
-    model_id: String,
-    base_url: String,
-    protocol: Protocol,
-}
-
-impl OpenCodeRouteProfile {
-    fn from_model(
-        provider: &str,
-        model: &str,
-        info: &opencode_models::OpenCodeModel,
-    ) -> Result<Self> {
-        if !info.is_openai_compatible_api() && !info.is_bedrock_api() {
-            bail!("OpenCode model `{provider}/{model}` is not OpenAI-compatible");
-        }
-        let model_id = info.api_id().to_string();
-        let base_url = info
-            .api_url()
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                crate::llm::providers::openai_compatible_profile(provider)
-                    .map(|profile| profile.base_url.to_string())
-            })
-            .or_else(|| {
-                crate::llm::providers::is_bedrock_provider(provider).then(|| {
-                    crate::llm::providers::bedrock_base_url(
-                        crate::llm::providers::BEDROCK_DEFAULT_REGION,
-                    )
-                })
-            })
-            .ok_or_else(|| {
-                anyhow!("OpenCode model `{provider}/{model}` does not expose an API URL")
-            })?;
-        let profile = crate::llm::providers::opencode_profile(provider, &model_id, &base_url);
-        Ok(Self {
-            model_id: profile.model_id,
-            base_url: profile.base_url,
-            protocol: profile.protocol,
-        })
-    }
-}
-
-fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
-    let profile = crate::llm::providers::openai_profile(model, env_value("OPENAI_BASE_URL"));
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::ApiKey(
-            env_value("OPENAI_API_KEY").context("OpenAI auth is not configured")?,
-        ),
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: env_json("OPENROUTER_PROVIDER_OPTIONS")
-            .and_then(|value| crate::llm::providers::openrouter_body_options(Some(&value))),
-    })
-}
-
-fn env_json(name: &str) -> Option<serde_json::Value> {
-    env_value(name).and_then(|value| serde_json::from_str(&value).ok())
-}
-
-fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
-    let profile = crate::llm::providers::xai_profile(model, env_value("XAI_BASE_URL"));
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::ApiKey(
-            env_value("XAI_API_KEY").context("xAI auth is not configured; set XAI_API_KEY")?,
-        ),
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: None,
-    })
-}
-
-fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
-    let profile =
-        crate::llm::providers::openrouter_profile(model, env_value("OPENROUTER_BASE_URL"));
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::ApiKey(
-            env_value("OPENROUTER_API_KEY")
-                .or_else(|| env_value("OPENCODE_API_KEY"))
-                .context("OpenRouter auth is not configured; set OPENROUTER_API_KEY")?,
-        ),
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: None,
-    })
-}
-
-fn prepare_anthropic_chat(model: &str) -> Result<ModelRoute> {
-    let model_id = opencode_models::find("anthropic", model)
-        .as_ref()
-        .map(|info| info.api_id().to_string())
-        .unwrap_or_else(|| model.to_string());
-    let profile =
-        crate::llm::providers::anthropic_profile(&model_id, env_value("ANTHROPIC_BASE_URL"));
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::Headers(vec![
-            (
-                "x-api-key".to_string(),
-                env_value("ANTHROPIC_API_KEY")
-                    .context("Anthropic auth is not configured; set ANTHROPIC_API_KEY")?,
-            ),
-            (
-                "anthropic-version".to_string(),
-                env_value("ANTHROPIC_VERSION").unwrap_or_else(|| "2023-06-01".to_string()),
-            ),
-        ]),
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: env_json("ANTHROPIC_PROVIDER_OPTIONS"),
-    })
-}
-
-fn prepare_azure_chat(model: &str) -> Result<ModelRoute> {
-    let base_url = env_value("AZURE_OPENAI_BASE_URL")
-        .or_else(|| env_value("AZURE_BASE_URL"))
-        .or_else(|| {
-            env_value("AZURE_OPENAI_RESOURCE_NAME")
-                .map(|name| crate::llm::providers::azure_resource_base_url(&name))
-        })
-        .context("Azure OpenAI requires AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME")?;
-    let use_completion_urls = env_value("AZURE_OPENAI_USE_COMPLETION_URLS")
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "on" | "yes"));
-    let profile = crate::llm::providers::azure_profile(model, base_url, use_completion_urls);
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::Header {
-            name: "api-key".to_string(),
-            value: env_value("AZURE_OPENAI_API_KEY")
-                .context("Azure OpenAI auth is not configured; set AZURE_OPENAI_API_KEY")?,
-        },
-        base_url: Some(profile.base_url),
-        query_params: Some(vec![(
-            "api-version".to_string(),
-            env_value("AZURE_OPENAI_API_VERSION").unwrap_or_else(|| "v1".to_string()),
-        )]),
-        additional_params: None,
-    })
-}
-
-fn prepare_cloudflare_ai_gateway_chat(model: &str) -> Result<ModelRoute> {
-    let base_url = env_value("CLOUDFLARE_AI_GATEWAY_BASE_URL").or_else(|| {
-        env_value("CLOUDFLARE_ACCOUNT_ID").map(|account_id| {
-            crate::llm::providers::cloudflare_ai_gateway_base_url(
-                &account_id,
-                env_value("CLOUDFLARE_AI_GATEWAY_ID").as_deref(),
-            )
-        })
-    }).context("Cloudflare AI Gateway requires CLOUDFLARE_AI_GATEWAY_BASE_URL or CLOUDFLARE_ACCOUNT_ID")?;
-    let gateway_key = env_value("CLOUDFLARE_API_TOKEN").or_else(|| env_value("CF_AIG_TOKEN"));
-    let api_key = env_value("OPENAI_API_KEY");
-    let auth = match (gateway_key, api_key) {
-        (Some(gateway_key), Some(api_key)) => RouteAuth::Composite(vec![
-            RouteAuth::Header {
-                name: "cf-aig-authorization".to_string(),
-                value: gateway_key,
-            },
-            RouteAuth::ApiKey(api_key),
-        ]),
-        (Some(gateway_key), None) => RouteAuth::Header {
-            name: "cf-aig-authorization".to_string(),
-            value: gateway_key,
-        },
-        (None, Some(api_key)) => RouteAuth::ApiKey(api_key),
-        (None, None) => bail!(
-            "Cloudflare AI Gateway auth is not configured; set CLOUDFLARE_API_TOKEN or CF_AIG_TOKEN"
-        ),
-    };
-    Ok(ModelRoute {
-        protocol: Protocol::OpenAiChat,
-        model: model.to_string(),
-        auth,
-        base_url: Some(base_url),
-        query_params: None,
-        additional_params: None,
-    })
-}
-
-fn prepare_cloudflare_workers_ai_chat(model: &str) -> Result<ModelRoute> {
-    let base_url = env_value("CLOUDFLARE_WORKERS_AI_BASE_URL").or_else(|| {
-        env_value("CLOUDFLARE_ACCOUNT_ID")
-            .map(|account_id| crate::llm::providers::cloudflare_workers_ai_base_url(&account_id))
-    }).context("Cloudflare Workers AI requires CLOUDFLARE_WORKERS_AI_BASE_URL or CLOUDFLARE_ACCOUNT_ID")?;
-    Ok(ModelRoute {
-        protocol: Protocol::OpenAiChat,
-        model: model.to_string(),
-        auth: RouteAuth::ApiKey(
-            env_value("CLOUDFLARE_API_KEY")
-                .or_else(|| env_value("CLOUDFLARE_WORKERS_AI_TOKEN"))
-                .context("Cloudflare Workers AI auth is not configured; set CLOUDFLARE_API_KEY or CLOUDFLARE_WORKERS_AI_TOKEN")?,
-        ),
-        base_url: Some(base_url),
-        query_params: None,
-        additional_params: None,
-    })
-}
-
-fn prepare_github_copilot_chat(model: &str) -> Result<ModelRoute> {
-    let model_info = opencode_models::find("github-copilot", model);
-    let profile = model_info
-        .as_ref()
-        .map(|info| OpenCodeRouteProfile::from_model("github-copilot", model, info))
-        .transpose()?;
-    let model_id = profile
-        .as_ref()
-        .map(|profile| profile.model_id.clone())
-        .unwrap_or_else(|| model.to_string());
-    let api_key = github_copilot_api_key().context(
-        "GitHub Copilot API token is not configured; set GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, OPENCODE_API_KEY, or OpenCode auth.json",
-    )?;
-    let route_profile = crate::llm::providers::github_copilot_profile(
-        &model_id,
-        profile.as_ref().map(|profile| profile.base_url.as_str()),
-    );
-    Ok(ModelRoute {
-        protocol: route_profile.protocol,
-        model: route_profile.model_id,
-        auth: RouteAuth::ApiKey(api_key),
-        base_url: Some(route_profile.base_url),
-        query_params: None,
-        additional_params: None,
-    })
-}
-
-fn prepare_bedrock_chat(provider: &str, model: &str) -> Result<ModelRoute> {
-    let model_id = opencode_models::find(provider, model)
-        .as_ref()
-        .map(|info| info.api_id().to_string())
-        .unwrap_or_else(|| model.to_string());
-    let region = env_value("AWS_REGION")
-        .or_else(|| env_value("AWS_DEFAULT_REGION"))
-        .unwrap_or_else(|| crate::llm::providers::BEDROCK_DEFAULT_REGION.to_string());
-    let profile = crate::llm::providers::bedrock_profile(
-        &model_id,
-        &region,
-        env_value("BEDROCK_BASE_URL").or_else(|| env_value("AWS_BEDROCK_BASE_URL")),
-    );
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: bedrock_auth(&region)?,
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: None,
-    })
-}
-
-fn bedrock_auth(region: &str) -> Result<RouteAuth> {
-    if let Some(api_key) =
-        env_value("BEDROCK_API_KEY").or_else(|| env_value("AWS_BEARER_TOKEN_BEDROCK"))
-    {
-        return Ok(RouteAuth::ApiKey(api_key));
-    }
-    let access_key_id = env_value("AWS_ACCESS_KEY_ID").context(
-        "Bedrock auth is not configured; set BEDROCK_API_KEY, AWS_BEARER_TOKEN_BEDROCK, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY",
-    )?;
-    let secret_access_key = env_value("AWS_SECRET_ACCESS_KEY")
-        .context("Bedrock SigV4 auth requires AWS_SECRET_ACCESS_KEY")?;
-    Ok(RouteAuth::AwsSigV4(AwsCredentials {
-        region: region.to_string(),
-        access_key_id,
-        secret_access_key,
-        session_token: env_value("AWS_SESSION_TOKEN"),
-    }))
-}
-
-fn prepare_opencode_compatible_chat(provider: &str, model: &str) -> Result<ModelRoute> {
-    let model_info = opencode_models::find(provider, model)
-        .ok_or_else(|| anyhow!("unknown OpenCode model `{provider}/{model}`"))?;
-    let profile = OpenCodeRouteProfile::from_model(provider, model, &model_info)?;
-    let api_key = opencode_auth_key(provider)
-        .ok_or_else(|| anyhow!("OpenCode auth.json has no credentials for `{provider}`"))?;
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::ApiKey(api_key),
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: None,
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ParsedModelSpec<'a> {
-    provider: Option<&'a str>,
-    model: &'a str,
-    base_model: &'a str,
-    reasoning_effort: Option<&'static str>,
-}
-
-impl<'a> ParsedModelSpec<'a> {
-    fn parse(spec: &'a str) -> Self {
-        let spec = spec.trim();
-        let (namespace, model) = config::split_model_spec(spec);
-        if let Some(provider) = namespace {
-            return Self::from_parts(Some(provider), model);
-        }
-        if let Some((provider, model)) = spec.split_once('/')
-            && !provider.trim().is_empty()
-            && !model.trim().is_empty()
-        {
-            return Self::from_parts(Some(provider), model);
-        }
-        Self::from_parts(None, model)
-    }
-
-    fn from_parts(provider: Option<&'a str>, model: &'a str) -> Self {
-        let (reasoning_effort, base_model) = split_reasoning_effort_suffix(model);
-        Self {
-            provider,
-            model,
-            base_model,
-            reasoning_effort,
-        }
-    }
-
-    fn provider_or_openai(self) -> &'a str {
-        self.provider
-            .map(config::canonical_provider)
-            .unwrap_or("openai")
-    }
+fn prepare_chat(model_spec: &str) -> Result<crate::llm::ModelRoute> {
+    crate::llm::route::resolve::model_route(model_spec, default_reasoning_effort(model_spec))
 }
 
 #[cfg(test)]
 fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
-    let parsed = ParsedModelSpec::parse(spec);
+    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(spec);
     (parsed.provider, parsed.base_model)
 }
 
@@ -566,7 +192,7 @@ fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
 /// 4. Static fallback for known reasoning-capable models
 /// 5. `None` otherwise
 pub fn default_reasoning_effort(model_spec: &str) -> Option<String> {
-    let parsed = ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
     if let Some(effort) = parsed.reasoning_effort.map(str::to_string) {
         return Some(effort);
     }
@@ -585,7 +211,7 @@ pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
     {
         return configured_reasoning_effort();
     }
-    let parsed = ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
     if parsed.reasoning_effort.is_some() {
         return None;
     }
@@ -649,27 +275,10 @@ fn normalize_effort_value(value: String) -> Option<String> {
     }
 }
 
-fn split_reasoning_effort_suffix(model: &str) -> (Option<&'static str>, &str) {
-    if let Some((base, suffix)) = model.rsplit_once('-') {
-        let effort = match suffix.to_ascii_lowercase().as_str() {
-            "none" => Some("none"),
-            "minimal" => Some("minimal"),
-            "low" => Some("low"),
-            "medium" => Some("medium"),
-            "high" => Some("high"),
-            _ => None,
-        };
-        if let Some(effort) = effort {
-            return (Some(effort), base);
-        }
-    }
-    (None, model)
-}
-
 /// Supported reasoning effort values for `model_spec` according to OpenCode.
 /// Falls back to the universal set when OpenCode is unavailable.
 pub fn reasoning_efforts_for(model_spec: &str) -> Vec<String> {
-    let parsed = ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
     let (provider, model_name) = split_model_spec_for_opencode(parsed.base_model);
     if let Some(info) = opencode_models::find(provider, model_name) {
         let efforts = info.reasoning_efforts();
@@ -733,57 +342,10 @@ fn reasoning_capable_fallback(model: &str) -> Option<&'static str> {
     capable.then_some("high")
 }
 
-/// Build a JSON payload suitable for `additional_params` on the agent builder.
-///
-/// Returns `None` when no reasoning effort should be applied (model doesn't
-/// support it or the resolved value is "auto"/empty).
-fn reasoning_effort_json(model_spec: &str, responses_api: bool) -> Option<serde_json::Value> {
-    let effort = default_reasoning_effort(model_spec)?;
-    if responses_api {
-        Some(serde_json::json!({"reasoning": {"effort": effort}}))
-    } else {
-        Some(serde_json::json!({"reasoning_effort": effort}))
-    }
-}
-
-fn merge_additional_params(
-    base: Option<serde_json::Value>,
-    overlay: Option<serde_json::Value>,
-) -> Option<serde_json::Value> {
-    match (base, overlay) {
-        (None, None) => None,
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (Some(mut base), Some(overlay)) => {
-            merge_json_objects(&mut base, overlay);
-            Some(base)
-        }
-    }
-}
-
-fn merge_json_objects(base: &mut serde_json::Value, overlay: serde_json::Value) {
-    let Some(base_object) = base.as_object_mut() else {
-        *base = overlay;
-        return;
-    };
-    let serde_json::Value::Object(overlay) = overlay else {
-        *base = overlay;
-        return;
-    };
-    for (key, value) in overlay {
-        match (base_object.get_mut(&key), value) {
-            (Some(existing), serde_json::Value::Object(next)) if existing.is_object() => {
-                merge_json_objects(existing, serde_json::Value::Object(next));
-            }
-            (_, value) => {
-                base_object.insert(key, value);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{Protocol, RouteAuth};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -862,7 +424,7 @@ mod tests {
 
     #[test]
     fn parsed_model_spec_captures_provider_model_and_reasoning_suffix() {
-        let parsed = ParsedModelSpec::parse(" copilot::gpt-5.5-low ");
+        let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(" copilot::gpt-5.5-low ");
         assert_eq!(parsed.provider, Some("copilot"));
         assert_eq!(parsed.model, "gpt-5.5-low");
         assert_eq!(parsed.base_model, "gpt-5.5");
@@ -1123,17 +685,29 @@ mod tests {
     #[test]
     fn reasoning_effort_json_uses_route_specific_param_shape() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        let chat_json = reasoning_effort_json("gpt-5.5", false);
+        let chat_json = crate::llm::route::resolve::reasoning_effort_json(
+            default_reasoning_effort("gpt-5.5"),
+            false,
+        );
         assert_eq!(
             chat_json,
             Some(serde_json::json!({"reasoning_effort": "high"}))
         );
-        let responses_json = reasoning_effort_json("gpt-5.5", true);
+        let responses_json = crate::llm::route::resolve::reasoning_effort_json(
+            default_reasoning_effort("gpt-5.5"),
+            true,
+        );
         assert_eq!(
             responses_json,
             Some(serde_json::json!({"reasoning": {"effort": "high"}}))
         );
-        assert_eq!(reasoning_effort_json("gpt-4.1-mini", false), None);
+        assert_eq!(
+            crate::llm::route::resolve::reasoning_effort_json(
+                default_reasoning_effort("gpt-4.1-mini"),
+                false
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1147,7 +721,7 @@ mod tests {
         }));
 
         assert_eq!(
-            merge_additional_params(base, overlay),
+            crate::llm::route::resolve::merge_additional_params(base, overlay),
             Some(serde_json::json!({
                 "reasoning": {"effort": "high", "summary": "auto"},
                 "text": {"verbosity": "low"}
@@ -1161,7 +735,7 @@ mod tests {
         let overlay = Some(serde_json::json!({"reasoning": false}));
 
         assert_eq!(
-            merge_additional_params(base, overlay),
+            crate::llm::route::resolve::merge_additional_params(base, overlay),
             Some(serde_json::json!({"reasoning": false}))
         );
     }

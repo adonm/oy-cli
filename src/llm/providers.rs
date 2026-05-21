@@ -2,6 +2,9 @@ use serde_json::{Value, json};
 
 use super::Protocol;
 
+#[path = "providers/route.rs"]
+pub(crate) mod route;
+
 pub(crate) const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const GITHUB_COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 pub(crate) const BEDROCK_DEFAULT_REGION: &str = "us-east-1";

@@ -4,6 +4,8 @@
 use std::env;
 use std::io::IsTerminal as _;
 
+const DEFAULT_MAX_BASH_CMD_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ContextConfig {
     pub limit_tokens: usize,
@@ -68,8 +70,8 @@ pub fn context_config_for_model(
 pub fn max_bash_cmd_bytes() -> usize {
     env::var("OY_MAX_BASH_CMD_BYTES")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(16 * 1024)
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_MAX_BASH_CMD_BYTES)
 }
 
 pub fn max_tool_rounds(default: usize) -> usize {

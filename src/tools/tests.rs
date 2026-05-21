@@ -80,7 +80,7 @@ fn tool_schema_helpers_preserve_aliases_defaults_and_nullable_shapes() {
     );
     assert_eq!(
         todo["properties"]["todos"]["description"],
-        "Complete replacement todo list. Alias: items. Omit to return current list."
+        "Complete replacement todo list; this replaces all existing todo items. Alias: items. Omit to return current list."
     );
 
     let list = schema_for("list");
@@ -941,6 +941,30 @@ async fn bash_returns_full_output_and_bounded_preview() {
     );
     assert_eq!(value["stdout_truncated"], true);
     assert_eq!(value["stdout_capped"], false);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn bash_accepts_large_commands() {
+    let (_dir, ctx) = test_context(auto_policy(), false);
+    let mut command = String::from("cat\n");
+    for _ in 0..25_000 {
+        command.push_str("# padding to exceed argv limits\n");
+    }
+    command.push_str("printf 'large-ok'\n");
+
+    let value = tool_bash(
+        &ctx,
+        BashArgs {
+            command,
+            timeout_seconds: 5,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(value["returncode"], 0);
+    assert_eq!(value["stdout"], "large-ok");
 }
 
 #[tokio::test]

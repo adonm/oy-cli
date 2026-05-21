@@ -7,8 +7,10 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 use std::ffi::OsStr;
+use std::io::Write as _;
 use std::process::Stdio;
 use std::time::Duration;
+use tempfile::NamedTempFile;
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -21,6 +23,7 @@ use super::policy::require_mutation_approval;
 
 const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
 const MAX_BASH_OUTPUT_BYTES: usize = 200_000;
+const MAX_BASH_ARG_COMMAND_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Serialize)]
 pub(super) struct BashOutput {
@@ -49,9 +52,15 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
     require_mutation_approval(ctx, "bash", Some(&approval_preview))?;
     let mut command = Command::new("bash");
     remove_sensitive_child_env(&mut command);
+    let _script_file = if args.command.len() > MAX_BASH_ARG_COMMAND_BYTES {
+        let script = write_temp_bash_script(&args.command)?;
+        command.arg(script.path());
+        Some(script)
+    } else {
+        command.arg("-c").arg(&args.command);
+        None
+    };
     let mut child = command
-        .arg("-c")
-        .arg(&args.command)
         .current_dir(&ctx.root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -86,6 +95,19 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
         stdout_capped: stdout_truncated,
         stderr_capped: stderr_truncated,
     })?)
+}
+
+fn write_temp_bash_script(command: &str) -> Result<NamedTempFile> {
+    let mut file = tempfile::Builder::new()
+        .prefix("oy-bash-")
+        .suffix(".sh")
+        .tempfile()
+        .context("failed to create temporary bash script")?;
+    file.write_all(command.as_bytes())
+        .context("failed to write temporary bash script")?;
+    file.flush()
+        .context("failed to flush temporary bash script")?;
+    Ok(file)
 }
 
 fn remove_sensitive_child_env(command: &mut Command) {
