@@ -5,9 +5,8 @@
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
-use super::{DEFAULT_LIMIT, DEFAULT_WEBFETCH_TIMEOUT_SECONDS, TodoStatus};
+use super::{DEFAULT_LIMIT, TodoStatus};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct TodoItemInput {
@@ -194,45 +193,22 @@ pub(super) struct BashArgs {
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct WebfetchArgs {
     pub(super) url: String,
-    #[serde(default = "default_method")]
-    pub(super) method: String,
     #[serde(default)]
-    pub(super) headers: HeaderPolicy,
+    pub(super) return_format: ReturnFormat,
     #[serde(default)]
-    pub(super) redirects: RedirectPolicy,
-    #[serde(default = "default_web_timeout", deserialize_with = "deserialize_u64")]
-    pub(super) timeout_seconds: u64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(from = "Option<BTreeMap<String, String>>")]
-pub(super) struct HeaderPolicy {
-    pub(super) values: BTreeMap<String, String>,
-}
-
-impl From<Option<BTreeMap<String, String>>> for HeaderPolicy {
-    fn from(values: Option<BTreeMap<String, String>>) -> Self {
-        Self {
-            values: values.unwrap_or_default(),
-        }
-    }
+    pub(super) user_agent: Option<String>,
+    #[serde(default)]
+    pub(super) cookie: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(from = "bool")]
-pub(super) enum RedirectPolicy {
-    None,
+#[serde(rename_all = "lowercase")]
+pub(super) enum ReturnFormat {
+    Raw,
     #[default]
-    Follow,
-}
-
-impl From<bool> for RedirectPolicy {
-    fn from(follow: bool) -> Self {
-        match follow {
-            true => Self::Follow,
-            false => Self::None,
-        }
-    }
+    Markdown,
+    Text,
+    Xml,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -294,10 +270,4 @@ fn default_offset() -> usize {
 }
 fn default_bash_timeout() -> u64 {
     120
-}
-fn default_method() -> String {
-    "GET".to_string()
-}
-fn default_web_timeout() -> u64 {
-    DEFAULT_WEBFETCH_TIMEOUT_SECONDS
 }

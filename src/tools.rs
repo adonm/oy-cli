@@ -1,3 +1,11 @@
+//! Tool schema registry, dispatch, previews, todos, and the
+//! filesystem/network/mutation approval boundaries.
+//!
+//! All tool capability is defined in this module and its children.
+//! [`ToolContext`] carries approval policy and mutable state through
+//! every invocation; the registry in [`registry`] is the single source
+//! of tool schemas visible to the model.
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,15 +38,6 @@ use shell::tool_bash;
 
 // === Public tool types and constants ===
 pub const DEFAULT_LIMIT: usize = 2000;
-pub const DEFAULT_WEBFETCH_TIMEOUT_SECONDS: u64 = 120;
-const MAX_WEBFETCH_TIMEOUT_SECONDS: u64 = 120;
-const MAX_WEBFETCH_BYTES: usize = 2 * 1024 * 1024;
-const WEBFETCH_ACCEPT: &str = "text/markdown,text/plain,text/html,application/xhtml+xml,application/json,application/xml;q=0.9,*/*;q=0.8";
-const WEBFETCH_USER_AGENT: &str = concat!(
-    "oy-cli/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/wagov-dtt/oy-cli)"
-);
 const TODO_FILE: &str = "TODO.md";
 const PREVIEW_ITEMS: usize = 40;
 const NORMAL_PREVIEW_LINES: usize = 12;

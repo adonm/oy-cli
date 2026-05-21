@@ -1,317 +1,289 @@
-//! Public-only HTTP fetch tool and network trust boundary.
-//!
-//! URL validation, DNS resolution, redirect handling, header filtering, and
-//! response caps live here so `webfetch` fails closed before making requests.
+//! Minimal reqwest-backed webfetch tool.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
-use futures_util::StreamExt as _;
-use reqwest::StatusCode;
-use reqwest::header::{ACCEPT, USER_AGENT};
+use regex::Regex;
+use reqwest::header::{CONTENT_TYPE, COOKIE, USER_AGENT};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
-use tokio::net::lookup_host;
 use url::Url;
 
-use super::args::{HeaderPolicy, RedirectPolicy, WebfetchArgs};
-use super::{
-    MAX_WEBFETCH_BYTES, MAX_WEBFETCH_TIMEOUT_SECONDS, NetworkAccess, ToolContext, WEBFETCH_ACCEPT,
-    WEBFETCH_USER_AGENT,
-};
+use super::args::{ReturnFormat, WebfetchArgs};
+use super::{NetworkAccess, ToolContext};
 
 #[derive(Debug, Serialize)]
 pub(super) struct WebfetchOutput {
-    pub method: String,
     pub url: String,
     pub status_code: u16,
-    pub reason_phrase: &'static str,
-    pub http_version: String,
-    pub headers: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_preview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<&'static str>,
-    #[serde(skip_serializing_if = "is_false")]
-    pub binary: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_bytes: Option<usize>,
-    pub truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body_capped: Option<bool>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
+    pub content: String,
+    pub links: Vec<String>,
 }
 
 pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
     if ctx.policy.network != NetworkAccess::Enabled {
         bail!("tool denied by policy: webfetch");
     }
-    let method = args.method.to_ascii_uppercase();
-    if !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
-        bail!("Only GET/HEAD/OPTIONS are allowed, got {method}");
-    }
-    let url = validate_public_url(&args.url).await?;
-    let resolved = public_socket_addrs(&url).await?;
-    let headers = validated_webfetch_headers(&args.headers)?;
-    let client = webfetch_client(&url, &resolved, args.timeout_seconds)?;
-    let mut request = client.request(method.parse()?, url.clone());
-    for (key, value) in &headers {
-        request = request.header(key, value);
-    }
-    let mut response = request.send().await?;
-    if args.redirects == RedirectPolicy::Follow {
-        response = follow_public_redirects(response, &method, &headers).await?;
-    }
-    let status = response.status();
-    let version = response.version();
-    let final_url = response.url().to_string();
-    if final_url != url.as_str() {
-        validate_public_url(&final_url).await?;
-    }
-    let headers = response.headers().clone();
-    let content_type = headers
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let header_map = headers
-        .iter()
-        .map(|(k, v)| {
-            let key = k.as_str().to_string();
-            let value = if matches!(
-                key.to_ascii_lowercase().as_str(),
-                "set-cookie" | "www-authenticate" | "proxy-authenticate" | "location"
-            ) {
-                "<redacted>".to_string()
-            } else {
-                v.to_str().unwrap_or("").to_string()
-            };
-            (key, value)
-        })
-        .collect::<BTreeMap<_, _>>();
 
-    let (body, body_capped) = read_limited_response(response, MAX_WEBFETCH_BYTES).await?;
-    if is_text_content_type(&content_type) {
-        let text = String::from_utf8_lossy(&body).to_string();
-        let normalized = if content_type.contains("text/html")
-            || text.trim_start().starts_with("<!DOCTYPE html")
-            || text.trim_start().starts_with("<html")
-        {
-            html2md::parse_html(&text)
-        } else {
-            text
-        };
-        let (text_preview, preview_truncated) = crate::ui::head_tail(&normalized, 12_000);
-        let truncated = preview_truncated || body_capped;
-        return Ok(serde_json::to_value(WebfetchOutput {
-            method,
-            url: final_url,
-            status_code: status.as_u16(),
-            reason_phrase: reason_phrase(status),
-            http_version: format!("{:?}", version),
-            headers: header_map,
-            text: Some(normalized),
-            text_preview: Some(text_preview),
-            format: Some(if content_type.contains("html") {
-                "markdown"
-            } else {
-                "text"
-            }),
-            binary: false,
-            content_bytes: None,
-            truncated,
-            body_capped: Some(body_capped),
-        })?);
+    let url = validate_public_url(&args.url).await?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("failed to build webfetch HTTP client")?;
+    let mut request = client.get(url.clone());
+    if let Some(user_agent) = args
+        .user_agent
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        request = request.header(USER_AGENT, user_agent.trim());
     }
+    if let Some(cookie) = args
+        .cookie
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        request = request.header(COOKIE, cookie.trim());
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch {}", url.as_str()))?;
+    let status_code = response.status().as_u16();
+    let response_url = response.url().clone();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let raw = response.text().await.with_context(|| {
+        format!(
+            "failed to read response body from {}",
+            response_url.as_str()
+        )
+    })?;
+    let links = extract_links(&raw, &content_type, &response_url);
+    let content = transform_scraped_content(&raw, &content_type, args.return_format);
 
     Ok(serde_json::to_value(WebfetchOutput {
-        method,
-        url: final_url,
-        status_code: status.as_u16(),
-        reason_phrase: reason_phrase(status),
-        http_version: format!("{:?}", version),
-        headers: header_map,
-        text: None,
-        text_preview: None,
-        format: None,
-        binary: true,
-        content_bytes: Some(body.len()),
-        truncated: body_capped,
-        body_capped: None,
+        url: response_url.to_string(),
+        status_code,
+        content,
+        links,
     })?)
-}
-async fn read_limited_response(
-    response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<(Vec<u8>, bool)> {
-    let mut stream = response.bytes_stream();
-    let mut out = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let remaining = max_bytes.saturating_sub(out.len());
-        if chunk.len() > remaining {
-            out.extend_from_slice(&chunk[..remaining]);
-            return Ok((out, true));
-        }
-        out.extend_from_slice(&chunk);
-        if out.len() >= max_bytes {
-            return Ok((out, true));
-        }
-    }
-    Ok((out, false))
-}
-
-// === Public network boundary ===
-async fn follow_public_redirects(
-    mut response: reqwest::Response,
-    method: &str,
-    headers: &BTreeMap<String, String>,
-) -> Result<reqwest::Response> {
-    for _ in 0..10 {
-        if !response.status().is_redirection() {
-            return Ok(response);
-        }
-        let location = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .context("redirect missing valid Location header")?;
-        let next_url = response.url().join(location)?;
-        validate_public_url_parts(&next_url)?;
-        let resolved = public_socket_addrs(&next_url).await?;
-        let client = webfetch_client(&next_url, &resolved, MAX_WEBFETCH_TIMEOUT_SECONDS)?;
-        let mut request = client.request(method.parse()?, next_url);
-        for (key, value) in headers {
-            request = request.header(key, value);
-        }
-        response = request.send().await?;
-    }
-    bail!("too many redirects")
-}
-
-pub(super) fn validated_webfetch_headers(
-    headers: &HeaderPolicy,
-) -> Result<BTreeMap<String, String>> {
-    let mut validated = BTreeMap::from([
-        (ACCEPT.as_str().to_string(), WEBFETCH_ACCEPT.to_string()),
-        (
-            USER_AGENT.as_str().to_string(),
-            WEBFETCH_USER_AGENT.to_string(),
-        ),
-    ]);
-    for (key, value) in &headers.values {
-        let lower = key.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "authorization"
-                | "cookie"
-                | "host"
-                | "proxy-authorization"
-                | "x-forwarded-for"
-                | "x-real-ip"
-        ) {
-            bail!("Header {key:?} is not allowed in webfetch requests");
-        }
-        if value.contains('\r') || value.contains('\n') {
-            bail!("Header value for {key:?} contains invalid CRLF characters");
-        }
-        validated.retain(|existing, _| !existing.eq_ignore_ascii_case(key));
-        validated.insert(key.clone(), value.clone());
-    }
-    Ok(validated)
-}
-
-fn webfetch_client(
-    url: &Url,
-    resolved: &[SocketAddr],
-    timeout_seconds: u64,
-) -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(
-            timeout_seconds.clamp(1, MAX_WEBFETCH_TIMEOUT_SECONDS),
-        ))
-        .resolve_to_addrs(url.host_str().context("missing hostname")?, resolved)
-        .build()?)
 }
 
 async fn validate_public_url(input: &str) -> Result<Url> {
-    let url = Url::parse(input).with_context(|| format!("invalid URL: {input}"))?;
-    validate_public_url_parts(&url)?;
-    let _ = public_socket_addrs(&url).await?;
+    let url = Url::parse(&normalize_scrape_url(input)).context("Invalid URL")?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("webfetch only supports http(s) URLs");
+    }
+    let host = url.host_str().context("URL must include a host")?;
+    validate_public_host(host)?;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        validate_public_ip(ip)?;
+        return Ok(url);
+    }
+
+    let port = url
+        .port_or_known_default()
+        .context("URL must include a valid port")?;
+    let mut resolved_any = false;
+    for addr in tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("failed to resolve {host}"))?
+    {
+        resolved_any = true;
+        validate_public_ip(addr.ip())?;
+    }
+    if !resolved_any {
+        bail!("failed to resolve {host}");
+    }
     Ok(url)
 }
 
-fn validate_public_url_parts(url: &Url) -> Result<()> {
-    if !matches!(url.scheme(), "http" | "https") {
-        bail!("Only http/https URLs are allowed, got {:?}", url.scheme());
-    }
-    let host = url.host_str().context("missing hostname")?;
-    let lower = host.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "localhost" | "localhost.localdomain" | "ip6-localhost" | "ip6-loopback"
-    ) {
-        bail!("Local addresses are not allowed: {host}");
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        ensure_public_ip(ip)?;
+fn validate_public_host(host: &str) -> Result<()> {
+    let host = host.trim_end_matches('.');
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        bail!("webfetch blocks localhost targets");
     }
     Ok(())
 }
 
-async fn public_socket_addrs(url: &Url) -> Result<Vec<SocketAddr>> {
-    validate_public_url_parts(url)?;
-    let host = url.host_str().context("missing hostname")?;
-    let port = url.port_or_known_default().unwrap_or(80);
-    let addrs = lookup_host((host, port)).await?.collect::<Vec<_>>();
-    if addrs.is_empty() {
-        bail!("URL host resolved to no addresses: {host}");
-    }
-    for addr in &addrs {
-        ensure_public_ip(addr.ip())?;
-    }
-    Ok(addrs)
-}
-
-fn ensure_public_ip(ip: IpAddr) -> Result<()> {
+fn validate_public_ip(ip: IpAddr) -> Result<()> {
     if is_public_ip(ip) {
         Ok(())
     } else {
-        bail!("URL resolves to non-public address ({ip})")
+        bail!("webfetch blocks localhost and private IP targets");
     }
 }
 
-pub(super) fn is_public_ip(ip: IpAddr) -> bool {
+fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(_) => ip_rfc::global(&ip) && !ip.is_multicast(),
-        IpAddr::V6(ip) => ip
-            .to_ipv4_mapped()
-            .map(|mapped| is_public_ip(IpAddr::V4(mapped)))
-            .unwrap_or_else(|| ip_rfc::global(&IpAddr::V6(ip)) && !is_denied_ipv6(ip)),
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
     }
 }
 
-fn is_denied_ipv6(ip: std::net::Ipv6Addr) -> bool {
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     let segments = ip.segments();
-    ip.is_multicast() || (segments[0] & 0xffc0) == 0xfec0
+    let first = segments[0];
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80
+        || (first & 0xff00) == 0xff00)
 }
 
-fn is_text_content_type(content_type: &str) -> bool {
-    content_type.starts_with("text/")
-        || content_type.contains("json")
-        || content_type.contains("xml")
-        || content_type.contains("javascript")
-        || content_type.contains("svg")
-        || content_type.is_empty()
+fn normalize_scrape_url(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.starts_with("http") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    }
 }
 
-fn reason_phrase(status: StatusCode) -> &'static str {
-    status.canonical_reason().unwrap_or("")
+fn is_html_content(content_type: &str, content: &str) -> bool {
+    content_type.to_ascii_lowercase().contains("html")
+        || content.trim_start().starts_with("<!DOCTYPE html")
+        || content.trim_start().starts_with("<html")
+}
+
+static HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))"#)
+        .expect("valid href regex")
+});
+
+fn extract_links(content: &str, content_type: &str, base_url: &Url) -> Vec<String> {
+    if !is_html_content(content_type, content) {
+        return Vec::new();
+    }
+    HREF_RE
+        .captures_iter(content)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .or_else(|| captures.get(2))
+                .or_else(|| captures.get(3))
+                .map(|value| value.as_str().trim())
+        })
+        .filter(|href| !href.is_empty())
+        .filter_map(|href| base_url.join(href).ok())
+        .map(|url| url.to_string())
+        .collect()
+}
+
+fn transform_scraped_content(
+    content: &str,
+    content_type: &str,
+    return_format: ReturnFormat,
+) -> String {
+    match return_format {
+        ReturnFormat::Raw => content.to_string(),
+        ReturnFormat::Markdown => {
+            if is_html_content(content_type, content) {
+                html2md::parse_html(content)
+            } else {
+                content.to_string()
+            }
+        }
+        ReturnFormat::Text => html_to_text(content, content_type),
+        ReturnFormat::Xml => format!(
+            "<page><content><![CDATA[{}]]></content></page>",
+            content.replace("]]>", "]]]]><![CDATA[>")
+        ),
+    }
+}
+
+fn html_to_text(content: &str, content_type: &str) -> String {
+    if is_html_content(content_type, content) {
+        html2md::parse_html(content)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        content.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_ip_filter_blocks_local_and_private_ranges() {
+        for ip in [
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            "fc00::1".parse().unwrap(),
+            "fe80::1".parse().unwrap(),
+        ] {
+            assert!(!is_public_ip(ip), "{ip} should be blocked");
+        }
+
+        for ip in [
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
+        ] {
+            assert!(is_public_ip(ip), "{ip} should be allowed");
+        }
+    }
+
+    #[test]
+    fn localhost_hostnames_are_blocked_before_resolution() {
+        assert!(validate_public_host("localhost").is_err());
+        assert!(validate_public_host("api.localhost").is_err());
+        assert!(validate_public_host("example.com").is_ok());
+    }
+
+    #[test]
+    fn extracts_absolute_and_relative_links_from_html() {
+        let base = Url::parse("https://example.com/docs/page.html").unwrap();
+        let links = extract_links(
+            r#"<html><a href="/root">root</a><a href='next.html'>next</a><a href=https://other.test/>other</a></html>"#,
+            "text/html; charset=utf-8",
+            &base,
+        );
+        assert_eq!(
+            links,
+            vec![
+                "https://example.com/root".to_string(),
+                "https://example.com/docs/next.html".to_string(),
+                "https://other.test/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_content_has_no_links() {
+        let base = Url::parse("https://example.com/").unwrap();
+        assert!(extract_links("<a href='/x'>x</a>", "text/plain", &base).is_empty());
+    }
 }

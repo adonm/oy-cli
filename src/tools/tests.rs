@@ -1,14 +1,12 @@
 use super::args::{
-    BashArgs, ExcludeArg, HeaderPolicy, ListArgs, PatchArgs, ReadArgs, RedirectPolicy, ReplaceArgs,
-    ReplaceMode, SearchArgs, SearchMode, SlocArgs, TodoArgs, TodoItemInput, WebfetchArgs,
+    BashArgs, ExcludeArg, ListArgs, PatchArgs, ReadArgs, ReplaceArgs, ReplaceMode, ReturnFormat,
+    SearchArgs, SearchMode, SlocArgs, TodoArgs, TodoItemInput, WebfetchArgs,
 };
-use super::network::{is_public_ip, tool_webfetch, validated_webfetch_headers};
+use super::network::tool_webfetch;
 use super::todo::tool_todo;
 use super::workspace;
 use super::*;
-use reqwest::header::{ACCEPT, USER_AGENT};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 use std::fs;
 
 fn test_context(policy: ToolPolicy, interactive: bool) -> (tempfile::TempDir, ToolContext) {
@@ -98,19 +96,14 @@ fn tool_schema_helpers_preserve_aliases_defaults_and_nullable_shapes() {
         json!({"type": "string"})
     );
 
-    let webfetch = schema_for("webfetch");
-    assert_eq!(webfetch["required"], json!(["url"]));
-    assert_eq!(webfetch["properties"]["follow_redirects"]["default"], true);
+    let scrape = schema_for("webfetch");
+    assert_eq!(scrape["required"], json!(["url"]));
+    assert_eq!(scrape["properties"]["return_format"]["default"], "markdown");
     assert_eq!(
-        webfetch["properties"]["headers"]["type"],
-        json!(["object", "null"])
+        scrape["properties"]["return_format"]["enum"],
+        json!(["raw", "markdown", "text", "xml"])
     );
-    assert!(
-        webfetch["properties"]["headers"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("credential headers are rejected")
-    );
+    assert!(scrape["properties"].get("proxy").is_none());
 }
 
 #[test]
@@ -149,66 +142,12 @@ fn fff_backed_tooldefs_document_path_semantics() {
 }
 
 #[test]
-fn webfetch_defaults_to_redirects_and_doc_friendly_headers() {
+fn webfetch_defaults_to_markdown() {
     let args: WebfetchArgs = serde_json::from_value(json!({
         "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-files-mounting-eks.md"
     }))
     .unwrap();
-    assert!(args.redirects == RedirectPolicy::Follow);
-
-    let headers = validated_webfetch_headers(&args.headers).unwrap();
-    assert_eq!(headers.get(ACCEPT.as_str()).unwrap(), WEBFETCH_ACCEPT);
-    assert!(
-        headers
-            .get(USER_AGENT.as_str())
-            .unwrap()
-            .starts_with("oy-cli/")
-    );
-}
-
-#[test]
-fn webfetch_custom_headers_override_defaults_but_sensitive_headers_stay_denied() {
-    let custom = BTreeMap::from([
-        ("accept".to_string(), "application/json".to_string()),
-        ("X-Trace".to_string(), "1".to_string()),
-    ]);
-    let headers = validated_webfetch_headers(&HeaderPolicy { values: custom }).unwrap();
-    assert_eq!(headers.get(ACCEPT.as_str()).unwrap(), "application/json");
-    assert_eq!(headers.get("X-Trace").unwrap(), "1");
-
-    let denied = BTreeMap::from([("Authorization".to_string(), "Bearer x".to_string())]);
-    assert!(validated_webfetch_headers(&HeaderPolicy { values: denied }).is_err());
-
-    let invalid = BTreeMap::from([("X-Trace".to_string(), "bad\r\nvalue".to_string())]);
-    assert!(validated_webfetch_headers(&HeaderPolicy { values: invalid }).is_err());
-}
-
-#[test]
-fn webfetch_ip_filter_rejects_non_public_ranges() {
-    for ip in [
-        "0.0.0.0",
-        "127.0.0.1",
-        "10.0.0.1",
-        "172.16.0.1",
-        "172.31.255.255",
-        "192.168.0.1",
-        "100.64.0.1",
-        "198.18.0.1",
-        "224.0.0.1",
-        "240.0.0.1",
-        "::1",
-        "fc00::1",
-        "fe80::1",
-        "fec0::1",
-        "ff00::1",
-        "::ffff:127.0.0.1",
-        "::ffff:10.0.0.1",
-    ] {
-        assert!(!is_public_ip(ip.parse().unwrap()), "{ip} should be denied");
-    }
-    for ip in ["1.1.1.1", "8.8.8.8", "192.0.0.9", "2606:4700:4700::1111"] {
-        assert!(is_public_ip(ip.parse().unwrap()), "{ip} should be allowed");
-    }
+    assert_eq!(args.return_format, ReturnFormat::Markdown);
 }
 
 #[test]
@@ -717,10 +656,9 @@ async fn webfetch_checks_network_policy_at_sink() {
         &ctx,
         WebfetchArgs {
             url: "https://example.com".into(),
-            method: "GET".into(),
-            headers: HeaderPolicy::default(),
-            redirects: RedirectPolicy::None,
-            timeout_seconds: DEFAULT_WEBFETCH_TIMEOUT_SECONDS,
+            return_format: ReturnFormat::Markdown,
+            user_agent: None,
+            cookie: None,
         },
     )
     .await

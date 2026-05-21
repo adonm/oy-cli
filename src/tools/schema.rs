@@ -6,7 +6,7 @@
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::{DEFAULT_LIMIT, DEFAULT_WEBFETCH_TIMEOUT_SECONDS};
+use super::DEFAULT_LIMIT;
 
 // === Schema builder ===
 
@@ -44,11 +44,6 @@ impl Schema {
     pub fn any_of(schemas: Vec<Schema>) -> Self {
         let items: Vec<Value> = schemas.into_iter().map(|s| s.0).collect();
         Self(json!({"anyOf": items}))
-    }
-
-    /// Nullable object with additional properties (for headers-style schemas).
-    pub fn nullable_open_object(additional: Schema) -> Self {
-        Self(json!({"type": ["object", "null"], "additionalProperties": additional.0}))
     }
 
     /// Attach a default value.
@@ -263,31 +258,24 @@ pub(super) fn schema_webfetch() -> Value {
     Schema::object()
         .property(
             "url",
-            Schema::string().describe("Public http(s) URL only; localhost and private IP targets are denied."),
+            Schema::string().describe("The URL to scrape. Public http(s) targets only; localhost and private IP targets are denied. Bare hostnames are treated as https://host."),
         )
         .property(
-            "method",
+            "return_format",
             Schema::string()
-                .default("GET")
-                .describe("HTTP method; use GET unless the public documentation endpoint requires another safe method."),
+                .enum_values(&["raw", "markdown", "text", "xml"])
+                .default("markdown")
+                .describe("Output format: raw, markdown, text, or xml (default: markdown)."),
         )
         .property(
-            "headers",
-            Schema::nullable_open_object(Schema::string()).describe(
-                "Optional non-sensitive headers. Authorization, cookies, tokens, and other credential headers are rejected.",
-            ),
+            "user_agent",
+            Schema::any_of(vec![Schema::string(), Schema::null()])
+                .describe("Custom User-Agent string."),
         )
         .property(
-            "follow_redirects",
-            Schema::boolean()
-                .default(true)
-                .describe("Follow redirects only while every hop remains public."),
-        )
-        .property(
-            "timeout_seconds",
-            Schema::integer().default(DEFAULT_WEBFETCH_TIMEOUT_SECONDS).describe(
-                "Request timeout in seconds; capped by the tool even if a larger value is supplied.",
-            ),
+            "cookie",
+            Schema::any_of(vec![Schema::string(), Schema::null()])
+                .describe("Cookie string (e.g. \"key=val; key2=val2\")."),
         )
         .required(&["url"])
         .build()

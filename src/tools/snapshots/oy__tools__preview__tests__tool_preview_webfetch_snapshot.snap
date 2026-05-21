@@ -1,12 +1,15 @@
 ---
 source: src/tools/preview.rs
-expression: tool_output("webfetch", &value)
+assertion_line: 793
+expression: "tool_output(\"webfetch\", &value)"
 ---
-HTTP 200 · markdown · 6 lines · truncated=no · https://example.com/docs
-── markdown
-1 │ # docs
-2 │ hello
-3 │ install
-4 │ configure
-5 │ run
-6 │ extra
+HTTP 200 · scrape · 6 lines · 2 links · https://example.com/docs
+── content
+─────┬──────────────────────────────────────────────────────────────────────────────────────────
+   1 │ # docs
+   2 │ hello
+   3 │ install
+   4 │ configure
+   5 │ run
+   6 │ extra
+─────┴──────────────────────────────────────────────────────────────────────────────────────────
