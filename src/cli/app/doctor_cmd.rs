@@ -1,3 +1,6 @@
+//! `oy doctor` subcommand: checks setup, auth, paths,
+//! and safety-relevant defaults.
+
 use anyhow::Result;
 use clap::Args;
 use std::path::Path;
@@ -34,6 +37,14 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         .map(|status| status.success())
         .unwrap_or(false);
 
+    let opencode_ok = std::process::Command::new("opencode")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+
     if crate::ui::is_json() {
         let payload = serde_json::json!({
             "workspace": root,
@@ -49,6 +60,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             "sessions_dir": sessions_dir,
             "history_dir": history_dir,
             "bash": bash_ok,
+            "opencode": opencode_ok,
             "next_step": recommended_next_step(&listing),
         });
         crate::ui::line(serde_json::to_string_pretty(&payload)?);
@@ -73,6 +85,10 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     crate::ui::kv(
         "bash",
         crate::ui::status_text(bash_ok, if bash_ok { "ok" } else { "missing" }),
+    );
+    crate::ui::kv(
+        "opencode",
+        crate::ui::status_text(opencode_ok, if opencode_ok { "ok" } else { "missing" }),
     );
     crate::ui::line("");
     crate::ui::section("Local state");
