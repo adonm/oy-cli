@@ -51,7 +51,7 @@ Workspace tools should only operate within `OY_ROOT` or the current directory. W
 
 ## Shell boundary
 
-`bash` is the highest-risk tool. It can read credential files, modify files, contact networks, start processes, and affect the host outside the repo. `oy` removes credential-like environment variables from child processes by default and escapes terminal/control sequences from stdout/stderr before returning tool output, but shell is still not sandboxed. Keep shell use explicit:
+`bash` is the highest-risk tool. It can read credential files, modify files, contact networks, start processes, and affect the host outside the repo. `oy` removes credential-like environment variables from child processes by default, but shell is still not sandboxed. Terminal/control sequences in stdout/stderr are passed through raw for bat/terminal formatting. Keep shell use explicit:
 
 - ask by default,
 - deny in read-only modes,

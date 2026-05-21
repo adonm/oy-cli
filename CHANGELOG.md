@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.10.1] - 2026-05-21
+
+### Changed
+- Preserved raw terminal/ANSI output through `bash`, markdown, diff, and always-coloured bat-backed previews so bat/terminal formatting is not replaced with visible escape glyphs.
+
 ## [0.10.0] - 2026-05-21
 
 ### Changed

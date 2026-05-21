@@ -4,10 +4,7 @@
 use std::fmt::Display;
 use std::time::Duration;
 
-use super::{
-    cyan, err_line, faint, green, is_quiet, line, red, sanitize_terminal,
-    sanitize_terminal_for_display,
-};
+use super::{cyan, err_line, escape_terminal_controls, faint, green, is_quiet, line, red};
 
 pub fn progress(
     label: &str,
@@ -19,7 +16,7 @@ pub fn progress(
     if is_quiet() {
         return;
     }
-    let detail = sanitize_terminal(&detail.to_string());
+    let detail = escape_terminal_controls(&detail.to_string());
     super::title_progress(format_args!("oy {label} {current}/{total} · {detail}"));
     line(progress_line(label, current, total, &detail, elapsed));
 }
@@ -60,8 +57,8 @@ pub fn tool_start(name: &str, detail: &str) {
     }
     super::title_progress(format_args!("oy tool · {name}"));
     err_line(tool_start_line(
-        &sanitize_terminal(name),
-        &sanitize_terminal(detail),
+        &escape_terminal_controls(name),
+        &escape_terminal_controls(detail),
     ));
 }
 
@@ -70,9 +67,8 @@ pub fn tool_result(name: &str, elapsed: Duration, preview: &str) {
         return;
     }
     super::title_progress(format_args!("oy tool ✓ {name}"));
-    let preview = sanitize_terminal_for_display(preview);
     let preview = preview.trim_end();
-    let head = tool_result_head(&sanitize_terminal(name), elapsed);
+    let head = tool_result_head(&escape_terminal_controls(name), elapsed);
     let Some((first, rest)) = preview.split_once('\n') else {
         if preview.is_empty() {
             err_line(head);
@@ -92,8 +88,8 @@ pub fn tool_error(name: &str, elapsed: Duration, err: impl Display) {
         return;
     }
     super::title_progress(format_args!("oy tool ✗ {name}"));
-    let name = sanitize_terminal(name);
-    let err = sanitize_terminal(&err.to_string());
+    let name = escape_terminal_controls(name);
+    let err = escape_terminal_controls(&err.to_string());
     err_line(format_args!(
         "  {} {name} {} · {err}",
         red("✗"),
@@ -156,12 +152,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_progress_sanitizes_untrusted_terminal_escapes() {
+    fn tool_progress_escapes_untrusted_terminal_controls() {
         set_output_mode(OutputMode::Normal);
         assert_eq!(
-            tool_start_line("read", &sanitize_terminal("path=\x1b[2JREADME.md")),
+            tool_start_line("read", &escape_terminal_controls("path=\x1b[2JREADME.md")),
             "  → read · path=␛[2JREADME.md"
         );
-        assert_eq!(sanitize_terminal("ok\n\x1b]52;c;bad"), "ok\n␛]52;c;bad");
+        assert_eq!(
+            escape_terminal_controls("ok\n\x1b]52;c;bad"),
+            "ok\n␛]52;c;bad"
+        );
     }
 }

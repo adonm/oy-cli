@@ -945,7 +945,7 @@ async fn bash_returns_full_output_and_bounded_preview() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn bash_output_escapes_terminal_sequences_before_returning() {
+async fn bash_output_preserves_terminal_sequences_raw() {
     let (_dir, ctx) = test_context(auto_policy(), false);
     let value = tool_bash(
         &ctx,
@@ -958,9 +958,10 @@ async fn bash_output_escapes_terminal_sequences_before_returning() {
     .unwrap();
 
     let stdout = value["stdout"].as_str().unwrap();
-    assert!(!stdout.contains('\x1b'));
-    assert!(!stdout.contains('\x07'));
-    assert_eq!(stdout, "␛[31mred␛(B␛[m�␈␋␌␎␏\n");
+    // Raw terminal sequences are preserved for bat to handle
+    assert!(stdout.contains('\x1b'));
+    assert!(stdout.contains('\x07'));
+    assert_eq!(stdout, "\x1b[31mred\x1b(B\x1b[m\x07\x08\x0b\x0c\x0e\x0f\n");
     assert_eq!(value["stdout_preview"], stdout);
 }
 

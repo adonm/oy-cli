@@ -16,12 +16,12 @@ Fixed in `Unreleased`:
 
 ### Medium: Terminal ANSI escape injection via unsanitised tool call previews and tool output
 
-- **Status**: Fixed in `Unreleased` — terminal-bound tool progress, result previews, errors, markdown, and diff previews now sanitize escape bytes before display.
+- **Status**: Superseded in `Unreleased` — direct progress/error metadata sinks escape terminal controls, but bat-backed output/content paths preserve raw ANSI/terminal bytes so `bash`, markdown, and diff output can be formatted by bat/the terminal.
 - **Category**: V5 Validation (output encoding) / CWE-150
 - **Evidence**
   - `src/tools/output.rs::note_tool` builds a summary string from model-supplied tool arguments and passes it to `crate::ui::tool_start`, which writes to stderr via `err_line()` without escape-filtering.
   - `src/cli/ui/progress.rs::tool_result` and `tool_error` similarly emit preview text and error messages to `err_line()` without sanitisation.
-  - Existing sanitisation (`strip_escapes` in `render_markdown`, `sanitize_terminal` in `paint`) covers only model text response and colour-wrapped text; raw strings passed to `err_line` bypass it.
+  - Earlier escaping was scattered across render paths and direct terminal sinks, which made it unclear which bytes were content and which bytes were terminal-control metadata.
   - Attacker-controlled strings appear early in the pipeline: the tool call summary is displayed *before* any approval.
 - **Trust boundary / sink**
   Model → tool call arguments / tool output → `err_line()` → terminal.
@@ -32,7 +32,7 @@ Fixed in `Unreleased`:
 - **Reference**
   OWASP ASVS V5.3.4 – “Verify that output encoding is applied to prevent … terminal injection attacks.” CWE-150.
 - **Fix**
-  Sanitise all untrusted strings immediately before they enter the terminal. Apply the existing `sanitize_terminal` function (strip `\x1b`) to every piece of user/model-controlled data that is interpolated into a string passed to `err_line` or `line`. This includes tool argument summaries, tool output previews, and tool error messages. A systematic approach is to add a sanitisation step inside `note_tool`, `tool_start`, `tool_result`, and `tool_error` (e.g. call `sanitize_terminal` on the summary/preview before the final `format!`).
+  Escape untrusted metadata immediately before it enters direct terminal sinks (`err_line`/`line`) while preserving raw content sent through bat-backed output paths. Keep terminal-control escaping at direct progress/error/title metadata boundaries rather than pre-processing `bash`, markdown, diff, or bat input.
 
 ---
 

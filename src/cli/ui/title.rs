@@ -1,7 +1,7 @@
 //! Terminal title and zellij pane-name updates.
 //!
 //! Title updates are best-effort UI side effects for human terminal sessions.
-//! They are disabled for quiet/JSON output and sanitize all user-controlled text
+//! They are disabled for quiet/JSON output and escape all user-controlled text
 //! before writing OSC sequences.
 
 use std::fmt::Display;
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn title_text_sanitizes_control_sequences_and_compacts_spaces() {
+    fn title_text_escapes_control_sequences_and_compacts_spaces() {
         assert_eq!(
             title_text("oy\nrun \x1b]2;bad\x07 README.md"),
             "oy run ]2;bad README.md"
