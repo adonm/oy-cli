@@ -1,19 +1,26 @@
+//! Model selection, endpoint discovery, reasoning-effort resolution,
+//! and the prompt-level LLM chat/tool loop.
+//!
+//! This module builds an [`LlmRequest`] from `oy`-owned messages and
+//! tool specs, resolves the model route, and drives the native backend.
+//! Provider metadata queries delegate to [`super::opencode_models`].
+
 use crate::config;
 use crate::llm::{
-    ChatBackend, LlmRequest, LlmResponse, LlmTools, Message, ModelRoute, NativeOpenAiBackend,
-    Protocol, RouteAuth, ToolSpec,
+    AwsCredentials, ChatBackend, LlmRequest, LlmResponse, LlmTools, Message, ModelRoute,
+    NativeOpenAiBackend, Protocol, RouteAuth, ToolSpec,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::{LazyLock, RwLock};
 
-pub(crate) use super::auth::{AuthStatus, auth_statuses};
+pub(crate) use super::auth::AuthStatus;
 use super::auth::{env_value, github_copilot_api_key, opencode_auth_key};
 use super::opencode_models;
 pub(crate) use super::opencode_models::AdapterModels;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelListing {
     pub current: Option<String>,
     pub auth: Vec<AuthStatus>,
@@ -49,28 +56,19 @@ fn no_model_message() -> String {
 
 pub async fn inspect_models() -> Result<ModelListing> {
     let current = resolve_model(None).ok();
-    let auth = auth_statuses()
-        .into_iter()
-        .filter(|item| item.availability.is_available())
-        .collect::<Vec<_>>();
     let dynamic = opencode_models::inspect();
-    let all_models = collect_all_models(&dynamic);
+    let all_models = dynamic
+        .iter()
+        .flat_map(|group| group.models().iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(ModelListing {
         current,
-        auth,
+        auth: super::auth::auth_statuses(),
         dynamic,
         all_models,
     })
-}
-
-fn collect_all_models(dynamic: &[AdapterModels]) -> Vec<String> {
-    let mut items = dynamic
-        .iter()
-        .flat_map(|group| group.models().iter().cloned())
-        .collect::<Vec<_>>();
-    items.sort();
-    items.dedup();
-    items
 }
 
 /// Information about the provider for a model spec.
@@ -82,24 +80,71 @@ pub(crate) struct ProviderInfo {
     pub endpoint: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CachedModelInfo {
+    pub limits: Option<opencode_models::OpenCodeModelLimit>,
+    pub provider_info: ProviderInfo,
+}
+
+static MODEL_INFO_CACHE: LazyLock<std::sync::RwLock<Option<CachedModelInfo>>> =
+    LazyLock::new(|| std::sync::RwLock::new(None));
+
+pub async fn cache_model_limits(model_spec: &str) -> Result<()> {
+    let parsed = ParsedModelSpec::parse(model_spec);
+    let provider = parsed.provider_or_openai();
+    if let Some(metadata) = crate::llm::providers::provider_metadata(provider)
+        && !metadata.supported
+    {
+        bail!(
+            "provider `{provider}` uses {:?}, which is not implemented by oy's native LLM backend yet",
+            metadata.family
+        );
+    }
+    let limits = opencode_models::lookup_limit(provider, parsed.base_model);
+
+    let endpoint = match provider {
+        "openai" => Some("https://api.openai.com/v1".to_string()),
+        "github-copilot" => Some("https://api.githubcopilot.com".to_string()),
+        _ => None,
+    };
+
+    let mut cache = MODEL_INFO_CACHE.write().unwrap();
+    *cache = Some(CachedModelInfo {
+        limits,
+        provider_info: ProviderInfo {
+            provider: provider.to_string(),
+            endpoint,
+        },
+    });
+
+    Ok(())
+}
+
 /// Extract provider info from a model spec string.
 pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
-    let parsed = ParsedModelSpec::parse(model_spec);
-    let provider = parsed.provider_or_openai().to_string();
-    let model_info = opencode_models::find(&provider, parsed.base_model);
-    let endpoint = model_info
-        .as_ref()
-        .and_then(|info| info.api_url().map(|s| s.trim_end_matches('/').to_string()));
-    ProviderInfo { provider, endpoint }
+    let lock = MODEL_INFO_CACHE.read().unwrap();
+    if let Some(info) = lock.as_ref() {
+        info.provider_info.clone()
+    } else {
+        let parsed = ParsedModelSpec::parse(model_spec);
+        ProviderInfo {
+            provider: parsed.provider_or_openai().to_string(),
+            endpoint: None,
+        }
+    }
 }
 
 /// Look up token limits for a model spec from OpenCode metadata.
 /// Returns `None` when OpenCode isn't available or the model isn't found.
-pub(crate) fn model_limits(model_spec: &str) -> Option<opencode_models::OpenCodeModelLimit> {
-    let parsed = ParsedModelSpec::parse(model_spec);
-    let provider = parsed.provider.map(config::canonical_provider)?;
-    opencode_models::lookup_limit(provider, parsed.base_model)
+pub(crate) fn model_limits(_model_spec: &str) -> Option<opencode_models::OpenCodeModelLimit> {
+    MODEL_INFO_CACHE
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|info| info.limits)
 }
+
+static BACKEND: NativeOpenAiBackend = NativeOpenAiBackend;
 
 pub async fn exec_chat(
     model_spec: &str,
@@ -109,15 +154,20 @@ pub async fn exec_chat(
     tools: LlmTools,
     max_turns: usize,
 ) -> Result<LlmResponse> {
+    let _ = cache_model_limits(model_spec).await;
     let route = prepare_chat(model_spec)?;
     let request = LlmRequest {
         route,
         system_prompt: preamble.to_string(),
+        system_cache: None,
         messages,
         tools: tool_specs,
         max_turns,
+        tool_choice: None,
+        generation: None,
+        cache: None,
     };
-    NativeOpenAiBackend.chat(request, tools).await
+    BACKEND.chat(request, tools).await
 }
 
 fn prepare_chat(model_spec: &str) -> Result<ModelRoute> {
@@ -125,19 +175,31 @@ fn prepare_chat(model_spec: &str) -> Result<ModelRoute> {
     let provider = parsed.provider_or_openai();
     let mut route = match provider {
         "github-copilot" => prepare_github_copilot_chat(parsed.base_model)?,
-        "openai" => ModelRoute {
-            protocol: Protocol::OpenAiChat,
-            model: parsed.base_model.to_string(),
-            auth: RouteAuth::ApiKey(
-                env_value("OPENAI_API_KEY").context("OpenAI auth is not configured")?,
-            ),
-            base_url: env_value("OPENAI_BASE_URL"),
-            additional_params: None,
-        },
+        "openai" => prepare_openai_chat(parsed.base_model)?,
+        "xai" => prepare_xai_chat(parsed.base_model)?,
+        "openrouter" => prepare_openrouter_chat(parsed.base_model)?,
+        "azure" => prepare_azure_chat(parsed.base_model)?,
+        "cloudflare-ai-gateway" => prepare_cloudflare_ai_gateway_chat(parsed.base_model)?,
+        "cloudflare-workers-ai" => prepare_cloudflare_workers_ai_chat(parsed.base_model)?,
+        "bedrock" | "amazon-bedrock" => prepare_bedrock_chat(provider, parsed.base_model)?,
         provider => prepare_opencode_compatible_chat(provider, parsed.base_model)?,
     };
-    route.additional_params =
-        reasoning_effort_json(model_spec, route.protocol.uses_responses_api());
+    let provider_defaults = match provider {
+        "openai" => {
+            crate::llm::providers::openai_default_provider_options(&route.model, route.protocol)
+        }
+        "github-copilot" => crate::llm::providers::github_copilot_default_provider_options(
+            &route.model,
+            route.protocol,
+        ),
+        "openrouter" => None,
+        _ if route.protocol == Protocol::BedrockConverse => None,
+        _ => crate::llm::providers::gpt5_default_provider_options(&route.model, route.protocol),
+    };
+    route.additional_params = merge_additional_params(
+        provider_defaults,
+        reasoning_effort_json(model_spec, route.protocol.uses_responses_api()),
+    );
     Ok(route)
 }
 
@@ -154,27 +216,169 @@ impl OpenCodeRouteProfile {
         model: &str,
         info: &opencode_models::OpenCodeModel,
     ) -> Result<Self> {
-        if !info.is_openai_compatible_api() {
+        if !info.is_openai_compatible_api() && !info.is_bedrock_api() {
             bail!("OpenCode model `{provider}/{model}` is not OpenAI-compatible");
         }
         let model_id = info.api_id().to_string();
         let base_url = info
             .api_url()
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                crate::llm::providers::openai_compatible_profile(provider)
+                    .map(|profile| profile.base_url.to_string())
+            })
+            .or_else(|| {
+                crate::llm::providers::is_bedrock_provider(provider).then(|| {
+                    crate::llm::providers::bedrock_base_url(
+                        crate::llm::providers::BEDROCK_DEFAULT_REGION,
+                    )
+                })
+            })
             .ok_or_else(|| {
                 anyhow!("OpenCode model `{provider}/{model}` does not expose an API URL")
-            })?
-            .to_string();
-        let protocol = if opencode_requires_responses_api_shim(provider, &model_id) {
-            Protocol::OpenAiResponses
-        } else {
-            Protocol::OpenAiChat
-        };
+            })?;
+        let profile = crate::llm::providers::opencode_profile(provider, &model_id, &base_url);
         Ok(Self {
-            model_id,
-            base_url,
-            protocol,
+            model_id: profile.model_id,
+            base_url: profile.base_url,
+            protocol: profile.protocol,
         })
     }
+}
+
+fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
+    let profile = crate::llm::providers::openai_profile(model, env_value("OPENAI_BASE_URL"));
+    Ok(ModelRoute {
+        protocol: profile.protocol,
+        model: profile.model_id,
+        auth: RouteAuth::ApiKey(
+            env_value("OPENAI_API_KEY").context("OpenAI auth is not configured")?,
+        ),
+        base_url: Some(profile.base_url),
+        query_params: None,
+        additional_params: env_json("OPENROUTER_PROVIDER_OPTIONS")
+            .and_then(|value| crate::llm::providers::openrouter_body_options(Some(&value))),
+    })
+}
+
+fn env_json(name: &str) -> Option<serde_json::Value> {
+    env_value(name).and_then(|value| serde_json::from_str(&value).ok())
+}
+
+fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
+    let profile = crate::llm::providers::xai_profile(model, env_value("XAI_BASE_URL"));
+    Ok(ModelRoute {
+        protocol: profile.protocol,
+        model: profile.model_id,
+        auth: RouteAuth::ApiKey(
+            env_value("XAI_API_KEY").context("xAI auth is not configured; set XAI_API_KEY")?,
+        ),
+        base_url: Some(profile.base_url),
+        query_params: None,
+        additional_params: None,
+    })
+}
+
+fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
+    let profile =
+        crate::llm::providers::openrouter_profile(model, env_value("OPENROUTER_BASE_URL"));
+    Ok(ModelRoute {
+        protocol: profile.protocol,
+        model: profile.model_id,
+        auth: RouteAuth::ApiKey(
+            env_value("OPENROUTER_API_KEY")
+                .or_else(|| env_value("OPENCODE_API_KEY"))
+                .context("OpenRouter auth is not configured; set OPENROUTER_API_KEY")?,
+        ),
+        base_url: Some(profile.base_url),
+        query_params: None,
+        additional_params: None,
+    })
+}
+
+fn prepare_azure_chat(model: &str) -> Result<ModelRoute> {
+    let base_url = env_value("AZURE_OPENAI_BASE_URL")
+        .or_else(|| env_value("AZURE_BASE_URL"))
+        .or_else(|| {
+            env_value("AZURE_OPENAI_RESOURCE_NAME")
+                .map(|name| crate::llm::providers::azure_resource_base_url(&name))
+        })
+        .context("Azure OpenAI requires AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME")?;
+    let use_completion_urls = env_value("AZURE_OPENAI_USE_COMPLETION_URLS")
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "on" | "yes"));
+    let profile = crate::llm::providers::azure_profile(model, base_url, use_completion_urls);
+    Ok(ModelRoute {
+        protocol: profile.protocol,
+        model: profile.model_id,
+        auth: RouteAuth::Header {
+            name: "api-key".to_string(),
+            value: env_value("AZURE_OPENAI_API_KEY")
+                .context("Azure OpenAI auth is not configured; set AZURE_OPENAI_API_KEY")?,
+        },
+        base_url: Some(profile.base_url),
+        query_params: Some(vec![(
+            "api-version".to_string(),
+            env_value("AZURE_OPENAI_API_VERSION").unwrap_or_else(|| "v1".to_string()),
+        )]),
+        additional_params: None,
+    })
+}
+
+fn prepare_cloudflare_ai_gateway_chat(model: &str) -> Result<ModelRoute> {
+    let base_url = env_value("CLOUDFLARE_AI_GATEWAY_BASE_URL").or_else(|| {
+        env_value("CLOUDFLARE_ACCOUNT_ID").map(|account_id| {
+            crate::llm::providers::cloudflare_ai_gateway_base_url(
+                &account_id,
+                env_value("CLOUDFLARE_AI_GATEWAY_ID").as_deref(),
+            )
+        })
+    }).context("Cloudflare AI Gateway requires CLOUDFLARE_AI_GATEWAY_BASE_URL or CLOUDFLARE_ACCOUNT_ID")?;
+    let gateway_key = env_value("CLOUDFLARE_API_TOKEN").or_else(|| env_value("CF_AIG_TOKEN"));
+    let api_key = env_value("OPENAI_API_KEY");
+    let auth = match (gateway_key, api_key) {
+        (Some(gateway_key), Some(api_key)) => RouteAuth::Composite(vec![
+            RouteAuth::Header {
+                name: "cf-aig-authorization".to_string(),
+                value: gateway_key,
+            },
+            RouteAuth::ApiKey(api_key),
+        ]),
+        (Some(gateway_key), None) => RouteAuth::Header {
+            name: "cf-aig-authorization".to_string(),
+            value: gateway_key,
+        },
+        (None, Some(api_key)) => RouteAuth::ApiKey(api_key),
+        (None, None) => bail!(
+            "Cloudflare AI Gateway auth is not configured; set CLOUDFLARE_API_TOKEN or CF_AIG_TOKEN"
+        ),
+    };
+    Ok(ModelRoute {
+        protocol: Protocol::OpenAiChat,
+        model: model.to_string(),
+        auth,
+        base_url: Some(base_url),
+        query_params: None,
+        additional_params: None,
+    })
+}
+
+fn prepare_cloudflare_workers_ai_chat(model: &str) -> Result<ModelRoute> {
+    let base_url = env_value("CLOUDFLARE_WORKERS_AI_BASE_URL").or_else(|| {
+        env_value("CLOUDFLARE_ACCOUNT_ID")
+            .map(|account_id| crate::llm::providers::cloudflare_workers_ai_base_url(&account_id))
+    }).context("Cloudflare Workers AI requires CLOUDFLARE_WORKERS_AI_BASE_URL or CLOUDFLARE_ACCOUNT_ID")?;
+    Ok(ModelRoute {
+        protocol: Protocol::OpenAiChat,
+        model: model.to_string(),
+        auth: RouteAuth::ApiKey(
+            env_value("CLOUDFLARE_API_KEY")
+                .or_else(|| env_value("CLOUDFLARE_WORKERS_AI_TOKEN"))
+                .context("Cloudflare Workers AI auth is not configured; set CLOUDFLARE_API_KEY or CLOUDFLARE_WORKERS_AI_TOKEN")?,
+        ),
+        base_url: Some(base_url),
+        query_params: None,
+        additional_params: None,
+    })
 }
 
 fn prepare_github_copilot_chat(model: &str) -> Result<ModelRoute> {
@@ -190,30 +394,60 @@ fn prepare_github_copilot_chat(model: &str) -> Result<ModelRoute> {
     let api_key = github_copilot_api_key().context(
         "GitHub Copilot API token is not configured; set GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, OPENCODE_API_KEY, or OpenCode auth.json",
     )?;
-    let protocol = if copilot_requires_responses_api_shim(&model_id) {
-        Protocol::OpenAiResponses
-    } else {
-        profile
-            .as_ref()
-            .map(|profile| profile.protocol)
-            .unwrap_or(Protocol::OpenAiChat)
-    };
+    let route_profile = crate::llm::providers::github_copilot_profile(
+        &model_id,
+        profile.as_ref().map(|profile| profile.base_url.as_str()),
+    );
     Ok(ModelRoute {
-        protocol,
-        model: model_id,
+        protocol: route_profile.protocol,
+        model: route_profile.model_id,
         auth: RouteAuth::ApiKey(api_key),
-        base_url: Some(copilot_base_url(profile.as_ref())),
+        base_url: Some(route_profile.base_url),
+        query_params: None,
         additional_params: None,
     })
 }
 
-fn copilot_base_url(profile: Option<&OpenCodeRouteProfile>) -> String {
-    profile
-        .map(|profile| profile.base_url.as_str())
-        .unwrap_or("https://api.githubcopilot.com")
-        .trim_end_matches("/v1")
-        .trim_end_matches('/')
-        .to_string()
+fn prepare_bedrock_chat(provider: &str, model: &str) -> Result<ModelRoute> {
+    let model_id = opencode_models::find(provider, model)
+        .as_ref()
+        .map(|info| info.api_id().to_string())
+        .unwrap_or_else(|| model.to_string());
+    let region = env_value("AWS_REGION")
+        .or_else(|| env_value("AWS_DEFAULT_REGION"))
+        .unwrap_or_else(|| crate::llm::providers::BEDROCK_DEFAULT_REGION.to_string());
+    let profile = crate::llm::providers::bedrock_profile(
+        &model_id,
+        &region,
+        env_value("BEDROCK_BASE_URL").or_else(|| env_value("AWS_BEDROCK_BASE_URL")),
+    );
+    Ok(ModelRoute {
+        protocol: profile.protocol,
+        model: profile.model_id,
+        auth: bedrock_auth(&region)?,
+        base_url: Some(profile.base_url),
+        query_params: None,
+        additional_params: None,
+    })
+}
+
+fn bedrock_auth(region: &str) -> Result<RouteAuth> {
+    if let Some(api_key) =
+        env_value("BEDROCK_API_KEY").or_else(|| env_value("AWS_BEARER_TOKEN_BEDROCK"))
+    {
+        return Ok(RouteAuth::ApiKey(api_key));
+    }
+    let access_key_id = env_value("AWS_ACCESS_KEY_ID").context(
+        "Bedrock auth is not configured; set BEDROCK_API_KEY, AWS_BEARER_TOKEN_BEDROCK, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY",
+    )?;
+    let secret_access_key = env_value("AWS_SECRET_ACCESS_KEY")
+        .context("Bedrock SigV4 auth requires AWS_SECRET_ACCESS_KEY")?;
+    Ok(RouteAuth::AwsSigV4(AwsCredentials {
+        region: region.to_string(),
+        access_key_id,
+        secret_access_key,
+        session_token: env_value("AWS_SESSION_TOKEN"),
+    }))
 }
 
 fn prepare_opencode_compatible_chat(provider: &str, model: &str) -> Result<ModelRoute> {
@@ -227,6 +461,7 @@ fn prepare_opencode_compatible_chat(provider: &str, model: &str) -> Result<Model
         model: profile.model_id,
         auth: RouteAuth::ApiKey(api_key),
         base_url: Some(profile.base_url),
+        query_params: None,
         additional_params: None,
     })
 }
@@ -276,19 +511,6 @@ impl<'a> ParsedModelSpec<'a> {
 fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
     let parsed = ParsedModelSpec::parse(spec);
     (parsed.provider, parsed.base_model)
-}
-
-fn copilot_requires_responses_api_shim(model: &str) -> bool {
-    // Copilot reasoning models require `/responses`. Keep this narrow local
-    // route rule until OpenCode exposes a protocol bit for these models.
-    let model = model.to_ascii_lowercase();
-    model.contains("codex") || model.starts_with("gpt-5") || model.starts_with("gemini-3")
-}
-
-fn opencode_requires_responses_api_shim(provider: &str, model: &str) -> bool {
-    // OpenCode's `opencode` GPT-5 family returns Responses API payloads from
-    // `https://opencode.ai/zen/v1`.
-    provider == "opencode" && model.to_ascii_lowercase().starts_with("gpt-5")
 }
 
 // ---------------------------------------------------------------------------
@@ -372,21 +594,19 @@ pub fn get_thinking_effort() -> Option<String> {
 }
 
 fn configured_reasoning_effort() -> Option<String> {
-    THINKING_OVERRIDE
-        .read()
-        .expect("thinking override lock poisoned")
-        .clone()
-        .or_else(|| env_value("OY_THINKING"))
-        .or_else(|| env_value("OY_REASONING_EFFORT"))
-        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" => None,
-            "off" | "false" | "0" | "none" => Some("none".to_string()),
-            "minimal" => Some("minimal".to_string()),
-            "low" => Some("low".to_string()),
-            "medium" => Some("medium".to_string()),
-            "high" | "true" | "1" | "on" => Some("high".to_string()),
-            _ => None,
-        })
+    get_thinking_effort().and_then(normalize_effort_value)
+}
+
+fn normalize_effort_value(value: String) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => None,
+        "off" | "false" | "0" | "none" => Some("none".to_string()),
+        "minimal" => Some("minimal".to_string()),
+        "low" => Some("low".to_string()),
+        "medium" => Some("medium".to_string()),
+        "high" | "true" | "1" | "on" => Some("high".to_string()),
+        _ => None,
+    }
 }
 
 fn split_reasoning_effort_suffix(model: &str) -> (Option<&'static str>, &str) {
@@ -411,7 +631,7 @@ fn split_reasoning_effort_suffix(model: &str) -> (Option<&'static str>, &str) {
 pub fn reasoning_efforts_for(model_spec: &str) -> Vec<String> {
     let parsed = ParsedModelSpec::parse(model_spec);
     let (provider, model_name) = split_model_spec_for_opencode(parsed.base_model);
-    if let Some(info) = opencode_models::lookup_reasoning(provider, model_name) {
+    if let Some(info) = opencode_models::find(provider, model_name) {
         let efforts = info.reasoning_efforts();
         if !efforts.is_empty() {
             return efforts.iter().map(|s| s.to_string()).collect();
@@ -439,7 +659,7 @@ fn is_moonshot_kimi_model(model_spec: &str) -> bool {
 /// Query OpenCode for the model's default reasoning effort.
 fn opencode_reasoning_effort(model_name: &str) -> Option<String> {
     let (provider, model) = split_model_spec_for_opencode(model_name);
-    opencode_models::lookup_reasoning(provider, model)
+    opencode_models::find(provider, model)
         .and_then(|info| info.default_reasoning_effort().map(|s| s.to_string()))
 }
 
@@ -486,6 +706,41 @@ fn reasoning_effort_json(model_spec: &str, responses_api: bool) -> Option<serde_
     }
 }
 
+fn merge_additional_params(
+    base: Option<serde_json::Value>,
+    overlay: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (base, overlay) {
+        (None, None) => None,
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (Some(mut base), Some(overlay)) => {
+            merge_json_objects(&mut base, overlay);
+            Some(base)
+        }
+    }
+}
+
+fn merge_json_objects(base: &mut serde_json::Value, overlay: serde_json::Value) {
+    let Some(base_object) = base.as_object_mut() else {
+        *base = overlay;
+        return;
+    };
+    let serde_json::Value::Object(overlay) = overlay else {
+        *base = overlay;
+        return;
+    };
+    for (key, value) in overlay {
+        match (base_object.get_mut(&key), value) {
+            (Some(existing), serde_json::Value::Object(next)) if existing.is_object() => {
+                merge_json_objects(existing, serde_json::Value::Object(next));
+            }
+            (_, value) => {
+                base_object.insert(key, value);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,32 +780,28 @@ mod tests {
     }
 
     #[test]
-    fn model_listing_only_includes_introspected_models() {
-        let models = collect_all_models(&[]);
-        assert!(models.is_empty());
-    }
-
-    #[test]
     fn copilot_routes_reasoning_models_to_responses_api() {
-        assert!(copilot_requires_responses_api_shim("gpt-5.5"));
-        assert!(copilot_requires_responses_api_shim("gpt-5.3-codex"));
-        assert!(copilot_requires_responses_api_shim(
-            "gemini-3.1-pro-preview"
-        ));
-        assert!(!copilot_requires_responses_api_shim("gpt-4.1"));
+        assert!(crate::llm::providers::github_copilot_should_use_responses_api("gpt-5.5"));
+        assert!(crate::llm::providers::github_copilot_should_use_responses_api("gpt-5.3-codex"));
+        assert!(
+            crate::llm::providers::github_copilot_should_use_responses_api(
+                "gemini-3.1-pro-preview"
+            )
+        );
+        assert!(!crate::llm::providers::github_copilot_should_use_responses_api("gpt-4.1"));
     }
 
     #[test]
     fn opencode_gpt5_routes_to_responses_api() {
-        assert!(opencode_requires_responses_api_shim(
+        assert!(crate::llm::providers::opencode_should_use_responses_api(
             "opencode",
             "gpt-5.4-mini"
         ));
-        assert!(!opencode_requires_responses_api_shim(
+        assert!(!crate::llm::providers::opencode_should_use_responses_api(
             "opencode-go",
             "mimo-v2.5-pro"
         ));
-        assert!(!opencode_requires_responses_api_shim(
+        assert!(!crate::llm::providers::opencode_should_use_responses_api(
             "opencode-go",
             "kimi-k2.6"
         ));
@@ -591,7 +842,27 @@ mod tests {
         assert_eq!(chat.model, "gpt-4.1-mini");
         assert_eq!(chat.auth, RouteAuth::ApiKey("test-openai-key".to_string()));
         assert_eq!(chat.base_url.as_deref(), Some("https://openai.example/v1"));
-        assert_eq!(chat.additional_params, None);
+        assert_eq!(
+            chat.additional_params,
+            Some(serde_json::json!({"store": false}))
+        );
+    }
+
+    #[test]
+    fn prepare_chat_adds_openai_gpt5_defaults_and_preserves_explicit_effort() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[("OPENAI_API_KEY", Some("test-openai-key"))]);
+
+        let chat = prepare_chat("openai::gpt-5.5-low").unwrap();
+
+        assert_eq!(chat.protocol, Protocol::OpenAiChat);
+        assert_eq!(
+            chat.additional_params,
+            Some(serde_json::json!({
+                "store": false,
+                "reasoning_effort": "low",
+            }))
+        );
     }
 
     #[test]
@@ -610,7 +881,10 @@ mod tests {
             chat.base_url.as_deref(),
             Some("https://api.githubcopilot.com")
         );
-        assert_eq!(chat.additional_params, None);
+        assert_eq!(
+            chat.additional_params,
+            Some(serde_json::json!({"store": false}))
+        );
     }
 
     #[test]
@@ -631,7 +905,89 @@ mod tests {
         );
         assert_eq!(
             chat.additional_params,
-            Some(serde_json::json!({"reasoning": {"effort": "low"}}))
+            Some(serde_json::json!({
+                "store": false,
+                "reasoning": {"effort": "low", "summary": "auto"}
+            }))
+        );
+    }
+
+    #[test]
+    fn prepare_chat_routes_xai_to_responses_api() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[
+            ("XAI_API_KEY", Some("test-xai-key")),
+            ("XAI_BASE_URL", None),
+        ]);
+
+        let chat = prepare_chat("xai/grok-4").unwrap();
+
+        assert_eq!(chat.protocol, Protocol::OpenAiResponses);
+        assert_eq!(chat.model, "grok-4");
+        assert_eq!(chat.auth, RouteAuth::ApiKey("test-xai-key".to_string()));
+        assert_eq!(chat.base_url.as_deref(), Some("https://api.x.ai/v1"));
+    }
+
+    #[test]
+    fn prepare_chat_routes_azure_with_api_key_header_and_version_query() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[
+            ("AZURE_OPENAI_API_KEY", Some("test-azure-key")),
+            ("AZURE_OPENAI_RESOURCE_NAME", Some("oy-test")),
+            ("AZURE_OPENAI_BASE_URL", None),
+            ("AZURE_OPENAI_API_VERSION", Some("2025-01-01")),
+            ("AZURE_OPENAI_USE_COMPLETION_URLS", None),
+        ]);
+
+        let chat = prepare_chat("azure/gpt-5.5-low").unwrap();
+
+        assert_eq!(chat.protocol, Protocol::OpenAiResponses);
+        assert_eq!(
+            chat.base_url.as_deref(),
+            Some("https://oy-test.openai.azure.com/openai/v1")
+        );
+        assert_eq!(
+            chat.auth,
+            RouteAuth::Header {
+                name: "api-key".to_string(),
+                value: "test-azure-key".to_string(),
+            }
+        );
+        assert_eq!(
+            chat.query_params,
+            Some(vec![("api-version".to_string(), "2025-01-01".to_string())])
+        );
+        assert_eq!(
+            chat.additional_params,
+            Some(serde_json::json!({"reasoning": {"effort": "low", "summary": "auto"}}))
+        );
+    }
+
+    #[test]
+    fn prepare_chat_routes_cloudflare_ai_gateway_with_gateway_header() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[
+            ("CLOUDFLARE_ACCOUNT_ID", Some("acct 1")),
+            ("CLOUDFLARE_AI_GATEWAY_ID", Some("gw/one")),
+            ("CLOUDFLARE_AI_GATEWAY_BASE_URL", None),
+            ("CLOUDFLARE_API_TOKEN", Some("test-gateway-key")),
+            ("CF_AIG_TOKEN", None),
+            ("OPENAI_API_KEY", None),
+        ]);
+
+        let chat = prepare_chat("cloudflare-ai-gateway/meta-llama").unwrap();
+
+        assert_eq!(chat.protocol, Protocol::OpenAiChat);
+        assert_eq!(
+            chat.base_url.as_deref(),
+            Some("https://gateway.ai.cloudflare.com/v1/acct+1/gw%2Fone/compat")
+        );
+        assert_eq!(
+            chat.auth,
+            RouteAuth::Header {
+                name: "cf-aig-authorization".to_string(),
+                value: "test-gateway-key".to_string(),
+            }
         );
     }
 
@@ -653,7 +1009,7 @@ mod tests {
             split_model_spec("opencode-go/kimi-k2.6-high"),
             (Some("opencode-go"), "kimi-k2.6")
         );
-        assert!(copilot_requires_responses_api_shim("gpt-5.5"));
+        assert!(crate::llm::providers::github_copilot_should_use_responses_api("gpt-5.5"));
         assert_eq!(reasoning_capable_fallback("gpt-5.5"), Some("high"));
         assert_eq!(
             default_reasoning_effort("moonshot/kimi-k2.6").as_deref(),
@@ -704,6 +1060,36 @@ mod tests {
             Some(serde_json::json!({"reasoning": {"effort": "high"}}))
         );
         assert_eq!(reasoning_effort_json("gpt-4.1-mini", false), None);
+    }
+
+    #[test]
+    fn merge_additional_params_deep_merges_provider_defaults_and_overrides() {
+        let base = Some(serde_json::json!({
+            "reasoning": {"effort": "medium", "summary": "auto"},
+            "text": {"verbosity": "low"}
+        }));
+        let overlay = Some(serde_json::json!({
+            "reasoning": {"effort": "high"}
+        }));
+
+        assert_eq!(
+            merge_additional_params(base, overlay),
+            Some(serde_json::json!({
+                "reasoning": {"effort": "high", "summary": "auto"},
+                "text": {"verbosity": "low"}
+            }))
+        );
+    }
+
+    #[test]
+    fn merge_additional_params_replaces_non_object_overlays() {
+        let base = Some(serde_json::json!({"reasoning": {"effort": "medium"}}));
+        let overlay = Some(serde_json::json!({"reasoning": false}));
+
+        assert_eq!(
+            merge_additional_params(base, overlay),
+            Some(serde_json::json!({"reasoning": false}))
+        );
     }
 
     // ── Live integration tests (network + OpenCode required) ──
@@ -824,6 +1210,7 @@ mod tests {
                     "properties": {"message": {"type": "string"}},
                     "required": ["message"]
                 }),
+                cache: None,
             }],
             vec![Box::new(Echo) as Box<dyn crate::llm::LlmTool>],
             crate::config::max_tool_rounds(2),

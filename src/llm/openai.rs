@@ -1,32 +1,29 @@
+//! Native OpenAI Chat Completions and Responses backends with an
+//! OpenCode-shaped HTTP+SSE protocol layer and hardened tool loop.
+//!
+//! This is the default transport: it lowers [`LlmRequest`] into
+//! provider-native request bodies, frames streaming SSE responses into
+//! step events, runs the native tool loop with error recovery, blocks
+//! repeated identical failed calls, caps model-visible tool output, and
+//! shares tool-round budget checks across both protocols.
+
 use super::{
-    ChatBackend, ChatFuture, LlmRequest, LlmResponse, LlmTool, LlmTools, Message, MessageContent,
-    Protocol, RouteAuth, ToolResultContent, ToolSpec,
+    ChatBackend, ChatFuture, LlmRequest, LlmResponse, LlmTools, Message, MessageContent, Protocol,
+    RouteAuth, ToolResultContent,
 };
-use anyhow::{Context, Result, anyhow, bail};
-use reqwest::StatusCode;
-use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use anyhow::{Context, Result, bail};
+use backon::Retryable;
+use serde_json::{Value, json};
+use std::future::Future;
+
+use super::protocols::{bedrock_converse, bedrock_event_stream, openai_chat, openai_responses};
+use super::schema::{StepAccumulator, ToolCall as NativeToolCall};
+use super::tool_runtime;
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const TOOL_ONLY_CHURN_LIMIT: usize = 64;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct NativeOpenAiBackend;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NativeToolCall {
-    id: String,
-    call_id: String,
-    name: String,
-    arguments: String,
-}
-
-impl NativeToolCall {
-    fn arguments_value(&self) -> Result<Value> {
-        serde_json::from_str(&self.arguments)
-            .with_context(|| format!("tool `{}` supplied invalid JSON arguments", self.name))
-    }
-}
 
 impl ChatBackend for NativeOpenAiBackend {
     type Tools = LlmTools;
@@ -37,31 +34,93 @@ impl ChatBackend for NativeOpenAiBackend {
 }
 
 async fn execute_native_chat(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
+    let request = super::cache_policy::apply(request);
     match request.route.protocol {
         Protocol::OpenAiChat => run_chat_completions(request, tools).await,
         Protocol::OpenAiResponses => run_responses(request, tools).await,
+        Protocol::BedrockConverse => run_bedrock_converse(request, tools).await,
+        Protocol::AnthropicMessages => {
+            bail!(
+                "protocol {:?} is not implemented by the native OpenAI backend",
+                request.route.protocol
+            )
+        }
     }
 }
 
-async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
-    let api_key = api_key(&request.route.auth);
-    let endpoint = endpoint_url(request.route.base_url.as_deref(), "chat/completions")?;
+async fn run_bedrock_converse(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
+    let endpoint = super::route::endpoint::render_with_query(
+        request.route.base_url.as_deref(),
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        &bedrock_converse::endpoint_path(&request.route.model),
+        request.route.query_params.as_deref(),
+    )?;
     let client = reqwest::Client::new();
-    let tool_specs = request.tools.clone();
-    let tools_by_name = tools_by_name(tools);
-    let mut messages = chat_messages_from_llm(&request.system_prompt, request.messages)?;
+    let tools_by_name = tool_runtime::tools_by_name(tools);
+    let mut request = request;
     let mut transcript = Vec::new();
-    let mut loop_state = ToolLoopState::default();
+    let mut loop_state = tool_runtime::ToolLoopState::default();
 
     for turn in 0..=request.max_turns {
-        let body = chat_request_body(
+        let body = bedrock_converse::request_body(&request)?;
+        let assistant = retry_transient_http_call(|| {
+            stream_bedrock_assistant(&client, &endpoint, &request.route.auth, &body)
+        })
+        .await?;
+        let assistant_message =
+            assistant_message_from_calls(&assistant.text, None, &assistant.tool_calls)?;
+
+        if assistant.tool_calls.is_empty() {
+            transcript.push(assistant_message);
+            return Ok(LlmResponse {
+                output: assistant.text,
+                messages: Some(transcript),
+            });
+        }
+        ensure_tool_round_budget(turn, request.max_turns, "Bedrock Converse")?;
+        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
+
+        request.messages.push(assistant_message.clone());
+        transcript.push(assistant_message);
+        for call in assistant.tool_calls {
+            let outcome =
+                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
+            let result = tool_result_message(&call, outcome.output.clone());
+            request.messages.push(result.clone());
+            transcript.push(result);
+        }
+    }
+
+    unreachable!("bounded tool loop exits from inside the loop")
+}
+
+async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
+    let endpoint = super::route::endpoint::render_with_query(
+        request.route.base_url.as_deref(),
+        OPENAI_BASE_URL,
+        "chat/completions",
+        request.route.query_params.as_deref(),
+    )?;
+    let client = reqwest::Client::new();
+    let tool_specs = request.tools.clone();
+    let tools_by_name = tool_runtime::tools_by_name(tools);
+    let mut messages = openai_chat::messages_from_llm(&request.system_prompt, request.messages)?;
+    let mut transcript = Vec::new();
+    let mut loop_state = tool_runtime::ToolLoopState::default();
+
+    for turn in 0..=request.max_turns {
+        let body = openai_chat::request_body(
             &request.route.model,
             &messages,
             &tool_specs,
+            request.tool_choice.as_ref(),
+            request.generation.as_ref(),
             request.route.additional_params.as_ref(),
         )?;
-        let value = post_json(&client, &endpoint, api_key, &body).await?;
-        let assistant = parse_chat_assistant(&value)?;
+        let assistant = retry_transient_http_call(|| {
+            stream_chat_assistant(&client, &endpoint, &request.route.auth, &body)
+        })
+        .await?;
         let assistant_message = assistant_message_from_calls(
             &assistant.text,
             assistant.reasoning_content.as_ref(),
@@ -78,16 +137,20 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
         ensure_tool_round_budget(turn, request.max_turns, "chat")?;
         loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
 
-        messages.push(chat_assistant_wire_message(
+        messages.push(openai_chat::assistant_wire_message(
             &assistant.text,
             assistant.reasoning_content.as_ref(),
             &assistant.tool_calls,
         )?);
         transcript.push(assistant_message);
         for call in assistant.tool_calls {
-            let outcome = execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
+            let outcome =
+                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
             let result = tool_result_message(&call, outcome.output.clone());
-            messages.push(chat_tool_result_wire_message(&call, &outcome.output));
+            messages.push(openai_chat::tool_result_wire_message(
+                &call,
+                &outcome.output,
+            ));
             transcript.push(result);
         }
     }
@@ -96,25 +159,32 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
 }
 
 async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
-    let api_key = api_key(&request.route.auth);
-    let endpoint = endpoint_url(request.route.base_url.as_deref(), "responses")?;
+    let endpoint = super::route::endpoint::render_with_query(
+        request.route.base_url.as_deref(),
+        OPENAI_BASE_URL,
+        "responses",
+        request.route.query_params.as_deref(),
+    )?;
     let client = reqwest::Client::new();
     let tool_specs = request.tools.clone();
-    let tools_by_name = tools_by_name(tools);
-    let mut input = responses_input_from_llm(request.messages)?;
+    let tools_by_name = tool_runtime::tools_by_name(tools);
+    let mut input = openai_responses::input_from_llm(&request.system_prompt, request.messages)?;
     let mut transcript = Vec::new();
-    let mut loop_state = ToolLoopState::default();
+    let mut loop_state = tool_runtime::ToolLoopState::default();
 
     for turn in 0..=request.max_turns {
-        let body = responses_request_body(
+        let body = openai_responses::request_body(
             &request.route.model,
-            &request.system_prompt,
             &input,
             &tool_specs,
+            request.tool_choice.as_ref(),
+            request.generation.as_ref(),
             request.route.additional_params.as_ref(),
         )?;
-        let value = post_json(&client, &endpoint, api_key, &body).await?;
-        let response = parse_responses_output(&value)?;
+        let response = retry_transient_http_call(|| {
+            stream_responses_output(&client, &endpoint, &request.route.auth, &body)
+        })
+        .await?;
         let assistant_message =
             assistant_message_from_calls(&response.text, None, &response.tool_calls)?;
 
@@ -128,12 +198,13 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
         ensure_tool_round_budget(turn, request.max_turns, "Responses")?;
         loop_state.note_assistant_turn(&response.text, &response.tool_calls)?;
 
-        append_responses_assistant_output(&mut input, &response.text, &response.tool_calls);
+        openai_responses::append_assistant_output(&mut input, &response.text, &response.tool_calls);
         transcript.push(assistant_message);
         for call in response.tool_calls {
-            let outcome = execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
+            let outcome =
+                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
             transcript.push(tool_result_message(&call, outcome.output.clone()));
-            input.push(responses_tool_result_input(&call, &outcome.output));
+            input.push(openai_responses::tool_result_input(&call, &outcome.output));
         }
     }
 
@@ -147,529 +218,99 @@ fn ensure_tool_round_budget(turn: usize, max_turns: usize, protocol: &str) -> Re
     Ok(())
 }
 
-fn api_key(auth: &RouteAuth) -> &str {
-    match auth {
-        RouteAuth::ApiKey(api_key) => api_key,
-    }
+async fn retry_transient_http_call<T, Fut, F>(operation: F) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+    F: FnMut() -> Fut,
+{
+    operation
+        .retry(crate::agent::retry::llm_backoff())
+        .when(crate::agent::retry::is_transient_error)
+        .notify(|_, dur| {
+            crate::ui::err_line(format_args!(
+                "retrying LLM HTTP call in {:.0}s…",
+                dur.as_secs_f64()
+            ))
+        })
+        .await
 }
 
-fn endpoint_url(base_url: Option<&str>, path: &str) -> Result<String> {
-    let base_url = base_url
-        .unwrap_or(OPENAI_BASE_URL)
-        .trim()
-        .trim_end_matches('/');
-    if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
-        bail!("native OpenAI base URL must be http or https");
-    }
-    Ok(format!("{base_url}/{}", path.trim_start_matches('/')))
-}
-
-async fn post_json(
+async fn stream_chat_assistant(
     client: &reqwest::Client,
     endpoint: &str,
-    api_key: &str,
+    auth: &RouteAuth,
     body: &Value,
-) -> Result<Value> {
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key)
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("failed to send native OpenAI request to {endpoint}"))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .context("failed to read native OpenAI response body")?;
-    if !status.is_success() {
-        bail!(
-            "native OpenAI request failed ({}): {}",
-            status,
-            provider_error_message(status, &text)
-        );
-    }
-    serde_json::from_str(&text).context("failed to parse native OpenAI response JSON")
-}
-
-fn provider_error_message(status: StatusCode, text: &str) -> String {
-    if let Ok(value) = serde_json::from_str::<Value>(text)
-        && let Some(message) = value
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .filter(|message| !message.trim().is_empty())
-    {
-        return message.to_string();
-    }
-    let text = text.trim();
-    if text.is_empty() {
-        status
-            .canonical_reason()
-            .unwrap_or("empty provider error")
-            .to_string()
-    } else {
-        text.chars().take(500).collect()
-    }
-}
-
-type ToolMap = HashMap<String, Box<dyn LlmTool>>;
-
-fn tools_by_name(tools: LlmTools) -> ToolMap {
-    tools
-        .into_iter()
-        .map(|tool| (tool.name().to_string(), tool))
-        .collect()
-}
-
-#[derive(Debug, Default)]
-struct ToolLoopState {
-    failed_calls: HashMap<ToolCallFingerprint, usize>,
-    tool_only_turns: usize,
-}
-
-impl ToolLoopState {
-    fn note_assistant_turn(&mut self, text: &str, tool_calls: &[NativeToolCall]) -> Result<()> {
-        if !tool_calls.is_empty() && text.trim().is_empty() {
-            self.tool_only_turns += 1;
-        } else {
-            self.tool_only_turns = 0;
-        }
-        if self.tool_only_turns > TOOL_ONLY_CHURN_LIMIT {
-            bail!(
-                "native OpenAI tool loop made no text progress for {TOOL_ONLY_CHURN_LIMIT} consecutive tool-only rounds"
-            );
-        }
-        Ok(())
-    }
-
-    fn previous_failures(&self, call: &NativeToolCall) -> Option<usize> {
-        self.failed_calls
-            .get(&ToolCallFingerprint::from(call))
-            .copied()
-    }
-
-    fn note_tool_result(&mut self, call: &NativeToolCall, failed: bool) {
-        let fingerprint = ToolCallFingerprint::from(call);
-        if failed {
-            *self.failed_calls.entry(fingerprint).or_insert(0) += 1;
-        } else {
-            self.failed_calls.remove(&fingerprint);
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ToolCallFingerprint {
-    name: String,
-    arguments: String,
-}
-
-impl From<&NativeToolCall> for ToolCallFingerprint {
-    fn from(call: &NativeToolCall) -> Self {
-        Self {
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ToolCallOutcome {
-    output: String,
-    failed: bool,
-}
-
-impl ToolCallOutcome {
-    fn success(output: String) -> Self {
-        Self {
-            output,
-            failed: false,
-        }
-    }
-
-    fn failure(output: String) -> Self {
-        Self {
-            output,
-            failed: true,
-        }
-    }
-}
-
-async fn execute_tool_call(
-    tools: &ToolMap,
-    state: &mut ToolLoopState,
-    call: &NativeToolCall,
-) -> ToolCallOutcome {
-    let outcome = if let Some(previous_failures) = state.previous_failures(call) {
-        ToolCallOutcome::failure(repeated_failed_tool_call_output(call, previous_failures))
-    } else {
-        call_tool(tools, call).await
-    };
-    state.note_tool_result(call, outcome.failed);
-    outcome
-}
-
-async fn call_tool(tools: &ToolMap, call: &NativeToolCall) -> ToolCallOutcome {
-    let Some(tool) = tools.get(&call.name) else {
-        return ToolCallOutcome::failure(unknown_tool_output(&call.name, tools));
-    };
-
-    match tool.call(call.arguments.clone()).await {
-        Ok(output) => ToolCallOutcome::success(output),
-        Err(err) => ToolCallOutcome::failure(tool_failure_output(&call.name, &err)),
-    }
-}
-
-fn tool_failure_output(name: &str, err: &anyhow::Error) -> String {
-    tool_error_output(
-        &format!("tool `{name}` failed: {err}"),
-        "Do not retry the same tool call unchanged. Fix the arguments, choose another tool, or report this blocker.",
+) -> Result<ParsedAssistant> {
+    let response =
+        super::route::transport::post_json_streaming(client, endpoint, auth, body).await?;
+    let step = super::route::transport::stream_json_sse_events(
+        response,
+        openai_chat::StreamState::default(),
+        |state, event| openai_chat::parse_stream_event(state, &event),
+        openai_chat::finish_stream,
     )
+    .await?;
+    Ok(parsed_assistant_from_step(step))
 }
 
-fn unknown_tool_output(name: &str, tools: &ToolMap) -> String {
-    tool_error_output(
-        &format!("model requested unknown tool `{name}`"),
-        &format!(
-            "Use one of the enabled tools and documented argument schemas. {}",
-            enabled_tools_hint(tools)
-        ),
+async fn stream_responses_output(
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth: &RouteAuth,
+    body: &Value,
+) -> Result<ParsedResponse> {
+    let response =
+        super::route::transport::post_json_streaming(client, endpoint, auth, body).await?;
+    let step = super::route::transport::stream_json_sse_events(
+        response,
+        openai_responses::StreamState::default(),
+        |state, event| openai_responses::parse_stream_event(state, &event),
+        openai_responses::finish_stream,
     )
+    .await?;
+    Ok(parsed_response_from_step(step))
 }
 
-fn repeated_failed_tool_call_output(call: &NativeToolCall, previous_failures: usize) -> String {
-    tool_error_output(
-        &format!(
-            "repeated identical failed tool call `{}` after {previous_failures} failure(s)",
-            call.name
-        ),
-        "Do not retry the same tool call unchanged. Change the arguments, choose another tool, or explain the blocker to the user.",
-    )
-}
+async fn stream_bedrock_assistant(
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth: &RouteAuth,
+    body: &Value,
+) -> Result<ParsedAssistant> {
+    let response =
+        super::route::transport::post_bedrock_json_streaming(client, endpoint, auth, body).await?;
+    let mut stream = response.bytes_stream();
+    let mut decoder = bedrock_event_stream::Decoder::default();
+    let mut state = bedrock_converse::StreamState::default();
+    let mut step = StepAccumulator::default();
 
-fn tool_error_output(summary: &str, recovery: &str) -> String {
-    format!("TOOL_ERROR: {summary}\nRECOVERY: {recovery}")
-}
-
-fn enabled_tools_hint(tools: &ToolMap) -> String {
-    if tools.is_empty() {
-        return "No tools are currently enabled.".to_string();
-    }
-    let mut names = tools.keys().map(String::as_str).collect::<Vec<_>>();
-    names.sort_unstable();
-    format!("Enabled tools: {}.", names.join(", "))
-}
-
-fn chat_request_body(
-    model: &str,
-    messages: &[Value],
-    tools: &[ToolSpec],
-    additional_params: Option<&Value>,
-) -> Result<Value> {
-    let mut body = Map::from_iter([
-        ("model".to_string(), json!(model)),
-        ("messages".to_string(), Value::Array(messages.to_vec())),
-    ]);
-    if !tools.is_empty() {
-        body.insert(
-            "tools".to_string(),
-            Value::Array(tools.iter().map(chat_tool_spec).collect()),
-        );
-    }
-    merge_additional_params(&mut body, additional_params)?;
-    Ok(Value::Object(body))
-}
-
-fn responses_request_body(
-    model: &str,
-    instructions: &str,
-    input: &[Value],
-    tools: &[ToolSpec],
-    additional_params: Option<&Value>,
-) -> Result<Value> {
-    let mut body = Map::from_iter([
-        ("model".to_string(), json!(model)),
-        ("input".to_string(), Value::Array(input.to_vec())),
-    ]);
-    if !instructions.trim().is_empty() {
-        body.insert("instructions".to_string(), json!(instructions));
-    }
-    if !tools.is_empty() {
-        body.insert(
-            "tools".to_string(),
-            Value::Array(tools.iter().map(responses_tool_spec).collect()),
-        );
-    }
-    merge_additional_params(&mut body, additional_params)?;
-    Ok(Value::Object(body))
-}
-
-fn merge_additional_params(
-    body: &mut Map<String, Value>,
-    additional_params: Option<&Value>,
-) -> Result<()> {
-    let Some(additional_params) = additional_params else {
-        return Ok(());
-    };
-    let Value::Object(extra) = additional_params else {
-        bail!("native OpenAI additional route params must be a JSON object");
-    };
-    for (key, value) in extra {
-        if body.contains_key(key) {
-            bail!("native OpenAI additional route param `{key}` conflicts with the request body");
-        }
-        body.insert(key.clone(), value.clone());
-    }
-    Ok(())
-}
-
-fn chat_tool_spec(spec: &ToolSpec) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": spec.name,
-            "description": spec.description,
-            "parameters": spec.parameters,
-        }
-    })
-}
-
-fn responses_tool_spec(spec: &ToolSpec) -> Value {
-    json!({
-        "type": "function",
-        "name": spec.name,
-        "description": spec.description,
-        "parameters": spec.parameters,
-    })
-}
-
-fn chat_messages_from_llm(system_prompt: &str, messages: Vec<Message>) -> Result<Vec<Value>> {
-    let mut wire = Vec::new();
-    if !system_prompt.trim().is_empty() {
-        wire.push(json!({"role": "system", "content": system_prompt}));
-    }
-    for message in messages {
-        match message {
-            Message::System { content } => wire.push(json!({"role": "system", "content": content})),
-            Message::User { content } => append_chat_user_content(&mut wire, content)?,
-            Message::Assistant { content, .. } => {
-                let assistant = assistant_parts(content)?;
-                wire.push(chat_assistant_wire_message(
-                    &assistant.text,
-                    assistant.reasoning_content.as_ref(),
-                    &assistant.tool_calls,
-                )?);
+    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+        let chunk = chunk.context("failed to read native Bedrock event-stream chunk")?;
+        for event in decoder.push_chunk(&chunk)? {
+            for event in bedrock_converse::parse_stream_event(&mut state, &event)? {
+                step.push(event)?;
             }
         }
     }
-    Ok(wire)
+    for event in bedrock_converse::finish_stream(&mut state)? {
+        step.push(event)?;
+    }
+    Ok(parsed_assistant_from_step(step))
 }
 
-fn append_chat_user_content(wire: &mut Vec<Value>, content: Vec<MessageContent>) -> Result<()> {
-    let mut text = Vec::new();
-    for item in content {
-        match item {
-            MessageContent::Text { text: value } => text.push(value),
-            MessageContent::ToolResult {
-                id,
-                call_id,
-                content,
-            } => {
-                if !text.is_empty() {
-                    wire.push(json!({"role": "user", "content": text.join("\n")}));
-                    text.clear();
-                }
-                wire.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call_id.unwrap_or(id),
-                    "content": tool_result_text(content)?,
-                }));
-            }
-            MessageContent::Opaque { value } => {
-                text.push(serde_json::to_string(&value)?);
-            }
-            MessageContent::ToolCall { .. } => bail!("user message cannot contain a tool call"),
-            MessageContent::Reasoning { .. } => bail!("user message cannot contain reasoning"),
-        }
-    }
-    if !text.is_empty() {
-        wire.push(json!({"role": "user", "content": text.join("\n")}));
-    }
-    Ok(())
-}
-
-fn responses_input_from_llm(messages: Vec<Message>) -> Result<Vec<Value>> {
-    let mut input = Vec::new();
-    for message in messages {
-        match message {
-            Message::System { content } => {
-                input.push(response_message("system", "input_text", content))
-            }
-            Message::User { content } => append_responses_user_content(&mut input, content)?,
-            Message::Assistant { content, .. } => {
-                append_responses_assistant_content(&mut input, content)?
-            }
-        }
-    }
-    Ok(input)
-}
-
-fn append_responses_user_content(
-    input: &mut Vec<Value>,
-    content: Vec<MessageContent>,
-) -> Result<()> {
-    let mut text = Vec::new();
-    for item in content {
-        match item {
-            MessageContent::Text { text: value } => text.push(value),
-            MessageContent::ToolResult {
-                id,
-                call_id,
-                content,
-            } => {
-                if !text.is_empty() {
-                    input.push(response_message("user", "input_text", text.join("\n")));
-                    text.clear();
-                }
-                input.push(json!({
-                    "type": "function_call_output",
-                    "call_id": call_id.unwrap_or(id),
-                    "output": tool_result_text(content)?,
-                }));
-            }
-            MessageContent::Opaque { value } => text.push(serde_json::to_string(&value)?),
-            MessageContent::ToolCall { .. } => bail!("user message cannot contain a tool call"),
-            MessageContent::Reasoning { .. } => bail!("user message cannot contain reasoning"),
-        }
-    }
-    if !text.is_empty() {
-        input.push(response_message("user", "input_text", text.join("\n")));
-    }
-    Ok(())
-}
-
-fn append_responses_assistant_content(
-    input: &mut Vec<Value>,
-    content: Vec<MessageContent>,
-) -> Result<()> {
-    let assistant = assistant_parts(content)?;
-    append_responses_assistant_output(input, &assistant.text, &assistant.tool_calls);
-    Ok(())
-}
-
-fn append_responses_assistant_output(
-    input: &mut Vec<Value>,
-    text: &str,
-    tool_calls: &[NativeToolCall],
-) {
-    if !text.is_empty() {
-        input.push(response_message(
-            "assistant",
-            "output_text",
-            text.to_string(),
-        ));
-    }
-    for call in tool_calls {
-        input.push(responses_function_call(call));
+fn parsed_assistant_from_step(step: StepAccumulator) -> ParsedAssistant {
+    ParsedAssistant {
+        text: step.text,
+        reasoning_content: step.reasoning_content,
+        tool_calls: step.tool_calls,
     }
 }
 
-fn responses_function_call(call: &NativeToolCall) -> Value {
-    json!({
-        "type": "function_call",
-        "call_id": call.call_id,
-        "name": call.name,
-        "arguments": call.arguments,
-    })
-}
-
-fn response_message(role: &str, content_type: &str, text: String) -> Value {
-    json!({
-        "role": role,
-        "content": [{"type": content_type, "text": text}],
-    })
-}
-
-#[derive(Debug, Clone)]
-struct NativeAssistantContent {
-    text: String,
-    reasoning_content: Option<Value>,
-    tool_calls: Vec<NativeToolCall>,
-}
-
-fn assistant_parts(content: Vec<MessageContent>) -> Result<NativeAssistantContent> {
-    let mut text = Vec::new();
-    let mut reasoning_content = None;
-    let mut tool_calls = Vec::new();
-    for item in content {
-        match item {
-            MessageContent::Text { text: value } => text.push(value),
-            MessageContent::ToolCall {
-                id,
-                call_id,
-                name,
-                arguments,
-                ..
-            } => {
-                let arguments = serde_json::to_string(&arguments)?;
-                tool_calls.push(NativeToolCall {
-                    call_id: call_id.unwrap_or_else(|| id.clone()),
-                    id,
-                    name,
-                    arguments,
-                });
-            }
-            MessageContent::Reasoning { value } => {
-                reasoning_content.get_or_insert(value);
-            }
-            MessageContent::Opaque { value } => text.push(serde_json::to_string(&value)?),
-            MessageContent::ToolResult { .. } => {
-                bail!("assistant message cannot contain a tool result")
-            }
-        }
+fn parsed_response_from_step(step: StepAccumulator) -> ParsedResponse {
+    ParsedResponse {
+        text: step.text,
+        tool_calls: step.tool_calls,
     }
-    Ok(NativeAssistantContent {
-        text: text.join("\n"),
-        reasoning_content,
-        tool_calls,
-    })
-}
-
-fn chat_assistant_wire_message(
-    text: &str,
-    reasoning_content: Option<&Value>,
-    tool_calls: &[NativeToolCall],
-) -> Result<Value> {
-    let mut message = Map::from_iter([("role".to_string(), json!("assistant"))]);
-    if !text.is_empty() || tool_calls.is_empty() {
-        message.insert("content".to_string(), json!(text));
-    } else {
-        message.insert("content".to_string(), Value::Null);
-    }
-    if let Some(reasoning_content) = reasoning_content {
-        message.insert("reasoning_content".to_string(), reasoning_content.clone());
-    }
-    if !tool_calls.is_empty() {
-        message.insert(
-            "tool_calls".to_string(),
-            Value::Array(
-                tool_calls
-                    .iter()
-                    .map(|call| {
-                        json!({
-                            "id": call.call_id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": call.arguments,
-                            }
-                        })
-                    })
-                    .collect(),
-            ),
-        );
-    }
-    Ok(Value::Object(message))
 }
 
 fn assistant_message_from_calls(
@@ -686,6 +327,7 @@ fn assistant_message_from_calls(
     if !text.is_empty() {
         content.push(MessageContent::Text {
             text: text.to_string(),
+            cache: None,
         });
     }
     for call in tool_calls {
@@ -707,6 +349,7 @@ fn assistant_message_from_calls(
     if content.is_empty() {
         content.push(MessageContent::Text {
             text: String::new(),
+            cache: None,
         });
     }
     Ok(Message::Assistant { id: None, content })
@@ -718,37 +361,9 @@ fn tool_result_message(call: &NativeToolCall, output: String) -> Message {
             id: format!("result-{}", call.call_id),
             call_id: Some(call.call_id.clone()),
             content: vec![ToolResultContent::Text { text: output }],
+            cache: None,
         }],
     }
-}
-
-fn chat_tool_result_wire_message(call: &NativeToolCall, output: &str) -> Value {
-    json!({
-        "role": "tool",
-        "tool_call_id": call.call_id,
-        "content": output,
-    })
-}
-
-fn responses_tool_result_input(call: &NativeToolCall, output: &str) -> Value {
-    json!({
-        "type": "function_call_output",
-        "call_id": call.call_id,
-        "output": output,
-    })
-}
-
-fn tool_result_text(content: Vec<ToolResultContent>) -> Result<String> {
-    content
-        .into_iter()
-        .map(|item| match item {
-            ToolResultContent::Text { text } => Ok(text),
-            ToolResultContent::Opaque { value } => {
-                serde_json::to_string(&value).map_err(Into::into)
-            }
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(|items| items.join("\n"))
 }
 
 #[derive(Debug, Clone)]
@@ -758,134 +373,17 @@ struct ParsedAssistant {
     tool_calls: Vec<NativeToolCall>,
 }
 
-fn parse_chat_assistant(value: &Value) -> Result<ParsedAssistant> {
-    let message = value
-        .pointer("/choices/0/message")
-        .ok_or_else(|| anyhow!("native OpenAI chat response did not include a message"))?;
-    let text = message
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let reasoning_content = message
-        .get("reasoning_content")
-        .filter(|value| !value.is_null())
-        .cloned();
-    let tool_calls = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(chat_tool_call)
-        .collect::<Result<Vec<_>>>()?;
-    Ok(ParsedAssistant {
-        text,
-        reasoning_content,
-        tool_calls,
-    })
-}
-
-fn chat_tool_call(value: &Value) -> Result<NativeToolCall> {
-    let id = required_string(value, "id", "chat tool call")?;
-    let function = value
-        .get("function")
-        .ok_or_else(|| anyhow!("chat tool call `{id}` did not include a function"))?;
-    Ok(NativeToolCall {
-        id: id.clone(),
-        call_id: id,
-        name: required_string(function, "name", "chat tool call function")?,
-        arguments: string_or_json(function.get("arguments")).unwrap_or_else(|| "{}".to_string()),
-    })
-}
-
 #[derive(Debug, Clone)]
 struct ParsedResponse {
     text: String,
     tool_calls: Vec<NativeToolCall>,
 }
 
-fn parse_responses_output(value: &Value) -> Result<ParsedResponse> {
-    let mut text = value
-        .get("output_text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let mut tool_calls = Vec::new();
-
-    for item in value
-        .get("output")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        match item.get("type").and_then(Value::as_str) {
-            Some("message") if text.is_empty() => {
-                text = response_message_text(item)?;
-            }
-            Some("function_call") => tool_calls.push(response_tool_call(item)?),
-            _ => {}
-        }
-    }
-
-    Ok(ParsedResponse { text, tool_calls })
-}
-
-fn response_message_text(item: &Value) -> Result<String> {
-    item.get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|content| {
-            matches!(
-                content.get("type").and_then(Value::as_str),
-                Some("output_text") | Some("text")
-            )
-        })
-        .map(|content| {
-            content
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| anyhow!("Responses message text item did not include text"))
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(|items| items.join("\n"))
-}
-
-fn response_tool_call(item: &Value) -> Result<NativeToolCall> {
-    let id = required_string(item, "id", "Responses function call")?;
-    Ok(NativeToolCall {
-        id: id.clone(),
-        call_id: item
-            .get("call_id")
-            .and_then(Value::as_str)
-            .unwrap_or(&id)
-            .to_string(),
-        name: required_string(item, "name", "Responses function call")?,
-        arguments: string_or_json(item.get("arguments")).unwrap_or_else(|| "{}".to_string()),
-    })
-}
-
-fn required_string(value: &Value, key: &str, context: &str) -> Result<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("{context} did not include `{key}`"))
-}
-
-fn string_or_json(value: Option<&Value>) -> Option<String> {
-    match value? {
-        Value::String(value) => Some(value.clone()),
-        value => Some(value.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+
+    use crate::llm::{GenerationOptions, ToolChoice, ToolSpec};
 
     fn read_tool_spec() -> ToolSpec {
         ToolSpec {
@@ -896,107 +394,8 @@ mod tests {
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"]
             }),
+            cache: None,
         }
-    }
-
-    struct FailingTool;
-
-    impl LlmTool for FailingTool {
-        fn name(&self) -> &str {
-            "fail"
-        }
-
-        fn call<'a>(&'a self, _args: String) -> crate::llm::LlmToolFuture<'a> {
-            Box::pin(async move { Err(anyhow!("boom")) })
-        }
-    }
-
-    #[tokio::test]
-    async fn tool_call_failure_is_returned_to_model_as_tool_output() {
-        let tools: ToolMap = HashMap::from([(
-            "fail".to_string(),
-            Box::new(FailingTool) as Box<dyn LlmTool>,
-        )]);
-        let call = NativeToolCall {
-            id: "call-1".to_string(),
-            call_id: "call-1".to_string(),
-            name: "fail".to_string(),
-            arguments: "{}".to_string(),
-        };
-
-        let output = call_tool(&tools, &call).await.output;
-
-        assert!(output.contains("TOOL_ERROR: tool `fail` failed: boom"));
-        assert!(output.contains("RECOVERY:"));
-        assert!(output.contains("Do not retry the same tool call unchanged"));
-    }
-
-    #[tokio::test]
-    async fn unknown_tool_is_returned_to_model_with_enabled_tool_hint() {
-        let tools: ToolMap = HashMap::from([(
-            "fail".to_string(),
-            Box::new(FailingTool) as Box<dyn LlmTool>,
-        )]);
-        let call = NativeToolCall {
-            id: "call-1".to_string(),
-            call_id: "call-1".to_string(),
-            name: "missing".to_string(),
-            arguments: "{}".to_string(),
-        };
-
-        let output = call_tool(&tools, &call).await.output;
-
-        assert!(output.contains("TOOL_ERROR: model requested unknown tool `missing`"));
-        assert!(output.contains("RECOVERY:"));
-        assert!(output.contains("Enabled tools: fail."));
-    }
-
-    #[tokio::test]
-    async fn repeated_identical_failed_tool_call_is_not_reinvoked() {
-        let tools: ToolMap = HashMap::from([(
-            "fail".to_string(),
-            Box::new(FailingTool) as Box<dyn LlmTool>,
-        )]);
-        let call = NativeToolCall {
-            id: "call-1".to_string(),
-            call_id: "call-1".to_string(),
-            name: "fail".to_string(),
-            arguments: "{\"path\":\"missing\"}".to_string(),
-        };
-        let mut state = ToolLoopState::default();
-
-        let first = execute_tool_call(&tools, &mut state, &call).await;
-        let second = execute_tool_call(&tools, &mut state, &call).await;
-
-        assert!(first.output.contains("tool `fail` failed: boom"));
-        assert!(
-            second
-                .output
-                .contains("repeated identical failed tool call `fail` after 1 failure(s)")
-        );
-        assert!(second.output.contains("RECOVERY:"));
-    }
-
-    #[test]
-    fn tool_only_churn_guard_fails_before_default_round_budget() {
-        let call = NativeToolCall {
-            id: "call-1".to_string(),
-            call_id: "call-1".to_string(),
-            name: "read".to_string(),
-            arguments: "{}".to_string(),
-        };
-        let mut state = ToolLoopState::default();
-
-        for _ in 0..TOOL_ONLY_CHURN_LIMIT {
-            state
-                .note_assistant_turn("", std::slice::from_ref(&call))
-                .unwrap();
-        }
-        let err = state
-            .note_assistant_turn("", std::slice::from_ref(&call))
-            .unwrap_err();
-
-        assert!(err.to_string().contains("no text progress"));
     }
 
     #[test]
@@ -1026,8 +425,8 @@ mod tests {
         };
         let output = "TOOL_ERROR: blocked\nRECOVERY: choose another tool";
 
-        let chat = chat_tool_result_wire_message(&call, output);
-        let responses = responses_tool_result_input(&call, output);
+        let chat = openai_chat::tool_result_wire_message(&call, output);
+        let responses = openai_responses::tool_result_input(&call, output);
         let transcript = tool_result_message(&call, output.to_string());
 
         assert_eq!(chat["content"], json!(output));
@@ -1068,7 +467,7 @@ mod tests {
 
     #[test]
     fn chat_request_serializes_openai_tool_golden() {
-        let messages = chat_messages_from_llm(
+        let messages = openai_chat::messages_from_llm(
             "system",
             vec![
                 Message::user_text("inspect"),
@@ -1090,15 +489,18 @@ mod tests {
                         content: vec![ToolResultContent::Text {
                             text: "ok".to_string(),
                         }],
+                        cache: None,
                     }],
                 },
             ],
         )
         .unwrap();
-        let body = chat_request_body(
+        let body = openai_chat::request_body(
             "gpt-4.1-mini",
             &messages,
             &[read_tool_spec()],
+            None,
+            None,
             Some(&json!({"reasoning_effort": "low"})),
         )
         .unwrap();
@@ -1136,6 +538,10 @@ mod tests {
   ],
   "model": "gpt-4.1-mini",
   "reasoning_effort": "low",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
   "tools": [
     {
       "function": {
@@ -1161,84 +567,204 @@ mod tests {
     }
 
     #[test]
-    fn chat_round_trips_deepseek_reasoning_content_for_tool_calls() {
-        let parsed = parse_chat_assistant(&json!({
+    fn chat_request_lowers_opencode_tool_choice_and_generation_options() {
+        let messages =
+            openai_chat::messages_from_llm("system", vec![Message::user_text("inspect")]).unwrap();
+
+        let body = openai_chat::request_body(
+            "gpt-4.1-mini",
+            &messages,
+            &[read_tool_spec()],
+            Some(&ToolChoice::Tool {
+                name: "read".to_string(),
+            }),
+            Some(&GenerationOptions {
+                max_tokens: Some(1000),
+                temperature: Some(0.2),
+                top_p: Some(0.9),
+                frequency_penalty: Some(0.1),
+                presence_penalty: Some(0.3),
+                seed: Some(42),
+                stop: Some(vec!["END".to_string()]),
+                ..GenerationOptions::default()
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type": "function", "function": {"name": "read"}})
+        );
+        assert_eq!(body["max_tokens"], json!(1000));
+        assert_eq!(body["temperature"], json!(0.2));
+        assert_eq!(body["top_p"], json!(0.9));
+        assert_eq!(body["frequency_penalty"], json!(0.1));
+        assert_eq!(body["presence_penalty"], json!(0.3));
+        assert_eq!(body["seed"], json!(42));
+        assert_eq!(body["stop"], json!(["END"]));
+    }
+
+    #[test]
+    fn chat_stream_accumulates_tool_call_argument_deltas() {
+        let mut state = openai_chat::StreamState::default();
+        let first = openai_chat::parse_stream_event(
+            &mut state,
+            &json!({
+                "choices": [{"delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "function": {"name": "read", "arguments": "{\"path\":"}
+                }]}}]
+            }),
+        )
+        .unwrap();
+        let second = openai_chat::parse_stream_event(&mut state, &json!({
             "choices": [{
-                "message": {
-                    "content": null,
-                    "reasoning_content": "thinking before tool call",
-                    "tool_calls": [{
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"}
-                    }]
-                }
+                "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"README.md\"}"}}]},
+                "finish_reason": "tool_calls"
             }]
         }))
         .unwrap();
+        let mut step = StepAccumulator::default();
+        let finished = openai_chat::finish_stream(&mut state).unwrap();
+        for event in first.into_iter().chain(second).chain(finished) {
+            step.push(event).unwrap();
+        }
+        let parsed = parsed_assistant_from_step(step);
+        assert_eq!(parsed.tool_calls[0].call_id, "call-1");
         assert_eq!(
-            parsed.reasoning_content.as_ref(),
-            Some(&json!("thinking before tool call"))
+            parsed.tool_calls[0].arguments_value().unwrap(),
+            json!({"path": "README.md"})
         );
 
-        let transcript = assistant_message_from_calls(
-            &parsed.text,
-            parsed.reasoning_content.as_ref(),
-            &parsed.tool_calls,
-        )
-        .unwrap();
+        let transcript =
+            assistant_message_from_calls(&parsed.text, None, &parsed.tool_calls).unwrap();
         let Message::Assistant { content, .. } = transcript else {
             panic!("expected assistant transcript message");
         };
         assert!(matches!(
             &content[0],
-            MessageContent::Reasoning { value } if value == &json!("thinking before tool call")
+            MessageContent::ToolCall { arguments, .. } if arguments == &json!({"path": "README.md"})
         ));
+    }
 
-        let wire = chat_assistant_wire_message(
+    #[test]
+    fn chat_stream_preserves_reasoning_content_for_tool_call_echo() {
+        let mut state = openai_chat::StreamState::default();
+        let events = [
+            json!({
+                "choices": [{"delta": {"reasoning_content": "thinking "}}]
+            }),
+            json!({
+                "choices": [{"delta": {"reasoning_content": "more"}}]
+            }),
+            json!({
+                "choices": [{"delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "function": {"name": "echo", "arguments": "{}"}
+                }]}, "finish_reason": "tool_calls"}]
+            }),
+        ];
+        let mut step = StepAccumulator::default();
+        for event in events {
+            for parsed in openai_chat::parse_stream_event(&mut state, &event).unwrap() {
+                step.push(parsed).unwrap();
+            }
+        }
+        for parsed in openai_chat::finish_stream(&mut state).unwrap() {
+            step.push(parsed).unwrap();
+        }
+
+        let parsed = parsed_assistant_from_step(step);
+        assert_eq!(parsed.reasoning_content, Some(json!("thinking more")));
+        let wire = openai_chat::assistant_wire_message(
             &parsed.text,
             parsed.reasoning_content.as_ref(),
             &parsed.tool_calls,
         )
         .unwrap();
-        assert_eq!(
-            wire["reasoning_content"],
-            json!("thinking before tool call")
+        assert_eq!(wire["reasoning_content"], json!("thinking more"));
+    }
+
+    #[test]
+    fn chat_stream_defers_finish_until_usage_arrives_after_finish_reason() {
+        let mut state = openai_chat::StreamState::default();
+        let mut step = StepAccumulator::default();
+
+        for event in openai_chat::parse_stream_event(
+            &mut state,
+            &json!({
+                "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}],
+                "usage": null
+            }),
+        )
+        .unwrap()
+        {
+            step.push(event).unwrap();
+        }
+        assert_eq!(step.text, "hi");
+        assert_eq!(step.finish_reason, None);
+
+        assert!(
+            openai_chat::parse_stream_event(
+                &mut state,
+                &json!({
+                    "choices": [],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+                }),
+            )
+            .unwrap()
+            .is_empty()
         );
-        assert_eq!(wire["tool_calls"][0]["id"], json!("call-1"));
+        for event in openai_chat::finish_stream(&mut state).unwrap() {
+            step.push(event).unwrap();
+        }
+
+        assert_eq!(
+            step.finish_reason,
+            Some(crate::llm::schema::FinishReason::Stop)
+        );
+        assert_eq!(step.usage.unwrap().total_tokens, Some(12));
     }
 
     #[test]
     fn responses_request_serializes_function_call_output_golden() {
-        let input = responses_input_from_llm(vec![
-            Message::user_text("inspect"),
-            Message::Assistant {
-                id: None,
-                content: vec![MessageContent::ToolCall {
-                    id: "fc_1".to_string(),
-                    call_id: Some("call-1".to_string()),
-                    name: "read".to_string(),
-                    arguments: json!({"path": "README.md"}),
-                    signature: None,
-                    additional_params: None,
-                }],
-            },
-            Message::User {
-                content: vec![MessageContent::ToolResult {
-                    id: "result-1".to_string(),
-                    call_id: Some("call-1".to_string()),
-                    content: vec![ToolResultContent::Text {
-                        text: "ok".to_string(),
-                    }],
-                }],
-            },
-        ])
-        .unwrap();
-        let body = responses_request_body(
-            "gpt-5.1",
+        let input = openai_responses::input_from_llm(
             "system",
+            vec![
+                Message::user_text("inspect"),
+                Message::Assistant {
+                    id: None,
+                    content: vec![MessageContent::ToolCall {
+                        id: "fc_1".to_string(),
+                        call_id: Some("call-1".to_string()),
+                        name: "read".to_string(),
+                        arguments: json!({"path": "README.md"}),
+                        signature: None,
+                        additional_params: None,
+                    }],
+                },
+                Message::User {
+                    content: vec![MessageContent::ToolResult {
+                        id: "result-1".to_string(),
+                        call_id: Some("call-1".to_string()),
+                        content: vec![ToolResultContent::Text {
+                            text: "ok".to_string(),
+                        }],
+                        cache: None,
+                    }],
+                },
+            ],
+        )
+        .unwrap();
+        let body = openai_responses::request_body(
+            "gpt-5.1",
             &input,
             &[read_tool_spec()],
+            None,
+            None,
             Some(&json!({"reasoning": {"effort": "low"}})),
         )
         .unwrap();
@@ -1246,6 +772,10 @@ mod tests {
         let actual = body;
         let expected = r#"{
   "input": [
+    {
+      "content": "system",
+      "role": "system"
+    },
     {
       "content": [
         {
@@ -1267,11 +797,11 @@ mod tests {
       "type": "function_call_output"
     }
   ],
-  "instructions": "system",
   "model": "gpt-5.1",
   "reasoning": {
     "effort": "low"
   },
+  "stream": true,
   "tools": [
     {
       "description": "Read a file",
@@ -1295,40 +825,157 @@ mod tests {
     }
 
     #[test]
-    fn parses_chat_and_responses_tool_calls() {
-        let chat = parse_chat_assistant(&json!({
-            "choices": [{
-                "message": {
-                    "content": null,
-                    "tool_calls": [{
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"}
-                    }]
-                }
-            }]
-        }))
-        .unwrap();
-        assert_eq!(chat.text, "");
-        assert_eq!(chat.tool_calls[0].call_id, "call-1");
-        assert_eq!(
-            chat.tool_calls[0].arguments_value().unwrap(),
-            json!({"path": "README.md"})
-        );
+    fn responses_request_lowers_opencode_tool_choice_and_generation_options() {
+        let input = openai_responses::input_from_llm("system", vec![Message::user_text("inspect")])
+            .unwrap();
 
-        let responses = parse_responses_output(&json!({
-            "id": "resp_1",
-            "output": [
-                {"type": "function_call", "id": "fc_1", "call_id": "call-2", "name": "read", "arguments": "{\"path\":\"Cargo.toml\"}"}
-            ]
-        }))
+        let body = openai_responses::request_body(
+            "gpt-5.1",
+            &input,
+            &[read_tool_spec()],
+            Some(&ToolChoice::Tool {
+                name: "read".to_string(),
+            }),
+            Some(&GenerationOptions {
+                max_tokens: Some(1000),
+                temperature: Some(0.2),
+                top_p: Some(0.9),
+                ..GenerationOptions::default()
+            }),
+            None,
+        )
         .unwrap();
-        assert_eq!(responses.tool_calls[0].call_id, "call-2");
+
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type": "function", "name": "read"})
+        );
+        assert_eq!(body["max_output_tokens"], json!(1000));
+        assert_eq!(body["temperature"], json!(0.2));
+        assert_eq!(body["top_p"], json!(0.9));
+        assert!(body.get("frequency_penalty").is_none());
     }
 
     #[test]
-    fn rejects_invalid_native_base_url() {
-        let err = endpoint_url(Some("file:///tmp/socket"), "responses").unwrap_err();
-        assert!(err.to_string().contains("must be http or https"));
+    fn responses_stream_parses_text_and_tool_calls() {
+        let mut state = openai_responses::StreamState::default();
+        let events = [
+            json!({"type": "response.output_text.delta", "delta": "hello"}),
+            json!({"type": "response.output_item.added", "item": {"type": "function_call", "id": "fc_1", "call_id": "call-2", "name": "read", "arguments": ""}}),
+            json!({"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "{\"path\":"}),
+            json!({"type": "response.output_item.done", "item": {"type": "function_call", "id": "fc_1", "call_id": "call-2", "name": "read", "arguments": "{\"path\":\"Cargo.toml\"}"}}),
+            json!({"type": "response.completed", "response": {"usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}}),
+        ];
+        let mut step = StepAccumulator::default();
+        for event in events {
+            for parsed in openai_responses::parse_stream_event(&mut state, &event).unwrap() {
+                step.push(parsed).unwrap();
+            }
+        }
+        let response = parsed_response_from_step(step);
+        assert_eq!(response.text, "hello");
+        assert_eq!(response.tool_calls[0].call_id, "call-2");
+        assert_eq!(
+            response.tool_calls[0].arguments_value().unwrap(),
+            json!({"path": "Cargo.toml"})
+        );
+    }
+
+    #[test]
+    fn responses_stream_accepts_argument_delta_before_item_start() {
+        let mut state = openai_responses::StreamState::default();
+        let events = [
+            json!({"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "{\"path\":"}),
+            json!({"type": "response.output_item.added", "item": {"type": "function_call", "id": "fc_1", "call_id": "call-2", "name": "read", "arguments": ""}}),
+            json!({"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "\"Cargo.toml\"}"}),
+            json!({"type": "response.output_item.done", "item": {"type": "function_call", "id": "fc_1", "call_id": "call-2", "name": "read", "arguments": "{\"path\":\"Cargo.toml\"}"}}),
+            json!({"type": "response.completed", "response": {"usage": {"input_tokens": 10, "output_tokens": 5}}}),
+        ];
+        let mut step = StepAccumulator::default();
+
+        for event in events {
+            for parsed in openai_responses::parse_stream_event(&mut state, &event).unwrap() {
+                step.push(parsed).unwrap();
+            }
+        }
+
+        let response = parsed_response_from_step(step);
+        assert_eq!(response.tool_calls[0].call_id, "call-2");
+        assert_eq!(
+            response.tool_calls[0].arguments_value().unwrap(),
+            json!({"path": "Cargo.toml"})
+        );
+    }
+
+    #[test]
+    fn responses_stream_accepts_done_without_added_item() {
+        let mut state = openai_responses::StreamState::default();
+        let events = openai_responses::parse_stream_event(
+            &mut state,
+            &json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call-2",
+                    "name": "read",
+                    "arguments": "{\"path\":\"Cargo.toml\"}"
+                }
+            }),
+        )
+        .unwrap();
+        let mut step = StepAccumulator::default();
+
+        for event in events {
+            step.push(event).unwrap();
+        }
+
+        let response = parsed_response_from_step(step);
+        assert_eq!(response.tool_calls[0].call_id, "call-2");
+        assert_eq!(
+            response.tool_calls[0].arguments_value().unwrap(),
+            json!({"path": "Cargo.toml"})
+        );
+    }
+
+    #[test]
+    fn responses_hosted_tools_emit_provider_executed_call_and_result_without_dispatch() {
+        let mut state = openai_responses::StreamState::default();
+        let events = openai_responses::parse_stream_event(
+            &mut state,
+            &json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "action": {"query": "rust"},
+                    "status": "completed",
+                    "results": [{"title": "Rust"}]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            crate::llm::schema::LlmEvent::ToolCall { call, provider_executed: true }
+                if call.call_id == "ws_1"
+                    && call.name == "web_search"
+                    && call.arguments_value().unwrap() == json!({"query": "rust"})
+        ));
+        assert!(matches!(
+            &events[1],
+            crate::llm::schema::LlmEvent::ToolResult { call_id, name, provider_executed: true, output }
+                if call_id == "ws_1"
+                    && name == "web_search"
+                    && output["type"] == json!("json")
+        ));
+
+        let mut step = StepAccumulator::default();
+        for event in events {
+            step.push(event).unwrap();
+        }
+        assert!(step.tool_calls.is_empty());
     }
 }

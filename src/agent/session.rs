@@ -1,5 +1,4 @@
 use anyhow::Result;
-use backon::Retryable;
 use chrono::Utc;
 
 use super::compaction::count_tokens;
@@ -12,7 +11,6 @@ pub use storage::load_saved;
 use crate::llm::Message;
 use crate::model;
 use crate::tools::{TodoItem, TodoStatus, ToolContext, ToolPolicy};
-use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 512;
@@ -232,41 +230,16 @@ pub async fn run_prompt_once_no_tools(
             token_count_text(tokens)
         ));
     }
-    let response = retry_transient(|| {
-        model::exec_chat(
-            &model_spec,
-            system_prompt,
-            vec![Message::user_text(prompt)],
-            Vec::new(),
-            Vec::new(),
-            config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS),
-        )
-    })
+    let response = model::exec_chat(
+        &model_spec,
+        system_prompt,
+        vec![Message::user_text(prompt)],
+        Vec::new(),
+        Vec::new(),
+        config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS),
+    )
     .await?;
     Ok(response.output)
-}
-
-async fn retry_transient<T, Fut, F>(operation: F) -> Result<T>
-where
-    Fut: Future<Output = Result<T>>,
-    F: FnMut() -> Fut,
-{
-    retry_transient_when(operation, || true).await
-}
-
-async fn retry_transient_when<T, Fut, F, R>(operation: F, mut retry_allowed: R) -> Result<T>
-where
-    Fut: Future<Output = Result<T>>,
-    F: FnMut() -> Fut,
-    R: FnMut() -> bool,
-{
-    operation
-        .retry(super::retry::llm_backoff())
-        .when(move |err| retry_allowed() && super::retry::is_transient_error(err))
-        .notify(|_, dur| {
-            crate::ui::err_line(format_args!("retrying in {:.0}s…", dur.as_secs_f64()))
-        })
-        .await
 }
 
 async fn run_prompt_with_policy(
@@ -296,23 +269,13 @@ async fn run_prompt_with_policy(
     if !crate::ui::is_quiet() {
         crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
     }
-    let response = retry_transient_when(
-        || {
-            model::exec_chat(
-                &model_spec,
-                &preamble,
-                messages.clone(),
-                tool_specs.clone(),
-                crate::tools::llm_tools(tool_context.clone()),
-                max_tool_rounds,
-            )
-        },
-        || {
-            !tool_context
-                .lock()
-                .expect("tool context mutex poisoned")
-                .external_side_effects
-        },
+    let response = model::exec_chat(
+        &model_spec,
+        &preamble,
+        messages,
+        tool_specs,
+        crate::tools::llm_tools(tool_context.clone()),
+        max_tool_rounds,
     )
     .await?;
     session.todos = tool_context

@@ -1,3 +1,10 @@
+//! Transient-error detection and jittered exponential backoff for
+//! LLM API retries.
+//!
+//! The native backend applies this at each provider HTTP/streaming call before
+//! local tool execution for that turn. The backoff budget is small
+//! (4 attempts, 1s–60s range) with jitter.
+
 use backon::ExponentialBuilder;
 
 const TRANSIENT_RETRY_ATTEMPTS: usize = 4;

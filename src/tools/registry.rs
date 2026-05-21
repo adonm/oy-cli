@@ -96,7 +96,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "webfetch",
-        description: "Fetch public web pages/files. Follows public redirects by default; blocks localhost/private IPs and sensitive headers.",
+        description: "Fetch a public web page and return its content as markdown, text, HTML, or XML. Minimal HTTP-only build; blocks localhost/private IPs.",
         gate: ToolGate::Network,
         schema: super::schema::schema_webfetch,
         summary: preview::summary_webfetch,
@@ -143,6 +143,7 @@ pub(super) fn spec(def: &ToolDef) -> ToolSpec {
         name: def.name.to_string(),
         description: def.description.to_string(),
         parameters: (def.schema)(),
+        cache: None,
     }
 }
 

@@ -1,3 +1,9 @@
+//! Session transcripts stored as [`Message`] sequences with token
+//! estimation, context-budget tracking, and compaction signalling.
+//!
+//! [`Transcript`] is the persisted unit; [`ContextStatus`] and
+//! [`ContextBudgetExceeded`] provide budget feedback to the session loop.
+
 use serde::{Deserialize, Serialize};
 
 use super::compaction::{compact_text, count_tokens, message_content_text};
@@ -223,5 +229,5 @@ fn is_user_prompt(message: &Message) -> bool {
     };
     content
         .iter()
-        .any(|item| matches!(item, MessageContent::Text { text } if !text.trim().is_empty()))
+        .any(|item| matches!(item, MessageContent::Text { text, .. } if !text.trim().is_empty()))
 }

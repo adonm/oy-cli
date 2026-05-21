@@ -1,3 +1,10 @@
+//! OpenCode model metadata queries: token limits, reasoning capability,
+//! and supported effort levels.
+//!
+//! This is the only source of OpenCode verbose model metadata; do not
+//! add local provider/model registries. See [`AdapterModels`] for the
+//! parsed listing shape and the free functions for cached lookups.
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +43,7 @@ pub(crate) struct OpenCodeModelListing {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OpenCodeModel {
-    #[serde(skip)]
+    #[serde(default)]
     spec: String,
     #[serde(default)]
     id: String,
@@ -78,15 +85,28 @@ pub(crate) struct OpenCodeModelLimit {
     pub input: Option<usize>,
     /// Max output tokens.
     #[serde(default)]
-    #[allow(dead_code)]
     pub output: usize,
 }
 
 // Value type is unused; we only inspect variant keys.
 type OpenCodeVariant = serde_json::Value;
 
+use std::sync::{LazyLock, RwLock};
+
+static MODELS_CACHE: LazyLock<RwLock<Option<OpenCodeModelListing>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+pub(crate) fn populate_cache(listing: OpenCodeModelListing) {
+    let mut cache = MODELS_CACHE.write().unwrap();
+    *cache = Some(listing);
+}
+
 impl OpenCodeModelListing {
     pub(crate) fn load() -> Result<Self> {
+        if let Some(cached) = MODELS_CACHE.read().unwrap().as_ref() {
+            return Ok(cached.clone());
+        }
+
         let output = std::process::Command::new("opencode")
             .arg("models")
             .arg("--verbose")
@@ -98,7 +118,9 @@ impl OpenCodeModelListing {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        parse_verbose(&String::from_utf8_lossy(&output.stdout))
+        let listing = parse_verbose(&String::from_utf8_lossy(&output.stdout))?;
+        populate_cache(listing.clone());
+        Ok(listing)
     }
 
     pub(crate) fn find(&self, provider: &str, model: &str) -> Option<&OpenCodeModel> {
@@ -205,16 +227,16 @@ impl OpenCodeModel {
         })
     }
 
+    pub(crate) fn is_bedrock_api(&self) -> bool {
+        self.api.npm.as_deref() == Some("@ai-sdk/amazon-bedrock")
+            || matches!(self.provider_id.as_str(), "bedrock" | "amazon-bedrock")
+    }
+
     fn is_supported_by_native_openai(&self) -> bool {
-        // Explicitly ignore bedrock/vertexai regardless of metadata;
-        // those providers were removed from oy.
-        if matches!(
-            self.provider_id.as_str(),
-            "bedrock" | "amazon-bedrock" | "vertexai"
-        ) {
+        if self.provider_id == "vertexai" {
             return false;
         }
-        self.is_openai_compatible_api()
+        self.is_openai_compatible_api() || self.is_bedrock_api()
     }
 }
 
@@ -283,15 +305,6 @@ pub(crate) fn find(provider: &str, model: &str) -> Option<OpenCodeModel> {
         .cloned()
 }
 
-/// Look up reasoning metadata for a model from OpenCode.
-/// Returns `None` when the listing can't be loaded or the model isn't found.
-pub(crate) fn lookup_reasoning(provider: &str, model: &str) -> Option<OpenCodeModel> {
-    OpenCodeModelListing::load()
-        .ok()?
-        .find(provider, model)
-        .cloned()
-}
-
 /// Look up token limits for a model from OpenCode.
 /// Returns `None` when the listing can't be loaded or the model isn't found,
 /// or when the model reports no context limit.
@@ -350,7 +363,7 @@ opencode/claude-test
     }
 
     #[test]
-    fn filters_out_bedrock_and_vertexai_models() {
+    fn includes_bedrock_but_filters_vertexai_models() {
         let text = r#"bedrock/anthropic.claude-sonnet-4
 {
   "id": "anthropic.claude-sonnet-4",
@@ -377,9 +390,16 @@ github-copilot/gpt-5.5
 }
 "#;
         let listing = parse_verbose(text).unwrap();
-        // find() still resolves them, but into_adapter_models filters them out
         let groups = listing.into_adapter_models();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(
+            groups[0].models(),
+            &["amazon-bedrock/anthropic.claude-opus-4".to_string()]
+        );
+        assert_eq!(
+            groups[1].models(),
+            &["bedrock/anthropic.claude-sonnet-4".to_string()]
+        );
+        assert_eq!(groups[2].models(), &["github-copilot/gpt-5.5".to_string()]);
     }
 }

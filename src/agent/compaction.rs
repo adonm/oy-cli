@@ -1,3 +1,11 @@
+//! Multi-pattern compression pipeline for tool outputs entering the
+//! LLM transcript.
+//!
+//! All transforms are idempotent and safety-preserving: they improve
+//! presentation density without altering semantic content. Only
+//! [`compact_text`] adds provenance headers; internal stages are pure.
+//! Token counting uses tokenizer-specific BPE through [`tiktoken_rs`].
+
 use crate::llm::{Message, MessageContent, ToolResultContent};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -288,7 +296,7 @@ pub(super) fn compact_text(text: &str, max_bytes: usize, label: &str) -> String 
 
 pub(super) fn message_content_text(message: &Message) -> String {
     match message {
-        Message::System { content } => content.clone(),
+        Message::System { content, .. } => content.clone(),
         Message::User { content } | Message::Assistant { content, .. } => content
             .iter()
             .map(message_content_part_text)
@@ -299,7 +307,7 @@ pub(super) fn message_content_text(message: &Message) -> String {
 
 fn message_content_part_text(content: &MessageContent) -> String {
     match content {
-        MessageContent::Text { text } => text.clone(),
+        MessageContent::Text { text, .. } => text.clone(),
         MessageContent::ToolCall {
             name, arguments, ..
         } => format!("{name} {arguments}"),
@@ -308,7 +316,7 @@ fn message_content_part_text(content: &MessageContent) -> String {
             .map(tool_result_content_text)
             .collect::<Vec<_>>()
             .join("\n"),
-        MessageContent::Reasoning { value } | MessageContent::Opaque { value } => {
+        MessageContent::Reasoning { value } | MessageContent::Opaque { value, .. } => {
             value_to_text(value)
         }
     }
