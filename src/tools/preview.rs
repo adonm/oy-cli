@@ -62,7 +62,7 @@ pub(super) fn summary_bash(args: &Value) -> String {
 }
 
 pub(super) fn summary_webfetch(args: &Value) -> String {
-    compact_kvs(args, &[("method", 8), ("url", 100)])
+    compact_kvs(args, &[("return_format", 16), ("url", 100)])
 }
 
 pub(super) fn summary_ask(args: &Value) -> String {
@@ -312,9 +312,7 @@ pub(super) fn preview_search(value: &Value) -> String {
         if !read_path.is_empty() {
             let _ = write!(out, "\n  → Read {read_path}");
         }
-        for item in matches.iter().take(PREVIEW_ITEMS) {
-            let _ = write!(out, "\n  {}", format_search_hit(item));
-        }
+        append_search_hits(&mut out, matches.iter().take(PREVIEW_ITEMS));
         if value_bool(value, "truncated") {
             let _ = write!(
                 out,
@@ -326,17 +324,81 @@ pub(super) fn preview_search(value: &Value) -> String {
     })
 }
 
-fn format_search_hit(item: &Value) -> String {
-    let path = value_str(item, "path");
+fn append_search_hits<'a>(out: &mut String, matches: impl Iterator<Item = &'a Value>) {
+    let matches = matches.collect::<Vec<_>>();
+    let file_count = matches
+        .iter()
+        .filter_map(|item| item.get("path").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if file_count == 0 {
+        return;
+    }
+
+    let grouped = file_count < matches.len();
+    let mut current_path = "";
+    let mut current_hits = Vec::new();
+    for item in matches {
+        let path = value_str(item, "path");
+        if path != current_path && !current_hits.is_empty() {
+            append_search_hit_block(out, current_path, &current_hits, grouped);
+            current_hits.clear();
+        }
+        current_path = path;
+        current_hits.push(item);
+    }
+    if !current_hits.is_empty() {
+        append_search_hit_block(out, current_path, &current_hits, grouped);
+    }
+}
+
+fn append_search_hit_block(out: &mut String, path: &str, hits: &[&Value], grouped: bool) {
+    let rendered_lines = hits
+        .iter()
+        .map(|item| {
+            (
+                value_usize(item, "line_number").max(1),
+                value_str(item, "text"),
+            )
+        })
+        .collect::<Vec<_>>();
+    if rendered_lines.iter().all(|(_, text)| text.is_empty()) {
+        append_fallback_search_hits(out, path, hits, grouped);
+        return;
+    }
+
+    let block = crate::ui::code_lines(path, &rendered_lines);
+    for line in block.lines() {
+        let _ = write!(out, "\n  {line}");
+    }
+}
+
+fn append_fallback_search_hits(out: &mut String, path: &str, hits: &[&Value], grouped: bool) {
+    if grouped {
+        let _ = write!(out, "\n  {}", crate::ui::path(path));
+        for item in hits {
+            let _ = write!(out, "\n    {}", format_search_hit_line(item));
+        }
+    } else {
+        for item in hits {
+            let _ = write!(
+                out,
+                "\n  {}:{}",
+                crate::ui::path(path),
+                format_search_hit_line(item)
+            );
+        }
+    }
+}
+
+fn format_search_hit_line(item: &Value) -> String {
     let line = value_usize(item, "line_number");
     let col = value_usize(item, "column");
     let text = crate::ui::truncate_chars(value_str(item, "text"), PREVIEW_LINE_CHARS);
     format!(
-        "{}:{}:{} {}",
-        crate::ui::path(path),
+        "{}:{} {text}",
         crate::ui::faint(line),
-        crate::ui::faint(col),
-        text
+        crate::ui::faint(col)
     )
 }
 pub(super) fn preview_replace(value: &Value) -> String {
@@ -365,9 +427,10 @@ pub(super) fn preview_replace(value: &Value) -> String {
             for item in changed.iter().take(PREVIEW_ITEMS) {
                 let _ = write!(
                     out,
-                    "\n  {} · {} repl",
-                    value_str(item, "path"),
-                    value_usize(item, "replacements")
+                    "\n  {} · {} replacement{}",
+                    crate::ui::path(value_str(item, "path")),
+                    value_usize(item, "replacements"),
+                    plural(value_usize(item, "replacements"))
                 );
             }
             if value_bool(value, "truncated") || files > changed.len() {
@@ -444,14 +507,12 @@ pub(super) fn preview_bash(value: &Value) -> String {
         .get("returncode")
         .and_then(Value::as_i64)
         .unwrap_or(-1);
-    let stdout = value
-        .get("stdout_preview")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| value_str(value, "stdout"));
-    let stderr = value
-        .get("stderr_preview")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| value_str(value, "stderr"));
+    let stdout = output_preview(value, "stdout");
+    let stderr = output_preview(value, "stderr");
+    let stdout_truncated = value_bool(value, "stdout_truncated");
+    let stderr_truncated = value_bool(value, "stderr_truncated");
+    let stdout_capped = value_bool(value, "stdout_capped");
+    let stderr_capped = value_bool(value, "stderr_capped");
     let icon = if code == 0 {
         crate::ui::green("✓")
     } else {
@@ -463,9 +524,11 @@ pub(super) fn preview_bash(value: &Value) -> String {
         plural(count_lines(stdout)),
         count_lines(stderr),
         plural(count_lines(stderr)),
-        bool_marker(value_bool(value, "stdout_truncated")),
-        bool_marker(value_bool(value, "stderr_truncated"))
+        bool_marker(stdout_truncated),
+        bool_marker(stderr_truncated)
     );
+    append_capped_flag(&mut summary, "stdout", stdout_capped);
+    append_capped_flag(&mut summary, "stderr", stderr_capped);
     if code != 0
         && let Some(first_stderr) = stderr.lines().find(|line| !line.trim().is_empty())
     {
@@ -476,15 +539,15 @@ pub(super) fn preview_bash(value: &Value) -> String {
     }
     with_verbose(summary, || {
         let mut out = String::new();
-        for key in ["stdout", "stderr"] {
-            let text = value_str(value, key);
-            let truncated_key = format!("{key}_truncated");
-            let truncated = value_bool(value, &truncated_key);
+        for (key, text, truncated) in [
+            ("stdout", stdout, stdout_truncated),
+            ("stderr", stderr, stderr_truncated),
+        ] {
             if text.is_empty() {
                 if truncated {
                     let _ = write!(
                         out,
-                        "\n{}\n  … {key} truncated",
+                        "\n{}\n  … {key} truncated with no preview",
                         crate::ui::block_title(key)
                     );
                 }
@@ -492,44 +555,49 @@ pub(super) fn preview_bash(value: &Value) -> String {
             }
             append_preview_lines(&mut out, text, key);
             if truncated {
-                let _ = write!(out, "\n  … {key} truncated for model context");
+                let _ = write!(out, "\n  … {key} truncated; showing bounded preview");
             }
         }
         out.trim_start().to_string()
     })
 }
+
+fn output_preview<'a>(value: &'a Value, key: &str) -> &'a str {
+    let preview_key = format!("{key}_preview");
+    value
+        .get(&preview_key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| value_str(value, key))
+}
+
+fn append_capped_flag(summary: &mut String, key: &str, capped: bool) {
+    if capped {
+        let _ = write!(summary, " · {key}-capped=yes");
+    }
+}
+
 pub(super) fn preview_webfetch(value: &Value) -> String {
     let status = value
         .get("status_code")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let url = value_str(value, "url");
-    if value
-        .get("binary")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return format!(
-            "HTTP {status} · binary · {} bytes · {url}",
-            value_usize(value, "content_bytes")
-        );
-    }
-    let text = value
-        .get("text_preview")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| value_str(value, "text"));
-    let format = value_str(value, "format");
-    let kind = if format.is_empty() { "text" } else { format };
+    let text = value.get("content").and_then(Value::as_str).unwrap_or("");
+    let links = value
+        .get("links")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     let summary = format!(
-        "HTTP {status} · {kind} · {} line{} · truncated={} · {url}",
+        "HTTP {status} · scrape · {} line{} · {links} link{} · {url}",
         count_lines(text),
         plural(count_lines(text)),
-        truncation_flag(value)
+        plural(links)
     );
     with_verbose(summary, || {
         let mut out = String::new();
         if !text.is_empty() {
-            append_preview_lines(&mut out, text, kind);
+            append_preview_lines(&mut out, text, "content");
         }
         if value_bool(value, "truncated") {
             out.push_str("\n  … response body truncated for model context");
@@ -640,6 +708,58 @@ mod tests {
     }
 
     #[test]
+    fn search_preview_groups_repeated_file_hits_without_expanding_unique_file_hits() {
+        let repeated = json!({
+            "pattern": "fn",
+            "path": "src/main.rs",
+            "match_count": 2,
+            "matches": [
+                {"path": "src/main.rs", "line_number": 1, "column": 1, "text": "fn main()"},
+                {"path": "src/main.rs", "line_number": 2, "column": 5, "text": "fn helper()"}
+            ],
+            "truncated": false
+        });
+        let unique = json!({
+            "pattern": "fn",
+            "path": "src",
+            "match_count": 2,
+            "matches": [
+                {"path": "src/main.rs", "line_number": 1, "column": 1, "text": "fn main()"},
+                {"path": "src/lib.rs", "line_number": 2, "column": 5, "text": "fn helper()"}
+            ],
+            "truncated": false
+        });
+
+        let repeated_output = strip_ansi_escapes::strip_str(tool_output("search", &repeated));
+        let unique_output = strip_ansi_escapes::strip_str(tool_output("search", &unique));
+        assert_eq!(repeated_output.matches("── src/main.rs").count(), 1);
+        assert!(repeated_output.contains("   1 fn main()"));
+        assert!(repeated_output.contains("   2 fn helper()"));
+        assert_eq!(unique_output.matches("── src/main.rs").count(), 1);
+        assert_eq!(unique_output.matches("── src/lib.rs").count(), 1);
+    }
+
+    #[test]
+    fn bash_preview_uses_bounded_preview_fields_and_marks_capped_output() {
+        let value = json!({
+            "returncode": 0,
+            "stdout": "full output should not be shown",
+            "stdout_preview": "preview head\npreview tail",
+            "stderr": "",
+            "stdout_truncated": true,
+            "stderr_truncated": false,
+            "stdout_capped": true,
+            "stderr_capped": false
+        });
+
+        let output = tool_output("bash", &value);
+
+        assert!(output.contains("stdout-capped=yes"));
+        assert!(output.contains("preview head"));
+        assert!(!output.contains("full output should not be shown"));
+    }
+
+    #[test]
     fn tool_preview_verbose_snapshot() {
         let _guard = OUTPUT_MODE_TEST_LOCK
             .lock()
@@ -706,9 +826,8 @@ mod tests {
         let value = json!({
             "status_code": 200,
             "url": "https://example.com/docs",
-            "text": "# docs\nhello\ninstall\nconfigure\nrun\nextra\n",
-            "format": "markdown",
-            "truncated": false
+            "content": "# docs\nhello\ninstall\nconfigure\nrun\nextra\n",
+            "links": ["https://example.com/install", "https://example.com/configure"]
         });
         insta::assert_snapshot!(tool_output("webfetch", &value));
         crate::ui::set_output_mode(crate::ui::OutputMode::Normal);

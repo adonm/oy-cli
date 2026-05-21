@@ -73,12 +73,8 @@ fn suffix_at_char_boundary(text: &str, max_bytes: usize) -> &str {
 }
 
 pub(crate) fn note_tool(name: &str, args: &Value) {
-    let detail = tool_call_summary(name, args);
+    let detail = preview::tool_call_summary(name, args);
     crate::ui::tool_start(name, &detail);
-}
-
-fn tool_call_summary(name: &str, args: &Value) -> String {
-    preview::tool_call_summary(name, args)
 }
 
 pub fn preview_tool_output(name: &str, value: &Value) -> String {

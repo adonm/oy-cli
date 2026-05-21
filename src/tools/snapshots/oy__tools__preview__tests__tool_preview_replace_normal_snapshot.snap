@@ -3,9 +3,9 @@ source: src/tools/preview.rs
 expression: tool_output("replace", &value)
 ---
 6 files changed · 9 replacements · returned=6 · truncated=no
-src/lib.rs · 1 repl
-  src/main.rs · 2 repl
-  src/app.rs · 1 repl
-  src/config.rs · 2 repl
-  src/tools.rs · 1 repl
-  README.md · 2 repl
+src/lib.rs · 1 replacement
+  src/main.rs · 2 replacements
+  src/app.rs · 1 replacement
+  src/config.rs · 2 replacements
+  src/tools.rs · 1 replacement
+  README.md · 2 replacements

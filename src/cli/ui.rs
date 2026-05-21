@@ -12,7 +12,7 @@ mod text;
 mod title;
 
 pub use progress::{format_duration, progress, tool_error, tool_result, tool_start};
-pub use render::{block_title, code, diff, markdown, text_block};
+pub use render::{block_title, code, code_lines, diff, markdown, text_block};
 pub use text::{clamp_lines, compact_preview, compact_spaces, head_tail, truncate_chars};
 pub use title::{title_progress, title_scope};
 

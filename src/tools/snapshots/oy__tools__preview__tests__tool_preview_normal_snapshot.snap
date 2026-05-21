@@ -3,9 +3,15 @@ source: src/tools/preview.rs
 expression: tool_output("search", &value)
 ---
 pattern=/run_prompt/ · path=src · 6 matches · 6 files · returned=6 · truncated=no
-src/session.rs:283:1 pub async fn run_prompt(...)
-  src/app.rs:40:9 Run(RunArgs),
-  src/chat.rs:110:18 run_prompt from chat
-  src/model.rs:88:5 resolve model before run_prompt
-  src/tools.rs:500:13 tool output for run_prompt
-  src/ui.rs:410:22 session::run_prompt(...)
+── src/session.rs
+   283 pub async fn run_prompt(...)
+  ── src/app.rs
+    40 Run(RunArgs),
+  ── src/chat.rs
+   110 run_prompt from chat
+  ── src/model.rs
+    88 resolve model before run_prompt
+  ── src/tools.rs
+   500 tool output for run_prompt
+  ── src/ui.rs
+   410 session::run_prompt(...)
