@@ -16,7 +16,7 @@ fn read_only_allows_todo_memory_but_denies_persistence() {
     )
     .unwrap();
     assert_eq!(value["count"], 1);
-    assert_eq!(ctx.todos[0].task, "plan work");
+    assert_eq!(ctx.todos()[0].task, "plan work");
 
     let err = tool_todo(
         &mut ctx,
@@ -45,17 +45,17 @@ async fn todo_omission_reads_and_explicit_empty_clears() {
     )
     .await
     .unwrap();
-    assert_eq!(ctx.todos.len(), 1);
+    assert_eq!(ctx.todos().len(), 1);
 
     let read = invoke(&mut ctx, "todo", json!({})).await.unwrap();
     assert_eq!(read["count"], 1);
-    assert_eq!(ctx.todos.len(), 1);
+    assert_eq!(ctx.todos().len(), 1);
 
     let cleared = invoke(&mut ctx, "todo", json!({ "todos": [] }))
         .await
         .unwrap();
     assert_eq!(cleared["count"], 0);
-    assert!(ctx.todos.is_empty());
+    assert!(ctx.todos().is_empty());
 }
 
 #[tokio::test]
@@ -77,19 +77,18 @@ async fn todo_accepts_items_alias_even_when_todos_is_also_present() {
     .unwrap();
 
     assert_eq!(result["count"], 1);
-    assert_eq!(ctx.todos[0].task, "canonical");
+    assert_eq!(ctx.todos()[0].task, "canonical");
 }
 
 #[test]
 fn todo_tool_persists_markdown_when_requested() {
     let dir = tempfile::tempdir().unwrap();
-    let mut ctx = ToolContext {
-        root: dir.path().to_path_buf(),
-        interactive: false,
-        policy: ToolPolicy::with_write(Approval::Auto, Approval::Auto),
-        todos: Vec::new(),
-        external_side_effects: false,
-    };
+    let mut ctx = ToolContext::new(
+        dir.path().to_path_buf(),
+        false,
+        ToolPolicy::with_write(Approval::Auto, Approval::Auto),
+        Vec::new(),
+    );
     let value = tool_todo(
         &mut ctx,
         TodoArgs {

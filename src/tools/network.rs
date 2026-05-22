@@ -22,7 +22,7 @@ pub(super) struct WebfetchOutput {
 }
 
 pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
-    if ctx.policy.network != NetworkAccess::Enabled {
+    if ctx.policy().network != NetworkAccess::Enabled {
         bail!("tool denied by policy: webfetch");
     }
 

@@ -13,21 +13,21 @@ use crate::compaction;
 use super::MAX_FILE_BYTES;
 
 #[derive(Debug, Clone)]
-pub(super) struct AuditFile {
-    pub(super) path: String,
-    pub(super) language: &'static str,
-    pub(super) bytes: u64,
-    pub(super) tokens: usize,
-    pub(super) text: String,
+pub(crate) struct AuditFile {
+    pub(crate) path: String,
+    pub(crate) language: &'static str,
+    pub(crate) bytes: u64,
+    pub(crate) tokens: usize,
+    pub(crate) text: String,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct AuditChunk {
-    pub(super) files: Vec<AuditFile>,
-    pub(super) tokens: usize,
+pub(crate) struct AuditChunk {
+    pub(crate) files: Vec<AuditFile>,
+    pub(crate) tokens: usize,
 }
 
-pub(super) fn collect_files(
+pub(crate) fn collect_files(
     root: &Path,
     output_path: Option<&Path>,
     model_spec: &str,
@@ -176,7 +176,7 @@ fn security_path_score(path: &str) -> bool {
     .any(|needle| path.contains(needle))
 }
 
-pub(super) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<AuditChunk> {
+pub(crate) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<AuditChunk> {
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut total = 0usize;
@@ -201,7 +201,7 @@ pub(super) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<Au
     chunks
 }
 
-pub(super) fn ensure_chunks_fit_prompt(chunks: &[AuditChunk], target_tokens: usize) -> Result<()> {
+pub(crate) fn ensure_chunks_fit_prompt(chunks: &[AuditChunk], target_tokens: usize) -> Result<()> {
     if let Some(chunk) = chunks.iter().find(|chunk| chunk.tokens > target_tokens) {
         let files = chunk
             .files
@@ -219,7 +219,7 @@ pub(super) fn ensure_chunks_fit_prompt(chunks: &[AuditChunk], target_tokens: usi
     Ok(())
 }
 
-pub(super) fn build_manifest(files: &[AuditFile]) -> String {
+pub(crate) fn build_manifest(files: &[AuditFile]) -> String {
     let mut languages = BTreeSet::new();
     let total_tokens = files.iter().map(|file| file.tokens).sum::<usize>();
     let total_bytes = files.iter().map(|file| file.bytes).sum::<u64>();
@@ -312,7 +312,7 @@ pub(super) fn build_security_index(files: &[AuditFile], limit: usize) -> String 
     }
 }
 
-pub(super) fn chunk_text(chunk: &AuditChunk) -> String {
+pub(crate) fn chunk_text(chunk: &AuditChunk) -> String {
     let mut out = String::new();
     for file in &chunk.files {
         let _ = writeln!(out, "\n## {}\n", file.path);

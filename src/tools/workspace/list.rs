@@ -14,32 +14,32 @@ use super::paths::{
 };
 
 pub(crate) fn tool_list(ctx: &ToolContext, args: ListArgs) -> Result<Value> {
-    reject_out_of_workspace_path(&ctx.root, &args.path, None)?;
+    reject_out_of_workspace_path(ctx.root(), &args.path, None)?;
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let shown_limit = args.limit.max(1);
     let (items, count) = if args.path == "." || args.path == "./" || args.path == "*" {
-        let items = list_dir_children(&ctx.root, &ctx.root, &exclude)?;
+        let items = list_dir_children(ctx.root(), ctx.root(), &exclude)?;
         let count = items.len();
         (items, count)
     } else if !glob_has_meta(&args.path) {
         match resolve_existing_path(ctx, &args.path) {
             Ok(path) if path.is_dir() => {
-                let items = list_dir_children(&ctx.root, &path, &exclude)?;
+                let items = list_dir_children(ctx.root(), &path, &exclude)?;
                 let count = items.len();
                 (items, count)
             }
-            Ok(path) => (vec![display_path(&ctx.root, &path)], 1),
-            Err(_) => fff_fuzzy_workspace_paths(&ctx.root, &args.path, &exclude)?,
+            Ok(path) => (vec![display_path(ctx.root(), &path)], 1),
+            Err(_) => fff_fuzzy_workspace_paths(ctx.root(), &args.path, &exclude)?,
         }
     } else {
         let pattern = if Path::new(&args.path).is_absolute() {
             args.path.clone()
         } else {
-            ctx.root.join(&args.path).to_string_lossy().to_string()
+            ctx.root().join(&args.path).to_string_lossy().to_string()
         };
         let mut out = glob(&pattern)?
             .filter_map(|entry| entry.ok())
-            .filter_map(|path| safe_list_item(&ctx.root, &path))
+            .filter_map(|path| safe_list_item(ctx.root(), &path))
             .filter(|item| !exclude.is_match(item.as_str()))
             .collect::<Vec<_>>();
         out.sort();

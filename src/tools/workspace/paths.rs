@@ -26,17 +26,17 @@ pub(super) fn reject_out_of_workspace_path(
 }
 
 pub(super) fn resolve_existing_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
-    reject_out_of_workspace_path(&ctx.root, path, None)?;
-    let joined = ctx.root.join(path);
+    reject_out_of_workspace_path(ctx.root(), path, None)?;
+    let joined = ctx.root().join(path);
     let resolved = joined
         .canonicalize()
         .with_context(|| format!("path does not exist: {path}"))?;
-    reject_out_of_workspace_path(&ctx.root, path, Some(&resolved))?;
+    reject_out_of_workspace_path(ctx.root(), path, Some(&resolved))?;
     Ok(resolved)
 }
 
 pub(super) fn resolve_read_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
-    reject_out_of_workspace_path(&ctx.root, path, None)?;
+    reject_out_of_workspace_path(ctx.root(), path, None)?;
     match resolve_existing_path(ctx, path) {
         Ok(path) => Ok(path),
         Err(err) => Err(read_path_error_with_suggestions(ctx, path, err)),
@@ -63,7 +63,7 @@ fn read_path_error_with_suggestions(
 
 fn read_path_suggestions(ctx: &ToolContext, path: &str) -> Result<Vec<String>> {
     let exclude = build_exclude_set(None)?;
-    let (items, _) = fff_fuzzy_workspace_paths_with_limit(&ctx.root, path, &exclude, 3)?;
+    let (items, _) = fff_fuzzy_workspace_paths_with_limit(ctx.root(), path, &exclude, 3)?;
     Ok(items)
 }
 

@@ -2,15 +2,16 @@
 //! filesystem/network/mutation approval boundaries.
 //!
 //! All tool capability is defined in this module and its children.
-//! [`ToolContext`] carries approval policy and mutable state through
-//! every invocation; the registry in [`registry`] is the single source
-//! of tool schemas visible to the model.
+//! [`ToolContext`] carries immutable tool environment plus explicit mutable
+//! state through every invocation; the registry in [`registry`] is the single
+//! source of tool schemas, dispatch, previews, gates, and effect classification.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 mod args;
 mod llm;
@@ -28,12 +29,12 @@ mod workspace;
 
 use args::AskArgs;
 pub(crate) use llm::llm_tools;
-use output::note_tool;
 pub(crate) use output::{encode_tool_output, preview_tool_output};
 pub(crate) use policy::{
     Approval, FileAccess, NetworkAccess, ToolPolicy, require_mutation_approval,
 };
 pub(crate) use registry::tool_specs;
+#[cfg(test)]
 use shell::tool_bash;
 
 // === Public tool types and constants ===
@@ -62,12 +63,67 @@ pub struct TodoItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolContext {
+pub struct ToolEnv {
     pub root: PathBuf,
     pub interactive: bool,
     pub policy: ToolPolicy,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolState {
     pub todos: Vec<TodoItem>,
     pub external_side_effects: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolContext {
+    pub env: ToolEnv,
+    pub state: ToolState,
+}
+
+impl ToolContext {
+    pub fn new(root: PathBuf, interactive: bool, policy: ToolPolicy, todos: Vec<TodoItem>) -> Self {
+        Self {
+            env: ToolEnv {
+                root,
+                interactive,
+                policy,
+            },
+            state: ToolState {
+                todos,
+                external_side_effects: false,
+            },
+        }
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.env.root
+    }
+
+    pub fn interactive(&self) -> bool {
+        self.env.interactive
+    }
+
+    pub fn policy(&self) -> ToolPolicy {
+        self.env.policy
+    }
+
+    pub fn todos(&self) -> &[TodoItem] {
+        &self.state.todos
+    }
+
+    pub fn todos_mut(&mut self) -> &mut Vec<TodoItem> {
+        &mut self.state.todos
+    }
+
+    pub fn mark_external_side_effect(&mut self) {
+        self.state.external_side_effects = true;
+    }
+
+    #[cfg(test)]
+    pub fn external_side_effects(&self) -> bool {
+        self.state.external_side_effects
+    }
 }
 
 // === Invocation, summaries, and previews ===
@@ -87,65 +143,35 @@ pub async fn invoke_shared(
     name: &str,
     args: Value,
 ) -> Result<Value> {
-    let mut ctx = shared.lock().expect("tool context mutex poisoned").clone();
-    let result = invoke_inner(&mut ctx, name, args).await;
-    let mut shared = shared.lock().expect("tool context mutex poisoned");
-    if result.is_ok() {
-        shared.todos = ctx.todos;
-    }
-    shared.external_side_effects |= ctx.external_side_effects;
-    result
+    let mut ctx = shared.lock().await;
+    invoke_inner(&mut ctx, name, args).await
 }
 
 async fn invoke_inner(ctx: &mut ToolContext, name: &str, args: Value) -> Result<Value> {
-    note_tool(name, &args);
-    if tool_may_have_external_side_effect(name, &args) {
-        ctx.external_side_effects = true;
+    let def = registry::find_def(name).ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
+    output::note_tool(def.name(), &args);
+    if (def.external_side_effect)(&args) {
+        ctx.mark_external_side_effect();
     }
     let started = std::time::Instant::now();
-    let result = match name {
-        "list" => parse_tool_args(args).and_then(|args| workspace::tool_list(ctx, args)),
-        "read" => parse_tool_args(args).and_then(|args| workspace::tool_read(ctx, args)),
-        "search" => parse_tool_args(args).and_then(|args| workspace::tool_search(ctx, args)),
-        "replace" => parse_tool_args(args).and_then(|args| workspace::tool_replace(ctx, args)),
-        "patch" => parse_tool_args(args).and_then(|args| workspace::tool_patch(ctx, args)),
-        "sloc" => parse_tool_args(args).and_then(|args| workspace::tool_sloc(ctx, args)),
-        "bash" => match parse_tool_args(args) {
-            Ok(args) => tool_bash(ctx, args).await,
-            Err(err) => Err(err),
-        },
-        "webfetch" => match parse_tool_args(args) {
-            Ok(args) => network::tool_webfetch(ctx, args).await,
-            Err(err) => Err(err),
-        },
-        "ask" => parse_tool_args(args).and_then(|args| tool_ask(ctx, args)),
-        "todo" => parse_tool_args(args).and_then(|args| todo::tool_todo(ctx, args)),
-        other => bail!("unknown tool: {other}"),
-    };
+    let result = def.executor.invoke(ctx, args).await;
     if let Ok(value) = &result {
-        crate::ui::tool_result(name, started.elapsed(), &preview_tool_output(name, value));
+        crate::ui::tool_result(
+            def.name(),
+            started.elapsed(),
+            &preview_tool_output(def.name(), value),
+        );
     } else if let Err(err) = &result {
-        crate::ui::tool_error(name, started.elapsed(), err);
+        crate::ui::tool_error(def.name(), started.elapsed(), err);
     }
     result
-}
-
-fn tool_may_have_external_side_effect(name: &str, args: &Value) -> bool {
-    match name {
-        "bash" | "replace" | "patch" => true,
-        "todo" => args
-            .get("persist")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        _ => false,
-    }
 }
 
 pub(crate) use todo::format_todos;
 
 // === Process and interactive tool implementations ===
 fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
-    if !ctx.interactive {
+    if !ctx.interactive() {
         bail!("Cannot ask: interactive prompting is unavailable");
     }
     Ok(Value::String(crate::chat::ask(

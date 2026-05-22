@@ -149,7 +149,7 @@ pub(super) fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> 
             })
             .collect()
     } else {
-        ctx.todos.clone()
+        ctx.todos().to_vec()
     };
     let todos = input_todos
         .into_iter()
@@ -169,17 +169,17 @@ pub(super) fn tool_todo(ctx: &mut ToolContext, args: TodoArgs) -> Result<Value> 
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    ctx.todos = todos;
+    *ctx.todos_mut() = todos;
     if args.persist {
-        save_todos_to_file(&ctx.root, &ctx.todos)?;
+        save_todos_to_file(ctx.root(), ctx.todos())?;
     }
-    let counts = todo_status_counts(&ctx.todos);
-    let preview = format_todo_preview(&ctx.todos);
+    let counts = todo_status_counts(ctx.todos());
+    let preview = format_todo_preview(ctx.todos());
     Ok(serde_json::to_value(TodoOutput {
         path: TODO_FILE,
         persisted: args.persist,
-        items: ctx.todos.clone(),
-        count: ctx.todos.len(),
+        items: ctx.todos().to_vec(),
+        count: ctx.todos().len(),
         status_counts: counts,
         preview,
     })?)

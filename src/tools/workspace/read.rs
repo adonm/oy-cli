@@ -14,7 +14,7 @@ pub(crate) fn tool_read(ctx: &ToolContext, args: ReadArgs) -> Result<Value> {
     if path.is_dir() {
         bail!("read path is a directory: {}", args.path);
     }
-    let Some(item) = read_text_file(&ctx.root, &path)? else {
+    let Some(item) = read_text_file(ctx.root(), &path)? else {
         bail!("read path is not utf-8 text: {}", args.path);
     };
     let display_path = item.display_path;

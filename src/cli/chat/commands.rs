@@ -210,14 +210,14 @@ fn status_command(session: &Session) -> Result<bool> {
     crate::ui::kv("interactive", crate::ui::bool_text(session.interactive));
     crate::ui::kv(
         "files-write",
-        format_args!("{:?}", session.policy.files_write()),
+        format_args!("{:?}", session.policy().files_write()),
     );
-    crate::ui::kv("shell", format_args!("{:?}", session.policy.shell));
+    crate::ui::kv("shell", format_args!("{:?}", session.policy().shell));
     crate::ui::kv(
         "network",
-        crate::ui::bool_text(session.policy.network == NetworkAccess::Enabled),
+        crate::ui::bool_text(session.policy().network == NetworkAccess::Enabled),
     );
-    crate::ui::kv("risk", config::policy_risk_label(&session.policy));
+    crate::ui::kv("risk", config::policy_risk_label(&session.policy()));
     crate::ui::kv("messages", session.transcript.messages.len());
     crate::ui::kv("todos", session.todos.len());
     let status = session.context_status();
@@ -239,7 +239,7 @@ fn save_command(name: Option<&str>, session: &mut Session) -> Result<bool> {
 }
 
 fn load_command(name: Option<&str>, session: &mut Session) -> Result<bool> {
-    if let Some(new_session) = session::load_saved(name, true, session.mode, session.policy)? {
+    if let Some(new_session) = session::load_saved(name, true, session.mode)? {
         *session = new_session;
         crate::ui::success("loaded session");
     } else {

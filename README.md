@@ -69,6 +69,7 @@ These commands show what is configured and what to do next.
 | `oy run [prompt]` | Explicit one-shot run; also accepts piped input |
 | `oy run --out path "prompt"` | Save the response to a file |
 | `oy audit [focus]` | Audit the repo and write `ISSUES.md` by default |
+| `oy review [target]` | Strict code-quality review for a branch/commit diff or the whole workspace |
 | `oy model [filter]` | List, choose, or save a model |
 | `oy doctor` | Check setup and local state |
 | `oy --help` | Show CLI help |
@@ -80,6 +81,7 @@ oy run "explain the project layout"
 oy run "inspect src/main.rs and suggest a simpler design"
 oy run "fix the failing tests"
 oy audit "security and complexity"
+oy review main --focus "types and boundaries"
 oy run --out docs/plan.md "write a migration plan"
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy run
 ```
@@ -143,6 +145,17 @@ oy audit --max-chunks 240
 ```
 
 The model does not get file-edit tools, shell access, or live search during an audit. The runner collects the review input first, then asks the model to report evidence-first findings. Large repositories fail closed above 80 review chunks by default; pass `--max-chunks N` when you intentionally want a larger audit.
+
+## Review
+
+`oy review [target]` runs a strict no-tools maintainability review inspired by thermo-nuclear code-quality review rules: structural simplification, code-judo opportunities, spaghetti branching, abstraction/type boundaries, and 1000-line decomposition risks. With a target, it reviews `git diff <target> --` against the current workspace; without one, it reviews the whole workspace. By default it writes `REVIEW.md`.
+
+```bash
+oy review
+oy review main
+oy review HEAD~1 --focus "types and boundaries"
+oy review main --out docs/review.md --max-chunks 120
+```
 
 ## Interactive chat
 

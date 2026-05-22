@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::{config, session};
 
-mod input;
+pub(crate) mod input;
 mod progress;
 mod prompts;
 mod reduce;

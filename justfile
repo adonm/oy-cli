@@ -73,6 +73,7 @@ _help-smoke:
     cargo run --locked -- run --help
     cargo run --locked -- chat --help
     cargo run --locked -- audit --help
+    cargo run --locked -- review --help
     cargo run --locked -- model --help
     cargo run --locked -- doctor --help
 

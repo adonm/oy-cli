@@ -8,11 +8,13 @@ use std::path::PathBuf;
 mod audit_cmd;
 mod doctor_cmd;
 mod model_cmd;
+mod review_cmd;
 mod session_cmd;
 
 use audit_cmd::{AuditArgs, AuditFormat};
 use doctor_cmd::DoctorArgs;
 use model_cmd::ModelArgs;
+use review_cmd::ReviewArgs;
 use session_cmd::{ChatArgs, RunArgs};
 
 #[derive(Debug, Parser)]
@@ -68,6 +70,8 @@ enum Command {
         #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
         focus: Vec<String>,
     },
+    /// Strict code-quality review for a branch/commit diff or the whole workspace.
+    Review(ReviewArgs),
 }
 
 pub async fn run(argv: Vec<String>) -> Result<i32> {
@@ -92,6 +96,7 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             })
             .await
         }
+        Command::Review(args) => review_cmd::review_command(args).await,
     }
 }
 
@@ -150,6 +155,25 @@ mod audit_tests {
     #[test]
     fn doctor_help_snapshot() {
         insta::assert_snapshot!(command_help_for_test("doctor"));
+    }
+
+    #[test]
+    fn review_accepts_target_and_focus_flags() {
+        let cli = parse_cli_for_test(&[
+            "oy",
+            "review",
+            "main",
+            "--focus",
+            "types and boundaries",
+            "--max-chunks",
+            "120",
+        ]);
+        let Command::Review(args) = cli.command else {
+            panic!("expected review command");
+        };
+        assert_eq!(args.target.as_deref(), Some("main"));
+        assert_eq!(args.focus, vec!["types and boundaries"]);
+        assert_eq!(args.max_chunks, 120);
     }
 
     #[test]

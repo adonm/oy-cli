@@ -57,7 +57,8 @@ pub(crate) fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value
     let exclude = build_exclude_set(args.exclude.as_ref())?;
     let target = resolve_existing_path(ctx, &args.path)?;
     let mut preview_plan = None;
-    let approval_preview = if ctx.policy.approval("replace") == Approval::Ask && ctx.interactive {
+    let approval_preview = if ctx.policy().approval("replace") == Approval::Ask && ctx.interactive()
+    {
         let plan = plan_replace(ctx, &target, &exclude, &regex, &replacement)?;
         let preview = preview_replace_plan(&plan, args.limit);
         preview_plan = Some(plan);
@@ -71,9 +72,12 @@ pub(crate) fn tool_replace(ctx: &ToolContext, args: ReplaceArgs) -> Result<Value
         Some(plan) => plan,
         None => plan_replace(ctx, &target, &exclude, &regex, &replacement)?,
     };
-    for item in &plan.plans {
-        config::write_workspace_file(&item.path, item.updated.as_bytes())?;
-    }
+    let writes = plan
+        .plans
+        .iter()
+        .map(|item| config::WorkspaceWrite::new(&item.path, item.updated.as_bytes()))
+        .collect::<Vec<_>>();
+    config::write_workspace_batch(&writes)?;
 
     let shown = args.limit.max(1);
     let changed_file_count = plan.plans.len();
@@ -114,8 +118,8 @@ fn plan_replace(
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
     let mut replacement_count = 0usize;
-    for path in fff_indexed_files(&ctx.root, target, exclude)? {
-        match plan_replace_file(&ctx.root, &path, regex, replacement) {
+    for path in fff_indexed_files(ctx.root(), target, exclude)? {
+        match plan_replace_file(ctx.root(), &path, regex, replacement) {
             Ok(ReplacePlanItem::Changed(plan)) => {
                 replacement_count += plan.replacements;
                 plans.push(plan);
@@ -123,7 +127,7 @@ fn plan_replace(
             Ok(ReplacePlanItem::Unchanged) => {}
             Ok(ReplacePlanItem::Skipped(item)) => skipped.push(item),
             Err(err) => errors.push(ToolErrorItem {
-                path: rel_path(&ctx.root, &path),
+                path: rel_path(ctx.root(), &path),
                 message: err.to_string(),
             }),
         }

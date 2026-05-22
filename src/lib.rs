@@ -10,6 +10,7 @@ mod agent;
 mod audit;
 mod cli;
 mod llm;
+mod review;
 mod tools;
 
 pub(crate) use agent::{compaction, model, session};

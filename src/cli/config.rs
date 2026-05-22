@@ -19,8 +19,9 @@ pub use model_config::{
     recent_models, save_model_config, saved_model_config_from_selection, split_model_spec,
 };
 pub use paths::{
-    config_dir_path, config_root, create_private_dir_all, oy_root, resolve_workspace_output_path,
-    sessions_dir, write_private_file, write_workspace_file,
+    WorkspaceWrite, config_dir_path, config_root, create_private_dir_all, oy_root,
+    resolve_workspace_output_path, sessions_dir, write_private_file, write_workspace_batch,
+    write_workspace_file,
 };
 pub use prompt::{ask_system_prompt, session_text_value, system_prompt};
 pub use sessions::{SessionFile, load_session_file, resolve_saved_session, save_session_file};

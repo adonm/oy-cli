@@ -41,16 +41,18 @@ pub(crate) fn tool_patch(ctx: &ToolContext, mut args: PatchArgs) -> Result<Value
         args.patch.push('\n');
     }
     let (patch_count, plans) = plan_patch(ctx, &args)?;
-    let approval_preview = if ctx.policy.approval("patch") == Approval::Ask && ctx.interactive {
+    let approval_preview = if ctx.policy().approval("patch") == Approval::Ask && ctx.interactive() {
         Some(combined_patch_diff(&plans))
     } else {
         None
     };
     require_mutation_approval(ctx, "patch", approval_preview.as_deref())?;
 
-    for plan in &plans {
-        config::write_workspace_file(&plan.path, plan.updated.as_bytes())?;
-    }
+    let writes = plans
+        .iter()
+        .map(|plan| config::WorkspaceWrite::new(&plan.path, plan.updated.as_bytes()))
+        .collect::<Vec<_>>();
+    config::write_workspace_batch(&writes)?;
 
     let shown = args.limit.max(1);
     let changed_file_count = plans.len();
@@ -99,7 +101,7 @@ fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPl
         if path.is_dir() {
             bail!("cannot patch directory: {patch_path}");
         }
-        if ctx.root.join(&patch_path).is_symlink() || path.is_symlink() {
+        if ctx.root().join(&patch_path).is_symlink() || path.is_symlink() {
             bail!("cannot patch symlink: {patch_path}");
         }
         if fs::metadata(&path)?.len() > MAX_WORKSPACE_FILE_BYTES {
@@ -126,7 +128,7 @@ fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPl
             continue;
         }
 
-        let display_path = rel_path(&ctx.root, &path);
+        let display_path = rel_path(ctx.root(), &path);
         if !seen.insert(display_path.clone()) {
             bail!("patch contains multiple changes for the same file: {display_path}");
         }
@@ -156,7 +158,7 @@ fn plan_apply_patch(ctx: &ToolContext, text: &str) -> Result<(usize, Vec<PatchPl
         if path.is_dir() {
             bail!("cannot patch directory: {}", file.path);
         }
-        if ctx.root.join(&file.path).is_symlink() || path.is_symlink() {
+        if ctx.root().join(&file.path).is_symlink() || path.is_symlink() {
             bail!("cannot patch symlink: {}", file.path);
         }
         if fs::metadata(&path)?.len() > MAX_WORKSPACE_FILE_BYTES {
@@ -174,7 +176,7 @@ fn plan_apply_patch(ctx: &ToolContext, text: &str) -> Result<(usize, Vec<PatchPl
             continue;
         }
 
-        let display_path = rel_path(&ctx.root, &path);
+        let display_path = rel_path(ctx.root(), &path);
         if !seen.insert(display_path.clone()) {
             bail!("patch contains multiple changes for the same file: {display_path}");
         }

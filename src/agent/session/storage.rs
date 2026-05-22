@@ -8,13 +8,11 @@ use std::path::Path;
 
 use super::{Session, Transcript};
 use crate::config::{self, SafetyMode};
-use crate::tools::ToolPolicy;
 
 pub fn load_saved(
     name: Option<&str>,
     interactive: bool,
     mode: SafetyMode,
-    policy: ToolPolicy,
 ) -> Result<Option<Session>> {
     let Some(path) = config::resolve_saved_session(name)? else {
         return Ok(None);
@@ -31,7 +29,6 @@ pub fn load_saved(
         model: saved.model,
         system_prompt,
         interactive,
-        policy,
         mode,
         transcript,
         todos: saved.todos,

@@ -18,7 +18,8 @@ pub use storage::load_saved;
 use crate::llm::Message;
 use crate::model;
 use crate::tools::{TodoItem, TodoStatus, ToolContext, ToolPolicy};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 512;
 
@@ -54,7 +55,6 @@ pub struct Session {
     pub model: String,
     pub system_prompt: String,
     pub interactive: bool,
-    pub policy: ToolPolicy,
     pub mode: SafetyMode,
     pub transcript: Transcript,
     pub todos: Vec<TodoItem>,
@@ -66,7 +66,6 @@ impl Session {
         model: String,
         interactive: bool,
         mode: SafetyMode,
-        policy: ToolPolicy,
     ) -> Self {
         let system_prompt = config::system_prompt(interactive, mode);
         Self {
@@ -74,11 +73,14 @@ impl Session {
             model,
             system_prompt,
             interactive,
-            policy,
             mode,
             transcript: Transcript::new(),
             todos: Vec::new(),
         }
+    }
+
+    pub fn policy(&self) -> ToolPolicy {
+        self.mode.policy()
     }
 
     pub fn restarted(&self) -> Self {
@@ -87,18 +89,16 @@ impl Session {
             self.model.clone(),
             self.interactive,
             self.mode,
-            self.policy,
         )
     }
 
     pub fn tool_context(&self) -> ToolContext {
-        ToolContext {
-            root: self.root.clone(),
-            interactive: self.interactive,
-            policy: self.policy,
-            todos: self.todos.clone(),
-            external_side_effects: false,
-        }
+        ToolContext::new(
+            self.root.clone(),
+            self.interactive,
+            self.policy(),
+            self.todos.clone(),
+        )
     }
 
     fn wait_status(&self, model_spec: &str) -> String {
@@ -219,6 +219,44 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
     run_prompt_with_policy(session, prompt, None).await
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::{Approval, ToolPolicy};
+
+    #[test]
+    fn session_policy_is_derived_from_mode() {
+        let session = Session::new(
+            std::path::PathBuf::from("."),
+            "model".into(),
+            false,
+            SafetyMode::Plan,
+        );
+
+        assert_eq!(session.policy(), ToolPolicy::read_only());
+
+        let restarted = session.restarted();
+        assert_eq!(restarted.mode, SafetyMode::Plan);
+        assert_eq!(restarted.policy(), ToolPolicy::read_only());
+    }
+
+    #[test]
+    fn tool_context_uses_derived_session_policy() {
+        let session = Session::new(
+            std::path::PathBuf::from("."),
+            "model".into(),
+            false,
+            SafetyMode::AutoEdits,
+        );
+
+        assert_eq!(
+            session.tool_context().policy().files_write(),
+            Approval::Auto
+        );
+        assert_eq!(session.tool_context().policy().shell, Approval::Ask);
+    }
+}
+
 pub async fn run_prompt_read_only(session: &mut Session, prompt: &str) -> Result<String> {
     run_prompt_with_policy(session, prompt, Some(ToolPolicy::read_only())).await
 }
@@ -263,20 +301,23 @@ async fn run_prompt_with_policy(
 
     let mut tool_context = session.tool_context();
     if let Some(policy) = policy_override {
-        tool_context.policy = policy;
+        tool_context.env.policy = policy;
     }
     let tool_context = Arc::new(Mutex::new(tool_context));
     let model_spec = session.model.trim().to_string();
     ensure_context_budget(session, &model_spec).await?;
-    let preamble = session.transcript.request_preamble(
-        &session.system_prompt,
-        &tool_context.lock().expect("tool context mutex poisoned"),
-    );
+    let preamble = {
+        let ctx = tool_context.lock().await;
+        session
+            .transcript
+            .request_preamble(&session.system_prompt, &ctx)
+    };
     let messages = session.transcript.to_messages();
     let tool_specs = {
-        let ctx = tool_context.lock().expect("tool context mutex poisoned");
+        let ctx = tool_context.lock().await;
         crate::tools::tool_specs(&ctx)
     };
+    let llm_tools = crate::tools::llm_tools(tool_context.clone()).await;
     crate::ui::title_progress(session.wait_status(&model_spec));
     if !crate::ui::is_quiet() {
         crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
@@ -286,15 +327,11 @@ async fn run_prompt_with_policy(
         &preamble,
         messages,
         tool_specs,
-        crate::tools::llm_tools(tool_context.clone()),
+        llm_tools,
         max_tool_rounds,
     )
     .await?;
-    session.todos = tool_context
-        .lock()
-        .expect("tool context mutex poisoned")
-        .todos
-        .clone();
+    session.todos = tool_context.lock().await.todos().to_vec();
     if let Some(messages) = response.messages {
         session.transcript.messages.extend(messages);
     } else {

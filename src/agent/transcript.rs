@@ -188,10 +188,10 @@ impl Transcript {
 
     pub fn request_preamble(&self, system_prompt: &str, tool_context: &ToolContext) -> String {
         let mut prompt = system_prompt.to_string();
-        if !tool_context.todos.is_empty() {
+        if !tool_context.todos().is_empty() {
             let header = config::session_text_value("transcript", "todo_system")
                 .unwrap_or_else(|_| String::from("{todos}"));
-            let todos = crate::tools::format_todos(&tool_context.todos);
+            let todos = crate::tools::format_todos(tool_context.todos());
             prompt.push_str("\n\n");
             prompt.push_str(header.replace("{todos}", todos.trim_end()).trim());
         }

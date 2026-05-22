@@ -24,7 +24,7 @@ fn non_interactive_default_denies_patch() {
 async fn invoke_shared_records_external_side_effect_attempts() {
     let (dir, ctx) = test_context(ToolPolicy::read_only(), false);
     fs::write(dir.path().join("a.txt"), "one\n").unwrap();
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(ctx));
+    let shared = std::sync::Arc::new(tokio::sync::Mutex::new(ctx));
 
     let err = invoke_shared(
         shared.clone(),
@@ -35,12 +35,7 @@ async fn invoke_shared_records_external_side_effect_attempts() {
     .unwrap_err();
 
     assert!(err.to_string().contains("tool denied by policy: replace"));
-    assert!(
-        shared
-            .lock()
-            .expect("tool context mutex poisoned")
-            .external_side_effects
-    );
+    assert!(shared.lock().await.external_side_effects());
     assert_eq!(
         fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "one\n"
@@ -51,19 +46,14 @@ async fn invoke_shared_records_external_side_effect_attempts() {
 async fn invoke_shared_read_only_tools_do_not_mark_external_side_effects() {
     let (dir, ctx) = test_context(ToolPolicy::read_only(), false);
     fs::write(dir.path().join("a.txt"), "one\n").unwrap();
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(ctx));
+    let shared = std::sync::Arc::new(tokio::sync::Mutex::new(ctx));
 
     let value = invoke_shared(shared.clone(), "read", json!({"path": "a.txt"}))
         .await
         .unwrap();
 
     assert_eq!(value["path"], "a.txt");
-    assert!(
-        !shared
-            .lock()
-            .expect("tool context mutex poisoned")
-            .external_side_effects
-    );
+    assert!(!shared.lock().await.external_side_effects());
 }
 
 #[test]

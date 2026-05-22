@@ -76,10 +76,10 @@ pub(crate) fn require_mutation_approval(
     tool: &str,
     preview: Option<&str>,
 ) -> Result<()> {
-    match ctx.policy.approval(tool) {
+    match ctx.policy().approval(tool) {
         Approval::Auto => Ok(()),
         Approval::Deny => bail!("tool denied by policy: {tool}"),
-        Approval::Ask if !ctx.interactive => bail!(
+        Approval::Ask if !ctx.interactive() => bail!(
             "tool denied by policy: {tool} requires interactive approval or an auto-approve mode"
         ),
         Approval::Ask => approve_tool(tool, preview),

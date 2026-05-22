@@ -6,14 +6,15 @@
 use crate::llm::{LlmTool, LlmToolFuture, LlmTools};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use super::ToolContext;
 use super::registry::{self, ToolDef};
 
-pub(crate) fn llm_tools(ctx: Arc<Mutex<ToolContext>>) -> LlmTools {
+pub(crate) async fn llm_tools(ctx: Arc<Mutex<ToolContext>>) -> LlmTools {
     let defs = {
-        let ctx = ctx.lock().expect("tool context mutex poisoned");
+        let ctx = ctx.lock().await;
         registry::enabled_tool_defs(&ctx)
     };
     defs.into_iter()
@@ -34,11 +35,11 @@ struct OyTool {
 
 impl LlmTool for OyTool {
     fn name(&self) -> &str {
-        self.def.name
+        self.def.name()
     }
 
     fn call<'a>(&'a self, args: String) -> LlmToolFuture<'a> {
-        Box::pin(async move { call_tool(self.ctx.clone(), self.def.name, args).await })
+        Box::pin(async move { call_tool(self.ctx.clone(), self.def.name(), args).await })
     }
 }
 

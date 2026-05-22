@@ -54,7 +54,7 @@ pub(crate) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> 
     let mut truncated = false;
     for target in &targets {
         match fff_search_target(
-            &ctx.root,
+            ctx.root(),
             target,
             &args.pattern,
             grep_mode,
@@ -73,7 +73,7 @@ pub(crate) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> 
             }
             Err(err) => {
                 errors.push(ToolErrorItem {
-                    path: rel_path(&ctx.root, target),
+                    path: rel_path(ctx.root(), target),
                     message: err.to_string(),
                 });
             }

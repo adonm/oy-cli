@@ -125,16 +125,15 @@ fn load_or_new(
     continue_session: bool,
     resume: &str,
 ) -> Result<Session> {
-    let policy = config::tool_policy(mode);
     if continue_session || !resume.is_empty() {
         let name = if continue_session { None } else { Some(resume) };
-        if let Some(session) = session::load_saved(name, interactive, mode, policy)? {
+        if let Some(session) = session::load_saved(name, interactive, mode)? {
             return Ok(session);
         }
     }
     let root = config::oy_root()?;
     let model = model::resolve_model(None)?;
-    Ok(Session::new(root, model, interactive, mode, policy))
+    Ok(Session::new(root, model, interactive, mode))
 }
 
 fn collect_task(parts: &[String]) -> Result<String> {
@@ -158,7 +157,7 @@ fn print_session_intro(mode: &str, session: &Session, prompt: Option<&str>) {
     crate::ui::kv("workspace", session.root.display());
     crate::ui::kv("model", &session.model);
     crate::ui::kv("mode", session.mode.name());
-    crate::ui::kv("risk", config::policy_risk_label(&session.policy));
+    crate::ui::kv("risk", config::policy_risk_label(&session.policy()));
     if let Some(prompt) = prompt {
         crate::ui::kv("prompt", crate::ui::compact_preview(prompt, 100));
     }

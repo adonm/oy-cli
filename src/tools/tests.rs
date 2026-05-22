@@ -11,13 +11,7 @@ use std::fs;
 
 fn test_context(policy: ToolPolicy, interactive: bool) -> (tempfile::TempDir, ToolContext) {
     let dir = tempfile::tempdir().unwrap();
-    let ctx = ToolContext {
-        root: dir.path().to_path_buf(),
-        interactive,
-        policy,
-        todos: Vec::new(),
-        external_side_effects: false,
-    };
+    let ctx = ToolContext::new(dir.path().to_path_buf(), interactive, policy, Vec::new());
     (dir, ctx)
 }
 

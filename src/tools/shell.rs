@@ -46,7 +46,7 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
     let timeout_seconds = args.timeout_seconds.clamp(1, MAX_BASH_TIMEOUT_SECONDS);
     let approval_preview = format!(
         "workspace: {}\ntimeout: {timeout_seconds}s\ncommand:\n{}",
-        ctx.root.display(),
+        ctx.root().display(),
         args.command.trim()
     );
     require_mutation_approval(ctx, "bash", Some(&approval_preview))?;
@@ -61,7 +61,7 @@ pub(crate) async fn tool_bash(ctx: &ToolContext, args: BashArgs) -> Result<Value
         None
     };
     let mut child = command
-        .current_dir(&ctx.root)
+        .current_dir(ctx.root())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
