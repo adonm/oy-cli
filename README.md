@@ -11,7 +11,7 @@
 mise use cargo-binstall cargo:oy-cli # install oy with mise
 oy doctor                                    # check setup
 oy model                                     # choose or confirm a model
-oy "summarize this repo"
+oy run "summarize this repo"
 oy audit                                     # write an audit report to ISSUES.md
 oy chat                                      # start an interactive session
 ```
@@ -41,7 +41,7 @@ oy --help
 When developing without installing, replace `oy` with `cargo run --`:
 
 ```bash
-cargo run -- "summarize this repo"
+cargo run -- run "summarize this repo"
 cargo run -- chat
 ```
 
@@ -64,7 +64,6 @@ These commands show what is configured and what to do next.
 
 | Command | Use it for |
 |---|---|
-| `oy "prompt"` | Run one task in the current workspace |
 | `oy chat` | Interactive chat with slash commands and history |
 | `oy chat --mode plan` | Read-only mode for looking around safely |
 | `oy run [prompt]` | Explicit one-shot run; also accepts piped input |
@@ -77,9 +76,9 @@ These commands show what is configured and what to do next.
 ## Examples
 
 ```bash
-oy "explain the project layout"
-oy "inspect src/main.rs and suggest a simpler design"
-oy "fix the failing tests"
+oy run "explain the project layout"
+oy run "inspect src/main.rs and suggest a simpler design"
+oy run "fix the failing tests"
 oy audit "security and complexity"
 oy run --out docs/plan.md "write a migration plan"
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy run
@@ -88,7 +87,7 @@ echo "update the changelog" | OY_NON_INTERACTIVE=1 oy run
 Use a different workspace:
 
 ```bash
-OY_ROOT=../my-project oy "summarize this repo"
+OY_ROOT=../my-project oy run "summarize this repo"
 ```
 
 ## Model setup
@@ -219,7 +218,7 @@ Default local paths:
 - **Provider call failed:** check credentials, selected model, and network/local server access.
 - **Tool denied:** switch mode only if the workspace is trusted, for example `oy chat --mode accept-edits`.
 - **Untrusted repo:** use `oy chat --mode plan` first.
-- **Long task stopped early:** increase `OY_MAX_TOOL_ROUNDS`, for example `OY_MAX_TOOL_ROUNDS=2048 oy "finish the migration"`.
+- **Long task stopped early:** increase `OY_MAX_TOOL_ROUNDS`, for example `OY_MAX_TOOL_ROUNDS=2048 oy run "finish the migration"`.
 
 ## Development
 

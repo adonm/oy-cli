@@ -71,8 +71,7 @@ commit so style/lint noise never reaches CI.
 
 ## Finding something to work on
 
-- **LLM internals roadmap** — help keep `oy` on its smaller owned LLM boundary;
-  see the month-by-month plan below.
+- **LLM internals** — help keep `oy` on its smaller owned LLM boundary.
 - **`docs/GOOD_FIRST_ISSUES.md`** — limited-scope tasks suitable for new
   contributors.
 - **`ISSUES.md`** — the latest audit findings; each finding lists the affected
@@ -83,26 +82,22 @@ commit so style/lint noise never reaches CI.
 [gfi]: https://github.com/wagov-dtt/oy-cli/labels/good-first-issue
 [hw]: https://github.com/wagov-dtt/oy-cli/labels/help-wanted
 
-## LLM internals roadmap
+## LLM internals
 
-Goal: reduce code and improve quality by owning the small LLM boundary `oy`
-actually needs, while keeping behavior stable. Port OpenCode's shape
-(`request -> route -> protocol -> transport -> tool loop`) and tested provider
-behavior where the Rust-native backend supports the protocol.
+Goal: keep the native LLM backend small, explicit, and owned by `oy`:
+`request -> route -> protocol -> transport -> tool loop`. The historical
+month-by-month migration is complete; new work should simplify this current
+boundary rather than add provider framework layers.
 
-| Month | Outcome | Keep it small by |
-|---|---|---|
-| 1 | **Done:** added `src/llm/` facade with `LlmRequest`, `LlmResponse`, `Message`, `ToolSpec`, `ModelRoute`, and a `ChatBackend` trait. | No wire-protocol rewrite; request/response conversion goldens covered the adapter seam. |
-| 2 | **Done:** moved transcript storage and tool definitions to `oy`-owned types. `agent::model` accepts `llm::Message` directly, and `src/tools/registry.rs` remains the single tool schema registry. | One tool schema registry, one message shape, no provider traits. |
-| 3 | **Done:** added non-streaming native OpenAI Chat and OpenAI Responses backends, reusing `agent::auth`, OpenCode route metadata, and the existing tool schema registry/tool loop boundary. | No new providers, credential paths, or streaming surface. |
-| 4 | **Done:** made the native backend the default, removed the previous external backend and compatibility shims, and kept only OpenAI-compatible Chat/Responses routes. | Keep only OpenAI-compatible protocols unless a concrete user need justifies more. |
-| 5 | **Done:** hardened the native tool loop without widening capability: repeated identical failed tool calls are blocked, unknown tools return enabled-tool hints, tool failures use consistent `TOOL_ERROR`/`RECOVERY` markers, model-visible tool output is capped with head/tail preservation, and tool-only churn has a progress guard. | Changes stay local to `src/llm/openai.rs` and `src/tools/output.rs`; Chat and Responses share focused coverage; the default tool-round budget is unchanged. |
-| 6 | **Done:** made retries side-effect aware and trimmed duplicated loop code: whole-prompt retries now stop after write/shell/persistent todo side-effect attempts, provider retry backoff uses fewer jittered attempts, Chat/Responses share tool-round budget handling, and common bad tool-call arguments have clearer schema descriptions. | One explicit side-effect signal near `tools::invoke_inner`; retry policy stayed in `agent::retry`; repeated loop mechanics were extracted without adding a new framework or provider abstraction. |
-| 7 | **Done:** reorganized the native backend toward OpenCode `packages/llm`: provider profiles, route auth/framing/transport, protocol modules, schema/events, cache policy, and tool runtime are split and tested. OpenAI Chat, OpenAI Responses, Anthropic Messages, and Bedrock Converse are native protocols; xAI, OpenRouter, Azure, Cloudflare, OpenAI-compatible families, Copilot, and Bedrock have provider routing. | Keep provider profiles as data plus focused quirks; unsupported Gemini entries fail closed until their protocols are native. |
+When touching LLM code:
 
-Every month: delete obsolete compatibility code, add focused request/response
-goldens, keep auth lookup centralized, and do not add process execution,
-credential paths, or protocol claims just to make the abstraction look complete.
+- keep `LlmRequest`, `LlmResponse`, messages, tools, cache hints, and routes in `oy`;
+- keep OpenCode model listing/limits in `agent::opencode_models`;
+- keep credential lookup in `agent::auth` and route auth helpers;
+- keep provider profiles narrow and covered by route/default/auth tests;
+- add protocol support only for concrete user need; unsupported routes should fail closed;
+- prefer request/response golden tests over live-provider tests;
+- delete obsolete compatibility code in the same change that makes it unused.
 
 ## Design rules
 

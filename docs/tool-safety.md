@@ -16,6 +16,7 @@ Native OpenAI-compatible tool loops fail closed for repeated identical failed to
 | `ask` | Asks the user in interactive runs | No | Interactive only | Use only for genuine ambiguity |
 | `webfetch` | Fetches web pages with Spider and returns the Spider MCP scrape shape | No local mutation | Network policy | Minimal HTTP-only Spider setup |
 | `replace` | Replaces text in workspace files | Yes | File-write approval | Inspect/search before changing |
+| `patch` | Applies diffs to existing workspace files | Yes | File-write approval | No create/delete; inspect/read before patching |
 | `bash` | Runs a shell command in workspace | Process side effects | Shell approval | Filters credential-like env vars; still uses user permissions |
 
 ## Approval modes

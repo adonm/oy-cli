@@ -20,13 +20,13 @@ user argv/stdin
 
 1. `src/main.rs` converts process errors into a user-facing exit code.
 2. `src/lib.rs` keeps the public crate surface small.
-3. `cli::app` parses commands, restores legacy argument shapes, and delegates command bodies to `cli::app/*_cmd.rs`.
+3. `cli::app` parses explicit subcommands and delegates command bodies to `cli::app/*_cmd.rs`.
 4. `cli::config` is a facade over focused config modules for modes, paths, prompts, model config, environment knobs, and saved sessions.
 5. `agent::session` owns session orchestration and saved sessions; transcript storage uses `llm::Message`, while context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
 6. `agent::model` resolves a small chat route, builds an `llm::LlmRequest` from `oy`-owned messages/tool specs, and executes it through `llm::NativeOpenAiBackend`. The native backend is OpenCode-shaped: provider profiles choose a route, protocols lower common messages/tools/cache hints into provider bodies, transports handle auth/framing, and the hardened tool loop appends assistant/tool turns. `agent::opencode_models` remains the only source of verbose model listings and limits; `llm::providers` only stores route/profile metadata that cannot be derived from the listing.
 7. `agent::auth` owns environment/OpenCode/Copilot API-token credential lookup; callers should not duplicate provider auth probing.
 8. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries. `src/tools/registry.rs` is the single `oy` tool schema registry; `src/tools/llm.rs` adapts enabled tools to the native `llm::LlmTool` trait.
-10. `src/audit.rs` is separate from the tool loop: it orchestrates collection, chunk review/reduce, rendering, and report writing through focused `src/audit/` modules.
+9. `src/audit.rs` is separate from the tool loop: it orchestrates collection, chunk review/reduce, rendering, and report writing through focused `src/audit/` modules.
 
 ## Main modules
 
@@ -39,13 +39,13 @@ user argv/stdin
 | `src/tools.rs`, `src/tools/` | Tool schema registry, native LLM tool adapter, tool dispatch, previews, todos, workspace filesystem boundary, webfetch network boundary, mutation approval |
 | `src/lib.rs` | Small public facade used by the binary and tests |
 | `src/main.rs` | Tokio entry point and process exit handling |
-| `tests/snapshots.rs` | Snapshot tests for chat help and tool preview UX |
+| `src/**/tests.rs`, `src/**/test/`, `src/**/snapshots/` | Unit, protocol golden, boundary, and snapshot tests close to the code under test |
 
 The current layout keeps top-level Rust files as facades/orchestrators where practical. When splitting files, prefer mechanical extraction with no behavior changes, keep trust-boundary validation near entry points, and keep `src/lib.rs` stable.
 
-## LLM transition target
+## LLM boundary
 
-The desired LLM boundary is OpenCode-shaped but `oy`-sized:
+The LLM path is OpenCode-shaped but `oy`-sized:
 
 ```text
 transcript/tools -> LlmRequest -> ModelRoute -> Protocol -> Transport -> LlmResponse
@@ -54,17 +54,15 @@ transcript/tools -> LlmRequest -> ModelRoute -> Protocol -> Transport -> LlmResp
                               OpenCode metadata             tool loop
 ```
 
-Months 1 through 6 are in place, and the current native backend now mirrors more of `packages/llm`: `src/llm/mod.rs` owns request/response, message, cache, tool-spec, route, backend-trait, and native tool types; `src/llm/providers.rs` owns narrow provider profiles for OpenAI, Copilot, OpenAI-compatible families, xAI, OpenRouter, Azure, Cloudflare, and Bedrock; `src/llm/protocols/` contains OpenAI Chat, OpenAI Responses, Anthropic Messages, and Bedrock Converse lowering/parsing; `src/llm/route/` contains endpoint, auth, framing, and HTTP transport helpers; and `src/llm/tool_runtime.rs` owns the hardened tool loop. Cache policy follows OpenCode's tools/system/latest-user defaults for inline-cache protocols while OpenAI-family protocols skip inline markers. Prompt-level provider retries use a small jittered backoff and stop once `tools::invoke_inner` records a write, shell, or persistent todo side-effect attempt.
+Current ownership rules:
 
-Rules for that transition:
-
-- own `LlmRequest`, `LlmResponse`, messages, tool definitions, and model routes in `oy`;
-- keep provider profiles narrow and covered by route/default/auth tests;
-- add protocol support incrementally; unsupported Gemini routes must fail closed until their native protocols are ported;
-- keep model listing/limits in OpenCode, provider auth lookup in `agent::auth`/route auth helpers, and policy checks in `tools`;
-- prefer request/response golden tests over broad live-provider tests.
-
-See `CONTRIBUTING.md` for the month-by-month roadmap.
+- `oy` owns `LlmRequest`, `LlmResponse`, messages, tool definitions, model routes, cache hints, and the local tool loop.
+- `agent::opencode_models` is the only source for verbose OpenCode model listings and limits.
+- `agent::auth` and `llm::route::auth` own credential lookup/signing; callers should not probe credentials ad hoc.
+- `llm::providers` keeps only narrow route/profile data and provider quirks that cannot be derived from OpenCode listings.
+- Protocol modules lower common messages/tools/cache hints into provider wire bodies and parse streamed events.
+- Unsupported Gemini routes fail closed until their native protocol is implemented.
+- Prefer request/response golden tests and focused route/auth tests over broad live-provider tests.
 
 ## Trust boundaries
 
