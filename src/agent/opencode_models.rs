@@ -221,7 +221,6 @@ impl OpenCodeModel {
                 "@ai-sdk/openai"
                     | "@ai-sdk/openai-compatible"
                     | "@ai-sdk/github-copilot"
-                    | "@ai-sdk/google"
                     | "@ai-sdk/anthropic"
             )
         })
@@ -360,6 +359,27 @@ opencode/claude-test
 "#;
         let listing = parse_verbose(text).unwrap();
         assert!(listing.find("anthropic", "anthropic.test").is_some());
+    }
+
+    #[test]
+    fn filters_google_models_until_native_protocol_is_supported() {
+        let text = r#"google/gemini-3-flash
+{
+  "id": "gemini-3-flash",
+  "providerID": "google",
+  "api": { "id": "gemini-3-flash", "npm": "@ai-sdk/google" }
+}
+github-copilot/gpt-5.5
+{
+  "id": "gpt-5.5",
+  "providerID": "github-copilot",
+  "api": { "id": "gpt-5.5", "npm": "@ai-sdk/github-copilot" }
+}
+"#;
+        let listing = parse_verbose(text).unwrap();
+        let groups = listing.into_adapter_models();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);
     }
 
     #[test]

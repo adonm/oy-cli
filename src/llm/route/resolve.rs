@@ -3,7 +3,7 @@
 //! This mirrors OpenCode's split: agent/app code chooses a model spec, while
 //! the LLM layer maps provider/model/auth/options into a runnable route.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::config;
 use crate::llm::{ModelRoute, Protocol};
@@ -72,6 +72,7 @@ pub(crate) fn model_route(
 ) -> Result<ModelRoute> {
     let parsed = ParsedModelSpec::parse(model_spec);
     let provider = parsed.provider_or_openai();
+    ensure_supported_provider(provider)?;
     let mut route = match provider {
         "github-copilot" => {
             crate::llm::providers::route::prepare_github_copilot_chat(parsed.base_model)?
@@ -124,6 +125,19 @@ pub(crate) fn model_route(
         reasoning_overlay,
     );
     Ok(route)
+}
+
+fn ensure_supported_provider(provider: &str) -> Result<()> {
+    let Some(metadata) = crate::llm::providers::provider_metadata(provider) else {
+        return Ok(());
+    };
+    if metadata.supported {
+        return Ok(());
+    }
+    bail!(
+        "provider `{provider}` uses {:?}, which is not implemented by oy's native LLM backend yet",
+        metadata.family
+    )
 }
 
 pub(crate) fn reasoning_effort_json(

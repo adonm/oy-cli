@@ -115,7 +115,7 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 oy model openai/gpt-4.1
 ```
 
-GitHub Copilot, OpenAI-compatible providers listed by OpenCode, Anthropic Messages, xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse route through `oy`'s Rust-native LLM backend. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Google/Gemini provider entries are detected but fail closed until their native protocol is ported. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
+GitHub Copilot, OpenAI-compatible providers listed by OpenCode, Anthropic Messages, xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse route through `oy`'s Rust-native LLM backend. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Google/Gemini OpenCode entries are filtered from routable listings and fail closed at route resolution until their native protocol is ported. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
 
 Provider-specific direct environment variables:
 

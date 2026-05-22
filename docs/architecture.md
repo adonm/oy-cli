@@ -23,7 +23,7 @@ user argv/stdin
 3. `cli::app` parses explicit subcommands and delegates command bodies to `cli::app/*_cmd.rs`.
 4. `cli::config` is a facade over focused config modules for modes, paths, prompts, model config, environment knobs, and saved sessions.
 5. `agent::session` owns session orchestration and saved sessions; transcript storage uses `llm::Message`, while context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
-6. `agent::model` resolves a small chat route, builds an `llm::LlmRequest` from `oy`-owned messages/tool specs, and executes it through `llm::NativeOpenAiBackend`. The native backend is OpenCode-shaped: provider profiles choose a route, protocols lower common messages/tools/cache hints into provider bodies, transports handle auth/framing, and the hardened tool loop appends assistant/tool turns. `agent::opencode_models` remains the only source of verbose model listings and limits; `llm::providers` only stores route/profile metadata that cannot be derived from the listing.
+6. `agent::model` is a facade over focused model lifecycle modules: selection/listing stay in the facade, while `agent::model::{exec,metadata,reasoning}` own chat execution handoff, best-effort model-limit caching, and reasoning-effort policy. Route construction and provider-support enforcement live in `llm::route::resolve`; metadata caching is not an execution gate. The native backend is OpenCode-shaped: provider profiles choose a route, protocols lower common messages/tools/cache hints into provider bodies, transports handle auth/framing, and the hardened tool loop appends assistant/tool turns. `agent::opencode_models` remains the only source of verbose model listings and limits; `llm::providers` only stores route/profile metadata that cannot be derived from the listing.
 7. `agent::auth` owns environment/OpenCode/Copilot API-token credential lookup; callers should not duplicate provider auth probing.
 8. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries. `src/tools/registry.rs` is the single `oy` tool schema registry; `src/tools/llm.rs` adapts enabled tools to the native `llm::LlmTool` trait.
 9. `src/audit.rs` is separate from the tool loop: it orchestrates collection, chunk review/reduce, rendering, and report writing through focused `src/audit/` modules.
@@ -61,7 +61,7 @@ Current ownership rules:
 - `agent::auth` and `llm::route::auth` own credential lookup/signing; callers should not probe credentials ad hoc.
 - `llm::providers` keeps only narrow route/profile data and provider quirks that cannot be derived from OpenCode listings.
 - Protocol modules lower common messages/tools/cache hints into provider wire bodies and parse streamed events.
-- Unsupported Gemini routes fail closed until their native protocol is implemented.
+- Unsupported Gemini/Google routes are filtered from routable OpenCode listings and fail closed in route resolution until their native protocol is implemented.
 - Prefer request/response golden tests and focused route/auth tests over broad live-provider tests.
 
 ## Trust boundaries
