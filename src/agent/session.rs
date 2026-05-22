@@ -219,44 +219,6 @@ pub async fn run_prompt(session: &mut Session, prompt: &str) -> Result<String> {
     run_prompt_with_policy(session, prompt, None).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tools::{Approval, ToolPolicy};
-
-    #[test]
-    fn session_policy_is_derived_from_mode() {
-        let session = Session::new(
-            std::path::PathBuf::from("."),
-            "model".into(),
-            false,
-            SafetyMode::Plan,
-        );
-
-        assert_eq!(session.policy(), ToolPolicy::read_only());
-
-        let restarted = session.restarted();
-        assert_eq!(restarted.mode, SafetyMode::Plan);
-        assert_eq!(restarted.policy(), ToolPolicy::read_only());
-    }
-
-    #[test]
-    fn tool_context_uses_derived_session_policy() {
-        let session = Session::new(
-            std::path::PathBuf::from("."),
-            "model".into(),
-            false,
-            SafetyMode::AutoEdits,
-        );
-
-        assert_eq!(
-            session.tool_context().policy().files_write(),
-            Approval::Auto
-        );
-        assert_eq!(session.tool_context().policy().shell, Approval::Ask);
-    }
-}
-
 pub async fn run_prompt_read_only(session: &mut Session, prompt: &str) -> Result<String> {
     run_prompt_with_policy(session, prompt, Some(ToolPolicy::read_only())).await
 }
@@ -341,4 +303,42 @@ async fn run_prompt_with_policy(
             .push(Message::assistant_text(response.output.clone()));
     }
     Ok(response.output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::{Approval, ToolPolicy};
+
+    #[test]
+    fn session_policy_is_derived_from_mode() {
+        let session = Session::new(
+            std::path::PathBuf::from("."),
+            "model".into(),
+            false,
+            SafetyMode::Plan,
+        );
+
+        assert_eq!(session.policy(), ToolPolicy::read_only());
+
+        let restarted = session.restarted();
+        assert_eq!(restarted.mode, SafetyMode::Plan);
+        assert_eq!(restarted.policy(), ToolPolicy::read_only());
+    }
+
+    #[test]
+    fn tool_context_uses_derived_session_policy() {
+        let session = Session::new(
+            std::path::PathBuf::from("."),
+            "model".into(),
+            false,
+            SafetyMode::AutoEdits,
+        );
+
+        assert_eq!(
+            session.tool_context().policy().files_write(),
+            Approval::Auto
+        );
+        assert_eq!(session.tool_context().policy().shell, Approval::Ask);
+    }
 }

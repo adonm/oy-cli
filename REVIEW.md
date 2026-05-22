@@ -11,6 +11,14 @@ The workspace has multiple structural maintainability issues that affect safety-
 
 ## Findings summary
 
+Current triage after review fixes:
+
+- **Fixed** `src/llm/providers/route.rs` — `OPENROUTER_PROVIDER_OPTIONS` is now parsed only on the OpenRouter route; OpenAI routes keep only OpenAI-owned options/defaults.
+- **Fixed** `src/agent/model.rs` — cached provider/limit metadata is keyed by canonical provider/base-model, so calls for another model no longer reuse the last cached provider or limits.
+- **Improved** `src/audit/report.rs`, `src/audit/sarif.rs` — finding extraction now accepts only explicit `### [Severity] Title` / `### Severity: Title` headings with code evidence, reducing bogus SARIF findings from generic Markdown subheadings.
+- **Already addressed in current code** `src/tools/registry.rs`, `src/tools.rs`, `src/agent/session.rs`, `src/agent/session/storage.rs`, `src/tools/workspace/patch.rs`, `src/cli/config/paths.rs` — tool schema/dispatch/effect classification are registry-backed, session policy is derived from mode, shared tool invocation mutates one locked context, and patch/replace writes use the workspace batch writer.
+- **Still open / larger refactors** shared audit/review pipeline extraction, native LLM protocol tool-loop extraction, and splitting the remaining large `agent::model` responsibilities into smaller modules.
+
 | Severity | Finding | Code reference |
 |---|---|---|
 | Blocker | Tool registry is not the canonical tool definition; schema, dispatch, gating, and side-effect classification are split across stringly parallel structures. | `src/tools/registry.rs::TOOL_DEFS`, `src/tools.rs::invoke_inner`, `src/tools.rs::tool_may_have_external_side_effect` |

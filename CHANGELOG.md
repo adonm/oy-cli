@@ -5,6 +5,7 @@
 ### Changed
 - Removed legacy top-level task/continue/resume CLI argument rewrites; use explicit `oy run ...` forms.
 - Split the large tools test module into boundary-focused test modules and refreshed architecture/contributor docs for the current native LLM boundary.
+- Scoped OpenRouter provider-body options to OpenRouter routes, made the model-info cache key model-specific, and tightened audit/SARIF finding extraction to explicit severity headings instead of broad Markdown-heading guesses.
 
 ## [0.10.3] - 2026-05-21
 

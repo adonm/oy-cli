@@ -63,7 +63,7 @@ pub fn audit_chunk_prompt(
     let mut prompt = String::new();
     let _ = writeln!(prompt, "Review audit chunk {chunk_id}/{chunk_count}.");
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReturn concise candidate findings for this chunk only. Use markdown with one `###` heading per finding, or return `[]` if there are no concrete findings. For each finding include severity, category, evidence path/symbol, trust boundary/sink when security-relevant, impact, reference, and fix. Do not write files.\n\n");
+    prompt.push_str("\nReturn concise candidate findings for this chunk only. Use markdown with one explicit `### [Severity] Title` heading per finding, or return `[]` if there are no concrete findings. For each finding include severity, category, evidence path/symbol, trust boundary/sink when security-relevant, impact, reference, and fix. Do not write files.\n\n");
     prompt.push_str("Repository manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nSecurity-relevant index:\n");
@@ -83,7 +83,7 @@ pub fn audit_full_prompt(
     let mut prompt = String::new();
     prompt.push_str("Conduct a full repository audit and return the final markdown report.\n");
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; include category, evidence, trust boundary/sink where security-relevant, impact, exploitability/preconditions, reference, and fix.\n4. Avoid generic advice. Do not write files.\n\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; each finding heading must use `### [Severity] Title`; include category, evidence, trust boundary/sink where security-relevant, impact, exploitability/preconditions, reference, and fix.\n4. Avoid generic advice. Do not write files.\n\n");
     prompt.push_str("Repository manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nSecurity-relevant index:\n");
@@ -103,7 +103,7 @@ pub fn audit_reduce_prompt(
     let mut prompt = String::new();
     prompt.push_str("Condense candidate audit findings into the final markdown report.\n");
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding that survives dedupe, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; preserve the shortest evidence needed to prove exploitability or impact, plus category, trust boundary/sink where security-relevant, reference, and fix.\n4. Drop weak/speculative/duplicate items, but do not omit concrete lower-severity findings from the summary.\n\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding that survives dedupe, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; each finding heading must use `### [Severity] Title`; preserve the shortest evidence needed to prove exploitability or impact, plus category, trust boundary/sink where security-relevant, reference, and fix.\n4. Drop weak/speculative/duplicate items, but do not omit concrete lower-severity findings from the summary.\n\n");
     prompt.push_str("Repository manifest:\n");
     prompt.push_str(manifest.trim());
     push_existing_issues(&mut prompt, existing_issues);

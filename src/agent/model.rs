@@ -81,6 +81,7 @@ pub(crate) struct ProviderInfo {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedModelInfo {
+    pub model_spec: String,
     pub limits: Option<opencode_models::OpenCodeModelLimit>,
     pub provider_info: ProviderInfo,
 }
@@ -109,6 +110,7 @@ pub async fn cache_model_limits(model_spec: &str) -> Result<()> {
 
     let mut cache = MODEL_INFO_CACHE.write().unwrap();
     *cache = Some(CachedModelInfo {
+        model_spec: canonical_cache_key(model_spec),
         limits,
         provider_info: ProviderInfo {
             provider: provider.to_string(),
@@ -122,7 +124,10 @@ pub async fn cache_model_limits(model_spec: &str) -> Result<()> {
 /// Extract provider info from a model spec string.
 pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
     let lock = MODEL_INFO_CACHE.read().unwrap();
-    if let Some(info) = lock.as_ref() {
+    if let Some(info) = lock
+        .as_ref()
+        .filter(|info| info.model_spec == canonical_cache_key(model_spec))
+    {
         info.provider_info.clone()
     } else {
         let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
@@ -135,12 +140,18 @@ pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
 
 /// Look up token limits for a model spec from OpenCode metadata.
 /// Returns `None` when OpenCode isn't available or the model isn't found.
-pub(crate) fn model_limits(_model_spec: &str) -> Option<opencode_models::OpenCodeModelLimit> {
+pub(crate) fn model_limits(model_spec: &str) -> Option<opencode_models::OpenCodeModelLimit> {
     MODEL_INFO_CACHE
         .read()
         .unwrap()
         .as_ref()
+        .filter(|info| info.model_spec == canonical_cache_key(model_spec))
         .and_then(|info| info.limits)
+}
+
+fn canonical_cache_key(model_spec: &str) -> String {
+    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
+    format!("{}/{}", parsed.provider_or_openai(), parsed.base_model)
 }
 
 static BACKEND: NativeOpenAiBackend = NativeOpenAiBackend;
@@ -381,6 +392,30 @@ mod tests {
         }
     }
 
+    struct ModelInfoCacheGuard {
+        saved: Option<CachedModelInfo>,
+    }
+
+    impl ModelInfoCacheGuard {
+        fn replace(next: Option<CachedModelInfo>) -> Self {
+            let mut cache = MODEL_INFO_CACHE
+                .write()
+                .unwrap_or_else(|err| err.into_inner());
+            let saved = cache.clone();
+            *cache = next;
+            Self { saved }
+        }
+    }
+
+    impl Drop for ModelInfoCacheGuard {
+        fn drop(&mut self) {
+            let mut cache = MODEL_INFO_CACHE
+                .write()
+                .unwrap_or_else(|err| err.into_inner());
+            *cache = self.saved.take();
+        }
+    }
+
     #[test]
     fn copilot_routes_reasoning_models_to_responses_api() {
         assert!(crate::llm::providers::github_copilot_should_use_responses_api("gpt-5.5"));
@@ -438,6 +473,10 @@ mod tests {
         let _env = EnvGuard::set(&[
             ("OPENAI_API_KEY", Some("test-openai-key")),
             ("OPENAI_BASE_URL", Some("https://openai.example/v1")),
+            (
+                "OPENROUTER_PROVIDER_OPTIONS",
+                Some("{\"usage\":true,\"promptCacheKey\":\"should-not-leak\"}"),
+            ),
         ]);
         let chat = prepare_chat("openai::gpt-4.1-mini").unwrap();
         assert_eq!(chat.protocol, Protocol::OpenAiChat);
@@ -447,6 +486,39 @@ mod tests {
         assert_eq!(
             chat.additional_params,
             Some(serde_json::json!({"store": false}))
+        );
+    }
+
+    #[test]
+    fn prepare_chat_keeps_openrouter_provider_options_on_openrouter_route() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = EnvGuard::set(&[
+            ("OPENROUTER_API_KEY", Some("test-openrouter-key")),
+            ("OPENROUTER_BASE_URL", Some("https://openrouter.example/v1")),
+            (
+                "OPENROUTER_PROVIDER_OPTIONS",
+                Some("{\"usage\":true,\"promptCacheKey\":\"abc\",\"ignored\":true}"),
+            ),
+        ]);
+
+        let chat = prepare_chat("openrouter/qwen-test").unwrap();
+
+        assert_eq!(chat.protocol, Protocol::OpenAiChat);
+        assert_eq!(chat.model, "qwen-test");
+        assert_eq!(
+            chat.auth,
+            RouteAuth::ApiKey("test-openrouter-key".to_string())
+        );
+        assert_eq!(
+            chat.base_url.as_deref(),
+            Some("https://openrouter.example/v1")
+        );
+        assert_eq!(
+            chat.additional_params,
+            Some(serde_json::json!({
+                "usage": {"include": true},
+                "prompt_cache_key": "abc"
+            }))
         );
     }
 
@@ -738,6 +810,43 @@ mod tests {
             crate::llm::route::resolve::merge_additional_params(base, overlay),
             Some(serde_json::json!({"reasoning": false}))
         );
+    }
+
+    #[test]
+    fn model_info_cache_is_model_specific() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _cache = ModelInfoCacheGuard::replace(Some(CachedModelInfo {
+            model_spec: canonical_cache_key("github-copilot/gpt-5.5-low"),
+            limits: Some(opencode_models::OpenCodeModelLimit {
+                context: 123_000,
+                input: Some(120_000),
+                output: 3_000,
+            }),
+            provider_info: ProviderInfo {
+                provider: "github-copilot".to_string(),
+                endpoint: Some("https://api.githubcopilot.com".to_string()),
+            },
+        }));
+
+        let matching = provider_info("github-copilot/gpt-5.5-high");
+        assert_eq!(matching.provider, "github-copilot");
+        assert_eq!(
+            matching.endpoint.as_deref(),
+            Some("https://api.githubcopilot.com")
+        );
+        assert_eq!(
+            model_limits("github-copilot/gpt-5.5-high").map(|limit| (
+                limit.context,
+                limit.input,
+                limit.output
+            )),
+            Some((123_000, Some(120_000), 3_000))
+        );
+
+        let other = provider_info("openrouter/qwen-test");
+        assert_eq!(other.provider, "openrouter");
+        assert_eq!(other.endpoint, None);
+        assert!(model_limits("openrouter/qwen-test").is_none());
     }
 
     // ── Live integration tests (network + OpenCode required) ──

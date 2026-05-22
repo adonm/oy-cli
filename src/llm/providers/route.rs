@@ -63,8 +63,7 @@ pub(crate) fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
         ),
         base_url: Some(profile.base_url),
         query_params: None,
-        additional_params: env_json("OPENROUTER_PROVIDER_OPTIONS")
-            .and_then(|value| crate::llm::providers::openrouter_body_options(Some(&value))),
+        additional_params: None,
     })
 }
 
@@ -89,6 +88,8 @@ pub(crate) fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
 pub(crate) fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
     let profile =
         crate::llm::providers::openrouter_profile(model, env_value("OPENROUTER_BASE_URL"));
+    let provider_options = env_json("OPENROUTER_PROVIDER_OPTIONS")
+        .and_then(|value| crate::llm::providers::openrouter_body_options(Some(&value)));
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
@@ -99,7 +100,7 @@ pub(crate) fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
         ),
         base_url: Some(profile.base_url),
         query_params: None,
-        additional_params: None,
+        additional_params: provider_options,
     })
 }
 

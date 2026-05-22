@@ -124,7 +124,7 @@ Provider-specific direct environment variables:
 | OpenAI | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL` |
 | GitHub Copilot | `GITHUB_COPILOT_API_KEY` or `COPILOT_API_KEY` |
 | xAI | `XAI_API_KEY`, optional `XAI_BASE_URL` |
-| OpenRouter | `OPENROUTER_API_KEY`, optional `OPENROUTER_BASE_URL` |
+| OpenRouter | `OPENROUTER_API_KEY`, optional `OPENROUTER_BASE_URL`, optional `OPENROUTER_PROVIDER_OPTIONS` JSON for OpenRouter request-body options such as usage/reasoning/prompt cache key |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`; optional `AZURE_OPENAI_API_VERSION` |
 | Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN` or `CF_AIG_TOKEN`, plus `CLOUDFLARE_AI_GATEWAY_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID`; optional `CLOUDFLARE_AI_GATEWAY_ID` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` or `CLOUDFLARE_WORKERS_AI_TOKEN`, plus `CLOUDFLARE_WORKERS_AI_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID` |
