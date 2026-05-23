@@ -6,6 +6,7 @@ use globset::GlobSet;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 
 use super::super::ToolContext;
@@ -126,31 +127,21 @@ fn fff_search_target(
         });
     }
 
-    let exact_target = target.is_file().then(|| rel_path(root, target));
-    let base = if target.is_file() {
-        target.parent().unwrap_or(root)
-    } else {
-        target
-    };
+    if target.is_file() {
+        return search_exact_file(root, target, pattern, mode, exclude, limit);
+    }
+
+    let base = target;
     let picker = fff_picker(base)?;
     let parser = QueryParser::new(AiGrepConfig);
     let query = parser.parse(pattern);
-    let fff_limit = exact_target
-        .as_ref()
-        .map_or(limit, |_| MAX_SEARCH_MATCHES.max(limit));
-    let result = picker.grep(&query, &grep_options(mode, fff_limit));
+    let result = picker.grep(&query, &grep_options(mode, limit));
 
     let mut matches = Vec::new();
-    let mut truncated = exact_target.is_none() && result.next_file_offset > 0;
+    let mut truncated = result.next_file_offset > 0;
     for item in result.matches {
         let file = result.files[item.file_index];
         let display = display_path_from_base(root, base, file.relative_path(&picker).as_str());
-        if exact_target
-            .as_deref()
-            .is_some_and(|target| target != display)
-        {
-            continue;
-        }
         if exclude.is_match(display.as_str()) {
             continue;
         }
@@ -164,6 +155,62 @@ fn fff_search_target(
             column: item.col + 1,
             text: crate::ui::truncate_chars(item.line_content.trim_end_matches(['\r', '\n']), 1000),
         });
+    }
+
+    Ok(SearchTargetMatches { matches, truncated })
+}
+
+fn search_exact_file(
+    root: &Path,
+    target: &Path,
+    pattern: &str,
+    mode: GrepMode,
+    exclude: &GlobSet,
+    limit: usize,
+) -> Result<SearchTargetMatches> {
+    let display = rel_path(root, target);
+    if exclude.is_match(display.as_str()) || fs::metadata(target)?.len() > MAX_WORKSPACE_FILE_BYTES
+    {
+        return Ok(SearchTargetMatches {
+            matches: Vec::new(),
+            truncated: false,
+        });
+    }
+
+    let raw = fs::read(target)?;
+    let text = match crate::decode_utf8(raw) {
+        Ok(text) => text,
+        Err(crate::TextDecodeError::Binary) => {
+            return Ok(SearchTargetMatches {
+                matches: Vec::new(),
+                truncated: false,
+            });
+        }
+        Err(crate::TextDecodeError::NonUtf8) => anyhow::bail!("cannot decode utf-8"),
+    };
+    let regex = match mode {
+        GrepMode::Regex => {
+            Regex::new(pattern).with_context(|| format!("invalid regex: {pattern}"))?
+        }
+        GrepMode::PlainText => Regex::new(&regex::escape(pattern))?,
+        GrepMode::Fuzzy => anyhow::bail!("fuzzy grep mode is not supported for workspace search"),
+    };
+
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    for (line_idx, line) in text.lines().enumerate() {
+        for item in regex.find_iter(line) {
+            if matches.len() >= limit {
+                truncated = true;
+                return Ok(SearchTargetMatches { matches, truncated });
+            }
+            matches.push(SearchHit {
+                path: display.clone(),
+                line_number: line_idx + 1,
+                column: item.start() + 1,
+                text: crate::ui::truncate_chars(line.trim_end_matches(['\r', '\n']), 1000),
+            });
+        }
     }
 
     Ok(SearchTargetMatches { matches, truncated })

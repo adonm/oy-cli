@@ -511,8 +511,8 @@ fn search_stops_at_requested_limit() {
 fn search_exact_file_does_not_spend_limit_on_siblings() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::create_dir(dir.path().join("src")).unwrap();
-    fs::write(dir.path().join("src/aaa.rs"), "hit\nhit\nhit\n").unwrap();
-    fs::write(dir.path().join("src/target.rs"), "hit\n").unwrap();
+    fs::write(dir.path().join("src/aaa.rs"), "hit\n".repeat(10_050)).unwrap();
+    fs::write(dir.path().join("src/target.rs"), "hit\nhit\n").unwrap();
 
     let value = workspace::tool_search(
         &ctx,
@@ -520,14 +520,15 @@ fn search_exact_file_does_not_spend_limit_on_siblings() {
             pattern: "hit".into(),
             path: "src/target.rs".into(),
             exclude: None,
-            limit: 1,
+            limit: 2,
             mode: SearchMode::Literal,
         },
     )
     .unwrap();
 
-    assert_eq!(value["match_count"], 1);
+    assert_eq!(value["match_count"], 2);
     assert_eq!(value["matches"][0]["path"], "src/target.rs");
+    assert_eq!(value["matches"][1]["path"], "src/target.rs");
     assert_eq!(value["truncated"], false);
 }
 
