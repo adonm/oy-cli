@@ -1,6 +1,6 @@
 //! Minimal reqwest-backed webfetch tool.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -34,34 +34,10 @@ pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Resu
         bail!("tool denied by policy: webfetch");
     }
 
-    let url = validate_public_url(&args.url).await?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(WEBFETCH_CONNECT_TIMEOUT)
-        .read_timeout(WEBFETCH_READ_TIMEOUT)
-        .timeout(WEBFETCH_REQUEST_TIMEOUT)
-        .build()
-        .context("failed to build webfetch HTTP client")?;
-    let mut request = client.get(url.clone());
-    if let Some(user_agent) = args
-        .user_agent
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        request = request.header(USER_AGENT, user_agent.trim());
-    }
-    if let Some(cookie) = args
-        .cookie
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        request = request.header(COOKIE, cookie.trim());
-    }
-
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("failed to fetch {}", url.as_str()))?;
+    let client = PublicWebfetchClient::new(&args.url).await?;
+    let response = client
+        .fetch(args.user_agent.as_deref(), args.cookie.as_deref())
+        .await?;
     let status_code = response.status().as_u16();
     let response_url = response.url().clone();
     let content_type = response
@@ -88,6 +64,102 @@ pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Resu
         links,
         truncated,
     })?)
+}
+
+struct PublicWebfetchClient {
+    url: Url,
+    client: reqwest::Client,
+}
+
+impl PublicWebfetchClient {
+    async fn new(input: &str) -> Result<Self> {
+        let target = PublicWebfetchTarget::resolve(input).await?;
+        Self::from_target(target)
+    }
+
+    fn from_target(target: PublicWebfetchTarget) -> Result<Self> {
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(WEBFETCH_CONNECT_TIMEOUT)
+            .read_timeout(WEBFETCH_READ_TIMEOUT)
+            .timeout(WEBFETCH_REQUEST_TIMEOUT);
+        if let Some((host, addrs)) = target.pinned_dns_override() {
+            builder = builder.resolve_to_addrs(host, addrs);
+        }
+        let client = builder
+            .build()
+            .context("failed to build webfetch HTTP client")?;
+
+        Ok(Self {
+            url: target.url,
+            client,
+        })
+    }
+
+    async fn fetch(
+        &self,
+        user_agent: Option<&str>,
+        cookie: Option<&str>,
+    ) -> Result<reqwest::Response> {
+        let mut request = self.client.get(self.url.clone());
+        if let Some(user_agent) = user_agent.filter(|value| !value.trim().is_empty()) {
+            request = request.header(USER_AGENT, user_agent.trim());
+        }
+        if let Some(cookie) = cookie.filter(|value| !value.trim().is_empty()) {
+            request = request.header(COOKIE, cookie.trim());
+        }
+
+        request
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch {}", self.url.as_str()))
+    }
+}
+
+struct PublicWebfetchTarget {
+    url: Url,
+    host: String,
+    resolved_addrs: Vec<SocketAddr>,
+}
+
+impl PublicWebfetchTarget {
+    async fn resolve(input: &str) -> Result<Self> {
+        let url = Url::parse(&normalize_scrape_url(input)).context("Invalid URL")?;
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("webfetch only supports http(s) URLs");
+        }
+        let host = url
+            .host_str()
+            .context("URL must include a host")?
+            .to_string();
+        validate_public_host(&host)?;
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            validate_public_ip(ip)?;
+            return Ok(Self {
+                url,
+                host,
+                resolved_addrs: Vec::new(),
+            });
+        }
+
+        let port = url
+            .port_or_known_default()
+            .context("URL must include a valid port")?;
+        let resolved_addrs = resolve_public_addrs(&host, port).await?;
+        Ok(Self {
+            url,
+            host,
+            resolved_addrs,
+        })
+    }
+
+    fn pinned_dns_override(&self) -> Option<(&str, &[SocketAddr])> {
+        if self.resolved_addrs.is_empty() {
+            None
+        } else {
+            Some((&self.host, &self.resolved_addrs))
+        }
+    }
 }
 
 async fn read_capped_response_body(
@@ -119,21 +191,8 @@ async fn read_capped_response_body(
     Ok((String::from_utf8_lossy(&body).to_string(), truncated))
 }
 
-async fn validate_public_url(input: &str) -> Result<Url> {
-    let url = Url::parse(&normalize_scrape_url(input)).context("Invalid URL")?;
-    if !matches!(url.scheme(), "http" | "https") {
-        bail!("webfetch only supports http(s) URLs");
-    }
-    let host = url.host_str().context("URL must include a host")?;
-    validate_public_host(host)?;
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        validate_public_ip(ip)?;
-        return Ok(url);
-    }
-
-    let port = url
-        .port_or_known_default()
-        .context("URL must include a valid port")?;
+async fn resolve_public_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let mut resolved_addrs = Vec::new();
     let mut resolved_any = false;
     for addr in tokio::net::lookup_host((host, port))
         .await
@@ -141,11 +200,12 @@ async fn validate_public_url(input: &str) -> Result<Url> {
     {
         resolved_any = true;
         validate_public_ip(addr.ip())?;
+        resolved_addrs.push(addr);
     }
     if !resolved_any {
         bail!("failed to resolve {host}");
     }
-    Ok(url)
+    Ok(resolved_addrs)
 }
 
 fn validate_public_host(host: &str) -> Result<()> {
@@ -333,6 +393,54 @@ mod tests {
 
         assert_eq!(body, "abc");
         assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn public_webfetch_client_uses_pinned_addrs_and_preserves_host() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pinned_addr = listener.local_addr().unwrap();
+        let url = Url::parse(&format!(
+            "http://example.test:{}/docs?q=1",
+            pinned_addr.port()
+        ))
+        .unwrap();
+        let client = PublicWebfetchClient::from_target(PublicWebfetchTarget {
+            url,
+            host: "example.test".to_string(),
+            resolved_addrs: vec![pinned_addr],
+        })
+        .unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let response = client.fetch(None, None).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /docs?q=1 HTTP/1.1\r\n"));
+        assert!(request.lines().any(|line| {
+            line.eq_ignore_ascii_case(&format!("host: example.test:{}", pinned_addr.port()))
+        }));
     }
 
     async fn test_response(body: &str, content_length: Option<usize>) -> reqwest::Response {
