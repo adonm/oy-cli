@@ -7,12 +7,14 @@ use std::path::PathBuf;
 
 mod audit_cmd;
 mod doctor_cmd;
+mod enhance_cmd;
 mod model_cmd;
 mod review_cmd;
 mod session_cmd;
 
 use audit_cmd::{AuditArgs, AuditFormat};
 use doctor_cmd::DoctorArgs;
+use enhance_cmd::EnhanceArgs;
 use model_cmd::ModelArgs;
 use review_cmd::ReviewArgs;
 use session_cmd::{ChatArgs, RunArgs};
@@ -72,6 +74,8 @@ enum Command {
     },
     /// Strict code-quality review for a branch/commit diff or the whole workspace.
     Review(ReviewArgs),
+    /// Audit, review, then address selected findings one committed change at a time.
+    Enhance(EnhanceArgs),
 }
 
 pub async fn run(argv: Vec<String>) -> Result<i32> {
@@ -97,6 +101,7 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             .await
         }
         Command::Review(args) => review_cmd::review_command(args).await,
+        Command::Enhance(args) => enhance_cmd::enhance_command(args).await,
     }
 }
 
@@ -184,6 +189,32 @@ mod audit_tests {
         };
         assert_eq!(format, AuditFormat::Sarif);
         assert_eq!(out, None);
+    }
+
+    #[test]
+    fn enhance_accepts_auto_mode_and_focus() {
+        let cli = parse_cli_for_test(&[
+            "oy",
+            "enhance",
+            "--mode",
+            "auto",
+            "--review-target",
+            "main",
+            "security",
+        ]);
+        let Command::Enhance(args) = cli.command else {
+            panic!("expected enhance command");
+        };
+        assert_eq!(args.mode, crate::config::SafetyMode::AutoAll);
+        assert_eq!(args.review_target.as_deref(), Some("main"));
+        assert_eq!(args.focus, vec!["security"]);
+    }
+
+    #[test]
+    fn help_documents_enhance_options() {
+        let help = command_help_for_test("enhance");
+        assert!(help.contains("--mode <MODE>"));
+        assert!(help.contains("--review-target <TARGET>"));
     }
 
     #[test]

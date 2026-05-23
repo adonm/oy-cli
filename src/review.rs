@@ -527,19 +527,20 @@ fn safe_relative_path(path: &str) -> bool {
 
 fn review_system_prompt() -> String {
     r#"You are oy in code-quality review mode. Review the supplied changes or workspace for maintainability, local reasoning, and structural simplicity.
-Be terse, evidence-first, and repo-specific. Avoid generic best-practice advice, style nits, and speculation.
+Write terse, evidence-first, repo-specific findings. Take the largest useful design view supported by the input: local evidence can justify critique of full flows, architecture, boundaries, data ownership, and product shape.
 
-Finding quality bar:
-- Report only high-conviction structural issues with concrete code evidence and a practical fix.
+Review stance:
+- Prioritize high-conviction structural issues with concrete code evidence and a practical fix.
+- Prefer full-design findings when the evidence shows a simpler architecture, clearer boundary, or smaller product/API shape.
 - Prefer code-judo findings: simpler designs that delete branches, helpers, modes, layers, conditionals, or concepts.
 - Flag files crossing or approaching 1000 lines when decomposition would make ownership clearer.
 - Flag spaghetti growth: ad-hoc conditionals, scattered special cases, feature checks in unrelated flows, or narrow edge cases inside busy functions.
 - Push on type and boundary cleanliness when optionality, casts, loose shapes, wrappers, or silent fallbacks hide invariants.
 - Call out architectural drift, duplicated canonical helpers, feature logic leaking across boundaries, and non-atomic related updates.
 - Prefer direct, boring code over magical or generic mechanisms that hide simple assumptions.
-- Return [] or say there are no major structural concerns when evidence is weak.
+- When evidence is thin, say there are no major structural concerns instead of filling space.
 
-Final reports must include a verdict, a succinct findings summary, and detailed writeups for only the most important findings. Spend tokens on repository evidence and concrete simplification, not broad philosophy."#
+Final reports must include a verdict, a succinct findings summary, and detailed writeups for the most important findings. Spend tokens on repository evidence, design impact, and concrete simplification."#
         .trim()
         .to_string()
 }
@@ -551,7 +552,7 @@ fn review_full_prompt(focus: &str, source: &str, manifest: &str, input: &str) ->
         "Conduct a code-quality review for this input source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with one concise bullet/table row for each high-conviction finding, including severity and code reference (`path:line` or `path::symbol`).\n4. Add `## Detailed findings` for only the most important findings; each must include severity, evidence, structural impact, and the concrete simplification or decomposition.\n5. Drop weak/speculative items and cosmetic nits. Do not write files.\n\nInput manifest:\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with one concise bullet/table row for each high-conviction finding, including severity and code reference (`path:line` or `path::symbol`).\n4. Add `## Detailed findings` for the most important findings; each must include severity, evidence, design impact, and the concrete simplification or decomposition.\n5. Keep the report focused on structural/design issues with actionable evidence. Leave workspace files unchanged.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nReview input:\n");
     prompt.push_str(input.trim());
@@ -572,7 +573,7 @@ fn review_chunk_prompt(
         "Review code-quality chunk {id}/{count} for source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReturn concise candidate findings for this chunk only. Use one `### [Severity] Title` heading per finding, or return `[]` if there are no high-conviction structural findings. For each finding include severity, evidence path/symbol/line when available, structural impact, and a concrete simplification or decomposition. Do not write files.\n\nInput manifest:\n");
+    prompt.push_str("\nReturn concise candidate findings for this chunk, using the manifest to connect local evidence to broader design impact when warranted. Use one `### [Severity] Title` heading per finding, or return `[]` when this chunk has no high-conviction structural findings. For each finding include severity, evidence path/symbol/line when available, design impact, and a concrete simplification or decomposition. Leave workspace files unchanged.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nChunk input:\n");
     prompt.push_str(input.trim());
@@ -586,7 +587,7 @@ fn review_reduce_prompt(focus: &str, source: &str, manifest: &str, findings: &st
         "Condense candidate code-quality findings into the final markdown report for source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with each surviving finding, severity, and code reference.\n4. Add `## Detailed findings` for only the most important findings; preserve evidence, structural impact, and the concrete simplification or decomposition.\n5. Drop weak/speculative/duplicate items and cosmetic nits.\n\nInput manifest:\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with each surviving finding, severity, and code reference.\n4. Add `## Detailed findings` for the most important findings; preserve evidence, design impact, and the concrete simplification or decomposition.\n5. Keep the final report focused on high-conviction structural/design findings and merge duplicates into the strongest version.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nCandidate findings:\n");
     prompt.push_str(findings.trim());
@@ -654,6 +655,8 @@ mod tests {
         assert!(prompt.contains("code-judo"));
         assert!(prompt.contains("1000 lines"));
         assert!(prompt.contains("spaghetti"));
+        assert!(prompt.contains("largest useful design view"));
+        assert!(prompt.contains("full-design findings"));
     }
 
     #[test]

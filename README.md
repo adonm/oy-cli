@@ -13,6 +13,7 @@ oy doctor                                    # check setup
 oy model                                     # choose or confirm a model
 oy run "summarize this repo"
 oy audit                                     # write an audit report to ISSUES.md
+oy enhance                                  # audit, review, then fix selected findings
 oy chat                                      # start an interactive session
 ```
 
@@ -70,6 +71,7 @@ These commands show what is configured and what to do next.
 | `oy run --out path "prompt"` | Save the response to a file |
 | `oy audit [focus]` | Audit the repo and write `ISSUES.md` by default |
 | `oy review [target]` | Strict code-quality review for a branch/commit diff or the whole workspace |
+| `oy enhance [focus]` | Run audit + review, pick findings, fix and commit them one at a time |
 | `oy model [filter]` | List, choose, or save a model |
 | `oy doctor` | Check setup and local state |
 | `oy --help` | Show CLI help |
@@ -82,6 +84,7 @@ oy run "inspect src/main.rs and suggest a simpler design"
 oy run "fix the failing tests"
 oy audit "security and complexity"
 oy review main --focus "types and boundaries"
+oy enhance --review-target main "security and complexity"
 oy run --out docs/plan.md "write a migration plan"
 echo "update the changelog" | OY_NON_INTERACTIVE=1 oy run
 ```
@@ -147,6 +150,18 @@ oy review main
 oy review HEAD~1 --focus "types and boundaries"
 oy review main --out docs/review.md --max-chunks 120
 ```
+
+## Enhance
+
+`oy enhance [focus]` runs `oy audit`, then `oy review`, shows the combined findings, and addresses the selected items one at a time. Each successful fix is committed before the next finding starts. The command requires a clean git workspace so each commit stays scoped to one finding.
+
+```bash
+oy enhance
+oy enhance --review-target main "security and complexity"
+oy enhance --mode auto
+```
+
+By default, `enhance` prompts you to choose findings. `oy enhance --mode auto` addresses as many findings as it can unattended, still one finding and one commit at a time. Progress is saved in `.tmp/oy-enhance/state.json`; rerunning `oy enhance` resumes any partial run found there, or reparses leftover `.tmp/oy-enhance/audit.md` / `review.md` reports if interrupted before state was written. The temporary state is removed after all selected findings are processed.
 
 ## Interactive chat
 

@@ -8,18 +8,18 @@ pub const AUDIT_TRANSPARENCY_PREFIX: &str =
     "Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli):";
 
 pub const AUDIT_SYSTEM_PROMPT: &str = r#"You are oy in audit mode. Audit the repository for security issues, unnecessary complexity, and material usability or performance problems.
-Be terse, evidence-first, and repo-specific. Avoid generic best-practice advice, style nits, and speculation.
+Write terse, evidence-first, repo-specific findings. Take the largest useful design view supported by the input: local evidence can justify critique of trust boundaries, architecture, workflow shape, data ownership, and operational design.
 
-Finding quality bar:
-- Report only concrete issues with a plausible attack path, trigger, broken invariant, data exposure, integrity risk, privilege impact, or material operational impact.
+Audit stance:
+- Prioritize concrete issues with a plausible attack path, trigger, broken invariant, data exposure, integrity risk, privilege impact, or material operational impact.
 - For vulnerabilities, include the trust boundary, sink, affected path/symbol evidence, impact, exploitability/preconditions, and a concrete fix.
 - Prefer critical/high security findings and issues likely to cause production incidents.
+- Prefer full-design findings when a simpler boundary, state machine, data model, or capability split removes whole bug classes.
 - Prefer simple remediations that remove whole bug classes.
 - Flag complexity when it complects separate concerns, hides state/dataflow, blocks local reasoning, or obscures performance/security boundaries.
-- Return [] or say no concrete findings for a chunk when evidence is weak.
 - Final reports must include a succinct all-findings summary with code references, then detailed writeups for only the most severe 10-20 findings.
 
-Use the embedded OWASP/grugbrain reference as a lightweight checklist and citation guide. Spend tokens on repository evidence, not long standards explanations."#;
+Use the embedded OWASP/grugbrain reference as a lightweight checklist and citation guide. Spend tokens on repository evidence, design impact, and concrete fixes."#;
 
 pub const AUDIT_REFERENCE: &str = r#"Audit reference checklist:
 
@@ -63,7 +63,7 @@ pub fn audit_chunk_prompt(
     let mut prompt = String::new();
     let _ = writeln!(prompt, "Review audit chunk {chunk_id}/{chunk_count}.");
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReturn concise candidate findings for this chunk only. Use markdown with one explicit `### [Severity] Title` heading per finding, or return `[]` if there are no concrete findings. For each finding include severity, category, evidence path/symbol, trust boundary/sink when security-relevant, impact, reference, and fix. Do not write files.\n\n");
+    prompt.push_str("\nReturn concise candidate findings for this chunk, using the manifest to connect local evidence to broader security/design impact when warranted. Use markdown with one explicit `### [Severity] Title` heading per finding, or return `[]` when this chunk has no concrete findings. For each finding include severity, category, evidence path/symbol, trust boundary/sink when security-relevant, impact, reference, and fix. Leave workspace files unchanged.\n\n");
     prompt.push_str("Repository manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nSecurity-relevant index:\n");
@@ -83,7 +83,7 @@ pub fn audit_full_prompt(
     let mut prompt = String::new();
     prompt.push_str("Conduct a full repository audit and return the final markdown report.\n");
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; each finding heading must use `### [Severity] Title`; include category, evidence, trust boundary/sink where security-relevant, impact, exploitability/preconditions, reference, and fix.\n4. Avoid generic advice. Do not write files.\n\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for the most severe 10-20 findings, ranked by severity/exploitability/impact; each finding heading must use `### [Severity] Title`; include category, evidence, trust boundary/sink where security-relevant, design impact, exploitability/preconditions, reference, and fix.\n4. Keep findings concrete, repo-specific, and actionable. Leave workspace files unchanged.\n\n");
     prompt.push_str("Repository manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nSecurity-relevant index:\n");
@@ -103,7 +103,7 @@ pub fn audit_reduce_prompt(
     let mut prompt = String::new();
     prompt.push_str("Condense candidate audit findings into the final markdown report.\n");
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding that survives dedupe, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for only the most severe 10-20 findings, ranked by severity/exploitability/impact; each finding heading must use `### [Severity] Title`; preserve the shortest evidence needed to prove exploitability or impact, plus category, trust boundary/sink where security-relevant, reference, and fix.\n4. Drop weak/speculative/duplicate items, but do not omit concrete lower-severity findings from the summary.\n\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Audit Issues`.\n2. Add `## Findings summary` with one succinct bullet/table row for every concrete finding that survives dedupe, including severity, short title, and code reference (`path:line` or `path::symbol`).\n3. Add `## Detailed findings` for the most severe 10-20 findings, ranked by severity/exploitability/impact; each finding heading must use `### [Severity] Title`; preserve the shortest evidence needed to prove exploitability or impact, plus category, trust boundary/sink where security-relevant, design impact, reference, and fix.\n4. Merge duplicates into the strongest version and keep concrete lower-severity findings in the summary.\n\n");
     prompt.push_str("Repository manifest:\n");
     prompt.push_str(manifest.trim());
     push_existing_issues(&mut prompt, existing_issues);
@@ -148,6 +148,8 @@ mod tests {
         assert!(prompt.contains("Grugbrain"));
         assert!(prompt.contains("complexity very bad"));
         assert!(prompt.contains("trust boundary"));
+        assert!(prompt.contains("largest useful design view"));
+        assert!(prompt.contains("full-design findings"));
     }
 
     #[test]
@@ -166,7 +168,7 @@ mod tests {
 
         let reduce = audit_reduce_prompt("", "files: 1", "### High\nEvidence: src/lib.rs:1", None);
         assert!(reduce.contains("## Findings summary"));
-        assert!(reduce.contains("do not omit concrete lower-severity findings"));
+        assert!(reduce.contains("keep concrete lower-severity findings"));
         assert!(reduce.contains("most severe 10-20"));
     }
 }
