@@ -72,50 +72,16 @@ pub(crate) fn model_route(
 ) -> Result<ModelRoute> {
     let parsed = ParsedModelSpec::parse(model_spec);
     let requested_provider = parsed.provider_or_openai();
-    let provider = canonical_provider_id(requested_provider);
-    ensure_supported_provider(provider)?;
-    let mut route = match provider {
-        "github-copilot" => {
-            crate::llm::providers::route::prepare_github_copilot_chat(parsed.base_model)?
-        }
-        "openai" => crate::llm::providers::route::prepare_openai_chat(parsed.base_model)?,
-        "xai" => crate::llm::providers::route::prepare_xai_chat(parsed.base_model)?,
-        "openrouter" => crate::llm::providers::route::prepare_openrouter_chat(parsed.base_model)?,
-        "anthropic" => crate::llm::providers::route::prepare_anthropic_chat(parsed.base_model)?,
-        "google" => crate::llm::providers::route::prepare_google_chat(parsed.base_model)?,
-        "azure" => crate::llm::providers::route::prepare_azure_chat(parsed.base_model)?,
-        "cloudflare-ai-gateway" => {
-            crate::llm::providers::route::prepare_cloudflare_ai_gateway_chat(parsed.base_model)?
-        }
-        "cloudflare-workers-ai" => {
-            crate::llm::providers::route::prepare_cloudflare_workers_ai_chat(parsed.base_model)?
-        }
-        "amazon-bedrock" => {
-            crate::llm::providers::route::prepare_bedrock_chat(provider, parsed.base_model)?
-        }
-        provider => crate::llm::providers::route::prepare_opencode_compatible_chat(
-            provider,
-            parsed.base_model,
-        )?,
-    };
-    let provider_defaults = match provider {
-        "openai" => {
-            crate::llm::providers::openai_default_provider_options(&route.model, route.protocol)
-        }
-        "github-copilot" => crate::llm::providers::github_copilot_default_provider_options(
-            &route.model,
-            route.protocol,
-        ),
-        "openrouter" | "anthropic" => None,
-        _ if matches!(
-            route.protocol,
-            Protocol::AnthropicMessages | Protocol::BedrockConverse | Protocol::Gemini
-        ) =>
-        {
-            None
-        }
-        _ => crate::llm::providers::gpt5_default_provider_options(&route.model, route.protocol),
-    };
+    let provider_metadata = crate::llm::providers::provider_metadata(requested_provider);
+    let provider = crate::llm::providers::canonical_provider_id(requested_provider);
+    ensure_supported_provider(provider, provider_metadata)?;
+    let mut route =
+        crate::llm::providers::route::prepare_chat(provider, provider_metadata, parsed.base_model)?;
+    let provider_defaults = crate::llm::providers::default_provider_options(
+        provider_metadata,
+        &route.model,
+        route.protocol,
+    );
     let reasoning_overlay = if matches!(
         route.protocol,
         Protocol::AnthropicMessages | Protocol::Gemini
@@ -132,14 +98,11 @@ pub(crate) fn model_route(
     Ok(route)
 }
 
-fn canonical_provider_id(provider: &str) -> &str {
-    crate::llm::providers::provider_metadata(provider)
-        .map(|metadata| metadata.id)
-        .unwrap_or(provider)
-}
-
-fn ensure_supported_provider(provider: &str) -> Result<()> {
-    let Some(metadata) = crate::llm::providers::provider_metadata(provider) else {
+fn ensure_supported_provider(
+    provider: &str,
+    metadata: Option<crate::llm::providers::ProviderMetadata>,
+) -> Result<()> {
+    let Some(metadata) = metadata else {
         return Ok(());
     };
     if metadata.supported {

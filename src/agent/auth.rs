@@ -71,9 +71,7 @@ pub(crate) fn github_copilot_api_key() -> Option<String> {
 
 fn copilot_api_key() -> Option<String> {
     first_nonempty([
-        || provider_api_key("github-copilot"),
-        || env_value("COPILOT_API_KEY"),
-        || env_value("OPENCODE_API_KEY"),
+        || provider_env_auth_key("github-copilot"),
         || opencode_auth_key_from_path("github-copilot", opencode_auth_path()),
     ])
 }
@@ -95,7 +93,7 @@ fn opencode_status(provider: &str) -> Option<AuthStatus> {
 }
 
 fn openai_status() -> Option<AuthStatus> {
-    let _key = env_value("OPENAI_API_KEY")?;
+    let _key = provider_env_auth_key("openai")?;
     Some(AuthStatus {
         adapter: "openai".to_string(),
         env_var: Some("OPENAI_API_KEY".to_string()),
@@ -163,6 +161,11 @@ fn provider_api_key(provider: &str) -> Option<String> {
     env_value(&env_name)
 }
 
+fn provider_env_auth_key(provider: &str) -> Option<String> {
+    crate::llm::providers::provider_metadata(provider)
+        .and_then(|metadata| metadata.first_auth_value(env_value))
+}
+
 fn opencode_auth_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -178,9 +181,9 @@ fn opencode_auth_key_from_path(provider: &str, path: PathBuf) -> Option<String> 
 }
 
 fn opencode_auth_key_from_value(provider: &str, value: &Value) -> Option<String> {
-    let provider_value = value
-        .get(provider)
-        .or_else(|| provider_alias(provider).and_then(|alias| value.get(alias)))?;
+    let provider_value = crate::llm::providers::opencode_auth_lookup_ids(provider)
+        .into_iter()
+        .find_map(|id| value.get(id))?;
     match provider_value.get("type").and_then(Value::as_str) {
         Some("api") => provider_value
             .get("key")
@@ -199,14 +202,6 @@ fn opencode_auth_key_from_value(provider: &str, value: &Value) -> Option<String>
             .and_then(Value::as_str)
             .filter(|key| !key.trim().is_empty())
             .map(ToOwned::to_owned),
-        _ => None,
-    }
-}
-
-fn provider_alias(provider: &str) -> Option<&'static str> {
-    match provider {
-        "copilot" => Some("github-copilot"),
-        "opencode-go" => Some("opencode"),
         _ => None,
     }
 }

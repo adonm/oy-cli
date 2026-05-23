@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::agent::auth::{env_value, github_copilot_api_key, opencode_auth_key};
 use crate::agent::opencode_models;
+use crate::llm::providers::{ProviderFamily, ProviderMetadata};
 use crate::llm::{AwsCredentials, ModelRoute, Protocol, RouteAuth};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +61,28 @@ impl OpenCodeRouteProfile {
     }
 }
 
+pub(crate) fn prepare_chat(
+    provider: &str,
+    metadata: Option<ProviderMetadata>,
+    model: &str,
+) -> Result<ModelRoute> {
+    match metadata.map(|metadata| metadata.family) {
+        Some(ProviderFamily::GitHubCopilot) => prepare_github_copilot_chat(model),
+        Some(ProviderFamily::OpenAi) => prepare_openai_chat(model),
+        Some(ProviderFamily::Xai) => prepare_xai_chat(model),
+        Some(ProviderFamily::OpenRouter) => prepare_openrouter_chat(model),
+        Some(ProviderFamily::Anthropic) => prepare_anthropic_chat(model),
+        Some(ProviderFamily::GoogleGemini) => prepare_google_chat(model),
+        Some(ProviderFamily::AzureOpenAi) => prepare_azure_chat(model),
+        Some(ProviderFamily::CloudflareAiGateway) => prepare_cloudflare_ai_gateway_chat(model),
+        Some(ProviderFamily::CloudflareWorkersAi) => prepare_cloudflare_workers_ai_chat(model),
+        Some(ProviderFamily::AmazonBedrock) => prepare_bedrock_chat(provider, model),
+        Some(ProviderFamily::OpenAiCompatible) | None => {
+            prepare_opencode_compatible_chat(provider, model)
+        }
+    }
+}
+
 pub(crate) fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
     let profile = crate::llm::providers::openai_profile(model, env_value("OPENAI_BASE_URL"));
     let provider_options = crate::llm::providers::openai_body_options(
@@ -70,7 +93,7 @@ pub(crate) fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
         protocol: profile.protocol,
         model: profile.model_id,
         auth: RouteAuth::ApiKey(
-            env_value("OPENAI_API_KEY").context("OpenAI auth is not configured")?,
+            provider_auth_value("openai").context("OpenAI auth is not configured")?,
         ),
         base_url: Some(profile.base_url),
         query_params: None,
@@ -83,6 +106,11 @@ fn env_json(name: &str) -> Option<serde_json::Value> {
     env_value(name).and_then(|value| serde_json::from_str(&value).ok())
 }
 
+fn provider_auth_value(provider: &str) -> Option<String> {
+    crate::llm::providers::provider_metadata(provider)
+        .and_then(|metadata| metadata.first_auth_value(env_value))
+}
+
 pub(crate) fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
     let profile = crate::llm::providers::xai_profile(model, env_value("XAI_BASE_URL"));
     let provider_options = crate::llm::providers::openai_body_options(
@@ -93,7 +121,7 @@ pub(crate) fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
         protocol: profile.protocol,
         model: profile.model_id,
         auth: RouteAuth::ApiKey(
-            env_value("XAI_API_KEY").context("xAI auth is not configured; set XAI_API_KEY")?,
+            provider_auth_value("xai").context("xAI auth is not configured; set XAI_API_KEY")?,
         ),
         base_url: Some(profile.base_url),
         query_params: None,
@@ -111,8 +139,7 @@ pub(crate) fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
         protocol: profile.protocol,
         model: profile.model_id,
         auth: RouteAuth::ApiKey(
-            env_value("OPENROUTER_API_KEY")
-                .or_else(|| env_value("OPENCODE_API_KEY"))
+            provider_auth_value("openrouter")
                 .context("OpenRouter auth is not configured; set OPENROUTER_API_KEY")?,
         ),
         base_url: Some(profile.base_url),
@@ -139,9 +166,7 @@ pub(crate) fn prepare_google_chat(model: &str) -> Result<ModelRoute> {
         model: profile.model_id,
         auth: RouteAuth::Header {
             name: "x-goog-api-key".to_string(),
-            value: env_value("GOOGLE_GENERATIVE_AI_API_KEY")
-                .or_else(|| env_value("GEMINI_API_KEY"))
-                .or_else(|| env_value("GOOGLE_API_KEY"))
+            value: provider_auth_value("google")
                 .context("Google Gemini auth is not configured; set GOOGLE_GENERATIVE_AI_API_KEY or GEMINI_API_KEY")?,
         },
         base_url: Some(profile.base_url),
@@ -167,7 +192,7 @@ pub(crate) fn prepare_anthropic_chat(model: &str) -> Result<ModelRoute> {
         auth: RouteAuth::Headers(vec![
             (
                 "x-api-key".to_string(),
-                env_value("ANTHROPIC_API_KEY")
+                provider_auth_value("anthropic")
                     .context("Anthropic auth is not configured; set ANTHROPIC_API_KEY")?,
             ),
             (
@@ -198,7 +223,7 @@ pub(crate) fn prepare_azure_chat(model: &str) -> Result<ModelRoute> {
         model: profile.model_id,
         auth: RouteAuth::Header {
             name: "api-key".to_string(),
-            value: env_value("AZURE_OPENAI_API_KEY")
+            value: provider_auth_value("azure")
                 .context("Azure OpenAI auth is not configured; set AZURE_OPENAI_API_KEY")?,
         },
         base_url: Some(profile.base_url),
@@ -220,7 +245,7 @@ pub(crate) fn prepare_cloudflare_ai_gateway_chat(model: &str) -> Result<ModelRou
             )
         })
     }).context("Cloudflare AI Gateway requires CLOUDFLARE_AI_GATEWAY_BASE_URL or CLOUDFLARE_ACCOUNT_ID")?;
-    let gateway_key = env_value("CLOUDFLARE_API_TOKEN").or_else(|| env_value("CF_AIG_TOKEN"));
+    let gateway_key = provider_auth_value("cloudflare-ai-gateway");
     let api_key =
         env_value("CLOUDFLARE_AI_GATEWAY_PROVIDER_API_KEY").or_else(|| env_value("OPENAI_API_KEY"));
     let auth = match (gateway_key, api_key) {
@@ -260,8 +285,7 @@ pub(crate) fn prepare_cloudflare_workers_ai_chat(model: &str) -> Result<ModelRou
         protocol: Protocol::OpenAiChat,
         model: model.to_string(),
         auth: RouteAuth::ApiKey(
-            env_value("CLOUDFLARE_API_KEY")
-                .or_else(|| env_value("CLOUDFLARE_WORKERS_AI_TOKEN"))
+            provider_auth_value("cloudflare-workers-ai")
                 .context("Cloudflare Workers AI auth is not configured; set CLOUDFLARE_API_KEY or CLOUDFLARE_WORKERS_AI_TOKEN")?,
         ),
         base_url: Some(base_url),

@@ -103,10 +103,7 @@ pub fn canonical_model_spec(model_spec: &str) -> String {
 }
 
 pub fn canonical_provider(provider: &str) -> &str {
-    match provider.trim() {
-        "copilot" => "github-copilot",
-        provider => provider,
-    }
+    crate::llm::providers::canonical_provider_id(provider.trim())
 }
 
 pub fn split_model_spec(spec: &str) -> (Option<&str>, &str) {

@@ -35,6 +35,15 @@ pub(crate) struct ProviderMetadata {
     pub(crate) supported: bool,
 }
 
+impl ProviderMetadata {
+    pub(crate) fn first_auth_value(
+        self,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Option<String> {
+        self.auth_env.iter().find_map(|name| lookup(name))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RouteProfile {
     pub(crate) model_id: String,
@@ -197,6 +206,24 @@ pub(crate) fn provider_metadata(provider: &str) -> Option<ProviderMetadata> {
                 supported: true,
             })
         })
+}
+
+pub(crate) fn canonical_provider_id(provider: &str) -> &str {
+    provider_metadata(provider)
+        .map(|metadata| metadata.id)
+        .unwrap_or(provider)
+}
+
+pub(crate) fn opencode_auth_lookup_ids(provider: &str) -> Vec<&str> {
+    let mut ids = vec![provider];
+    let canonical = canonical_provider_id(provider);
+    if canonical != provider {
+        ids.push(canonical);
+    }
+    if provider == "opencode-go" {
+        ids.push("opencode");
+    }
+    ids
 }
 
 pub(crate) fn openai_profile(model: &str, base_url: Option<String>) -> RouteProfile {
@@ -502,6 +529,28 @@ pub(crate) fn github_copilot_default_provider_options(
         merge_json_objects(&mut options, gpt5);
     }
     Some(options)
+}
+
+pub(crate) fn default_provider_options(
+    provider: Option<ProviderMetadata>,
+    model_id: &str,
+    protocol: Protocol,
+) -> Option<serde_json::Value> {
+    match provider.map(|metadata| metadata.family) {
+        Some(ProviderFamily::OpenAi) => openai_default_provider_options(model_id, protocol),
+        Some(ProviderFamily::GitHubCopilot) => {
+            github_copilot_default_provider_options(model_id, protocol)
+        }
+        Some(ProviderFamily::OpenRouter | ProviderFamily::Anthropic) => None,
+        _ if matches!(
+            protocol,
+            Protocol::AnthropicMessages | Protocol::BedrockConverse | Protocol::Gemini
+        ) =>
+        {
+            None
+        }
+        _ => gpt5_default_provider_options(model_id, protocol),
+    }
 }
 
 fn gpt5_default_provider_options_for_protocol(
