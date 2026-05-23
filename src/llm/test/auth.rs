@@ -86,3 +86,26 @@ fn sigv4_signing_key_matches_aws_documented_example() {
         "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9"
     );
 }
+
+#[test]
+fn test_sigv4_headers_with_custom_port() {
+    let credentials = AwsCredentials {
+        access_key_id: "test_key".to_string(),
+        secret_access_key: "test_secret".to_string(),
+        session_token: None,
+        region: "us-east-1".to_string(),
+    };
+
+    // Signature with custom port should be different from signature without port or with standard port
+    let headers_with_custom_port = sigv4_headers("http://localhost:8000/v1/foo", "{}", &credentials).unwrap();
+    let auth_with_custom_port = headers_with_custom_port.get("authorization").unwrap().to_str().unwrap();
+
+    let headers_without_port = sigv4_headers("http://localhost/v1/foo", "{}", &credentials).unwrap();
+    let auth_without_port = headers_without_port.get("authorization").unwrap().to_str().unwrap();
+
+    let headers_with_standard_port = sigv4_headers("http://localhost:80/v1/foo", "{}", &credentials).unwrap();
+    let auth_with_standard_port = headers_with_standard_port.get("authorization").unwrap().to_str().unwrap();
+
+    assert_ne!(auth_with_custom_port, auth_without_port);
+    assert_eq!(auth_without_port, auth_with_standard_port);
+}

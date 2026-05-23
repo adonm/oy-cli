@@ -137,7 +137,22 @@ fn apply_header_pairs(
 fn sigv4_headers(endpoint: &str, body: &str, credentials: &AwsCredentials) -> Result<HeaderMap> {
     let url =
         reqwest::Url::parse(endpoint).context("failed to parse Bedrock endpoint for SigV4")?;
-    let host = url.host_str().context("Bedrock endpoint has no host")?;
+    let host_base = url.host_str().context("Bedrock endpoint has no host")?;
+    let host = match url.port() {
+        Some(port) => {
+            let is_standard = match url.scheme() {
+                "http" => port == 80,
+                "https" => port == 443,
+                _ => false,
+            };
+            if is_standard {
+                host_base.to_string()
+            } else {
+                format!("{host_base}:{port}")
+            }
+        }
+        None => host_base.to_string(),
+    };
     let path = if url.path().is_empty() {
         "/"
     } else {
