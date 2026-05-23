@@ -78,8 +78,64 @@ impl PublicWebfetchClient {
     }
 
     fn from_target(target: PublicWebfetchTarget) -> Result<Self> {
+        let custom_policy = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+
+            let (scheme, host, port) = {
+                let url = attempt.url();
+                let scheme = url.scheme().to_string();
+                let host = match url.host_str() {
+                    Some(h) => h.to_string(),
+                    None => return attempt.error("redirect URL must include a host"),
+                };
+                let port = url.port_or_known_default();
+                (scheme, host, port)
+            };
+
+            if !matches!(scheme.as_str(), "http" | "https") {
+                return attempt.error("webfetch only supports http(s) redirects");
+            }
+
+            if let Err(err) = validate_public_host(&host) {
+                return attempt.error(err.to_string());
+            }
+
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                if let Err(err) = validate_public_ip(ip) {
+                    return attempt.error(err.to_string());
+                }
+            } else {
+                let port = match port {
+                    Some(p) => p,
+                    None => return attempt.error("redirect URL must include a valid port"),
+                };
+
+                use std::net::ToSocketAddrs;
+                match (&host as &str, port).to_socket_addrs() {
+                    Ok(addrs) => {
+                        let mut resolved_any = false;
+                        for addr in addrs {
+                            resolved_any = true;
+                            if let Err(err) = validate_public_ip(addr.ip()) {
+                                return attempt.error(err.to_string());
+                            }
+                        }
+                        if !resolved_any {
+                            return attempt.error(format!("failed to resolve {host}"));
+                        }
+                    }
+                    Err(err) => {
+                        return attempt.error(format!("failed to resolve {host}: {err}"));
+                    }
+                }
+            }
+
+            attempt.follow()
+        });
         let mut builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(custom_policy)
             .connect_timeout(WEBFETCH_CONNECT_TIMEOUT)
             .read_timeout(WEBFETCH_READ_TIMEOUT)
             .timeout(WEBFETCH_REQUEST_TIMEOUT);
@@ -478,5 +534,59 @@ mod tests {
         });
 
         reqwest::Client::new().get(url).send().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_webfetch_client_allows_safe_redirects_but_blocks_private_targets() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pinned_addr = listener.local_addr().unwrap();
+        
+        let url = Url::parse(&format!(
+            "http://example.test:{}/start",
+            pinned_addr.port()
+        ))
+        .unwrap();
+        
+        let client = PublicWebfetchClient::from_target(PublicWebfetchTarget {
+            url,
+            host: "example.test".to_string(),
+            resolved_addrs: vec![pinned_addr],
+        })
+        .unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:12345/secret\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let response = client.fetch(None, None).await;
+        assert!(response.is_err());
+        let err = response.err().unwrap();
+        let err_debug = format!("{:?}", err);
+        assert!(
+            err_debug.contains("webfetch blocks localhost and private IP targets")
+                || err_debug.contains("redirect"),
+            "unexpected error message: {}",
+            err_debug
+        );
+        
+        server.await.unwrap();
     }
 }
