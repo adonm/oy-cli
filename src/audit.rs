@@ -502,7 +502,7 @@ Evidence: src/old.rs:1
     }
 
     #[test]
-    fn skips_lockfiles_build_dirs_and_likely_secrets() {
+    fn skips_lockfiles_build_dirs_likely_secrets_and_generated_reports() {
         assert!(should_skip_path("target/debug/app"));
         assert!(should_skip_path("Cargo.lock"));
         assert!(should_skip_path(".env"));
@@ -514,6 +514,10 @@ Evidence: src/old.rs:1
         assert!(should_skip_path("certs/prod.pem"));
         assert!(should_skip_path("ISSUES.md"));
         assert!(should_skip_path("issues.md"));
+        assert!(should_skip_path("REVIEW.md"));
+        assert!(should_skip_path("docs/review.md"));
+        assert!(should_skip_path("oy.sarif"));
+        assert!(should_skip_path(".tmp/oy-enhance/review.md"));
         assert!(!should_skip_path("src/main.rs"));
         assert!(!should_skip_path("src/token.rs"));
         assert!(!should_skip_path("src/secret_manager.go"));
