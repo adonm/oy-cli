@@ -361,12 +361,6 @@ fn stringify_schema_enum(value: &Value) -> Value {
 
 fn project_schema(schema: &Value) -> Option<Value> {
     let object = schema.as_object()?;
-    if object.get("type").and_then(Value::as_str) == Some("object")
-        && !object.get("properties").is_some_and(Value::is_object)
-        && !object.contains_key("additionalProperties")
-    {
-        return None;
-    }
     let mut out = Map::new();
     copy_if_present(&mut out, object, "description");
     copy_if_present(&mut out, object, "required");

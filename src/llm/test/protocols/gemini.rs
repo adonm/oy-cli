@@ -27,7 +27,8 @@ fn request() -> LlmRequest {
                 "properties": {
                     "status": {"type": "integer", "enum": [1, 2]},
                     "tags": {"type": "array"},
-                    "name": {"type": "string", "properties": {"ignored": {"type": "string"}}, "required": ["ignored"]}
+                    "name": {"type": "string", "properties": {"ignored": {"type": "string"}}, "required": ["ignored"]},
+                    "metadata": {"type": "object"}
                 }
             }),
             cache: None,
@@ -66,7 +67,8 @@ fn request_body_lowers_messages_tools_and_generation() {
                     "properties": {
                         "status": {"type": "string", "enum": ["1", "2"]},
                         "tags": {"type": "array", "items": {"type": "string"}},
-                        "name": {"type": "string"}
+                        "name": {"type": "string"},
+                        "metadata": {"type": "object"}
                     }
                 }
             }]}],
