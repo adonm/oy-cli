@@ -2227,6 +2227,7 @@ dependencies = [
  "toon-format",
  "unicode-width",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
