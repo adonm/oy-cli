@@ -6,7 +6,7 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
-    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(spec);
+    let parsed = crate::llm::ParsedModelSpec::parse(spec);
     (parsed.provider, parsed.base_model)
 }
 
@@ -119,7 +119,7 @@ fn split_model_spec_strips_reasoning_suffix_for_routing() {
 
 #[test]
 fn parsed_model_spec_captures_provider_model_and_reasoning_suffix() {
-    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(" copilot::gpt-5.5-low ");
+    let parsed = crate::llm::ParsedModelSpec::parse(" copilot::gpt-5.5-low ");
     assert_eq!(parsed.provider, Some("copilot"));
     assert_eq!(parsed.model, "gpt-5.5-low");
     assert_eq!(parsed.base_model, "gpt-5.5");

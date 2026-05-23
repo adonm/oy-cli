@@ -15,7 +15,7 @@ use super::super::opencode_models;
 /// 4. Static fallback for known reasoning-capable models
 /// 5. `None` otherwise
 pub fn default_reasoning_effort(model_spec: &str) -> Option<String> {
-    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::ParsedModelSpec::parse(model_spec);
     if let Some(effort) = parsed.reasoning_effort.map(str::to_string) {
         return Some(effort);
     }
@@ -34,11 +34,12 @@ pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
     {
         return configured_reasoning_effort();
     }
-    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::ParsedModelSpec::parse(model_spec);
     if parsed.reasoning_effort.is_some() {
         return None;
     }
     let base_model = parsed.base_model;
+    let provider = parsed.provider_or_openai();
 
     // Moonshot/Kimi defaults thinking on for this model. Its OpenAI-compatible
     // chat endpoint rejects follow-up tool requests unless assistant tool-call
@@ -50,7 +51,7 @@ pub fn reasoning_effort_option(model_spec: &str) -> Option<String> {
     }
 
     // Prefer OpenCode metadata when available.
-    if let Some(effort) = opencode_reasoning_effort(base_model) {
+    if let Some(effort) = opencode_reasoning_effort(provider, base_model) {
         return Some(effort);
     }
 
@@ -101,8 +102,9 @@ fn normalize_effort_value(value: String) -> Option<String> {
 /// Supported reasoning effort values for `model_spec` according to OpenCode.
 /// Falls back to the universal set when OpenCode is unavailable.
 pub fn reasoning_efforts_for(model_spec: &str) -> Vec<String> {
-    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
-    let (provider, model_name) = split_model_spec_for_opencode(parsed.base_model);
+    let parsed = crate::llm::ParsedModelSpec::parse(model_spec);
+    let provider = parsed.provider_or_openai();
+    let model_name = parsed.base_model;
     if let Some(info) = opencode_models::find(provider, model_name) {
         let efforts = info.reasoning_efforts();
         if !efforts.is_empty() {
@@ -129,29 +131,15 @@ fn is_moonshot_kimi_model(model_spec: &str) -> bool {
 }
 
 /// Query OpenCode for the model's default reasoning effort.
-fn opencode_reasoning_effort(model_name: &str) -> Option<String> {
-    let (provider, model) = split_model_spec_for_opencode(model_name);
-    opencode_models::find(provider, model)
+fn opencode_reasoning_effort(provider: &str, model_name: &str) -> Option<String> {
+    opencode_models::find(provider, model_name)
         .and_then(|info| info.default_reasoning_effort().map(|s| s.to_string()))
-}
-
-/// Split a model name into (provider, model) for OpenCode lookup.
-fn split_model_spec_for_opencode(model: &str) -> (&str, &str) {
-    if let Some((provider, model)) = model.rsplit_once('/') {
-        (provider, model)
-    } else {
-        ("openai", model)
-    }
 }
 
 /// Static fallback: true when the model name matches known reasoning-capable
 /// families. Kept for environments where `opencode` is not installed.
 pub(crate) fn reasoning_capable_fallback(model: &str) -> Option<&'static str> {
-    let model = model
-        .rsplit_once('/')
-        .map(|(_, name)| name)
-        .unwrap_or(model)
-        .to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
     let capable = model.starts_with("gpt-5")
         || model.contains("codex")
         || model.starts_with("o1")

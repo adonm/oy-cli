@@ -27,7 +27,7 @@ static MODEL_INFO_CACHE: LazyLock<std::sync::RwLock<HashMap<String, CachedModelI
     LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
 pub async fn cache_model_limits(model_spec: &str) -> Result<()> {
-    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::ParsedModelSpec::parse(model_spec);
     let provider = parsed.provider_or_openai();
     let limits = opencode_models::lookup_limit(provider, parsed.base_model);
 
@@ -62,7 +62,7 @@ pub(crate) fn provider_info(model_spec: &str) -> ProviderInfo {
     if let Some(info) = lock.get(&canonical_cache_key(model_spec)) {
         info.provider_info.clone()
     } else {
-        let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
+        let parsed = crate::llm::ParsedModelSpec::parse(model_spec);
         ProviderInfo {
             provider: parsed.provider_or_openai().to_string(),
             endpoint: None,
@@ -81,7 +81,7 @@ pub(crate) fn model_limits(model_spec: &str) -> Option<opencode_models::OpenCode
 }
 
 pub(crate) fn canonical_cache_key(model_spec: &str) -> String {
-    let parsed = crate::llm::route::resolve::ParsedModelSpec::parse(model_spec);
+    let parsed = crate::llm::ParsedModelSpec::parse(model_spec);
     format!("{}/{}", parsed.provider_or_openai(), parsed.base_model)
 }
 

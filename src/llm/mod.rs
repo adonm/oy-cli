@@ -21,6 +21,7 @@ mod schema;
 mod tool_runtime;
 
 pub(crate) use openai::NativeOpenAiBackend;
+pub(crate) use route::resolve::ParsedModelSpec;
 
 pub(crate) type ChatFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmResponse>> + 'a>>;
 pub(crate) type LlmToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
