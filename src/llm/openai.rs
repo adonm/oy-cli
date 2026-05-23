@@ -73,52 +73,37 @@ async fn run_message_protocol(
 ) -> Result<LlmResponse> {
     let endpoint = message_protocol_endpoint(protocol, &request)?;
     let client = reqwest::Client::new();
-    let tools_by_name = tool_runtime::tools_by_name(tools);
-    let mut request = request;
-    let mut transcript = Vec::new();
-    let mut loop_state = tool_runtime::ToolLoopState::default();
+    let auth = request.route.auth.clone();
+    let max_turns = request.max_turns;
 
-    for turn in 0..=request.max_turns {
-        let body = message_protocol_request_body(protocol, &request)?;
-        let assistant = retry_transient_http_call(|| {
-            stream_message_protocol_assistant(
-                protocol,
-                &client,
-                &endpoint,
-                &request.route.auth,
-                &body,
-            )
-        })
-        .await?;
-        let assistant_message = assistant_message_from_calls(
-            &assistant.text,
-            assistant_reasoning_content(protocol, &assistant),
-            &assistant.tool_calls,
-        )?;
-
-        if assistant.tool_calls.is_empty() {
-            transcript.push(assistant_message);
-            return Ok(LlmResponse {
-                output: assistant.text,
-                messages: Some(transcript),
-            });
-        }
-        ensure_tool_round_budget(turn, request.max_turns, message_protocol_label(protocol))?;
-        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
-
-        request.messages.push(assistant_message.clone());
-        transcript.push(assistant_message);
-        for call in assistant.tool_calls {
-            let outcome =
-                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
-            let result =
-                message_protocol_tool_result_message(protocol, &call, outcome.output.clone());
+    run_tool_loop(
+        ToolLoopConfig {
+            max_turns,
+            protocol_label: message_protocol_label(protocol),
+            include_reasoning_in_transcript: message_protocol_includes_reasoning(protocol),
+        },
+        tools,
+        request,
+        move |request| message_protocol_request_body(protocol, request),
+        move |body| {
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            let auth = auth.clone();
+            async move {
+                stream_message_protocol_assistant(protocol, &client, &endpoint, &auth, &body).await
+            }
+        },
+        |request, _assistant, assistant_message| {
+            request.messages.push(assistant_message.clone());
+            Ok(())
+        },
+        |request, _call, _output, result| {
             request.messages.push(result.clone());
-            transcript.push(result);
-        }
-    }
-
-    unreachable!("bounded tool loop exits from inside the loop")
+            Ok(())
+        },
+        move |call, output| message_protocol_tool_result_message(protocol, call, output),
+    )
+    .await
 }
 
 fn message_protocol_endpoint(protocol: MessageProtocol, request: &LlmRequest) -> Result<String> {
@@ -170,15 +155,10 @@ async fn stream_message_protocol_assistant(
     }
 }
 
-fn assistant_reasoning_content<'a>(
-    protocol: MessageProtocol,
-    assistant: &'a ParsedAssistant,
-) -> Option<&'a Value> {
+fn message_protocol_includes_reasoning(protocol: MessageProtocol) -> bool {
     match protocol {
-        MessageProtocol::BedrockConverse => None,
-        MessageProtocol::Gemini | MessageProtocol::AnthropicMessages => {
-            assistant.reasoning_content.as_ref()
-        }
+        MessageProtocol::BedrockConverse => false,
+        MessageProtocol::Gemini | MessageProtocol::AnthropicMessages => true,
     }
 }
 
@@ -212,59 +192,53 @@ async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<Ll
     )?;
     let client = reqwest::Client::new();
     let tool_specs = request.tools.clone();
-    let tools_by_name = tool_runtime::tools_by_name(tools);
-    let mut messages = openai_chat::messages_from_llm(&request.system_prompt, request.messages)?;
-    let mut transcript = Vec::new();
-    let mut loop_state = tool_runtime::ToolLoopState::default();
+    let model = request.route.model.clone();
+    let auth = request.route.auth.clone();
+    let tool_choice = request.tool_choice.clone();
+    let generation = request.generation.clone();
+    let additional_params = request.route.additional_params.clone();
+    let max_turns = request.max_turns;
+    let messages = openai_chat::messages_from_llm(&request.system_prompt, request.messages)?;
 
-    for turn in 0..=request.max_turns {
-        let body = openai_chat::request_body(
-            &request.route.model,
-            &messages,
-            &tool_specs,
-            request.tool_choice.as_ref(),
-            request.generation.as_ref(),
-            request.route.additional_params.as_ref(),
-        )?;
-        let assistant = retry_transient_http_call(|| {
-            stream_chat_assistant(&client, &endpoint, &request.route.auth, &body)
-        })
-        .await?;
-        let assistant_message = assistant_message_from_calls(
-            &assistant.text,
-            assistant.reasoning_content.as_ref(),
-            &assistant.tool_calls,
-        )?;
-
-        if assistant.tool_calls.is_empty() {
-            transcript.push(assistant_message);
-            return Ok(LlmResponse {
-                output: assistant.text,
-                messages: Some(transcript),
-            });
-        }
-        ensure_tool_round_budget(turn, request.max_turns, "chat")?;
-        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
-
-        messages.push(openai_chat::assistant_wire_message(
-            &assistant.text,
-            assistant.reasoning_content.as_ref(),
-            &assistant.tool_calls,
-        )?);
-        transcript.push(assistant_message);
-        for call in assistant.tool_calls {
-            let outcome =
-                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
-            let result = tool_result_message(&call, outcome.output.clone());
-            messages.push(openai_chat::tool_result_wire_message(
-                &call,
-                &outcome.output,
-            ));
-            transcript.push(result);
-        }
-    }
-
-    unreachable!("bounded tool loop exits from inside the loop")
+    run_tool_loop(
+        ToolLoopConfig {
+            max_turns,
+            protocol_label: "chat",
+            include_reasoning_in_transcript: true,
+        },
+        tools,
+        messages,
+        move |messages| {
+            openai_chat::request_body(
+                &model,
+                messages,
+                &tool_specs,
+                tool_choice.as_ref(),
+                generation.as_ref(),
+                additional_params.as_ref(),
+            )
+        },
+        move |body| {
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            let auth = auth.clone();
+            async move { stream_chat_assistant(&client, &endpoint, &auth, &body).await }
+        },
+        |messages, assistant, _assistant_message| {
+            messages.push(openai_chat::assistant_wire_message(
+                &assistant.text,
+                assistant.reasoning_content.as_ref(),
+                &assistant.tool_calls,
+            )?);
+            Ok(())
+        },
+        |messages, call, output, _result| {
+            messages.push(openai_chat::tool_result_wire_message(call, output));
+            Ok(())
+        },
+        tool_result_message,
+    )
+    .await
 }
 
 async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
@@ -276,57 +250,138 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
     )?;
     let client = reqwest::Client::new();
     let tool_specs = request.tools.clone();
-    let tools_by_name = tool_runtime::tools_by_name(tools);
+    let model = request.route.model.clone();
+    let auth = request.route.auth.clone();
+    let tool_choice = request.tool_choice.clone();
+    let generation = request.generation.clone();
+    let additional_params = request.route.additional_params.clone();
+    let max_turns = request.max_turns;
     let store = request
         .route
         .additional_params
         .as_ref()
         .and_then(|params| params.get("store"))
         .and_then(Value::as_bool);
-    let mut input = openai_responses::input_from_llm_with_store(
+    let input = openai_responses::input_from_llm_with_store(
         &request.system_prompt,
         request.messages,
         store,
     )?;
+
+    run_tool_loop(
+        ToolLoopConfig {
+            max_turns,
+            protocol_label: "Responses",
+            include_reasoning_in_transcript: true,
+        },
+        tools,
+        input,
+        move |input| {
+            openai_responses::request_body(
+                &model,
+                input,
+                &tool_specs,
+                tool_choice.as_ref(),
+                generation.as_ref(),
+                additional_params.as_ref(),
+            )
+        },
+        move |body| {
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            let auth = auth.clone();
+            async move {
+                stream_responses_output(&client, &endpoint, &auth, &body)
+                    .await
+                    .map(ParsedAssistant::from)
+            }
+        },
+        |input, assistant, _assistant_message| {
+            openai_responses::append_assistant_output(
+                input,
+                &assistant.text,
+                &assistant.tool_calls,
+            );
+            Ok(())
+        },
+        |input, call, output, _result| {
+            input.push(openai_responses::tool_result_input(call, output));
+            Ok(())
+        },
+        tool_result_message,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ToolLoopConfig {
+    max_turns: usize,
+    protocol_label: &'static str,
+    include_reasoning_in_transcript: bool,
+}
+
+async fn run_tool_loop<
+    WireState,
+    BuildBody,
+    StreamAssistant,
+    StreamFuture,
+    AppendAssistantWire,
+    AppendToolResultWire,
+    ToolResultTranscript,
+>(
+    config: ToolLoopConfig,
+    tools: LlmTools,
+    mut wire_state: WireState,
+    build_body: BuildBody,
+    stream_assistant: StreamAssistant,
+    mut append_assistant_wire: AppendAssistantWire,
+    mut append_tool_result_wire: AppendToolResultWire,
+    tool_result_transcript: ToolResultTranscript,
+) -> Result<LlmResponse>
+where
+    BuildBody: Fn(&WireState) -> Result<Value>,
+    StreamAssistant: Fn(Value) -> StreamFuture,
+    StreamFuture: Future<Output = Result<ParsedAssistant>>,
+    AppendAssistantWire: FnMut(&mut WireState, &ParsedAssistant, &Message) -> Result<()>,
+    AppendToolResultWire: FnMut(&mut WireState, &NativeToolCall, &str, &Message) -> Result<()>,
+    ToolResultTranscript: Fn(&NativeToolCall, String) -> Message,
+{
+    let tools_by_name = tool_runtime::tools_by_name(tools);
     let mut transcript = Vec::new();
     let mut loop_state = tool_runtime::ToolLoopState::default();
 
-    for turn in 0..=request.max_turns {
-        let body = openai_responses::request_body(
-            &request.route.model,
-            &input,
-            &tool_specs,
-            request.tool_choice.as_ref(),
-            request.generation.as_ref(),
-            request.route.additional_params.as_ref(),
-        )?;
-        let response = retry_transient_http_call(|| {
-            stream_responses_output(&client, &endpoint, &request.route.auth, &body)
-        })
-        .await?;
+    for turn in 0..=config.max_turns {
+        let body = build_body(&wire_state)?;
+        let assistant = retry_transient_http_call(|| stream_assistant(body.clone())).await?;
+        let reasoning_content = if config.include_reasoning_in_transcript {
+            assistant.reasoning_content.as_ref()
+        } else {
+            None
+        };
         let assistant_message = assistant_message_from_calls(
-            &response.text,
-            response.reasoning_content.as_ref(),
-            &response.tool_calls,
+            &assistant.text,
+            reasoning_content,
+            &assistant.tool_calls,
         )?;
 
-        if response.tool_calls.is_empty() {
+        if assistant.tool_calls.is_empty() {
             transcript.push(assistant_message);
             return Ok(LlmResponse {
-                output: response.text,
+                output: assistant.text,
                 messages: Some(transcript),
             });
         }
-        ensure_tool_round_budget(turn, request.max_turns, "Responses")?;
-        loop_state.note_assistant_turn(&response.text, &response.tool_calls)?;
+        ensure_tool_round_budget(turn, config.max_turns, config.protocol_label)?;
+        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
 
-        openai_responses::append_assistant_output(&mut input, &response.text, &response.tool_calls);
+        append_assistant_wire(&mut wire_state, &assistant, &assistant_message)?;
         transcript.push(assistant_message);
-        for call in response.tool_calls {
+        for call in &assistant.tool_calls {
             let outcome =
-                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
-            transcript.push(tool_result_message(&call, outcome.output.clone()));
-            input.push(openai_responses::tool_result_input(&call, &outcome.output));
+                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, call).await;
+            let result = tool_result_transcript(call, outcome.output.clone());
+            append_tool_result_wire(&mut wire_state, call, &outcome.output, &result)?;
+            transcript.push(result);
         }
     }
 
@@ -548,6 +603,16 @@ struct ParsedResponse {
     text: String,
     reasoning_content: Option<Value>,
     tool_calls: Vec<NativeToolCall>,
+}
+
+impl From<ParsedResponse> for ParsedAssistant {
+    fn from(response: ParsedResponse) -> Self {
+        Self {
+            text: response.text,
+            reasoning_content: response.reasoning_content,
+            tool_calls: response.tool_calls,
+        }
+    }
 }
 
 #[cfg(test)]
