@@ -1,10 +1,13 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{Datelike, Timelike, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
+use std::{env, net::IpAddr};
 
 use crate::llm::{AwsCredentials, RouteAuth};
+
+const ALLOW_INSECURE_LOCAL_PROVIDER_HTTP_ENV: &str = "OY_ALLOW_INSECURE_LOCAL_PROVIDER_HTTP";
 
 pub(crate) fn apply_json_headers(
     builder: reqwest::RequestBuilder,
@@ -12,6 +15,7 @@ pub(crate) fn apply_json_headers(
     endpoint: &str,
     body: &str,
 ) -> Result<reqwest::RequestBuilder> {
+    ensure_credential_transport(endpoint)?;
     match auth {
         RouteAuth::ApiKey(api_key) => Ok(builder
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -49,6 +53,71 @@ pub(crate) fn apply_json_headers(
         RouteAuth::AwsSigV4(credentials) => {
             Ok(builder.headers(sigv4_headers(endpoint, body, credentials)?))
         }
+    }
+}
+
+fn ensure_credential_transport(endpoint: &str) -> Result<()> {
+    let url = reqwest::Url::parse(endpoint).context("failed to parse native LLM endpoint")?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            if !insecure_local_provider_http_opt_in() {
+                bail!(
+                    "refusing to attach provider credentials over HTTP; use HTTPS for provider base URLs or set {ALLOW_INSECURE_LOCAL_PROVIDER_HTTP_ENV}=1 for loopback/private local development endpoints"
+                );
+            }
+            let host = url
+                .host_str()
+                .context("native LLM HTTP endpoint has no host")?;
+            if !is_loopback_or_private_host(host) {
+                bail!(
+                    "{ALLOW_INSECURE_LOCAL_PROVIDER_HTTP_ENV} only permits HTTP provider credentials to loopback or private IP endpoints"
+                );
+            }
+            eprintln!(
+                "warning: sending native LLM credentials over HTTP to local endpoint {host} because {ALLOW_INSECURE_LOCAL_PROVIDER_HTTP_ENV} is set"
+            );
+            Ok(())
+        }
+        scheme => bail!(
+            "native LLM endpoint must use HTTPS, or HTTP with {ALLOW_INSECURE_LOCAL_PROVIDER_HTTP_ENV}=1 for local development; got `{scheme}`"
+        ),
+    }
+}
+
+fn insecure_local_provider_http_opt_in() -> bool {
+    env::var(ALLOW_INSECURE_LOCAL_PROVIDER_HTTP_ENV)
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+}
+
+fn is_loopback_or_private_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if host
+        .to_ascii_lowercase()
+        .strip_suffix(".localhost")
+        .is_some_and(|prefix| !prefix.is_empty())
+    {
+        return true;
+    }
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .is_ok_and(is_loopback_or_private_ip)
+}
+
+fn is_loopback_or_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
     }
 }
 
