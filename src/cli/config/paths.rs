@@ -283,13 +283,14 @@ fn restrict_to_owner(path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
     use windows_sys::Win32::Security::{
-        AddAccessAllowedAce, GetLengthSid, InitializeAcl,
-        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
-        TokenUser, ACL, ACL_REVISION,
+        ACL, ACL_REVISION, AddAccessAllowedAce, DACL_SECURITY_INFORMATION, GetLengthSid,
+        InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
-    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, GetTokenInformation};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetTokenInformation, OpenProcessToken,
+    };
 
     let path_wide: Vec<u16> = path
         .as_os_str()
@@ -314,7 +315,14 @@ fn restrict_to_owner(path: &Path) -> Result<()> {
         }
 
         let mut buf = vec![0u8; size as usize];
-        if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut _, size, &mut size) == 0 {
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr() as *mut _,
+            size,
+            &mut size,
+        ) == 0
+        {
             CloseHandle(token);
             bail!(
                 "failed to get token user information: Windows error {}",

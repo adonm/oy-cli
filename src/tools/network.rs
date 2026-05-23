@@ -542,13 +542,9 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let pinned_addr = listener.local_addr().unwrap();
-        
-        let url = Url::parse(&format!(
-            "http://example.test:{}/start",
-            pinned_addr.port()
-        ))
-        .unwrap();
-        
+
+        let url = Url::parse(&format!("http://example.test:{}/start", pinned_addr.port())).unwrap();
+
         let client = PublicWebfetchClient::from_target(PublicWebfetchTarget {
             url,
             host: "example.test".to_string(),
@@ -586,7 +582,7 @@ mod tests {
             "unexpected error message: {}",
             err_debug
         );
-        
+
         server.await.unwrap();
     }
 }

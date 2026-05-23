@@ -327,21 +327,38 @@ fn apply_context_hunks(text: &str, file: &ApplyPatchFile) -> Result<String> {
     let mut lines = split_preserving_newlines(text);
     let mut cursor = 0;
     for (idx, hunk) in file.hunks.iter().enumerate() {
-        let anchor_start = hunk
-            .anchor
-            .as_ref()
-            .and_then(|anchor| find_anchor_line(&lines, anchor, cursor))
-            .unwrap_or(cursor);
-        let start = find_line_sequence(&lines, &hunk.old_lines, anchor_start)
-            .or_else(|| find_line_sequence(&lines, &hunk.old_lines, cursor))
-            .or_else(|| find_line_sequence(&lines, &hunk.old_lines, 0))
-            .ok_or_else(|| {
-                anyhow!(
-                    "failed applying patch for {}: context hunk #{} did not match; re-read the file and regenerate the hunk with current context",
-                    file.path,
-                    idx + 1
-                )
-            })?;
+        let start = if hunk.old_lines.is_empty() {
+            if let Some(ref anchor) = hunk.anchor {
+                find_anchor_line(&lines, anchor, cursor)
+                    .or_else(|| find_anchor_line(&lines, anchor, 0))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "failed applying patch for {}: context hunk #{} anchor '{}' not found; re-read the file and regenerate the hunk with current context",
+                            file.path,
+                            idx + 1,
+                            anchor
+                        )
+                    })?
+            } else {
+                cursor
+            }
+        } else {
+            let anchor_start = hunk
+                .anchor
+                .as_ref()
+                .and_then(|anchor| find_anchor_line(&lines, anchor, cursor))
+                .unwrap_or(cursor);
+            find_line_sequence(&lines, &hunk.old_lines, anchor_start)
+                .or_else(|| find_line_sequence(&lines, &hunk.old_lines, cursor))
+                .or_else(|| find_line_sequence(&lines, &hunk.old_lines, 0))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "failed applying patch for {}: context hunk #{} did not match; re-read the file and regenerate the hunk with current context",
+                        file.path,
+                        idx + 1
+                    )
+                })?
+        };
         lines.splice(start..start + hunk.old_lines.len(), hunk.new_lines.clone());
         cursor = start + hunk.new_lines.len();
     }

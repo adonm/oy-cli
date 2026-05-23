@@ -56,6 +56,34 @@ fn patch_accepts_apply_patch_update_file_format() {
 }
 
 #[test]
+fn patch_supports_context_pure_insertion_hunks() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::write(
+        dir.path().join("engine.rs"),
+        "impl BrowserEngine {\n    /// The full browser request.\n    pub fn request(&self) {}\n}\n",
+    )
+    .unwrap();
+
+    let value = workspace::tool_patch(
+        &ctx,
+        PatchArgs {
+            patch: "*** Begin Patch\n*** Update File: engine.rs\n@@\n+    // Initialized\n@@ The full browser request.\n+    // Executed\n*** End Patch\n"
+                .into(),
+            strip: 1,
+            limit: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value["patch_count"], 1);
+    assert_eq!(value["changed_file_count"], 1);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("engine.rs")).unwrap(),
+        "    // Initialized\nimpl BrowserEngine {\n    // Executed\n    /// The full browser request.\n    pub fn request(&self) {}\n}\n"
+    );
+}
+
+#[test]
 fn apply_patch_rejects_add_file_and_leaves_workspace_unchanged() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::write(dir.path().join("a.txt"), "one\n").unwrap();

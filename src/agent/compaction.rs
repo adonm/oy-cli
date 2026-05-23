@@ -10,7 +10,7 @@ use crate::llm::{Message, MessageContent, ToolResultContent};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
-use tiktoken_rs::{bpe_for_model, cl100k_base_singleton, CoreBPE};
+use tiktoken_rs::{CoreBPE, bpe_for_model, cl100k_base_singleton};
 
 static TOKENIZER_CACHE: LazyLock<RwLock<HashMap<String, &'static CoreBPE>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
