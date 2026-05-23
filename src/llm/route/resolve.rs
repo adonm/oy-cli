@@ -6,7 +6,7 @@
 use anyhow::{Result, bail};
 
 use crate::config;
-use crate::llm::{ModelRoute, Protocol};
+use crate::llm::{merge_json_objects, ModelRoute, Protocol};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ParsedModelSpec<'a> {
@@ -140,23 +140,4 @@ pub(crate) fn merge_additional_params(
     }
 }
 
-fn merge_json_objects(base: &mut serde_json::Value, overlay: serde_json::Value) {
-    let Some(base_object) = base.as_object_mut() else {
-        *base = overlay;
-        return;
-    };
-    let serde_json::Value::Object(overlay) = overlay else {
-        *base = overlay;
-        return;
-    };
-    for (key, value) in overlay {
-        match (base_object.get_mut(&key), value) {
-            (Some(existing), serde_json::Value::Object(next)) if existing.is_object() => {
-                merge_json_objects(existing, serde_json::Value::Object(next));
-            }
-            (_, value) => {
-                base_object.insert(key, value);
-            }
-        }
-    }
-}
+

@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::Protocol;
+use super::{Protocol, merge_json_objects};
 
 #[path = "providers/route.rs"]
 pub(crate) mod route;
@@ -580,26 +580,7 @@ fn gpt5_default_provider_options_for_protocol(
     Some(options)
 }
 
-fn merge_json_objects(base: &mut serde_json::Value, overlay: serde_json::Value) {
-    let Some(base_object) = base.as_object_mut() else {
-        *base = overlay;
-        return;
-    };
-    let serde_json::Value::Object(overlay) = overlay else {
-        *base = overlay;
-        return;
-    };
-    for (key, value) in overlay {
-        match (base_object.get_mut(&key), value) {
-            (Some(existing), serde_json::Value::Object(next)) if existing.is_object() => {
-                merge_json_objects(existing, serde_json::Value::Object(next));
-            }
-            (_, value) => {
-                base_object.insert(key, value);
-            }
-        }
-    }
-}
+
 
 fn percent_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()

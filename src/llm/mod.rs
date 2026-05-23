@@ -23,6 +23,27 @@ mod tool_runtime;
 pub(crate) use openai::NativeOpenAiBackend;
 pub(crate) use route::resolve::ParsedModelSpec;
 
+pub(crate) fn merge_json_objects(base: &mut Value, overlay: Value) {
+    let Some(base_object) = base.as_object_mut() else {
+        *base = overlay;
+        return;
+    };
+    let Value::Object(overlay) = overlay else {
+        *base = overlay;
+        return;
+    };
+    for (key, value) in overlay {
+        match (base_object.get_mut(&key), value) {
+            (Some(existing), Value::Object(next)) if existing.is_object() => {
+                merge_json_objects(existing, Value::Object(next));
+            }
+            (_, value) => {
+                base_object.insert(key, value);
+            }
+        }
+    }
+}
+
 pub(crate) type ChatFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmResponse>> + 'a>>;
 pub(crate) type LlmToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 
