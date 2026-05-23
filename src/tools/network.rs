@@ -225,9 +225,19 @@ fn validate_public_ip(ip: IpAddr) -> Result<()> {
 }
 
 fn is_public_ip(ip: IpAddr) -> bool {
-    ip_rfc::global(&ip)
-        && !ip.is_multicast()
-        && !matches!(ip, IpAddr::V6(ip) if (ip.segments()[0] & 0xffc0) == 0xfec0)
+    let normalized_ip = match ip {
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4() {
+                IpAddr::V4(v4)
+            } else {
+                IpAddr::V6(v6)
+            }
+        }
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+    };
+    ip_rfc::global(&normalized_ip)
+        && !normalized_ip.is_multicast()
+        && !matches!(normalized_ip, IpAddr::V6(ip) if (ip.segments()[0] & 0xffc0) == 0xfec0)
 }
 
 fn normalize_scrape_url(input: &str) -> String {
@@ -332,6 +342,10 @@ mod tests {
             "fe80::1".parse().unwrap(),
             "fec0::1".parse().unwrap(),
             "ff0e::1".parse().unwrap(),
+            "::ffff:127.0.0.1".parse().unwrap(),
+            "::ffff:10.0.0.1".parse().unwrap(),
+            "::ffff:169.254.169.254".parse().unwrap(),
+            "::ffff:192.168.1.1".parse().unwrap(),
         ] {
             assert!(!is_public_ip(ip), "{ip} should be blocked");
         }
