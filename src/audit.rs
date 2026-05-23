@@ -34,7 +34,10 @@ use reduce::{
     reduce_candidate_findings_budget,
 };
 pub(crate) use report::default_output_path;
-use report::{transparency_snippet, with_succinct_findings_summary, with_transparency_line};
+use report::{
+    transparency_snippet, with_structured_findings_block, with_succinct_findings_summary,
+    with_transparency_line,
+};
 use sarif::render_sarif;
 
 const DEFAULT_INPUT_LIMIT: usize = 128_000;
@@ -273,6 +276,7 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     };
 
     let report = with_transparency_line(&report, &transparency_snippet(&options));
+    let report = with_structured_findings_block(&report, "audit");
     let report = with_succinct_findings_summary(&report);
     let output = match options.format {
         AuditOutputFormat::Markdown => report,
@@ -371,6 +375,44 @@ mod tests {
         assert_eq!(
             value["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"],
             42
+        );
+    }
+
+    #[test]
+    fn sarif_renderer_prefers_structured_findings_block() {
+        let sarif = render_sarif(
+            r#"# Audit Issues
+
+## Detailed findings
+
+### Low: stale markdown
+Evidence: src/old.rs:1
+
+## Machine-readable findings
+
+```json oy-findings
+[
+  {
+    "source": "audit",
+    "severity": "High",
+    "title": "typed path wins",
+    "locations": [{ "path": "src/new.rs", "line": 9 }],
+    "evidence": "src/new.rs:9 proves it",
+    "body": "Fix it.",
+    "category": "security"
+  }
+]
+```
+"#,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let results = value["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ruleId"], "oy/high/typed-path-wins");
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "src/new.rs"
         );
     }
 

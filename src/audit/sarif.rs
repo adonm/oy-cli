@@ -8,12 +8,13 @@ use std::path::Path;
 use super::report;
 
 pub(super) fn render_sarif(report: &str) -> Result<String> {
-    let findings = report::extract_findings(&report.lines().collect::<Vec<_>>());
+    let findings = report::findings_from_report(report);
     let mut rules = std::collections::BTreeMap::<String, Value>::new();
     let mut results = Vec::new();
 
     for finding in findings {
-        let location = sarif_location(&finding.code_ref);
+        let code_ref = finding.primary_code_ref();
+        let location = code_ref.as_deref().and_then(sarif_location);
         let rule_id = sarif_rule_id(&finding);
         let level = sarif_level(&finding.severity);
         rules.entry(rule_id.clone()).or_insert_with(|| {
@@ -34,7 +35,7 @@ pub(super) fn render_sarif(report: &str) -> Result<String> {
             "message": { "text": format!("{}: {}", finding.severity, finding.title) },
             "properties": {
                 "severity": finding.severity,
-                "codeRef": finding.code_ref
+                "codeRef": code_ref
             }
         });
         if let Some(location) = location {
@@ -64,7 +65,7 @@ pub(super) fn render_sarif(report: &str) -> Result<String> {
     Ok(out)
 }
 
-fn sarif_rule_id(finding: &report::FindingSummary) -> String {
+fn sarif_rule_id(finding: &report::Finding) -> String {
     let mut slug = String::new();
     for ch in finding.title.chars().flat_map(char::to_lowercase) {
         if ch.is_ascii_alphanumeric() {

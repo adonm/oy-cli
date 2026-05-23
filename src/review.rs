@@ -182,6 +182,7 @@ pub async fn run(options: ReviewOptions) -> Result<ReviewResult> {
     };
 
     let report = with_transparency_line(&report, &transparency_snippet(&options));
+    let report = report::with_structured_findings_block(&report, "review");
     config::write_workspace_file(&output_path, report.as_bytes())?;
     Ok(ReviewResult {
         output_path,
@@ -552,7 +553,7 @@ fn review_full_prompt(focus: &str, source: &str, manifest: &str, input: &str) ->
         "Conduct a code-quality review for this input source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with one concise bullet/table row for each high-conviction finding, including severity and code reference (`path:line` or `path::symbol`).\n4. Add `## Detailed findings` for the most important findings; each must include severity, evidence, design impact, and the concrete simplification or decomposition.\n5. Keep the report focused on structural/design issues with actionable evidence. Leave workspace files unchanged.\n\nInput manifest:\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with one concise bullet/table row for each high-conviction finding, including severity and code reference (`path:line` or `path::symbol`).\n4. Add `## Detailed findings` for the most important findings; each must include severity, evidence, design impact, and the concrete simplification or decomposition.\n5. Add `## Machine-readable findings` containing one fenced block exactly marked ```json oy-findings with a JSON array of objects: source, severity, title, locations [{path,line,symbol}], evidence, body, category. This block is the machine API; keep Markdown as presentation.\n6. Keep the report focused on structural/design issues with actionable evidence. Leave workspace files unchanged.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nReview input:\n");
     prompt.push_str(input.trim());
@@ -587,7 +588,7 @@ fn review_reduce_prompt(focus: &str, source: &str, manifest: &str, findings: &st
         "Condense candidate code-quality findings into the final markdown report for source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with each surviving finding, severity, and code reference.\n4. Add `## Detailed findings` for the most important findings; preserve evidence, design impact, and the concrete simplification or decomposition.\n5. Keep the final report focused on high-conviction structural/design findings and merge duplicates into the strongest version.\n\nInput manifest:\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with each surviving finding, severity, and code reference.\n4. Add `## Detailed findings` for the most important findings; preserve evidence, design impact, and the concrete simplification or decomposition.\n5. Add `## Machine-readable findings` containing one fenced block exactly marked ```json oy-findings with a JSON array of objects: source, severity, title, locations [{path,line,symbol}], evidence, body, category. This block is the machine API; keep Markdown as presentation.\n6. Keep the final report focused on high-conviction structural/design findings and merge duplicates into the strongest version.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nCandidate findings:\n");
     prompt.push_str(findings.trim());

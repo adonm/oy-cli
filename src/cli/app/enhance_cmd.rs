@@ -533,6 +533,19 @@ fn collect_findings(audit_report: &str, review_report: &str) -> Vec<Finding> {
 }
 
 fn parse_findings(source: FindingSource, report: &str) -> Vec<Finding> {
+    let structured = crate::audit::report::structured_findings_from_report(report)
+        .into_iter()
+        .filter(|finding| !is_no_finding_title(&finding.title))
+        .map(|finding| Finding {
+            source: FindingSource::parse(&finding.source).unwrap_or(source),
+            title: clean_title(&format!("{}: {}", finding.severity, finding.title)),
+            body: typed_finding_body(&finding),
+        })
+        .collect::<Vec<_>>();
+    if !structured.is_empty() {
+        return structured;
+    }
+
     let mut findings = section_after_heading(report, "Detailed findings")
         .map(|detailed| {
             let mut findings = parse_heading_findings(source, detailed, 3);
@@ -549,6 +562,28 @@ fn parse_findings(source: FindingSource, report: &str) -> Vec<Finding> {
         );
     }
     findings
+}
+
+fn typed_finding_body(finding: &crate::audit::report::Finding) -> String {
+    let mut body = String::new();
+    body.push_str(&format!("### {}: {}\n", finding.severity, finding.title));
+    if let Some(location) = finding.primary_code_ref() {
+        body.push_str(&format!("\n- Location: `{location}`\n"));
+    }
+    if let Some(category) = finding.category.as_deref() {
+        body.push_str(&format!("- Category: {category}\n"));
+    }
+    if !finding.evidence.trim().is_empty() {
+        body.push_str("\nEvidence:\n");
+        body.push_str(finding.evidence.trim());
+        body.push('\n');
+    }
+    if !finding.body.trim().is_empty() {
+        body.push('\n');
+        body.push_str(finding.body.trim());
+        body.push('\n');
+    }
+    body.trim().to_string()
 }
 
 fn section_after_heading<'a>(report: &'a str, heading: &str) -> Option<&'a str> {
@@ -762,6 +797,41 @@ mod tests {
         let findings = parse_findings(FindingSource::Review, report);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].title.contains("split large function"));
+    }
+
+    #[test]
+    fn parses_typed_findings_before_markdown_fallback() {
+        let report = r#"# Code Quality Review
+
+## Detailed findings
+
+### Low: stale markdown
+Evidence: src/old.rs:1
+
+## Machine-readable findings
+
+```json oy-findings
+[
+  {
+    "source": "review",
+    "severity": "High",
+    "title": "split report API from prose",
+    "locations": [{ "path": "src/report.rs", "line": 12 }],
+    "evidence": "src/report.rs:12 reparses markdown",
+    "body": "Use the typed finding list.",
+    "category": "design"
+  }
+]
+```
+"#;
+
+        let findings = parse_findings(FindingSource::Review, report);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source, FindingSource::Review);
+        assert_eq!(findings[0].title, "High: split report API from prose");
+        assert!(findings[0].body.contains("src/report.rs:12"));
+        assert!(!findings[0].body.contains("src/old.rs:1"));
     }
 
     #[test]
