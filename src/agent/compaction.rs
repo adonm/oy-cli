@@ -8,8 +8,12 @@
 
 use crate::llm::{Message, MessageContent, ToolResultContent};
 use regex::Regex;
-use std::sync::LazyLock;
-use tiktoken_rs::{bpe_for_model, cl100k_base_singleton};
+use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
+use tiktoken_rs::{bpe_for_model, cl100k_base_singleton, CoreBPE};
+
+static TOKENIZER_CACHE: LazyLock<RwLock<HashMap<String, &'static CoreBPE>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 fn model_tokenizer_name(model: &str) -> &str {
     model
@@ -19,8 +23,18 @@ fn model_tokenizer_name(model: &str) -> &str {
 }
 
 pub(crate) fn count_tokens(model: &str, text: &str) -> usize {
+    if let Some(&bpe) = TOKENIZER_CACHE.read().unwrap().get(model) {
+        return bpe.encode_with_special_tokens(text).len();
+    }
+
     let model_name = model_tokenizer_name(model);
     let bpe = bpe_for_model(model_name).unwrap_or_else(|_| cl100k_base_singleton());
+
+    TOKENIZER_CACHE
+        .write()
+        .unwrap()
+        .insert(model.to_string(), bpe);
+
     bpe.encode_with_special_tokens(text).len()
 }
 
@@ -407,5 +421,25 @@ mod tests {
             result.contains("fatal: unrecoverable"),
             "fatal line was dropped"
         );
+    }
+
+    #[test]
+    fn count_tokens_caching() {
+        // First run resolves and populates cache
+        let tokens_1 = count_tokens("gpt-4o", "hello world");
+        assert_eq!(tokens_1, 2);
+
+        // Second run uses cache
+        let tokens_2 = count_tokens("gpt-4o", "hello world");
+        assert_eq!(tokens_2, 2);
+
+        // Test with custom model name that maps to fallback
+        let tokens_3 = count_tokens("anthropic:claude-3-5-sonnet", "hello world");
+        assert_eq!(tokens_3, 2);
+
+        // Verify cache actually contains the entries
+        let cache = TOKENIZER_CACHE.read().unwrap();
+        assert!(cache.contains_key("gpt-4o"));
+        assert!(cache.contains_key("anthropic:claude-3-5-sonnet"));
     }
 }
