@@ -23,6 +23,7 @@ pub(crate) fn assistant_parts(content: Vec<MessageContent>) -> Result<AssistantC
                 call_id,
                 name,
                 arguments,
+                signature,
                 ..
             } => {
                 let arguments = serde_json::to_string(&arguments)?;
@@ -31,6 +32,7 @@ pub(crate) fn assistant_parts(content: Vec<MessageContent>) -> Result<AssistantC
                     id,
                     name,
                     arguments,
+                    signature,
                 });
             }
             MessageContent::Reasoning { value } => {

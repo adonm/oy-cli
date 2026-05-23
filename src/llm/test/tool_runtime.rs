@@ -31,6 +31,7 @@ fn call(name: &str, arguments: &str) -> ToolCall {
         call_id: "call-1".to_string(),
         name: name.to_string(),
         arguments: arguments.to_string(),
+        signature: None,
     }
 }
 

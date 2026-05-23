@@ -103,7 +103,8 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
             state.next_tool_call_id += 1;
             let arguments =
                 serde_json::to_string(call.get("args").unwrap_or(&Value::Object(Map::new())))?;
-            let tool_call = ToolCall::from_raw_input(id, name, &arguments, ROUTE)?;
+            let mut tool_call = ToolCall::from_raw_input(id, name, &arguments, ROUTE)?;
+            tool_call.signature = thought_signature(part);
             state.has_tool_calls = true;
             events.push(LlmEvent::ToolCall {
                 call: tool_call,
@@ -112,6 +113,12 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
         }
     }
     Ok(events)
+}
+
+fn thought_signature(part: &Value) -> Option<String> {
+    part.get("thoughtSignature")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 pub(crate) fn finish_stream(state: &mut StreamState) -> Result<Vec<LlmEvent>> {
@@ -190,12 +197,26 @@ fn lower_assistant_content(content: &[MessageContent]) -> Result<Vec<Value>> {
         parts.push(json!({"text": assistant.text}));
     }
     for call in assistant.tool_calls {
-        parts.push(json!({"functionCall": {"name": call.name, "args": call.arguments_value()?}}));
+        let mut part = Map::from_iter([(
+            "functionCall".to_string(),
+            json!({"name": call.name, "args": call.arguments_value()?}),
+        )]);
+        insert_thought_signature(&mut part, call.signature.as_deref());
+        parts.push(Value::Object(part));
     }
     if parts.is_empty() {
         parts.push(json!({"text": ""}));
     }
     Ok(parts)
+}
+
+fn insert_thought_signature(part: &mut Map<String, Value>, signature: Option<&str>) {
+    if let Some(signature) = signature.filter(|signature| !signature.is_empty()) {
+        part.insert(
+            "thoughtSignature".to_string(),
+            Value::String(signature.to_string()),
+        );
+    }
 }
 
 fn lower_tools(tools: &[ToolSpec]) -> Vec<Value> {

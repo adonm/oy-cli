@@ -352,6 +352,7 @@ fn hosted_tool_events(item: &Value) -> Option<Vec<LlmEvent>> {
         id: id.clone(),
         name: name.to_string(),
         arguments: input.to_string(),
+        signature: None,
     };
     let output = if item.get("error").is_some_and(|error| !error.is_null()) {
         json!({"type": "error", "value": item.get("error").cloned().unwrap_or(Value::Null)})

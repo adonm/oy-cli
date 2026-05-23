@@ -27,6 +27,7 @@ pub(crate) struct ToolCall {
     pub(crate) call_id: String,
     pub(crate) name: String,
     pub(crate) arguments: String,
+    pub(crate) signature: Option<String>,
 }
 
 impl ToolCall {
@@ -51,6 +52,7 @@ impl ToolCall {
             id,
             name,
             arguments: arguments.to_string(),
+            signature: None,
         })
     }
 

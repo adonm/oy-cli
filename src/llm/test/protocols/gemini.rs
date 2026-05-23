@@ -93,7 +93,7 @@ fn request_body_lowers_tool_result_with_function_name() {
                 call_id: Some("tool_0".to_string()),
                 name: "lookup".to_string(),
                 arguments: json!({"query": "weather"}),
-                signature: None,
+                signature: Some("sig-a".to_string()),
                 additional_params: None,
             }],
         },
@@ -114,7 +114,7 @@ fn request_body_lowers_tool_result_with_function_name() {
     assert_eq!(
         body["contents"],
         json!([
-            {"role": "model", "parts": [{"functionCall": {"name": "lookup", "args": {"query": "weather"}}}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "lookup", "args": {"query": "weather"}}, "thoughtSignature": "sig-a"}]},
             {"role": "user", "parts": [{"functionResponse": {"name": "lookup", "response": {"name": "lookup", "content": "sunny"}}}]}
         ])
     );
@@ -139,7 +139,7 @@ fn stream_parser_maps_text_reasoning_tool_usage_and_finish() {
         "candidates": [{"content": {"role": "model", "parts": [{"text": "thinking", "thought": true}]}}]
     })).unwrap());
     events.extend(parse_stream_event(&mut state, &json!({
-        "candidates": [{"content": {"role": "model", "parts": [{"text": "Hello"}, {"functionCall": {"name": "lookup", "args": {"query": "weather"}}}]}, "finishReason": "STOP"}],
+        "candidates": [{"content": {"role": "model", "parts": [{"text": "Hello"}, {"functionCall": {"name": "lookup", "args": {"query": "weather"}}, "thoughtSignature": "sig-a"}]}, "finishReason": "STOP"}],
         "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 2, "thoughtsTokenCount": 1, "cachedContentTokenCount": 1, "totalTokenCount": 8}
     })).unwrap());
     events.extend(finish_stream(&mut state).unwrap());
@@ -155,6 +155,7 @@ fn stream_parser_maps_text_reasoning_tool_usage_and_finish() {
         .unwrap();
     assert_eq!(call.call_id, "tool_0");
     assert_eq!(call.arguments_value().unwrap(), json!({"query": "weather"}));
+    assert_eq!(call.signature.as_deref(), Some("sig-a"));
     assert!(events.iter().any(|event| matches!(
         event,
         LlmEvent::StepFinish {

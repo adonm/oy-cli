@@ -39,6 +39,7 @@ fn chat_and_responses_tool_error_wire_payloads_match_transcript() {
         call_id: "call-1".to_string(),
         name: "read".to_string(),
         arguments: "{}".to_string(),
+        signature: None,
     };
     let output = "TOOL_ERROR: blocked\nRECOVERY: choose another tool";
 
@@ -68,6 +69,7 @@ fn invalid_tool_arguments_still_round_trip_in_transcript() {
             call_id: "call-1".to_string(),
             name: "read".to_string(),
             arguments: "{not-json".to_string(),
+            signature: None,
         }],
     )
     .unwrap();

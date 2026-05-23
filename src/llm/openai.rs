@@ -556,7 +556,7 @@ fn assistant_message_from_calls(
             call_id: Some(call.call_id.clone()),
             name: call.name.clone(),
             arguments,
-            signature: None,
+            signature: call.signature.clone(),
             additional_params: None,
         });
     }

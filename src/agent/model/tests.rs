@@ -59,6 +59,25 @@ impl Drop for ModelInfoCacheGuard {
     }
 }
 
+struct OpenCodeModelsCacheGuard {
+    saved: Option<crate::agent::opencode_models::OpenCodeModelListing>,
+}
+
+impl OpenCodeModelsCacheGuard {
+    fn replace(verbose: &str) -> Self {
+        let listing = crate::agent::opencode_models::parse_verbose(verbose).unwrap();
+        Self {
+            saved: crate::agent::opencode_models::replace_cache_for_test(Some(listing)),
+        }
+    }
+}
+
+impl Drop for OpenCodeModelsCacheGuard {
+    fn drop(&mut self) {
+        crate::agent::opencode_models::replace_cache_for_test(self.saved.take());
+    }
+}
+
 #[test]
 fn copilot_routes_reasoning_models_to_responses_api() {
     assert!(crate::llm::providers::github_copilot_should_use_responses_api("gpt-5.5"));
@@ -369,6 +388,92 @@ fn prepare_chat_routes_cloudflare_ai_gateway_with_gateway_header() {
             name: "cf-aig-authorization".to_string(),
             value: "test-gateway-key".to_string(),
         }
+    );
+}
+
+#[test]
+fn prepare_chat_routes_opencode_gemini_with_gemini_auth_header() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let _env = EnvGuard::set(&[
+        ("OPENCODE_API_KEY", Some("test-opencode-key")),
+        ("OPENCODE_GO_API_KEY", None),
+    ]);
+    let _models = OpenCodeModelsCacheGuard::replace(
+        r#"opencode/gemini-3.5-flash
+{
+  "id": "gemini-3.5-flash",
+  "providerID": "opencode",
+  "api": {
+    "id": "gemini-3.5-flash",
+    "url": "https://opencode.ai/zen/v1",
+    "npm": "@ai-sdk/google"
+  },
+  "limit": { "context": 1048576, "output": 65536 }
+}
+"#,
+    );
+
+    let chat = prepare_chat("opencode/gemini-3.5-flash").unwrap();
+
+    assert_eq!(chat.protocol, Protocol::Gemini);
+    assert_eq!(chat.model, "gemini-3.5-flash");
+    assert_eq!(chat.base_url.as_deref(), Some("https://opencode.ai/zen/v1"));
+    assert_eq!(chat.default_output_tokens, Some(65536));
+    assert_eq!(
+        chat.auth,
+        RouteAuth::Composite(vec![
+            RouteAuth::Header {
+                name: "x-goog-api-key".to_string(),
+                value: "test-opencode-key".to_string(),
+            },
+            RouteAuth::Headers(vec![
+                ("x-opencode-client".to_string(), "oy".to_string()),
+                ("user-agent".to_string(), "oy".to_string()),
+            ]),
+        ])
+    );
+}
+
+#[test]
+fn prepare_chat_keeps_opencode_go_openai_compatible_bearer_auth() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let _env = EnvGuard::set(&[
+        ("OPENCODE_API_KEY", Some("test-opencode-key")),
+        ("OPENCODE_GO_API_KEY", None),
+    ]);
+    let _models = OpenCodeModelsCacheGuard::replace(
+        r#"opencode-go/deepseek-v4-flash
+{
+  "id": "deepseek-v4-flash",
+  "providerID": "opencode-go",
+  "api": {
+    "id": "deepseek-v4-flash",
+    "url": "https://opencode.ai/zen/go/v1",
+    "npm": "@ai-sdk/openai-compatible"
+  },
+  "limit": { "context": 1000000, "output": 384000 }
+}
+"#,
+    );
+
+    let chat = prepare_chat("opencode-go/deepseek-v4-flash").unwrap();
+
+    assert_eq!(chat.protocol, Protocol::OpenAiChat);
+    assert_eq!(chat.model, "deepseek-v4-flash");
+    assert_eq!(
+        chat.base_url.as_deref(),
+        Some("https://opencode.ai/zen/go/v1")
+    );
+    assert_eq!(chat.default_output_tokens, Some(384000));
+    assert_eq!(
+        chat.auth,
+        RouteAuth::Composite(vec![
+            RouteAuth::ApiKey("test-opencode-key".to_string()),
+            RouteAuth::Headers(vec![
+                ("x-opencode-client".to_string(), "oy".to_string()),
+                ("user-agent".to_string(), "oy".to_string()),
+            ]),
+        ])
     );
 }
 

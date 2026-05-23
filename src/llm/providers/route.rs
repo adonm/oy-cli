@@ -375,19 +375,30 @@ pub(crate) fn prepare_opencode_compatible_chat(provider: &str, model: &str) -> R
     let profile = OpenCodeRouteProfile::from_model(provider, model, &model_info)?;
     let api_key = opencode_auth_key(provider)
         .ok_or_else(|| anyhow!("OpenCode auth.json has no credentials for `{provider}`"))?;
+    let auth = match profile.protocol {
+        Protocol::Gemini => RouteAuth::Composite(vec![
+            RouteAuth::Header {
+                name: "x-goog-api-key".to_string(),
+                value: api_key,
+            },
+            opencode_client_headers(),
+        ]),
+        _ => RouteAuth::Composite(vec![RouteAuth::ApiKey(api_key), opencode_client_headers()]),
+    };
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
-        auth: RouteAuth::Composite(vec![
-            RouteAuth::ApiKey(api_key),
-            RouteAuth::Headers(vec![
-                ("x-opencode-client".to_string(), "oy".to_string()),
-                ("user-agent".to_string(), "oy".to_string()),
-            ]),
-        ]),
+        auth,
         base_url: Some(profile.base_url),
         query_params: None,
         additional_params: None,
         default_output_tokens: profile.default_output_tokens,
     })
+}
+
+fn opencode_client_headers() -> RouteAuth {
+    RouteAuth::Headers(vec![
+        ("x-opencode-client".to_string(), "oy".to_string()),
+        ("user-agent".to_string(), "oy".to_string()),
+    ])
 }

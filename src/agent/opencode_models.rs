@@ -101,6 +101,16 @@ pub(crate) fn populate_cache(listing: OpenCodeModelListing) {
     *cache = Some(listing);
 }
 
+#[cfg(test)]
+pub(crate) fn replace_cache_for_test(
+    listing: Option<OpenCodeModelListing>,
+) -> Option<OpenCodeModelListing> {
+    let mut cache = MODELS_CACHE.write().unwrap();
+    let saved = cache.clone();
+    *cache = listing;
+    saved
+}
+
 impl OpenCodeModelListing {
     pub(crate) fn load() -> Result<Self> {
         if let Some(cached) = MODELS_CACHE.read().unwrap().as_ref() {
