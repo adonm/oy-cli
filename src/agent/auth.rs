@@ -196,7 +196,6 @@ fn opencode_auth_key_from_value(provider: &str, value: &Value) -> Option<String>
             .map(ToOwned::to_owned),
         Some("oauth") => provider_value
             .get("access")
-            .or_else(|| provider_value.get("refresh"))
             .and_then(Value::as_str)
             .filter(|key| !key.trim().is_empty())
             .map(ToOwned::to_owned),
@@ -221,7 +220,8 @@ mod tests {
         let value = serde_json::json!({
             "anthropic": { "type": "api", "key": "anthropic-token" },
             "github-copilot": { "type": "wellknown", "token": "copilot-token" },
-            "github-copilot-oauth": { "type": "oauth", "refresh": "copilot-oauth-token", "access": "old-token" }
+            "github-copilot-oauth": { "type": "oauth", "refresh": "copilot-refresh-token", "access": "old-token" },
+            "refresh-only-oauth": { "type": "oauth", "refresh": "copilot-refresh-token" }
         });
         assert_eq!(
             opencode_auth_key_from_value("anthropic", &value),
@@ -234,6 +234,10 @@ mod tests {
         assert_eq!(
             opencode_auth_key_from_value("github-copilot-oauth", &value),
             Some("old-token".to_string())
+        );
+        assert_eq!(
+            opencode_auth_key_from_value("refresh-only-oauth", &value),
+            None
         );
     }
 }
