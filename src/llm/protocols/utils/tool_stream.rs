@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::llm::schema::{LlmEvent, ToolCall};
+use crate::llm::schema::{MAX_LLM_TOOL_ARGUMENT_BYTES, ensure_byte_limit};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct PendingTool {
@@ -10,6 +11,24 @@ pub(crate) struct PendingTool {
     pub(crate) name: String,
     pub(crate) input: String,
     pub(crate) provider_executed: bool,
+}
+
+impl PendingTool {
+    pub(crate) fn new(
+        route: &str,
+        id: String,
+        name: String,
+        input: String,
+        provider_executed: bool,
+    ) -> Result<Self> {
+        ensure_tool_input_limit(route, &name, 0, input.len())?;
+        Ok(Self {
+            id,
+            name,
+            input,
+            provider_executed,
+        })
+    }
 }
 
 pub(crate) type State<K> = HashMap<K, PendingTool>;
@@ -27,6 +46,7 @@ pub(crate) fn append_or_start<K>(
     id: Option<&str>,
     name: Option<&str>,
     text: Option<&str>,
+    route: &str,
     missing_tool_message: &str,
 ) -> Result<Vec<LlmEvent>>
 where
@@ -47,6 +67,7 @@ where
     });
     tool.id = id.to_string();
     tool.name = name.to_string();
+    ensure_tool_input_limit(route, &tool.name, tool.input.len(), text.len())?;
     tool.input.push_str(text);
     let is_new = !tools.contains_key(&key);
     tools.insert(key, tool.clone());
@@ -70,6 +91,7 @@ pub(crate) fn append_existing<K>(
     tools: &mut State<K>,
     key: &K,
     text: &str,
+    route: &str,
     missing_tool_message: &str,
 ) -> Result<Vec<LlmEvent>>
 where
@@ -81,6 +103,7 @@ where
     if text.is_empty() {
         return Ok(Vec::new());
     }
+    ensure_tool_input_limit(route, &tool.name, tool.input.len(), text.len())?;
     tool.input.push_str(text);
     Ok(vec![LlmEvent::ToolInputDelta {
         text: text.to_string(),
@@ -142,6 +165,20 @@ fn finish_events(
             provider_executed: tool.provider_executed,
         },
     ])
+}
+
+fn ensure_tool_input_limit(
+    route: &str,
+    name: &str,
+    current: usize,
+    additional: usize,
+) -> Result<()> {
+    ensure_byte_limit(
+        &format!("tool arguments for {route} tool call {name}"),
+        current,
+        additional,
+        MAX_LLM_TOOL_ARGUMENT_BYTES,
+    )
 }
 
 #[cfg(test)]

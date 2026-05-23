@@ -1,6 +1,26 @@
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+pub(crate) const MAX_LLM_EVENT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_LLM_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_LLM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_LLM_SESSION_BYTES: usize = 64 * 1024 * 1024;
+
+pub(crate) fn ensure_byte_limit(
+    context: &str,
+    current: usize,
+    additional: usize,
+    limit: usize,
+) -> Result<()> {
+    let Some(total) = current.checked_add(additional) else {
+        bail!("LLM provider {context} exceeded {limit} byte limit");
+    };
+    if total > limit {
+        bail!("LLM provider {context} exceeded {limit} byte limit");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolCall {
     pub(crate) id: String,
@@ -17,6 +37,12 @@ impl ToolCall {
         route: &str,
     ) -> Result<Self> {
         let arguments = if input.is_empty() { "{}" } else { input };
+        ensure_byte_limit(
+            &format!("tool arguments for {route} tool call {name}"),
+            0,
+            arguments.len(),
+            MAX_LLM_TOOL_ARGUMENT_BYTES,
+        )?;
         serde_json::from_str::<Value>(arguments).with_context(|| {
             format!("Invalid JSON input for {route} tool call {name}: {arguments}")
         })?;
@@ -226,28 +252,29 @@ pub(crate) struct StepAccumulator {
     pub(crate) tool_calls: Vec<ToolCall>,
     pub(crate) finish_reason: Option<FinishReason>,
     pub(crate) usage: Option<Usage>,
+    response_bytes: usize,
 }
 
 impl StepAccumulator {
     pub(crate) fn push(&mut self, event: LlmEvent) -> Result<()> {
         match event {
             LlmEvent::TextDelta { text } => {
+                self.add_response_bytes("text delta", text.len())?;
                 self.text.push_str(&text);
             }
             LlmEvent::ReasoningDelta { text } => {
                 if text.is_empty() {
                     return Ok(());
                 }
-                match self.reasoning_content.as_ref().and_then(Value::as_str) {
-                    Some(existing) => {
-                        let mut combined = existing.to_string();
-                        combined.push_str(&text);
-                        self.reasoning_content = Some(Value::String(combined));
-                    }
+                self.add_response_bytes("reasoning delta", text.len())?;
+                match self.reasoning_content.as_mut() {
+                    Some(Value::String(existing)) => existing.push_str(&text),
                     None => self.reasoning_content = Some(Value::String(text)),
+                    Some(_) => self.reasoning_content = Some(Value::String(text)),
                 }
             }
             LlmEvent::ReasoningItem { value } => {
+                self.add_response_bytes("reasoning item", serde_json::to_vec(&value)?.len())?;
                 self.reasoning_content = Some(value);
             }
             LlmEvent::ToolCall {
@@ -268,6 +295,17 @@ impl StepAccumulator {
             | LlmEvent::ToolInputEnd { .. }
             | LlmEvent::ToolResult { .. } => {}
         }
+        Ok(())
+    }
+
+    fn add_response_bytes(&mut self, context: &str, additional: usize) -> Result<()> {
+        ensure_byte_limit(
+            context,
+            self.response_bytes,
+            additional,
+            MAX_LLM_RESPONSE_BYTES,
+        )?;
+        self.response_bytes += additional;
         Ok(())
     }
 }
@@ -305,4 +343,19 @@ fn sum_tokens(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 
 fn u64_at(value: &Value, pointer: &str) -> Option<u64> {
     value.pointer(pointer).and_then(Value::as_u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_accumulator_rejects_huge_text_delta() {
+        let mut step = StepAccumulator::default();
+        let text = "x".repeat(MAX_LLM_RESPONSE_BYTES + 1);
+
+        let err = step.push(LlmEvent::TextDelta { text }).unwrap_err();
+
+        assert!(err.to_string().contains("text delta exceeded"));
+    }
 }

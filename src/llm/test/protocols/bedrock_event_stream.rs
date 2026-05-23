@@ -27,3 +27,14 @@ fn decoder_rejects_invalid_crc() {
 
     assert!(err.to_string().contains("invalid message CRC"));
 }
+
+#[test]
+fn decoder_rejects_oversized_advertised_frame() {
+    let mut chunk = Vec::new();
+    chunk.extend_from_slice(&((crate::llm::schema::MAX_LLM_EVENT_BYTES + 1) as u32).to_be_bytes());
+
+    let err = Decoder::default().push_chunk(&chunk).unwrap_err();
+
+    assert!(err.to_string().contains("frame length"));
+    assert!(err.to_string().contains("exceeded"));
+}

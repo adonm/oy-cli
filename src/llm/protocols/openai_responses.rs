@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use crate::llm::protocols::shared::{assistant_parts, tool_result_text};
 use crate::llm::protocols::utils::provider_options;
 use crate::llm::protocols::utils::tool_stream;
-use crate::llm::schema::{FinishReason, LlmEvent, ToolCall, Usage};
+use crate::llm::schema::{
+    FinishReason, LlmEvent, MAX_LLM_TOOL_ARGUMENT_BYTES, ToolCall, Usage, ensure_byte_limit,
+};
 use crate::llm::{GenerationOptions, Message, MessageContent, ToolChoice, ToolSpec};
 
 const ROUTE: &str = "openai-responses";
@@ -119,12 +121,13 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                 tool_stream::start(
                     &mut state.tools,
                     item_id.to_string(),
-                    tool_stream::PendingTool {
-                        id: id.to_string(),
-                        name: name.to_string(),
+                    tool_stream::PendingTool::new(
+                        ROUTE,
+                        id.to_string(),
+                        name.to_string(),
                         input,
-                        provider_executed: false,
-                    },
+                        false,
+                    )?,
                 );
                 events.push(LlmEvent::ToolInputStart {
                     id: id.to_string(),
@@ -143,14 +146,18 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                         &mut state.tools,
                         &key,
                         delta,
+                        ROUTE,
                         "OpenAI Responses function call argument delta arrived before item start",
                     )?);
                 } else if !delta.is_empty() {
-                    state
-                        .pending_argument_deltas
-                        .entry(key)
-                        .or_default()
-                        .push_str(delta);
+                    let pending = state.pending_argument_deltas.entry(key).or_default();
+                    ensure_byte_limit(
+                        "pending tool arguments for openai-responses tool call",
+                        pending.len(),
+                        delta.len(),
+                        MAX_LLM_TOOL_ARGUMENT_BYTES,
+                    )?;
+                    pending.push_str(delta);
                 }
             }
         }
@@ -172,12 +179,13 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                     tool_stream::start(
                         &mut state.tools,
                         item_id.to_string(),
-                        tool_stream::PendingTool {
-                            id: call_id.to_string(),
-                            name: name.to_string(),
+                        tool_stream::PendingTool::new(
+                            ROUTE,
+                            call_id.to_string(),
+                            name.to_string(),
                             input,
-                            provider_executed: false,
-                        },
+                            false,
+                        )?,
                     );
                 }
                 let key = item_id.to_string();

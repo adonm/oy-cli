@@ -95,16 +95,18 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
+                    let provider_executed =
+                        block.get("type").and_then(Value::as_str) == Some("server_tool_use");
                     tool_stream::start(
                         &mut state.tools,
                         index,
-                        tool_stream::PendingTool {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: String::new(),
-                            provider_executed: block.get("type").and_then(Value::as_str)
-                                == Some("server_tool_use"),
-                        },
+                        tool_stream::PendingTool::new(
+                            ROUTE,
+                            id.clone(),
+                            name.clone(),
+                            String::new(),
+                            provider_executed,
+                        )?,
                     );
                     events.push(LlmEvent::ToolInputStart { id, name });
                     if block.get("type").and_then(Value::as_str) == Some("server_tool_use") {
@@ -173,6 +175,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                             &mut state.tools,
                             &index,
                             text,
+                            ROUTE,
                             "Anthropic Messages tool argument delta is missing its tool call",
                         )?);
                     }

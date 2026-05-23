@@ -1,15 +1,31 @@
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::llm::schema::{MAX_LLM_EVENT_BYTES, MAX_LLM_SESSION_BYTES, ensure_byte_limit};
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Decoder {
     buffer: Vec<u8>,
     offset: usize,
+    session_bytes: usize,
 }
 
 impl Decoder {
     pub(crate) fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<Value>> {
-        self.append_chunk(chunk);
+        ensure_byte_limit(
+            "Bedrock event-stream session",
+            self.session_bytes,
+            chunk.len(),
+            MAX_LLM_SESSION_BYTES,
+        )?;
+        ensure_byte_limit(
+            "Bedrock event-stream chunk",
+            0,
+            chunk.len(),
+            MAX_LLM_EVENT_BYTES,
+        )?;
+        self.session_bytes += chunk.len();
+        self.append_chunk(chunk)?;
         let mut out = Vec::new();
         loop {
             let remaining = self.buffer.len().saturating_sub(self.offset);
@@ -24,6 +40,11 @@ impl Decoder {
             if total_len < 16 {
                 bail!("Failed to decode Bedrock Converse event-stream frame: frame too short");
             }
+            if total_len > MAX_LLM_EVENT_BYTES {
+                bail!(
+                    "Failed to decode Bedrock Converse event-stream frame: frame length {total_len} exceeded {MAX_LLM_EVENT_BYTES} byte limit"
+                );
+            }
             if remaining < total_len {
                 break;
             }
@@ -35,16 +56,29 @@ impl Decoder {
         Ok(out)
     }
 
-    fn append_chunk(&mut self, chunk: &[u8]) {
+    fn append_chunk(&mut self, chunk: &[u8]) -> Result<()> {
         if self.offset == 0 {
+            ensure_byte_limit(
+                "Bedrock event-stream pending frame",
+                self.buffer.len(),
+                chunk.len(),
+                MAX_LLM_EVENT_BYTES,
+            )?;
             self.buffer.extend_from_slice(chunk);
-            return;
+            return Ok(());
         }
         let remaining = self.buffer[self.offset..].to_vec();
+        ensure_byte_limit(
+            "Bedrock event-stream pending frame",
+            remaining.len(),
+            chunk.len(),
+            MAX_LLM_EVENT_BYTES,
+        )?;
         self.buffer.clear();
         self.buffer.extend_from_slice(&remaining);
         self.buffer.extend_from_slice(chunk);
         self.offset = 0;
+        Ok(())
     }
 
     fn compact_if_consumed(&mut self) {

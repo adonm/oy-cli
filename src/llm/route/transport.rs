@@ -5,7 +5,9 @@ use serde_json::Value;
 
 use super::{auth, framing::SseDecoder};
 use crate::llm::RouteAuth;
-use crate::llm::schema::{LlmEvent, StepAccumulator};
+use crate::llm::schema::{
+    LlmEvent, MAX_LLM_EVENT_BYTES, MAX_LLM_SESSION_BYTES, StepAccumulator, ensure_byte_limit,
+};
 
 pub(crate) async fn post_json_streaming(
     client: &reqwest::Client,
@@ -78,15 +80,24 @@ pub(crate) async fn stream_json_sse_events<State>(
     let mut stream = response.bytes_stream();
     let mut decoder = SseDecoder::default();
     let mut step = StepAccumulator::default();
+    let mut session_bytes = 0;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("failed to read native OpenAI SSE chunk")?;
-        for data in decoder.push_chunk(&chunk) {
+        ensure_byte_limit(
+            "stream session",
+            session_bytes,
+            chunk.len(),
+            MAX_LLM_SESSION_BYTES,
+        )?;
+        ensure_byte_limit("stream chunk", 0, chunk.len(), MAX_LLM_EVENT_BYTES)?;
+        session_bytes += chunk.len();
+        for data in decoder.push_chunk(&chunk)? {
             consume_json_event(&data, &mut state, &mut handle_event, &mut step)?;
         }
     }
 
-    for data in decoder.finish() {
+    for data in decoder.finish()? {
         consume_json_event(&data, &mut state, &mut handle_event, &mut step)?;
     }
 

@@ -167,6 +167,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
             function
                 .and_then(|function| function.get("arguments"))
                 .and_then(Value::as_str),
+            ROUTE,
             "OpenAI Chat tool call delta is missing id or name",
         )?);
     }

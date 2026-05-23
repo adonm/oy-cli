@@ -82,12 +82,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
         tool_stream::start(
             &mut state.tools,
             index,
-            tool_stream::PendingTool {
-                id: id.clone(),
-                name: name.clone(),
-                input: String::new(),
-                provider_executed: false,
-            },
+            tool_stream::PendingTool::new(ROUTE, id.clone(), name.clone(), String::new(), false)?,
         );
         events.push(LlmEvent::ToolInputStart { id, name });
     }
@@ -114,6 +109,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                 &mut state.tools,
                 &index,
                 input,
+                ROUTE,
                 "Bedrock Converse tool delta is missing its tool call",
             )?);
         }
