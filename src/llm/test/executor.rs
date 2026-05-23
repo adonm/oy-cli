@@ -307,6 +307,32 @@ fn chat_stream_preserves_reasoning_content_for_tool_call_echo() {
 }
 
 #[test]
+fn chat_request_omits_non_string_reasoning_content() {
+    let wire = openai_chat::assistant_wire_message(
+        "",
+        Some(&json!({
+            "text": "summary",
+            "openai": {
+                "itemId": "rs_1",
+                "reasoningEncryptedContent": "encrypted"
+            }
+        })),
+        &[NativeToolCall {
+            id: "call-1".to_string(),
+            call_id: "call-1".to_string(),
+            name: "echo".to_string(),
+            arguments: "{}".to_string(),
+            signature: None,
+        }],
+    )
+    .unwrap();
+
+    assert!(wire.get("reasoning_content").is_none());
+    assert_eq!(wire["content"], Value::Null);
+    assert_eq!(wire["tool_calls"][0]["id"], json!("call-1"));
+}
+
+#[test]
 fn chat_stream_defers_finish_until_usage_arrives_after_finish_reason() {
     let mut state = openai_chat::StreamState::default();
     let mut step = StepAccumulator::default();

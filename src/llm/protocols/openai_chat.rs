@@ -81,8 +81,8 @@ pub(crate) fn assistant_wire_message(
     } else {
         message.insert("content".to_string(), Value::Null);
     }
-    if let Some(reasoning_content) = reasoning_content {
-        message.insert("reasoning_content".to_string(), reasoning_content.clone());
+    if let Some(reasoning_content) = reasoning_content.and_then(Value::as_str) {
+        message.insert("reasoning_content".to_string(), json!(reasoning_content));
     }
     if !tool_calls.is_empty() {
         message.insert(
