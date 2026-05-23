@@ -119,6 +119,28 @@ impl Usage {
         })
     }
 
+    pub(crate) fn from_gemini(usage: &Value) -> Self {
+        let input = u64_at(usage, "/promptTokenCount");
+        let cached = u64_at(usage, "/cachedContentTokenCount");
+        let visible_output = u64_at(usage, "/candidatesTokenCount");
+        let reasoning = u64_at(usage, "/thoughtsTokenCount");
+        let output = sum_tokens(visible_output, reasoning);
+        Self {
+            input_tokens: input,
+            output_tokens: visible_output.map(|_| output.unwrap_or(0)),
+            non_cached_input_tokens: subtract_tokens(input, cached),
+            cache_read_input_tokens: cached,
+            cache_write_input_tokens: None,
+            reasoning_tokens: reasoning,
+            total_tokens: total_tokens(
+                input,
+                visible_output.map(|_| output.unwrap_or(0)),
+                u64_at(usage, "/totalTokenCount"),
+            ),
+            provider_metadata: Some(serde_json::json!({"google": usage.clone()})),
+        }
+    }
+
     pub(crate) fn merge_prefer_defined(self, fallback: Self) -> Self {
         let input = self.input_tokens.or(fallback.input_tokens);
         let output = self.output_tokens.or(fallback.output_tokens);

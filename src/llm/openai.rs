@@ -17,7 +17,8 @@ use serde_json::{Value, json};
 use std::future::Future;
 
 use super::protocols::{
-    anthropic_messages, bedrock_converse, bedrock_event_stream, openai_chat, openai_responses,
+    anthropic_messages, bedrock_converse, bedrock_event_stream, gemini, openai_chat,
+    openai_responses,
 };
 use super::schema::{StepAccumulator, ToolCall as NativeToolCall};
 use super::tool_runtime;
@@ -42,7 +43,57 @@ async fn execute_native_chat(request: LlmRequest, tools: LlmTools) -> Result<Llm
         Protocol::OpenAiResponses => run_responses(request, tools).await,
         Protocol::AnthropicMessages => run_anthropic_messages(request, tools).await,
         Protocol::BedrockConverse => run_bedrock_converse(request, tools).await,
+        Protocol::Gemini => run_gemini(request, tools).await,
     }
+}
+
+async fn run_gemini(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
+    let endpoint = super::route::endpoint::render_with_query(
+        request.route.base_url.as_deref(),
+        crate::llm::providers::GEMINI_BASE_URL,
+        &gemini::endpoint_path(&request.route.model),
+        Some(&[("alt".to_string(), "sse".to_string())]),
+    )?;
+    let client = reqwest::Client::new();
+    let tools_by_name = tool_runtime::tools_by_name(tools);
+    let mut request = request;
+    let mut transcript = Vec::new();
+    let mut loop_state = tool_runtime::ToolLoopState::default();
+
+    for turn in 0..=request.max_turns {
+        let body = gemini::request_body(&request)?;
+        let assistant = retry_transient_http_call(|| {
+            stream_gemini_assistant(&client, &endpoint, &request.route.auth, &body)
+        })
+        .await?;
+        let assistant_message = assistant_message_from_calls(
+            &assistant.text,
+            assistant.reasoning_content.as_ref(),
+            &assistant.tool_calls,
+        )?;
+
+        if assistant.tool_calls.is_empty() {
+            transcript.push(assistant_message);
+            return Ok(LlmResponse {
+                output: assistant.text,
+                messages: Some(transcript),
+            });
+        }
+        ensure_tool_round_budget(turn, request.max_turns, "Gemini")?;
+        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
+
+        request.messages.push(assistant_message.clone());
+        transcript.push(assistant_message);
+        for call in assistant.tool_calls {
+            let outcome =
+                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
+            let result = gemini_tool_result_message(&call, outcome.output.clone());
+            request.messages.push(result.clone());
+            transcript.push(result);
+        }
+    }
+
+    unreachable!("bounded tool loop exits from inside the loop")
 }
 
 async fn run_anthropic_messages(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
@@ -335,6 +386,24 @@ async fn stream_responses_output(
     Ok(parsed_response_from_step(step))
 }
 
+async fn stream_gemini_assistant(
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth: &RouteAuth,
+    body: &Value,
+) -> Result<ParsedAssistant> {
+    let response =
+        super::route::transport::post_json_streaming(client, endpoint, auth, body).await?;
+    let step = super::route::transport::stream_json_sse_events(
+        response,
+        gemini::StreamState::default(),
+        |state, event| gemini::parse_stream_event(state, &event),
+        gemini::finish_stream,
+    )
+    .await?;
+    Ok(parsed_assistant_from_step(step))
+}
+
 async fn stream_bedrock_assistant(
     client: &reqwest::Client,
     endpoint: &str,
@@ -417,6 +486,17 @@ fn assistant_message_from_calls(
         });
     }
     Ok(Message::Assistant { id: None, content })
+}
+
+fn gemini_tool_result_message(call: &NativeToolCall, output: String) -> Message {
+    Message::User {
+        content: vec![MessageContent::ToolResult {
+            id: call.name.clone(),
+            call_id: None,
+            content: vec![ToolResultContent::Text { text: output }],
+            cache: None,
+        }],
+    }
 }
 
 fn tool_result_message(call: &NativeToolCall, output: String) -> Message {

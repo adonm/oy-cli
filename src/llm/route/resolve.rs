@@ -81,6 +81,7 @@ pub(crate) fn model_route(
         "xai" => crate::llm::providers::route::prepare_xai_chat(parsed.base_model)?,
         "openrouter" => crate::llm::providers::route::prepare_openrouter_chat(parsed.base_model)?,
         "anthropic" => crate::llm::providers::route::prepare_anthropic_chat(parsed.base_model)?,
+        "google" => crate::llm::providers::route::prepare_google_chat(parsed.base_model)?,
         "azure" => crate::llm::providers::route::prepare_azure_chat(parsed.base_model)?,
         "cloudflare-ai-gateway" => {
             crate::llm::providers::route::prepare_cloudflare_ai_gateway_chat(parsed.base_model)?
@@ -107,14 +108,17 @@ pub(crate) fn model_route(
         "openrouter" | "anthropic" => None,
         _ if matches!(
             route.protocol,
-            Protocol::AnthropicMessages | Protocol::BedrockConverse
+            Protocol::AnthropicMessages | Protocol::BedrockConverse | Protocol::Gemini
         ) =>
         {
             None
         }
         _ => crate::llm::providers::gpt5_default_provider_options(&route.model, route.protocol),
     };
-    let reasoning_overlay = if route.protocol == Protocol::AnthropicMessages {
+    let reasoning_overlay = if matches!(
+        route.protocol,
+        Protocol::AnthropicMessages | Protocol::Gemini
+    ) {
         None
     } else {
         reasoning_effort_json(reasoning_effort, route.protocol.uses_responses_api())

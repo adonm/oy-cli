@@ -7,13 +7,13 @@
 
 Block
 
-Current triage after fixes: provider-support enforcement now lives in route resolution, Google/Gemini OpenCode entries are filtered from routable listings until their native protocol is ported, and `agent::model` has been split into a small facade plus execution, metadata-cache, reasoning, and test modules. The remaining review items are larger structural refactors around shared no-tools analysis, native protocol tool-loop extraction, patch normalization, typed LLM message role/content boundaries, tool argument/schema drift, and audit input decomposition.
+Current triage after fixes: provider-support enforcement now lives in route resolution, native Gemini support has been added for Google/OpenCode Gemini routes, and `agent::model` has been split into a small facade plus execution, metadata-cache, reasoning, and test modules. The remaining review items are larger structural refactors around shared no-tools analysis, native protocol tool-loop extraction, patch normalization, typed LLM message role/content boundaries, tool argument/schema drift, and audit input decomposition.
 
 ## Findings summary
 
 | Severity | Finding | Code reference |
 |---|---|---|
-| Fixed | Provider support gating lived in cache/metadata paths and was bypassable by normal routing/execution; route resolution now fails closed before constructing a route, and metadata caching is best-effort only. | `src/llm/route/resolve.rs::model_route`, `src/agent/model/metadata.rs::cache_model_limits`, `src/agent/opencode_models.rs::OpenCodeModel::is_openai_compatible_api` |
+| Fixed | Provider support gating lived in cache/metadata paths and was bypassable by normal routing/execution; route resolution now fails closed before constructing a route, and metadata caching is best-effort only. | `src/llm/route/resolve.rs::model_route`, `src/agent/model/metadata.rs::cache_model_limits`, `src/llm/protocols/gemini.rs`, `src/agent/opencode_models.rs::OpenCodeModel::is_gemini_api` |
 | Fixed | `src/agent/model.rs` crossed the 1,000-line threshold and mixed selection, metadata, execution, reasoning, and tests; it is now an 85-line facade over focused submodules. | `src/agent/model.rs`, `src/agent/model/exec.rs`, `src/agent/model/metadata.rs`, `src/agent/model/reasoning.rs`, `src/agent/model/tests.rs` |
 | Major | `audit` and `review` are forking the same no-tools map/reduce review workflow instead of sharing a canonical pipeline. | `src/review.rs`, `src/audit.rs`, `src/audit/reduce.rs`, `src/audit/report.rs`, `src/audit/input`, `src/cli/app/audit_cmd.rs`, `src/cli/app/review_cmd.rs` |
 | Major | Native protocol execution repeats the same tool-loop orchestration in multiple provider/protocol functions. | `src/llm/openai.rs::run_chat_completions`, `run_responses`, `run_anthropic_messages`, `run_bedrock_converse` |
@@ -32,11 +32,12 @@ Current triage after fixes: provider-support enforcement now lives in route reso
 
 - `src/llm/route/resolve.rs::model_route` now calls a provider-support check before constructing `ModelRoute`.
 - `src/agent/model/metadata.rs::cache_model_limits` no longer rejects unsupported providers; it only populates best-effort limit/provider metadata.
-- `src/agent/opencode_models.rs::OpenCodeModel::is_openai_compatible_api` no longer treats `@ai-sdk/google` as routable, so Google/Gemini entries stay out of `oy model` listings until the native protocol is implemented.
-- `src/agent/model/tests.rs::prepare_chat_rejects_unsupported_provider_before_auth_lookup` covers the fail-closed route boundary.
-- `src/agent/opencode_models.rs::filters_google_models_until_native_protocol_is_supported` covers listing filtering.
+- `src/llm/protocols/gemini.rs` adds the missing Google Gemini native protocol: request lowering, SSE parsing, usage mapping, function calls, and Gemini tool-schema projection.
+- `src/agent/opencode_models.rs::OpenCodeModel::is_gemini_api` makes Google/Gemini OpenCode entries routable through the Gemini protocol rather than pretending they are OpenAI-compatible.
+- `src/agent/model/tests.rs::prepare_chat_routes_google_gemini_with_api_key_header` covers direct Google route construction.
+- `src/agent/opencode_models.rs::includes_google_models_when_gemini_protocol_is_supported` covers listing inclusion.
 
-The invariant is now local: if route resolution returns a route, the provider passed the supported-provider policy. Metadata/cache helpers are not execution gates.
+The invariant is now local: if route resolution returns a route, the provider passed the supported-provider policy and has a native protocol mapping. Metadata/cache helpers are not execution gates.
 
 ---
 

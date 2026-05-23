@@ -42,6 +42,11 @@ fn provider_registry_matches_opencode_provider_surface() {
     assert!(ids.contains(&"google"));
     assert!(ids.contains(&"amazon-bedrock"));
     assert!(provider_metadata("anthropic").unwrap().supported);
+    assert!(provider_metadata("google").unwrap().supported);
+    assert_eq!(
+        provider_metadata("google").unwrap().default_base_url,
+        Some(GEMINI_BASE_URL)
+    );
     assert_eq!(
         provider_metadata("deepseek").unwrap().family,
         ProviderFamily::OpenAiCompatible

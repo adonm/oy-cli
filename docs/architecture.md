@@ -61,7 +61,7 @@ Current ownership rules:
 - `agent::auth` and `llm::route::auth` own credential lookup/signing; callers should not probe credentials ad hoc.
 - `llm::providers` keeps only narrow route/profile data and provider quirks that cannot be derived from OpenCode listings.
 - Protocol modules lower common messages/tools/cache hints into provider wire bodies and parse streamed events.
-- Unsupported Gemini/Google routes are filtered from routable OpenCode listings and fail closed in route resolution until their native protocol is implemented.
+- Native provider families track OpenCode's LLM package: OpenAI/Responses, OpenAI-compatible Chat, Anthropic Messages, Gemini, and Bedrock Converse. Route resolution is the fail-closed provider-support boundary.
 - Prefer request/response golden tests and focused route/auth tests over broad live-provider tests.
 
 ## Trust boundaries

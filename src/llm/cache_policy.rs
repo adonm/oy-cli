@@ -76,7 +76,7 @@ pub(crate) fn apply(request: LlmRequest) -> LlmRequest {
 
 pub(crate) fn respects_inline_hints(protocol: Protocol) -> bool {
     match protocol {
-        Protocol::OpenAiChat | Protocol::OpenAiResponses => false,
+        Protocol::OpenAiChat | Protocol::OpenAiResponses | Protocol::Gemini => false,
         Protocol::AnthropicMessages | Protocol::BedrockConverse => true,
     }
 }

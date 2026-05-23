@@ -23,8 +23,8 @@ impl OpenCodeRouteProfile {
         model: &str,
         info: &opencode_models::OpenCodeModel,
     ) -> Result<Self> {
-        if !info.is_openai_compatible_api() && !info.is_bedrock_api() {
-            bail!("OpenCode model `{provider}/{model}` is not OpenAI-compatible");
+        if !info.is_openai_compatible_api() && !info.is_bedrock_api() && !info.is_gemini_api() {
+            bail!("OpenCode model `{provider}/{model}` is not supported by the native LLM backend");
         }
         let model_id = info.api_id().to_string();
         let base_url = info
@@ -44,7 +44,11 @@ impl OpenCodeRouteProfile {
             .ok_or_else(|| {
                 anyhow!("OpenCode model `{provider}/{model}` does not expose an API URL")
             })?;
-        let profile = crate::llm::providers::opencode_profile(provider, &model_id, &base_url);
+        let profile = if info.is_gemini_api() {
+            crate::llm::providers::gemini_profile(&model_id, Some(base_url.clone()))
+        } else {
+            crate::llm::providers::opencode_profile(provider, &model_id, &base_url)
+        };
         Ok(Self {
             model_id: profile.model_id,
             base_url: profile.base_url,
@@ -101,6 +105,31 @@ pub(crate) fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
         base_url: Some(profile.base_url),
         query_params: None,
         additional_params: provider_options,
+    })
+}
+
+pub(crate) fn prepare_google_chat(model: &str) -> Result<ModelRoute> {
+    let model_id = opencode_models::find("google", model)
+        .as_ref()
+        .map(|info| info.api_id().to_string())
+        .unwrap_or_else(|| model.to_string());
+    let profile = crate::llm::providers::gemini_profile(
+        &model_id,
+        env_value("GOOGLE_BASE_URL").or_else(|| env_value("GEMINI_BASE_URL")),
+    );
+    Ok(ModelRoute {
+        protocol: profile.protocol,
+        model: profile.model_id,
+        auth: RouteAuth::Header {
+            name: "x-goog-api-key".to_string(),
+            value: env_value("GOOGLE_GENERATIVE_AI_API_KEY")
+                .or_else(|| env_value("GEMINI_API_KEY"))
+                .or_else(|| env_value("GOOGLE_API_KEY"))
+                .context("Google Gemini auth is not configured; set GOOGLE_GENERATIVE_AI_API_KEY or GEMINI_API_KEY")?,
+        },
+        base_url: Some(profile.base_url),
+        query_params: None,
+        additional_params: None,
     })
 }
 

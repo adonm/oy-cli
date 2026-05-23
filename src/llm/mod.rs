@@ -68,6 +68,7 @@ pub(crate) enum Protocol {
     OpenAiResponses,
     AnthropicMessages,
     BedrockConverse,
+    Gemini,
 }
 
 impl Protocol {

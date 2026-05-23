@@ -231,11 +231,15 @@ impl OpenCodeModel {
             || matches!(self.provider_id.as_str(), "bedrock" | "amazon-bedrock")
     }
 
+    pub(crate) fn is_gemini_api(&self) -> bool {
+        self.api.npm.as_deref() == Some("@ai-sdk/google") || self.provider_id == "google"
+    }
+
     fn is_supported_by_native_openai(&self) -> bool {
         if self.provider_id == "vertexai" {
             return false;
         }
-        self.is_openai_compatible_api() || self.is_bedrock_api()
+        self.is_openai_compatible_api() || self.is_bedrock_api() || self.is_gemini_api()
     }
 }
 
@@ -362,7 +366,7 @@ opencode/claude-test
     }
 
     #[test]
-    fn filters_google_models_until_native_protocol_is_supported() {
+    fn includes_google_models_when_gemini_protocol_is_supported() {
         let text = r#"google/gemini-3-flash
 {
   "id": "gemini-3-flash",
@@ -378,8 +382,9 @@ github-copilot/gpt-5.5
 "#;
         let listing = parse_verbose(text).unwrap();
         let groups = listing.into_adapter_models();
-        assert_eq!(groups.len(), 1);
+        assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);
+        assert_eq!(groups[1].models(), &["google/gemini-3-flash".to_string()]);
     }
 
     #[test]

@@ -115,7 +115,7 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 oy model openai/gpt-4.1
 ```
 
-GitHub Copilot, OpenAI-compatible providers listed by OpenCode, Anthropic Messages, xAI, OpenRouter, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, and Amazon Bedrock Converse route through `oy`'s Rust-native LLM backend. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Google/Gemini OpenCode entries are filtered from routable listings and fail closed at route resolution until their native protocol is ported. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
+`oy`'s Rust-native LLM backend follows the provider families in OpenCode's LLM package: OpenAI, GitHub Copilot, OpenAI-compatible profiles, OpenRouter, xAI, Anthropic Messages, Google Gemini, Azure OpenAI, Cloudflare AI Gateway/Workers AI, and Amazon Bedrock Converse. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
 
 Provider-specific direct environment variables:
 
@@ -129,6 +129,7 @@ Provider-specific direct environment variables:
 | Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN` or `CF_AIG_TOKEN`, plus `CLOUDFLARE_AI_GATEWAY_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID`; optional `CLOUDFLARE_AI_GATEWAY_ID` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` or `CLOUDFLARE_WORKERS_AI_TOKEN`, plus `CLOUDFLARE_WORKERS_AI_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID` |
 | Anthropic | `ANTHROPIC_API_KEY`; optional `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION`, `ANTHROPIC_PROVIDER_OPTIONS` |
+| Google Gemini | `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY`; optional `GOOGLE_BASE_URL` or `GEMINI_BASE_URL` |
 | Amazon Bedrock | `BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`, or SigV4 via `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; optional `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `BEDROCK_BASE_URL` |
 
 The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect the full OpenCode listing or clear the recent history.

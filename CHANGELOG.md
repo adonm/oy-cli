@@ -6,7 +6,8 @@
 - Removed legacy top-level task/continue/resume CLI argument rewrites; use explicit `oy run ...` forms.
 - Split the large tools test module into boundary-focused test modules and refreshed architecture/contributor docs for the current native LLM boundary.
 - Scoped OpenRouter provider-body options to OpenRouter routes, made the model-info cache key model-specific, and tightened audit/SARIF finding extraction to explicit severity headings instead of broad Markdown-heading guesses.
-- Moved unsupported-provider enforcement into route resolution, filtered Google/Gemini OpenCode entries from routable listings until the native protocol is ported, and split `agent::model` into facade, execution, metadata-cache, reasoning, and test modules.
+- Moved unsupported-provider enforcement into route resolution and split `agent::model` into facade, execution, metadata-cache, reasoning, and test modules.
+- Added a native Gemini protocol for Google AI Studio/OpenCode Gemini models, including SSE parsing, function calling, usage mapping, and Gemini tool-schema projection.
 
 ## [0.10.3] - 2026-05-21
 

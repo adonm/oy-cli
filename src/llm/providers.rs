@@ -7,6 +7,7 @@ pub(crate) mod route;
 
 pub(crate) const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const GITHUB_COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
+pub(crate) const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(crate) const BEDROCK_DEFAULT_REGION: &str = "us-east-1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,13 +150,13 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     ProviderMetadata {
         id: "google",
         family: ProviderFamily::GoogleGemini,
-        default_base_url: None,
+        default_base_url: Some(GEMINI_BASE_URL),
         auth_env: &[
             "GOOGLE_GENERATIVE_AI_API_KEY",
             "GEMINI_API_KEY",
             "GOOGLE_API_KEY",
         ],
-        supported: false,
+        supported: true,
     },
     ProviderMetadata {
         id: "amazon-bedrock",
@@ -275,11 +276,21 @@ pub(crate) fn opencode_profile(provider: &str, model_id: &str, base_url: &str) -
             Protocol::BedrockConverse
         } else if provider == "anthropic" {
             Protocol::AnthropicMessages
+        } else if provider == "google" {
+            Protocol::Gemini
         } else if opencode_should_use_responses_api(provider, model_id) {
             Protocol::OpenAiResponses
         } else {
             Protocol::OpenAiChat
         },
+    }
+}
+
+pub(crate) fn gemini_profile(model: &str, base_url: Option<String>) -> RouteProfile {
+    RouteProfile {
+        model_id: model.to_string(),
+        base_url: base_url.unwrap_or_else(|| GEMINI_BASE_URL.to_string()),
+        protocol: Protocol::Gemini,
     }
 }
 

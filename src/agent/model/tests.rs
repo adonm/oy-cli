@@ -244,14 +244,34 @@ fn prepare_chat_routes_xai_to_responses_api() {
 }
 
 #[test]
-fn prepare_chat_rejects_unsupported_provider_before_auth_lookup() {
+fn prepare_chat_routes_google_gemini_with_api_key_header() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    let _env = EnvGuard::set(&[("GOOGLE_GENERATIVE_AI_API_KEY", Some("test-google-key"))]);
+    let _env = EnvGuard::set(&[
+        ("GOOGLE_GENERATIVE_AI_API_KEY", Some("test-google-key")),
+        ("GEMINI_API_KEY", None),
+        ("GOOGLE_API_KEY", None),
+        (
+            "GOOGLE_BASE_URL",
+            Some("https://generativelanguage.example/v1beta"),
+        ),
+    ]);
 
-    let err = prepare_chat("google/gemini-3-flash")
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("provider `google`"), "unexpected error: {err}");
+    let chat = prepare_chat("google/gemini-3-flash").unwrap();
+
+    assert_eq!(chat.protocol, Protocol::Gemini);
+    assert_eq!(chat.model, "gemini-3-flash");
+    assert_eq!(
+        chat.auth,
+        RouteAuth::Header {
+            name: "x-goog-api-key".to_string(),
+            value: "test-google-key".to_string(),
+        }
+    );
+    assert_eq!(
+        chat.base_url.as_deref(),
+        Some("https://generativelanguage.example/v1beta")
+    );
+    assert_eq!(chat.additional_params, None);
 }
 
 #[test]
