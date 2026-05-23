@@ -36,6 +36,8 @@ jobs:
       - uses: jdx/mise-action@v4
       - name: Add cross-compilation target
         run: rustup target add ${{ matrix.target }}
+      - name: Ensure lockfile is up to date
+        run: cargo update --workspace
       - name: Build size-optimized release binary
         env:
           RUSTFLAGS: -C debuginfo=0

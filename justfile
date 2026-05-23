@@ -28,8 +28,9 @@ check: _fmt-check _clippy _test _rustdoc _help-smoke
 ci: _fmt-check _clippy _nextest _miri _rustdoc _help-smoke
     @echo "✓ CI-parity checks passed"
 
-# Auto-format and apply clippy suggestions, then run the local suite.
+# Auto-format, apply clippy suggestions, update lockfile, then run the local suite.
 fix: _fmt _clippy-fix
+    cargo update --workspace
     @just check
 
 # === Individual checks (available as standalone targets) ===

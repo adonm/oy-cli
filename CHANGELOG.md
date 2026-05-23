@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.10.4] - 2026-05-23
+
 ### Changed
 - Removed legacy top-level task/continue/resume CLI argument rewrites; use explicit `oy run ...` forms.
 - Split the large tools test module into boundary-focused test modules and refreshed architecture/contributor docs for the current native LLM boundary.

@@ -45,9 +45,12 @@ tests, and writes a JUnit report via `.config/nextest.toml`; `just ci` runs
 that optional path locally when nextest and nightly Miri are installed. Keep
 `cargo test --doc --locked` because nextest does not run rustdoc tests.
 
+Keep `Cargo.lock` in sync with `Cargo.toml` by running `cargo update --workspace` after dependency changes. The release workflow runs this automatically, but doing it locally prevents CI surprises.
+
 For release-adjacent changes, also run:
 
 ```bash
+cargo update --workspace
 just package          # or: cargo package --locked
 ```
 
