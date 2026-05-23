@@ -2,8 +2,10 @@
 
 use std::net::IpAddr;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use futures_util::StreamExt as _;
 use regex::Regex;
 use reqwest::header::{CONTENT_TYPE, COOKIE, USER_AGENT};
 use serde::Serialize;
@@ -13,12 +15,18 @@ use url::Url;
 use super::args::{ReturnFormat, WebfetchArgs};
 use super::{NetworkAccess, ToolContext};
 
+const WEBFETCH_BODY_LIMIT_BYTES: usize = 5 * 1024 * 1024;
+const WEBFETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const WEBFETCH_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const WEBFETCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Serialize)]
 pub(super) struct WebfetchOutput {
     pub url: String,
     pub status_code: u16,
     pub content: String,
     pub links: Vec<String>,
+    pub truncated: bool,
 }
 
 pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Result<Value> {
@@ -29,6 +37,9 @@ pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Resu
     let url = validate_public_url(&args.url).await?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(WEBFETCH_CONNECT_TIMEOUT)
+        .read_timeout(WEBFETCH_READ_TIMEOUT)
+        .timeout(WEBFETCH_REQUEST_TIMEOUT)
         .build()
         .context("failed to build webfetch HTTP client")?;
     let mut request = client.get(url.clone());
@@ -59,12 +70,14 @@ pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Resu
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let raw = response.text().await.with_context(|| {
-        format!(
-            "failed to read response body from {}",
-            response_url.as_str()
-        )
-    })?;
+    let (raw, truncated) = read_capped_response_body(response, WEBFETCH_BODY_LIMIT_BYTES)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to read response body from {}",
+                response_url.as_str()
+            )
+        })?;
     let links = extract_links(&raw, &content_type, &response_url);
     let content = transform_scraped_content(&raw, &content_type, args.return_format);
 
@@ -73,7 +86,37 @@ pub(super) async fn tool_webfetch(ctx: &ToolContext, args: WebfetchArgs) -> Resu
         status_code,
         content,
         links,
+        truncated,
     })?)
+}
+
+async fn read_capped_response_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<(String, bool)> {
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or(limit as u64)
+            .min(limit as u64) as usize,
+    );
+    let mut truncated = response
+        .content_length()
+        .is_some_and(|length| length > limit as u64);
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let remaining = limit.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok((String::from_utf8_lossy(&body).to_string(), truncated))
 }
 
 async fn validate_public_url(input: &str) -> Result<Url> {
@@ -272,5 +315,46 @@ mod tests {
     fn text_content_has_no_links() {
         let base = Url::parse("https://example.com/").unwrap();
         assert!(extract_links("<a href='/x'>x</a>", "text/plain", &base).is_empty());
+    }
+
+    #[tokio::test]
+    async fn response_body_reader_caps_streamed_bytes() {
+        let response = test_response("abcdef", None).await;
+        let (body, truncated) = read_capped_response_body(response, 3).await.unwrap();
+
+        assert_eq!(body, "abc");
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn response_body_reader_marks_large_content_length_truncated() {
+        let response = test_response("abcdef", Some(6)).await;
+        let (body, truncated) = read_capped_response_body(response, 3).await.unwrap();
+
+        assert_eq!(body, "abc");
+        assert!(truncated);
+    }
+
+    async fn test_response(body: &str, content_length: Option<usize>) -> reqwest::Response {
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let body = body.to_string();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let content_length = content_length
+                .map(|length| format!("Content-Length: {length}\r\n"))
+                .unwrap_or_default();
+            socket
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\n{content_length}Connection: close\r\n\r\n{body}")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        reqwest::Client::new().get(url).send().await.unwrap()
     }
 }
