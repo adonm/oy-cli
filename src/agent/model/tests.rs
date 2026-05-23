@@ -1,9 +1,8 @@
 use super::*;
 use crate::llm::{Message, Protocol, RouteAuth, ToolSpec};
 use std::env;
-use std::sync::Mutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::ENV_LOCK;
 
 fn split_model_spec(spec: &str) -> (Option<&str>, &str) {
     let parsed = crate::llm::ParsedModelSpec::parse(spec);

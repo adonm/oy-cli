@@ -38,3 +38,6 @@ pub async fn run(argv: Vec<String>) -> anyhow::Result<i32> {
 pub fn err_line(args: std::fmt::Arguments<'_>) {
     ui::err_line(args);
 }
+
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -1,7 +1,6 @@
 use super::*;
-use std::sync::Mutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::ENV_LOCK;
 
 struct EnvGuard {
     saved: Option<String>,

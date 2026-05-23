@@ -40,10 +40,9 @@ mod tests {
     use std::{
         env, fs,
         path::{Path, PathBuf},
-        sync::Mutex,
     };
 
-    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::ENV_LOCK;
 
     #[test]
     fn mode_policy_and_risk_labels_are_centralized() {
@@ -135,7 +134,7 @@ mod tests {
 
     #[test]
     fn save_and_clear_model_config_persist_recent_models() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
         unsafe { env::set_var("OY_CONFIG", &config) };

@@ -87,6 +87,7 @@ async fn bash_output_preserves_terminal_sequences_raw() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn bash_filters_credential_like_environment_variables() {
+    let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let old_secret = std::env::var("OY_TEST_SECRET_TOKEN").ok();
     let old_public = std::env::var("OY_TEST_PUBLIC_VALUE").ok();
     unsafe {
