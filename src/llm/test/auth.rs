@@ -124,3 +124,32 @@ fn test_sigv4_headers_with_custom_port() {
     assert_ne!(auth_with_custom_port, auth_without_port);
     assert_eq!(auth_without_port, auth_with_standard_port);
 }
+
+#[test]
+fn test_recursive_composite_auth() {
+    let client = reqwest::Client::new();
+    let builder = client.post("https://api.openai.com/v1/chat/completions");
+    let auth = RouteAuth::Composite(vec![
+        RouteAuth::ApiKey("secret_key_1".to_string()),
+        RouteAuth::Composite(vec![
+            RouteAuth::Header {
+                name: "X-Custom".to_string(),
+                value: "value_2".to_string(),
+            },
+        ]),
+    ]);
+
+    let builder_with_headers = apply_json_headers(
+        builder,
+        &auth,
+        "https://api.openai.com/v1/chat/completions",
+        "{}",
+    )
+    .unwrap();
+
+    let request = builder_with_headers.build().unwrap();
+    let headers = request.headers();
+
+    assert_eq!(headers.get("authorization").unwrap(), "Bearer secret_key_1");
+    assert_eq!(headers.get("x-custom").unwrap(), "value_2");
+}

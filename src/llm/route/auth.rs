@@ -16,6 +16,15 @@ pub(crate) fn apply_json_headers(
     body: &str,
 ) -> Result<reqwest::RequestBuilder> {
     ensure_credential_transport(endpoint)?;
+    apply_json_headers_inner(builder, auth, endpoint, body)
+}
+
+fn apply_json_headers_inner(
+    builder: reqwest::RequestBuilder,
+    auth: &RouteAuth,
+    endpoint: &str,
+    body: &str,
+) -> Result<reqwest::RequestBuilder> {
     match auth {
         RouteAuth::ApiKey(api_key) => Ok(builder
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -42,7 +51,7 @@ pub(crate) fn apply_json_headers(
                         HeaderValue::from_str(value).context("invalid auth header value")?,
                     ),
                     RouteAuth::Headers(headers) => apply_header_pairs(builder, headers)?,
-                    RouteAuth::Composite(_) => apply_json_headers(builder, auth, endpoint, body)?,
+                    RouteAuth::Composite(_) => apply_json_headers_inner(builder, auth, endpoint, body)?,
                     RouteAuth::AwsSigV4(credentials) => {
                         builder.headers(sigv4_headers(endpoint, body, credentials)?)
                     }
