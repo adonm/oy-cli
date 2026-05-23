@@ -48,61 +48,30 @@ async fn execute_native_chat(request: LlmRequest, tools: LlmTools) -> Result<Llm
 }
 
 async fn run_gemini(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
-    let endpoint = super::route::endpoint::render_with_query(
-        request.route.base_url.as_deref(),
-        crate::llm::providers::GEMINI_BASE_URL,
-        &gemini::endpoint_path(&request.route.model),
-        Some(&[("alt".to_string(), "sse".to_string())]),
-    )?;
-    let client = reqwest::Client::new();
-    let tools_by_name = tool_runtime::tools_by_name(tools);
-    let mut request = request;
-    let mut transcript = Vec::new();
-    let mut loop_state = tool_runtime::ToolLoopState::default();
-
-    for turn in 0..=request.max_turns {
-        let body = gemini::request_body(&request)?;
-        let assistant = retry_transient_http_call(|| {
-            stream_gemini_assistant(&client, &endpoint, &request.route.auth, &body)
-        })
-        .await?;
-        let assistant_message = assistant_message_from_calls(
-            &assistant.text,
-            assistant.reasoning_content.as_ref(),
-            &assistant.tool_calls,
-        )?;
-
-        if assistant.tool_calls.is_empty() {
-            transcript.push(assistant_message);
-            return Ok(LlmResponse {
-                output: assistant.text,
-                messages: Some(transcript),
-            });
-        }
-        ensure_tool_round_budget(turn, request.max_turns, "Gemini")?;
-        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
-
-        request.messages.push(assistant_message.clone());
-        transcript.push(assistant_message);
-        for call in assistant.tool_calls {
-            let outcome =
-                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
-            let result = gemini_tool_result_message(&call, outcome.output.clone());
-            request.messages.push(result.clone());
-            transcript.push(result);
-        }
-    }
-
-    unreachable!("bounded tool loop exits from inside the loop")
+    run_message_protocol(request, tools, MessageProtocol::Gemini).await
 }
 
 async fn run_anthropic_messages(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
-    let endpoint = super::route::endpoint::render_with_query(
-        request.route.base_url.as_deref(),
-        "https://api.anthropic.com/v1",
-        "messages",
-        request.route.query_params.as_deref(),
-    )?;
+    run_message_protocol(request, tools, MessageProtocol::AnthropicMessages).await
+}
+
+async fn run_bedrock_converse(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
+    run_message_protocol(request, tools, MessageProtocol::BedrockConverse).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageProtocol {
+    Gemini,
+    AnthropicMessages,
+    BedrockConverse,
+}
+
+async fn run_message_protocol(
+    request: LlmRequest,
+    tools: LlmTools,
+    protocol: MessageProtocol,
+) -> Result<LlmResponse> {
+    let endpoint = message_protocol_endpoint(protocol, &request)?;
     let client = reqwest::Client::new();
     let tools_by_name = tool_runtime::tools_by_name(tools);
     let mut request = request;
@@ -110,14 +79,20 @@ async fn run_anthropic_messages(request: LlmRequest, tools: LlmTools) -> Result<
     let mut loop_state = tool_runtime::ToolLoopState::default();
 
     for turn in 0..=request.max_turns {
-        let body = anthropic_messages::request_body(&request)?;
+        let body = message_protocol_request_body(protocol, &request)?;
         let assistant = retry_transient_http_call(|| {
-            stream_anthropic_assistant(&client, &endpoint, &request.route.auth, &body)
+            stream_message_protocol_assistant(
+                protocol,
+                &client,
+                &endpoint,
+                &request.route.auth,
+                &body,
+            )
         })
         .await?;
         let assistant_message = assistant_message_from_calls(
             &assistant.text,
-            assistant.reasoning_content.as_ref(),
+            assistant_reasoning_content(protocol, &assistant),
             &assistant.tool_calls,
         )?;
 
@@ -128,7 +103,7 @@ async fn run_anthropic_messages(request: LlmRequest, tools: LlmTools) -> Result<
                 messages: Some(transcript),
             });
         }
-        ensure_tool_round_budget(turn, request.max_turns, "Anthropic Messages")?;
+        ensure_tool_round_budget(turn, request.max_turns, message_protocol_label(protocol))?;
         loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
 
         request.messages.push(assistant_message.clone());
@@ -136,7 +111,8 @@ async fn run_anthropic_messages(request: LlmRequest, tools: LlmTools) -> Result<
         for call in assistant.tool_calls {
             let outcome =
                 tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
-            let result = tool_result_message(&call, outcome.output.clone());
+            let result =
+                message_protocol_tool_result_message(protocol, &call, outcome.output.clone());
             request.messages.push(result.clone());
             transcript.push(result);
         }
@@ -145,50 +121,86 @@ async fn run_anthropic_messages(request: LlmRequest, tools: LlmTools) -> Result<
     unreachable!("bounded tool loop exits from inside the loop")
 }
 
-async fn run_bedrock_converse(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
-    let endpoint = super::route::endpoint::render_with_query(
-        request.route.base_url.as_deref(),
-        "https://bedrock-runtime.us-east-1.amazonaws.com",
-        &bedrock_converse::endpoint_path(&request.route.model),
-        request.route.query_params.as_deref(),
-    )?;
-    let client = reqwest::Client::new();
-    let tools_by_name = tool_runtime::tools_by_name(tools);
-    let mut request = request;
-    let mut transcript = Vec::new();
-    let mut loop_state = tool_runtime::ToolLoopState::default();
+fn message_protocol_endpoint(protocol: MessageProtocol, request: &LlmRequest) -> Result<String> {
+    match protocol {
+        MessageProtocol::Gemini => super::route::endpoint::render_with_query(
+            request.route.base_url.as_deref(),
+            crate::llm::providers::GEMINI_BASE_URL,
+            &gemini::endpoint_path(&request.route.model),
+            Some(&[("alt".to_string(), "sse".to_string())]),
+        ),
+        MessageProtocol::AnthropicMessages => super::route::endpoint::render_with_query(
+            request.route.base_url.as_deref(),
+            "https://api.anthropic.com/v1",
+            "messages",
+            request.route.query_params.as_deref(),
+        ),
+        MessageProtocol::BedrockConverse => super::route::endpoint::render_with_query(
+            request.route.base_url.as_deref(),
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            &bedrock_converse::endpoint_path(&request.route.model),
+            request.route.query_params.as_deref(),
+        ),
+    }
+}
 
-    for turn in 0..=request.max_turns {
-        let body = bedrock_converse::request_body(&request)?;
-        let assistant = retry_transient_http_call(|| {
-            stream_bedrock_assistant(&client, &endpoint, &request.route.auth, &body)
-        })
-        .await?;
-        let assistant_message =
-            assistant_message_from_calls(&assistant.text, None, &assistant.tool_calls)?;
+fn message_protocol_request_body(protocol: MessageProtocol, request: &LlmRequest) -> Result<Value> {
+    match protocol {
+        MessageProtocol::Gemini => gemini::request_body(request),
+        MessageProtocol::AnthropicMessages => anthropic_messages::request_body(request),
+        MessageProtocol::BedrockConverse => bedrock_converse::request_body(request),
+    }
+}
 
-        if assistant.tool_calls.is_empty() {
-            transcript.push(assistant_message);
-            return Ok(LlmResponse {
-                output: assistant.text,
-                messages: Some(transcript),
-            });
+async fn stream_message_protocol_assistant(
+    protocol: MessageProtocol,
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth: &RouteAuth,
+    body: &Value,
+) -> Result<ParsedAssistant> {
+    match protocol {
+        MessageProtocol::Gemini => stream_gemini_assistant(client, endpoint, auth, body).await,
+        MessageProtocol::AnthropicMessages => {
+            stream_anthropic_assistant(client, endpoint, auth, body).await
         }
-        ensure_tool_round_budget(turn, request.max_turns, "Bedrock Converse")?;
-        loop_state.note_assistant_turn(&assistant.text, &assistant.tool_calls)?;
-
-        request.messages.push(assistant_message.clone());
-        transcript.push(assistant_message);
-        for call in assistant.tool_calls {
-            let outcome =
-                tool_runtime::execute_tool_call(&tools_by_name, &mut loop_state, &call).await;
-            let result = tool_result_message(&call, outcome.output.clone());
-            request.messages.push(result.clone());
-            transcript.push(result);
+        MessageProtocol::BedrockConverse => {
+            stream_bedrock_assistant(client, endpoint, auth, body).await
         }
     }
+}
 
-    unreachable!("bounded tool loop exits from inside the loop")
+fn assistant_reasoning_content<'a>(
+    protocol: MessageProtocol,
+    assistant: &'a ParsedAssistant,
+) -> Option<&'a Value> {
+    match protocol {
+        MessageProtocol::BedrockConverse => None,
+        MessageProtocol::Gemini | MessageProtocol::AnthropicMessages => {
+            assistant.reasoning_content.as_ref()
+        }
+    }
+}
+
+fn message_protocol_tool_result_message(
+    protocol: MessageProtocol,
+    call: &NativeToolCall,
+    output: String,
+) -> Message {
+    match protocol {
+        MessageProtocol::Gemini => gemini_tool_result_message(call, output),
+        MessageProtocol::AnthropicMessages | MessageProtocol::BedrockConverse => {
+            tool_result_message(call, output)
+        }
+    }
+}
+
+fn message_protocol_label(protocol: MessageProtocol) -> &'static str {
+    match protocol {
+        MessageProtocol::Gemini => "Gemini",
+        MessageProtocol::AnthropicMessages => "Anthropic Messages",
+        MessageProtocol::BedrockConverse => "Bedrock Converse",
+    }
 }
 
 async fn run_chat_completions(request: LlmRequest, tools: LlmTools) -> Result<LlmResponse> {
@@ -265,7 +277,17 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
     let client = reqwest::Client::new();
     let tool_specs = request.tools.clone();
     let tools_by_name = tool_runtime::tools_by_name(tools);
-    let mut input = openai_responses::input_from_llm(&request.system_prompt, request.messages)?;
+    let store = request
+        .route
+        .additional_params
+        .as_ref()
+        .and_then(|params| params.get("store"))
+        .and_then(Value::as_bool);
+    let mut input = openai_responses::input_from_llm_with_store(
+        &request.system_prompt,
+        request.messages,
+        store,
+    )?;
     let mut transcript = Vec::new();
     let mut loop_state = tool_runtime::ToolLoopState::default();
 
@@ -282,8 +304,11 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
             stream_responses_output(&client, &endpoint, &request.route.auth, &body)
         })
         .await?;
-        let assistant_message =
-            assistant_message_from_calls(&response.text, None, &response.tool_calls)?;
+        let assistant_message = assistant_message_from_calls(
+            &response.text,
+            response.reasoning_content.as_ref(),
+            &response.tool_calls,
+        )?;
 
         if response.tool_calls.is_empty() {
             transcript.push(assistant_message);
@@ -310,7 +335,7 @@ async fn run_responses(request: LlmRequest, tools: LlmTools) -> Result<LlmRespon
 
 fn ensure_tool_round_budget(turn: usize, max_turns: usize, protocol: &str) -> Result<()> {
     if turn >= max_turns {
-        bail!("native OpenAI {protocol} exceeded the tool round budget");
+        bail!("native {protocol} exceeded the tool round budget");
     }
     Ok(())
 }
@@ -442,6 +467,7 @@ fn parsed_assistant_from_step(step: StepAccumulator) -> ParsedAssistant {
 fn parsed_response_from_step(step: StepAccumulator) -> ParsedResponse {
     ParsedResponse {
         text: step.text,
+        reasoning_content: step.reasoning_content,
         tool_calls: step.tool_calls,
     }
 }
@@ -520,6 +546,7 @@ struct ParsedAssistant {
 #[derive(Debug, Clone)]
 struct ParsedResponse {
     text: String,
+    reasoning_content: Option<Value>,
     tool_calls: Vec<NativeToolCall>,
 }
 

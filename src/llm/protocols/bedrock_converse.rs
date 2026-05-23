@@ -86,6 +86,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                 id: id.clone(),
                 name: name.clone(),
                 input: String::new(),
+                provider_executed: false,
             },
         );
         events.push(LlmEvent::ToolInputStart { id, name });

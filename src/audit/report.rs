@@ -44,7 +44,7 @@ pub(crate) fn default_output_path(format: AuditOutputFormat) -> PathBuf {
     }
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if !value.is_empty()
         && value
             .chars()
@@ -56,18 +56,29 @@ fn shell_quote(value: &str) -> String {
 }
 
 pub(super) fn with_transparency_line(report: &str, snippet: &str) -> String {
+    with_report_transparency_line(
+        report,
+        snippet,
+        prompts::AUDIT_REPORT_TITLE,
+        prompts::AUDIT_TRANSPARENCY_PREFIX,
+    )
+}
+
+pub(crate) fn with_report_transparency_line(
+    report: &str,
+    snippet: &str,
+    title: &str,
+    transparency_prefix: &str,
+) -> String {
     let mut lines = report
         .lines()
-        .filter(|line| !line.starts_with(&format!("> {}", prompts::AUDIT_TRANSPARENCY_PREFIX)))
+        .filter(|line| !line.starts_with(&format!("> {transparency_prefix}")))
         .collect::<Vec<_>>();
     while lines.first().is_some_and(|line| line.trim().is_empty()) {
         lines.remove(0);
     }
-    if lines
-        .first()
-        .is_none_or(|line| line.trim() != prompts::AUDIT_REPORT_TITLE)
-    {
-        lines.insert(0, prompts::AUDIT_REPORT_TITLE);
+    if lines.first().is_none_or(|line| line.trim() != title) {
+        lines.insert(0, title);
     }
     let insert_at = 1;
     let mut rebuilt = Vec::new();

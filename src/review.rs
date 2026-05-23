@@ -10,6 +10,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::audit::{reduce::compact_to_tokens, report};
 use crate::{config, session};
 
 pub const DEFAULT_MAX_REVIEW_CHUNKS: usize = 80;
@@ -163,7 +164,11 @@ pub async fn run(options: ReviewOptions) -> Result<ReviewResult> {
         );
         for (id, text) in findings {
             let _ = writeln!(candidate, "\n## Candidate findings from chunk {id}\n");
-            candidate.push_str(compact_to_tokens(&model, text.trim(), per_chunk_limit).trim());
+            candidate.push_str(
+                compact_to_tokens(&model, text.trim(), per_chunk_limit)
+                    .trim()
+                    .as_ref(),
+            );
             candidate.push('\n');
         }
         let budget = sizing
@@ -521,29 +526,20 @@ fn safe_relative_path(path: &str) -> bool {
 }
 
 fn review_system_prompt() -> String {
-    r#"You are oy in thermo-nuclear code-quality review mode. Run an unusually strict maintainability review focused on implementation quality, structural simplification, abstraction quality, giant files, and spaghetti-condition growth.
+    r#"You are oy in code-quality review mode. Review the supplied changes or workspace for maintainability, local reasoning, and structural simplicity.
+Be terse, evidence-first, and repo-specific. Avoid generic best-practice advice, style nits, and speculation.
 
-Baseline:
-- Perform a deep code-quality audit of the supplied changes or workspace.
-- Rethink how to structure/implement the code to meaningfully improve code quality without changing behavior.
-- Improve abstractions, modularity, succinctness, legibility, and local reasoning.
-- Be ambitious and rigorous: measure twice, cut once.
+Finding quality bar:
+- Report only high-conviction structural issues with concrete code evidence and a practical fix.
+- Prefer code-judo findings: simpler designs that delete branches, helpers, modes, layers, conditionals, or concepts.
+- Flag files crossing or approaching 1000 lines when decomposition would make ownership clearer.
+- Flag spaghetti growth: ad-hoc conditionals, scattered special cases, feature checks in unrelated flows, or narrow edge cases inside busy functions.
+- Push on type and boundary cleanliness when optionality, casts, loose shapes, wrappers, or silent fallbacks hide invariants.
+- Call out architectural drift, duplicated canonical helpers, feature logic leaking across boundaries, and non-atomic related updates.
+- Prefer direct, boring code over magical or generic mechanisms that hide simple assumptions.
+- Return [] or say there are no major structural concerns when evidence is weak.
 
-Non-negotiable standards:
-0. Be ambitious about structural simplification. Search for code-judo moves that delete branches, helpers, modes, layers, conditionals, or concepts entirely. Prefer the design that feels inevitable in hindsight.
-1. Treat a file moving from under 1000 lines to over 1000 lines as a presumptive blocker unless there is a compelling structural reason. Prefer decomposition first.
-2. Do not allow random spaghetti growth: ad-hoc conditionals, scattered special cases, feature checks in unrelated flows, or narrow edge cases inserted into already-busy functions are design problems.
-3. Bias toward cleaning the design, not accepting merely working code. Prefer simplifications that remove moving pieces altogether.
-4. Prefer direct, boring, maintainable code over hacky, magical, or generic mechanisms that hide simple assumptions.
-5. Push hard on type and boundary cleanliness when optionality, casts, loose shapes, or silent fallbacks obscure invariants.
-6. Keep logic in the canonical layer and reuse existing helpers; call out architectural drift and feature logic leaking into shared paths.
-7. Treat unnecessary sequential orchestration and non-atomic related updates as design smells when a cleaner structure is obvious.
-
-Approval bar:
-Do not approve if there is a clear structural regression, obvious missed code-judo simplification, unjustified file-size explosion, spaghetti special-case branching, magical abstraction, unnecessary wrapper/cast/optionality churn, boundary leak, canonical-helper duplication, or obvious missed decomposition.
-
-Tone and output:
-Be direct, serious, and demanding without being rude. Prioritize high-conviction structural findings over cosmetic nits. If there are no blocker/major maintainability findings, say so explicitly."#
+Final reports must include a verdict, a succinct findings summary, and detailed writeups for only the most important findings. Spend tokens on repository evidence and concrete simplification, not broad philosophy."#
         .trim()
         .to_string()
 }
@@ -552,10 +548,10 @@ fn review_full_prompt(focus: &str, source: &str, manifest: &str, input: &str) ->
     let mut prompt = String::new();
     let _ = writeln!(
         prompt,
-        "Conduct a thermo-nuclear code-quality review for this input source: {source}."
+        "Conduct a code-quality review for this input source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReview questions:\n- Is there a code-judo move that would make this dramatically simpler?\n- Can this be reframed so fewer concepts, branches, modes, or layers are needed?\n- Does this improve or worsen local architecture and canonical ownership boundaries?\n- Did branching complexity, optionality, wrappers, casts, or feature-specific checks make the code harder to reason about?\n- Did any file cross or approach the 1000-line decomposition threshold?\n\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with a concise bullet for each high-conviction finding.\n4. Add `## Detailed findings`; each finding must include severity, evidence path/symbol/line when available, why the structure is worse, and the concrete restructuring remedy.\n5. Avoid low-value naming/style nits unless they are symptoms of a larger structural problem. Do not write files.\n\nInput manifest:\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with one concise bullet/table row for each high-conviction finding, including severity and code reference (`path:line` or `path::symbol`).\n4. Add `## Detailed findings` for only the most important findings; each must include severity, evidence, structural impact, and the concrete simplification or decomposition.\n5. Drop weak/speculative items and cosmetic nits. Do not write files.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nReview input:\n");
     prompt.push_str(input.trim());
@@ -576,7 +572,7 @@ fn review_chunk_prompt(
         "Review code-quality chunk {id}/{count} for source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReturn concise candidate findings for this chunk only. Use one `###` heading per finding, or return `[]` if there are no high-conviction structural/code-quality findings. For each finding include severity, evidence path/symbol/line when available, structural impact, and a concrete code-judo/decomposition remedy. Do not write files.\n\nInput manifest:\n");
+    prompt.push_str("\nReturn concise candidate findings for this chunk only. Use one `### [Severity] Title` heading per finding, or return `[]` if there are no high-conviction structural findings. For each finding include severity, evidence path/symbol/line when available, structural impact, and a concrete simplification or decomposition. Do not write files.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nChunk input:\n");
     prompt.push_str(input.trim());
@@ -587,10 +583,10 @@ fn review_reduce_prompt(focus: &str, source: &str, manifest: &str, findings: &st
     let mut prompt = String::new();
     let _ = writeln!(
         prompt,
-        "Condense candidate thermo-nuclear code-quality findings into the final markdown report for source: {source}."
+        "Condense candidate code-quality findings into the final markdown report for source: {source}."
     );
     push_focus(&mut prompt, focus);
-    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with each surviving finding, severity, and code reference.\n4. Add `## Detailed findings` for the most important findings only; preserve evidence, explain why maintainability/local reasoning got worse, and propose the concrete restructuring remedy.\n5. Drop weak/speculative/duplicate items and cosmetic nits.\n\nInput manifest:\n");
+    prompt.push_str("\nReport format:\n1. Start with `# Code Quality Review`.\n2. Add `## Verdict` with `Block`, `Needs work`, or `No major structural concerns`.\n3. Add `## Findings summary` with each surviving finding, severity, and code reference.\n4. Add `## Detailed findings` for only the most important findings; preserve evidence, structural impact, and the concrete simplification or decomposition.\n5. Drop weak/speculative/duplicate items and cosmetic nits.\n\nInput manifest:\n");
     prompt.push_str(manifest.trim());
     prompt.push_str("\n\nCandidate findings:\n");
     prompt.push_str(findings.trim());
@@ -604,28 +600,19 @@ fn push_focus(out: &mut String, focus: &str) {
     }
 }
 
-fn compact_to_tokens(model: &str, text: &str, max_tokens: usize) -> String {
-    if crate::compaction::count_tokens(model, text) <= max_tokens {
-        return text.to_string();
-    }
-    let mut out = crate::ui::truncate_chars(text, max_tokens.saturating_mul(4).max(1));
-    while crate::compaction::count_tokens(model, &out) > max_tokens && out.len() > 1 {
-        out.truncate(out.len() * 3 / 4);
-    }
-    out.push_str("\n\n[truncated to fit reduce prompt]\n");
-    out
-}
-
 fn transparency_snippet(options: &ReviewOptions) -> String {
     let mut command = Vec::new();
     if !options.model.trim().is_empty() {
-        command.push(format!("OY_MODEL={}", shell_quote(options.model.trim())));
+        command.push(format!(
+            "OY_MODEL={}",
+            report::shell_quote(options.model.trim())
+        ));
     }
     command.push("oy".to_string());
     command.push("review".to_string());
     if options.out != default_output_path() {
         command.push("--out".to_string());
-        command.push(shell_quote(&options.out.to_string_lossy()));
+        command.push(report::shell_quote(&options.out.to_string_lossy()));
     }
     if options.max_chunks != DEFAULT_MAX_REVIEW_CHUNKS {
         command.push("--max-chunks".to_string());
@@ -637,11 +624,11 @@ fn transparency_snippet(options: &ReviewOptions) -> String {
         .map(str::trim)
         .filter(|target| !target.is_empty())
     {
-        command.push(shell_quote(target));
+        command.push(report::shell_quote(target));
     }
     if !options.focus.trim().is_empty() {
         command.push("--focus".to_string());
-        command.push(shell_quote(options.focus.trim()));
+        command.push(report::shell_quote(options.focus.trim()));
     }
     format!(
         "> {} `{}` · {}",
@@ -651,41 +638,8 @@ fn transparency_snippet(options: &ReviewOptions) -> String {
     )
 }
 
-fn shell_quote(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 fn with_transparency_line(report: &str, snippet: &str) -> String {
-    let mut lines = report
-        .lines()
-        .filter(|line| !line.starts_with(&format!("> {TRANSPARENCY_PREFIX}")))
-        .collect::<Vec<_>>();
-    while lines.first().is_some_and(|line| line.trim().is_empty()) {
-        lines.remove(0);
-    }
-    if lines.first().is_none_or(|line| line.trim() != REPORT_TITLE) {
-        lines.insert(0, REPORT_TITLE);
-    }
-    let mut rebuilt = vec![lines[0].to_string(), String::new(), snippet.to_string()];
-    if lines.len() > 1 {
-        rebuilt.push(String::new());
-        rebuilt.extend(lines[1..].iter().map(|line| (*line).to_string()));
-    }
-    let mut out = rebuilt.join("\n");
-    while out.ends_with("\n\n") {
-        out.pop();
-    }
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+    report::with_report_transparency_line(report, snippet, REPORT_TITLE, TRANSPARENCY_PREFIX)
 }
 
 #[cfg(test)]
@@ -693,9 +647,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn review_system_prompt_contains_thermo_nuclear_rules() {
+    fn review_system_prompt_contains_code_quality_rules() {
         let prompt = review_system_prompt();
-        assert!(prompt.contains("thermo-nuclear"));
+        assert!(prompt.contains("code-quality review mode"));
+        assert!(prompt.contains("evidence-first"));
         assert!(prompt.contains("code-judo"));
         assert!(prompt.contains("1000 lines"));
         assert!(prompt.contains("spaghetti"));

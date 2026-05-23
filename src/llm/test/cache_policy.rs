@@ -119,6 +119,7 @@ fn request_with_protocol(protocol: Protocol, cache: Option<CachePolicy>) -> LlmR
             auth: RouteAuth::ApiKey("test".to_string()),
             query_params: None,
             additional_params: None,
+            default_output_tokens: None,
         },
         system_prompt: String::new(),
         system_cache: None,

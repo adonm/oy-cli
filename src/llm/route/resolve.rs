@@ -71,7 +71,8 @@ pub(crate) fn model_route(
     reasoning_effort: Option<String>,
 ) -> Result<ModelRoute> {
     let parsed = ParsedModelSpec::parse(model_spec);
-    let provider = parsed.provider_or_openai();
+    let requested_provider = parsed.provider_or_openai();
+    let provider = canonical_provider_id(requested_provider);
     ensure_supported_provider(provider)?;
     let mut route = match provider {
         "github-copilot" => {
@@ -89,7 +90,7 @@ pub(crate) fn model_route(
         "cloudflare-workers-ai" => {
             crate::llm::providers::route::prepare_cloudflare_workers_ai_chat(parsed.base_model)?
         }
-        "bedrock" | "amazon-bedrock" => {
+        "amazon-bedrock" => {
             crate::llm::providers::route::prepare_bedrock_chat(provider, parsed.base_model)?
         }
         provider => crate::llm::providers::route::prepare_opencode_compatible_chat(
@@ -129,6 +130,12 @@ pub(crate) fn model_route(
         reasoning_overlay,
     );
     Ok(route)
+}
+
+fn canonical_provider_id(provider: &str) -> &str {
+    crate::llm::providers::provider_metadata(provider)
+        .map(|metadata| metadata.id)
+        .unwrap_or(provider)
 }
 
 fn ensure_supported_provider(provider: &str) -> Result<()> {

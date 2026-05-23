@@ -28,6 +28,7 @@ pub(crate) enum ProviderFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProviderMetadata {
     pub(crate) id: &'static str,
+    pub(crate) aliases: &'static [&'static str],
     pub(crate) family: ProviderFamily,
     pub(crate) default_base_url: Option<&'static str>,
     pub(crate) auth_env: &'static [&'static str],
@@ -89,6 +90,7 @@ pub(crate) const OPENAI_COMPATIBLE_PROFILES: &[OpenAiCompatibleProfile] = &[
 pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     ProviderMetadata {
         id: "openai",
+        aliases: &[],
         family: ProviderFamily::OpenAi,
         default_base_url: Some(OPENAI_BASE_URL),
         auth_env: &["OPENAI_API_KEY"],
@@ -96,6 +98,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "github-copilot",
+        aliases: &["copilot"],
         family: ProviderFamily::GitHubCopilot,
         default_base_url: Some(GITHUB_COPILOT_BASE_URL),
         auth_env: &[
@@ -107,6 +110,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "openrouter",
+        aliases: &[],
         family: ProviderFamily::OpenRouter,
         default_base_url: Some("https://openrouter.ai/api/v1"),
         auth_env: &["OPENROUTER_API_KEY", "OPENCODE_API_KEY"],
@@ -114,6 +118,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "xai",
+        aliases: &[],
         family: ProviderFamily::Xai,
         default_base_url: Some("https://api.x.ai/v1"),
         auth_env: &["XAI_API_KEY"],
@@ -121,6 +126,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "azure",
+        aliases: &[],
         family: ProviderFamily::AzureOpenAi,
         default_base_url: None,
         auth_env: &["AZURE_OPENAI_API_KEY"],
@@ -128,6 +134,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "cloudflare-ai-gateway",
+        aliases: &[],
         family: ProviderFamily::CloudflareAiGateway,
         default_base_url: None,
         auth_env: &["CLOUDFLARE_API_TOKEN", "CF_AIG_TOKEN"],
@@ -135,6 +142,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "cloudflare-workers-ai",
+        aliases: &[],
         family: ProviderFamily::CloudflareWorkersAi,
         default_base_url: None,
         auth_env: &["CLOUDFLARE_API_KEY", "CLOUDFLARE_WORKERS_AI_TOKEN"],
@@ -142,6 +150,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "anthropic",
+        aliases: &[],
         family: ProviderFamily::Anthropic,
         default_base_url: Some("https://api.anthropic.com/v1"),
         auth_env: &["ANTHROPIC_API_KEY"],
@@ -149,6 +158,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "google",
+        aliases: &["gemini"],
         family: ProviderFamily::GoogleGemini,
         default_base_url: Some(GEMINI_BASE_URL),
         auth_env: &[
@@ -160,6 +170,7 @@ pub(crate) const PROVIDERS: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         id: "amazon-bedrock",
+        aliases: &["bedrock"],
         family: ProviderFamily::AmazonBedrock,
         default_base_url: None,
         auth_env: &[
@@ -175,10 +186,11 @@ pub(crate) fn provider_metadata(provider: &str) -> Option<ProviderMetadata> {
     PROVIDERS
         .iter()
         .copied()
-        .find(|metadata| metadata.id == provider)
+        .find(|metadata| metadata.id == provider || metadata.aliases.contains(&provider))
         .or_else(|| {
             openai_compatible_profile(provider).map(|profile| ProviderMetadata {
                 id: profile.provider,
+                aliases: &[],
                 family: ProviderFamily::OpenAiCompatible,
                 default_base_url: Some(profile.base_url),
                 auth_env: &[],
@@ -191,7 +203,7 @@ pub(crate) fn openai_profile(model: &str, base_url: Option<String>) -> RouteProf
     RouteProfile {
         model_id: model.to_string(),
         base_url: base_url.unwrap_or_else(|| OPENAI_BASE_URL.to_string()),
-        protocol: Protocol::OpenAiChat,
+        protocol: Protocol::OpenAiResponses,
     }
 }
 
@@ -315,7 +327,8 @@ pub(crate) fn bedrock_base_url(region: &str) -> String {
 }
 
 pub(crate) fn is_bedrock_provider(provider: &str) -> bool {
-    matches!(provider, "bedrock" | "amazon-bedrock")
+    provider_metadata(provider)
+        .is_some_and(|metadata| metadata.family == ProviderFamily::AmazonBedrock)
 }
 
 pub(crate) fn openai_compatible_profile(provider: &str) -> Option<OpenAiCompatibleProfile> {
@@ -358,6 +371,104 @@ pub(crate) fn openrouter_body_options(input: Option<&Value>) -> Option<Value> {
         body.insert("prompt_cache_key".to_string(), json!(prompt_cache_key));
     }
     (!body.is_empty()).then_some(Value::Object(body))
+}
+
+pub(crate) fn openai_body_options(input: Option<&Value>, protocol: Protocol) -> Option<Value> {
+    let object = input.and_then(Value::as_object)?;
+    let openai = object
+        .get("openai")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    let mut body = serde_json::Map::new();
+
+    if let Some(store) = openai.get("store").and_then(Value::as_bool) {
+        body.insert("store".to_string(), json!(store));
+    }
+
+    if protocol.uses_responses_api()
+        && let Some(instructions) = openai.get("instructions").and_then(Value::as_str)
+    {
+        body.insert("instructions".to_string(), json!(instructions));
+    }
+
+    if let Some(prompt_cache_key) = openai.get("promptCacheKey").and_then(Value::as_str)
+        && protocol.uses_responses_api()
+    {
+        body.insert("prompt_cache_key".to_string(), json!(prompt_cache_key));
+    }
+
+    if let Some(effort) = openai.get("reasoningEffort").and_then(Value::as_str) {
+        if protocol.uses_responses_api() {
+            let reasoning = body
+                .entry("reasoning".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(reasoning) = reasoning.as_object_mut() {
+                reasoning.insert("effort".to_string(), json!(effort));
+            }
+        } else {
+            body.insert("reasoning_effort".to_string(), json!(effort));
+        }
+    }
+
+    if protocol.uses_responses_api() {
+        if openai.get("reasoningSummary").and_then(Value::as_str) == Some("auto") {
+            let reasoning = body
+                .entry("reasoning".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(reasoning) = reasoning.as_object_mut() {
+                reasoning.insert("summary".to_string(), json!("auto"));
+            }
+        }
+        if openai
+            .get("includeEncryptedReasoning")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            body.insert(
+                "include".to_string(),
+                json!(["reasoning.encrypted_content"]),
+            );
+        }
+        if let Some(verbosity) = openai.get("textVerbosity").and_then(Value::as_str) {
+            body.insert("text".to_string(), json!({"verbosity": verbosity}));
+        }
+    }
+
+    (!body.is_empty()).then_some(Value::Object(body))
+}
+
+pub(crate) fn anthropic_body_options(input: Option<&Value>) -> Option<Value> {
+    let object = input.and_then(Value::as_object)?;
+    let anthropic = object
+        .get("anthropic")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    let thinking = anthropic.get("thinking").and_then(Value::as_object)?;
+    if thinking.get("type").and_then(Value::as_str) != Some("enabled") {
+        return None;
+    }
+    let budget = thinking
+        .get("budgetTokens")
+        .or_else(|| thinking.get("budget_tokens"))
+        .and_then(Value::as_u64)?;
+    Some(json!({"thinking": {"type": "enabled", "budget_tokens": budget}}))
+}
+
+pub(crate) fn gemini_body_options(input: Option<&Value>) -> Option<Value> {
+    let object = input.and_then(Value::as_object)?;
+    let gemini = object
+        .get("gemini")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    let thinking = gemini.get("thinkingConfig").and_then(Value::as_object)?;
+    let mut config = serde_json::Map::new();
+    if let Some(budget) = thinking.get("thinkingBudget").and_then(Value::as_i64) {
+        config.insert("thinkingBudget".to_string(), json!(budget));
+    }
+    if let Some(include) = thinking.get("includeThoughts").and_then(Value::as_bool) {
+        config.insert("includeThoughts".to_string(), json!(include));
+    }
+    (!config.is_empty()).then_some(json!({"generationConfig": {"thinkingConfig": config}}))
 }
 
 pub(crate) fn opencode_should_use_responses_api(provider: &str, model_id: &str) -> bool {

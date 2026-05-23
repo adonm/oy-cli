@@ -127,9 +127,10 @@ pub(super) fn should_skip_path(path: &str) -> bool {
     if name == ".env" || name.starts_with(".env.") {
         return true;
     }
-    if SKIP_FILENAME_SUBSTRINGS
-        .iter()
-        .any(|needle| name.contains(needle))
+    if !is_source_path(&lower)
+        && SKIP_FILENAME_SUBSTRINGS
+            .iter()
+            .any(|needle| name.contains(needle))
     {
         return true;
     }
@@ -137,6 +138,39 @@ pub(super) fn should_skip_path(path: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| SKIP_EXTENSIONS.contains(&extension))
+}
+
+fn is_source_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension,
+                "rs" | "py"
+                    | "go"
+                    | "js"
+                    | "mjs"
+                    | "cjs"
+                    | "ts"
+                    | "tsx"
+                    | "java"
+                    | "kt"
+                    | "kts"
+                    | "swift"
+                    | "rb"
+                    | "php"
+                    | "cs"
+                    | "c"
+                    | "h"
+                    | "cc"
+                    | "cpp"
+                    | "cxx"
+                    | "hpp"
+                    | "sh"
+                    | "bash"
+            )
+        })
 }
 
 fn audit_priority(file: &AuditFile) -> (u8, std::cmp::Reverse<usize>, String) {

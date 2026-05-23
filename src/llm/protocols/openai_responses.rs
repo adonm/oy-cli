@@ -44,7 +44,11 @@ pub(crate) fn request_body(
     Ok(Value::Object(body))
 }
 
-pub(crate) fn input_from_llm(system_prompt: &str, messages: Vec<Message>) -> Result<Vec<Value>> {
+pub(crate) fn input_from_llm_with_store(
+    system_prompt: &str,
+    messages: Vec<Message>,
+    store: Option<bool>,
+) -> Result<Vec<Value>> {
     let mut input = Vec::new();
     if !system_prompt.trim().is_empty() {
         input.push(json!({"role": "system", "content": system_prompt}));
@@ -55,7 +59,9 @@ pub(crate) fn input_from_llm(system_prompt: &str, messages: Vec<Message>) -> Res
                 input.push(response_message("system", "input_text", content))
             }
             Message::User { content } => append_user_content(&mut input, content)?,
-            Message::Assistant { content, .. } => append_assistant_content(&mut input, content)?,
+            Message::Assistant { content, .. } => {
+                append_assistant_content(&mut input, content, store)?
+            }
         }
     }
     Ok(input)
@@ -92,6 +98,13 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                 });
             }
         }
+        Some("response.reasoning_text.delta" | "response.reasoning_summary_text.delta") => {
+            if let Some(text) = event.get("delta").and_then(Value::as_str) {
+                events.push(LlmEvent::ReasoningDelta {
+                    text: text.to_string(),
+                });
+            }
+        }
         Some("response.output_item.added") => {
             let item = event.get("item").unwrap_or(&Value::Null);
             if item.get("type").and_then(Value::as_str) == Some("function_call")
@@ -110,6 +123,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                         id: id.to_string(),
                         name: name.to_string(),
                         input,
+                        provider_executed: false,
                     },
                 );
                 events.push(LlmEvent::ToolInputStart {
@@ -162,6 +176,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                             id: call_id.to_string(),
                             name: name.to_string(),
                             input,
+                            provider_executed: false,
                         },
                     );
                 }
@@ -175,6 +190,10 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                     )?);
                 } else {
                     events.extend(tool_stream::finish(ROUTE, &mut state.tools, &key)?);
+                }
+            } else if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                if let Some(reasoning) = reasoning_item(item) {
+                    events.push(LlmEvent::ReasoningItem { value: reasoning });
                 }
             } else if let Some(hosted) = hosted_tool_events(item) {
                 events.extend(hosted);
@@ -190,7 +209,9 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
         }
         Some("response.failed") => events.push(LlmEvent::ProviderError {
             message: event
-                .get("message")
+                .pointer("/response/error/message")
+                .or_else(|| event.pointer("/response/error/code"))
+                .or_else(|| event.get("message"))
                 .or_else(|| event.get("code"))
                 .and_then(Value::as_str)
                 .unwrap_or("OpenAI Responses response failed")
@@ -384,10 +405,73 @@ fn append_user_content(input: &mut Vec<Value>, content: Vec<MessageContent>) -> 
     Ok(())
 }
 
-fn append_assistant_content(input: &mut Vec<Value>, content: Vec<MessageContent>) -> Result<()> {
+fn append_assistant_content(
+    input: &mut Vec<Value>,
+    content: Vec<MessageContent>,
+    store: Option<bool>,
+) -> Result<()> {
     let assistant = assistant_parts(content)?;
+    if let Some(reasoning) = assistant.reasoning_content.as_ref()
+        && let Some(item) = lower_reasoning(reasoning, store)
+    {
+        input.push(item);
+    }
     append_assistant_output(input, &assistant.text, &assistant.tool_calls);
     Ok(())
+}
+
+fn lower_reasoning(value: &Value, store: Option<bool>) -> Option<Value> {
+    let object = value.as_object()?;
+    let item_id = object
+        .get("openai")
+        .and_then(Value::as_object)
+        .unwrap_or(object)
+        .get("itemId")
+        .and_then(Value::as_str)?;
+    let text = object
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("summary").and_then(Value::as_str))
+        .unwrap_or_default();
+    let encrypted_content = object
+        .get("openai")
+        .and_then(Value::as_object)
+        .unwrap_or(object)
+        .get("reasoningEncryptedContent")
+        .cloned();
+    if store == Some(false) && !encrypted_content.as_ref().is_some_and(Value::is_string) {
+        return None;
+    }
+
+    Some(json!({
+        "type": "reasoning",
+        "id": item_id,
+        "summary": if text.is_empty() {
+            Value::Array(Vec::new())
+        } else {
+            json!([{"type": "summary_text", "text": text}])
+        },
+        "encrypted_content": encrypted_content.unwrap_or(Value::Null),
+    }))
+}
+
+fn reasoning_item(item: &Value) -> Option<Value> {
+    let id = item.get("id").and_then(Value::as_str)?;
+    let text = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|summary| summary.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    Some(json!({
+        "text": text,
+        "openai": {
+            "itemId": id,
+            "reasoningEncryptedContent": item.get("encrypted_content").cloned().unwrap_or(Value::Null),
+        }
+    }))
 }
 
 fn function_call(call: &ToolCall) -> Value {

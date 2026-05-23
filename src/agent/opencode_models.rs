@@ -214,6 +214,10 @@ impl OpenCodeModel {
         }
     }
 
+    pub(crate) fn limits(&self) -> OpenCodeModelLimit {
+        self.limit
+    }
+
     pub(crate) fn is_openai_compatible_api(&self) -> bool {
         self.api.npm.as_deref().is_some_and(|api| {
             matches!(

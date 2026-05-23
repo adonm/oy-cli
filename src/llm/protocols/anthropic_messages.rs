@@ -40,6 +40,7 @@ pub(crate) fn request_body(request: &LlmRequest) -> Result<Value> {
                     .generation
                     .as_ref()
                     .and_then(|generation| generation.max_tokens)
+                    .or(request.route.default_output_tokens)
                     .unwrap_or(4096)
             ),
         ),
@@ -83,7 +84,7 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                 .and_then(Value::as_str)
                 .unwrap_or_default()
             {
-                "tool_use" => {
+                "tool_use" | "server_tool_use" => {
                     let id = block
                         .get("id")
                         .and_then(Value::as_str)
@@ -101,9 +102,14 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                             id: id.clone(),
                             name: name.clone(),
                             input: String::new(),
+                            provider_executed: block.get("type").and_then(Value::as_str)
+                                == Some("server_tool_use"),
                         },
                     );
                     events.push(LlmEvent::ToolInputStart { id, name });
+                    if block.get("type").and_then(Value::as_str) == Some("server_tool_use") {
+                        state.has_tool_calls = true;
+                    }
                 }
                 "text" => {
                     if let Some(text) = block.get("text").and_then(Value::as_str) {
@@ -118,6 +124,11 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                             text: text.to_string(),
                         });
                     }
+                }
+                "web_search_tool_result"
+                | "code_execution_tool_result"
+                | "web_fetch_tool_result" => {
+                    events.push(server_tool_result(block));
                 }
                 _ => {}
             }
@@ -142,6 +153,15 @@ pub(crate) fn parse_stream_event(state: &mut StreamState, event: &Value) -> Resu
                     if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
                         events.push(LlmEvent::ReasoningDelta {
                             text: text.to_string(),
+                        });
+                    }
+                }
+                "signature_delta" => {
+                    if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                        events.push(LlmEvent::ReasoningItem {
+                            value: json!({
+                                "anthropic": {"signature": signature}
+                            }),
                         });
                     }
                 }
@@ -217,6 +237,38 @@ pub(crate) fn finish_stream(state: &mut StreamState) -> Result<Vec<LlmEvent>> {
         },
         usage: state.usage.clone(),
     }])
+}
+
+fn server_tool_result(block: &Value) -> LlmEvent {
+    let kind = block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let name = match kind {
+        "web_search_tool_result" => "web_search",
+        "code_execution_tool_result" => "code_execution",
+        "web_fetch_tool_result" => "web_fetch",
+        _ => "server_tool",
+    };
+    let id = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let content = block.get("content").cloned().unwrap_or(Value::Null);
+    let is_error = content
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.ends_with("_tool_result_error"));
+    LlmEvent::ToolResult {
+        call_id: id,
+        name: name.to_string(),
+        output: json!({
+            "type": if is_error { "error" } else { "json" },
+            "value": content,
+        }),
+        provider_executed: true,
+    }
 }
 
 fn lower_system(

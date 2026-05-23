@@ -20,8 +20,8 @@ use crate::{config, session};
 pub(crate) mod input;
 mod progress;
 mod prompts;
-mod reduce;
-mod report;
+pub(crate) mod reduce;
+pub(crate) mod report;
 mod sarif;
 
 use input::{
@@ -473,6 +473,9 @@ mod tests {
         assert!(should_skip_path("ISSUES.md"));
         assert!(should_skip_path("issues.md"));
         assert!(!should_skip_path("src/main.rs"));
+        assert!(!should_skip_path("src/token.rs"));
+        assert!(!should_skip_path("src/secret_manager.go"));
+        assert!(!should_skip_path("src/credential_store.ts"));
     }
 
     #[test]

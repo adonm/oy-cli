@@ -52,7 +52,8 @@ pub(crate) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> 
     let mut matches = Vec::new();
     let mut errors = Vec::new();
     let mut truncated = false;
-    for target in &targets {
+    let target_count = targets.len();
+    for (target_idx, target) in targets.iter().enumerate() {
         match fff_search_target(
             ctx.root(),
             target,
@@ -66,7 +67,7 @@ pub(crate) fn tool_search(ctx: &ToolContext, args: SearchArgs) -> Result<Value> 
                 truncated: target_truncated,
             }) => {
                 matches.append(&mut found);
-                if target_truncated || matches.len() >= cap {
+                if target_truncated || (matches.len() >= cap && target_idx + 1 < target_count) {
                     truncated = true;
                     break;
                 }
@@ -125,6 +126,7 @@ fn fff_search_target(
         });
     }
 
+    let exact_target = target.is_file().then(|| rel_path(root, target));
     let base = if target.is_file() {
         target.parent().unwrap_or(root)
     } else {
@@ -133,11 +135,13 @@ fn fff_search_target(
     let picker = fff_picker(base)?;
     let parser = QueryParser::new(AiGrepConfig);
     let query = parser.parse(pattern);
-    let result = picker.grep(&query, &grep_options(mode, limit));
+    let fff_limit = exact_target
+        .as_ref()
+        .map_or(limit, |_| MAX_SEARCH_MATCHES.max(limit));
+    let result = picker.grep(&query, &grep_options(mode, fff_limit));
 
-    let exact_target = target.is_file().then(|| rel_path(root, target));
     let mut matches = Vec::new();
-    let mut truncated = result.next_file_offset > 0;
+    let mut truncated = exact_target.is_none() && result.next_file_offset > 0;
     for item in result.matches {
         let file = result.files[item.file_index];
         let display = display_path_from_base(root, base, file.relative_path(&picker).as_str());

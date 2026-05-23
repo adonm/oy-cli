@@ -7,7 +7,7 @@ use crate::compaction;
 
 use super::prompts;
 
-pub(super) fn compact_to_tokens<'a>(
+pub(crate) fn compact_to_tokens<'a>(
     model_spec: &str,
     text: &'a str,
     max_tokens: usize,

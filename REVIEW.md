@@ -1,293 +1,73 @@
 # Code Quality Review
 
-> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=github-copilot/gpt-5.5 oy review` · 2026-05-22
+> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=github-copilot/gpt-5.5 oy review` · 2026-05-23
 
 
 ## Verdict
 
-Block
-
-Current triage after fixes: provider-support enforcement now lives in route resolution, native Gemini support has been added for Google/OpenCode Gemini routes, and `agent::model` has been split into a small facade plus execution, metadata-cache, reasoning, and test modules. The remaining review items are larger structural refactors around shared no-tools analysis, native protocol tool-loop extraction, patch normalization, typed LLM message role/content boundaries, tool argument/schema drift, and audit input decomposition.
+Needs work
 
 ## Findings summary
 
-| Severity | Finding | Code reference |
-|---|---|---|
-| Fixed | Provider support gating lived in cache/metadata paths and was bypassable by normal routing/execution; route resolution now fails closed before constructing a route, and metadata caching is best-effort only. | `src/llm/route/resolve.rs::model_route`, `src/agent/model/metadata.rs::cache_model_limits`, `src/llm/protocols/gemini.rs`, `src/agent/opencode_models.rs::OpenCodeModel::is_gemini_api` |
-| Fixed | `src/agent/model.rs` crossed the 1,000-line threshold and mixed selection, metadata, execution, reasoning, and tests; it is now an 85-line facade over focused submodules. | `src/agent/model.rs`, `src/agent/model/exec.rs`, `src/agent/model/metadata.rs`, `src/agent/model/reasoning.rs`, `src/agent/model/tests.rs` |
-| Major | `audit` and `review` are forking the same no-tools map/reduce review workflow instead of sharing a canonical pipeline. | `src/review.rs`, `src/audit.rs`, `src/audit/reduce.rs`, `src/audit/report.rs`, `src/audit/input`, `src/cli/app/audit_cmd.rs`, `src/cli/app/review_cmd.rs` |
-| Major | Native protocol execution repeats the same tool-loop orchestration in multiple provider/protocol functions. | `src/llm/openai.rs::run_chat_completions`, `run_responses`, `run_anthropic_messages`, `run_bedrock_converse` |
-| Major | Patch handling has two parser/application paths with duplicated safety-sensitive validation. | `src/tools/workspace/patch.rs::plan_patch`, `parse_patch_set`, `plan_apply_patch`, `parse_apply_patch`, `apply_context_hunks` |
-| Major | LLM message role/content invariants are not represented in types, forcing protocol lowerers to rediscover invalid states. | `src/llm/mod.rs::Message`, `src/llm/protocols/openai_chat.rs::append_user_content`, `src/llm/protocols/shared.rs::assistant_parts` |
-| Major | Tool argument schema and serde deserialization are independent contracts and can drift. | `src/tools/schema.rs`, `src/tools/args.rs` |
-| Major | Audit input collection mixes skip policy, prioritization, indexing, manifesting, language detection, and chunking in one module. | `src/audit/input.rs` |
+- **Medium** — Session turns are committed piecemeal, leaving partial saved state on failures: `src/agent/session.rs::run_prompt_with_policy`
+- **Medium** — Provider/model routing metadata has multiple sources of truth: `src/llm/providers.rs`, `src/llm/route/resolve.rs::model_route`, `src/llm/providers/route.rs`, `src/agent/model/reasoning.rs`
+- **Medium** — `oy review` duplicates the audit map/reduce pipeline instead of reusing it: `src/review.rs`, `src/audit.rs`, `src/audit/report.rs`
+- **Medium** — Native LLM execution repeats the same tool loop across protocol paths: `src/llm/openai.rs::{run_gemini,run_anthropic_messages,run_bedrock_converse,run_chat_completions,run_responses}`
+- **Medium** — Audit input skip rules exclude security-relevant source files by basename: `src/audit/input.rs::should_skip_path`
+- **Medium** — Exact-file search greps the parent directory and post-filters results: `src/tools/workspace/search.rs::fff_search_target`
 
 ## Detailed findings
 
-### 1. Fixed: Provider support gating is enforced by route resolution
+### Medium — Session turns are committed piecemeal
 
-**Severity:** Fixed
+**Evidence:** `src/agent/session.rs::run_prompt_with_policy` pushes the user message into `session.transcript.messages` before later steps run: context-budget checks, tool context construction, route/auth resolution, model execution, todo updates, and assistant/tool transcript appends.
 
-**Evidence:**
+**Structural impact:** A failure after the initial push leaves the persisted session with a user prompt but no corresponding assistant/tool turn. Retrying can duplicate the prompt or continue from misleading state. If tool execution partially happened before a later failure, transcript state and external side effects can also diverge.
 
-- `src/llm/route/resolve.rs::model_route` now calls a provider-support check before constructing `ModelRoute`.
-- `src/agent/model/metadata.rs::cache_model_limits` no longer rejects unsupported providers; it only populates best-effort limit/provider metadata.
-- `src/llm/protocols/gemini.rs` adds the missing Google Gemini native protocol: request lowering, SSE parsing, usage mapping, function calls, and Gemini tool-schema projection.
-- `src/agent/opencode_models.rs::OpenCodeModel::is_gemini_api` makes Google/Gemini OpenCode entries routable through the Gemini protocol rather than pretending they are OpenAI-compatible.
-- `src/agent/model/tests.rs::prepare_chat_routes_google_gemini_with_api_key_header` covers direct Google route construction.
-- `src/agent/opencode_models.rs::includes_google_models_when_gemini_protocol_is_supported` covers listing inclusion.
+**Simplification:** Stage the whole turn locally: build a candidate transcript/tool context, run budget checks and model/tool execution against that staged state, then commit transcript and todos together on success. If failed tool turns need to be preserved, commit an explicit failed-turn/tool-error record rather than silently keeping only the user message.
 
-The invariant is now local: if route resolution returns a route, the provider passed the supported-provider policy and has a native protocol mapping. Metadata/cache helpers are not execution gates.
-
----
-
-### 2. Fixed: `src/agent/model.rs` is now a small facade
-
-**Severity:** Fixed
+### Medium — Provider/model routing metadata has multiple sources of truth
 
 **Evidence:**
 
-- `src/agent/model.rs` is now 85 lines and owns only selection/listing facade behavior and public re-exports.
-- `src/agent/model/exec.rs` owns `exec_chat` and route/request handoff.
-- `src/agent/model/metadata.rs` owns model-limit/provider metadata caching.
-- `src/agent/model/reasoning.rs` owns thinking/reasoning-effort policy.
-- `src/agent/model/tests.rs` holds the former inline unit/live tests outside the production facade.
+- `src/llm/providers.rs::PROVIDERS` defines provider family, auth envs, default URLs, and support state.
+- `src/llm/route/resolve.rs::model_route` separately matches provider strings to `prepare_*` functions.
+- `src/llm/providers/route.rs` separately hardcodes auth/env/base-url handling per provider.
+- `src/agent/model/reasoning.rs::reasoning_effort_option` also owns provider/model capability quirks, including Moonshot/Kimi handling, OpenCode metadata lookup, and a static fallback list.
+- Alias drift already exists: metadata lists `amazon-bedrock`, while routing accepts both `"bedrock" | "amazon-bedrock"`.
 
-This removes the immediate 1,000-line blocker while preserving the public `agent::model` API used by sessions, audit, review, and CLI commands.
+**Structural impact:** Adding or changing a provider requires coordinated edits across metadata, route dispatch, provider-specific builders, auth handling, and agent reasoning policy. Provider capability behavior is no longer locally reasoned about in the LLM routing layer.
 
----
+**Simplification:** Make one provider descriptor the source of truth: canonical id, aliases, family, default URL, auth envs, support state, route builder, and model capability/reasoning policy. Resolve the descriptor once in `model_route`, then dispatch by descriptor/family. Keep `agent::model` passing user/env overrides rather than encoding provider-specific rules.
 
-### 3. `audit` and `review` are forking the same no-tools map/reduce pipeline
+### Medium — `oy review` duplicates the audit map/reduce pipeline
 
-**Severity:** Major
+**Evidence:** `src/review.rs::{run,sizing,prepare_workspace_input,compact_to_tokens,transparency_snippet,shell_quote,with_transparency_line}` mirrors orchestration and helpers from `src/audit.rs::{run,audit_constants}` and `src/audit/report.rs::{transparency_snippet,shell_quote,with_transparency_line}`. `review.rs` already depends on audit input helpers such as `collect_files`, `build_manifest`, `chunk_files`, and `ensure_chunks_fit_prompt`.
 
-**Evidence:**
+**Structural impact:** The no-tools workspace review flow now has two owners for sizing, chunk fan-out, reduce budgeting, transparency output, shell quoting, and output insertion. Fixes to deterministic map/reduce behavior can drift between `audit` and `review`.
 
-- `src/review.rs` contains its own orchestration: `run`, sizing, workspace/diff input preparation, token compaction, transparency-line insertion, shell quoting, and prompt construction.
-- Similar pipeline concepts already exist under `src/audit.rs`, `src/audit/reduce.rs`, `src/audit/report.rs`, and `src/audit/input`.
-- `src/cli/app/audit_cmd.rs::audit_command` and `src/cli/app/review_cmd.rs::review_command` are near-parallel command bodies: resolve root/model/focus/output, print no-tools prelude, run pipeline, emit JSON or success text.
+**Simplification:** Extract a shared no-tools map/reduce runner parameterized by prompts, report title/source label, output format, and existing-report behavior. Leave `audit` and `review` as thin specializations. Move transparency-line insertion and shell quoting into the shared report helper.
 
-This is the same architectural workflow twice: collect input, size/chunk it, map to candidate findings, reduce into final output, decorate/report, and write results.
+### Medium — Native LLM execution repeats the same tool loop across protocol paths
 
-**Why this hurts maintainability:**
+**Evidence:** `src/llm/openai.rs::{run_gemini,run_anthropic_messages,run_bedrock_converse,run_chat_completions,run_responses}` each repeats the same control flow: build request body, stream assistant output, convert assistant state, return when no tool calls remain, enforce tool-round budget, record assistant turn, execute tool calls, and append tool results.
 
-- Chunking limits, retry behavior, truncation, progress output, JSON shape, and report decoration can drift.
-- Fixes to prompt budgeting or compaction must be copied between systems.
-- The command layer duplicates orchestration that should be policy-agnostic.
-- `review` partially reuses audit input but not the rest of the pipeline, creating an awkward half-shared design.
+**Structural impact:** Tool-loop behavior is a cross-protocol invariant but must be fixed in five places. Drift is already visible in naming: `ensure_tool_round_budget` reports `native OpenAI {protocol} exceeded...` even for Gemini, Anthropic, and Bedrock protocol paths.
 
-**Required restructuring:**
+**Simplification:** Extract the shared loop around a small protocol adapter: `build_body`, `stream_step`, `append_assistant`, and `append_tool_result`. Keep protocol wire-format lowering local, but make budget enforcement, transcript updates, tool execution, and stop/return behavior single-owner.
 
-Extract one shared no-tools analysis runner, for example:
+### Medium — Audit input skip rules exclude security-relevant source files by basename
 
-```rust
-AnalysisSpec {
-    name,
-    default_output_path,
-    input_source,
-    map_prompt_builder,
-    reduce_prompt_builder,
-    report_renderer,
-    count_labels,
-}
-```
+**Evidence:** `src/audit/input.rs::should_skip_path` applies `SKIP_FILENAME_SUBSTRINGS = ["credential", "secret", "token"]` to filenames globally. The same audit path scoring later prioritizes security concepts such as auth/token/secret.
 
-The shared runner should own:
+**Structural impact:** The collector conflates likely secret artifacts with security-relevant source code. Files such as `token.rs`, `secret_manager.rs`, or `credential_store.go` can be silently omitted from audit input, making audit coverage hard to trust.
 
-- sizing and chunk/reduce budgeting,
-- candidate-finding compaction,
-- progress/no-tools prelude behavior,
-- transparency/report decoration helpers,
-- output writing and JSON/text emission shape where possible.
+**Simplification:** Split the policy: skip known secret/config artifacts such as `.env*`, private keys, `.netrc`, and credential dotfiles, but do not skip recognized source extensions solely because the basename contains `token`, `secret`, or `credential`. If needed, redact suspicious literal contents inside source files instead.
 
-Keep audit/review prompts and report semantics separate. Do not keep two orchestration engines.
+### Medium — Exact-file search greps the parent directory and post-filters
 
----
+**Evidence:** `src/tools/workspace/search.rs::fff_search_target` uses `target.parent()` as the grep base when `target.is_file()`, runs `picker.grep(... page_limit: limit)` across the parent directory, then filters matches by `exact_target` afterward.
 
-### 4. Native protocol execution has four near-identical tool loops
+**Structural impact:** Exact-file search is not enforced at the search boundary. Sibling file matches can consume the page limit before the target file is filtered in, so results for an exact file can be truncated or omitted depending on directory contents/index order.
 
-**Severity:** Major
-
-**Evidence:**
-
-Duplicated orchestration appears in:
-
-- `src/llm/openai.rs::run_chat_completions`
-- `src/llm/openai.rs::run_responses`
-- `src/llm/openai.rs::run_anthropic_messages`
-- `src/llm/openai.rs::run_bedrock_converse`
-
-Each path appears to perform the same lifecycle: build protocol body, stream assistant step with retry, convert assistant output, detect tool calls, enforce round budget, update `ToolLoopState`, execute local tools, append tool results, and continue.
-
-**Why this hurts maintainability:**
-
-- Retry, round-budget, transcript preservation, and side-effect handling must be fixed in every protocol path.
-- Protocol-specific lowering is mixed with canonical tool-loop control flow.
-- Adding another protocol will likely copy the same loop again.
-- Subtle behavior drift between providers is likely and hard to review.
-
-**Required restructuring:**
-
-Keep protocol serialization/deserialization explicit, but extract the shared control flow into one driver.
-
-A small adapter boundary is enough:
-
-```rust
-trait ProtocolToolLoop {
-    fn build_body(...);
-    async fn stream_step(...);
-    fn assistant_message(...);
-    fn append_assistant(...);
-    fn append_tool_result(...);
-}
-```
-
-The shared driver should own:
-
-- retry behavior,
-- round-budget enforcement,
-- `ToolLoopState`,
-- local tool execution,
-- transcript assembly,
-- common stop/continue decisions.
-
-Provider/protocol modules should only describe wire-format lowering and parsing.
-
----
-
-### 5. Patch handling duplicates parsers and safety/application paths
-
-**Severity:** Major
-
-**Evidence:**
-
-`src/tools/workspace/patch.rs` contains separate flows around:
-
-- `plan_patch`
-- `parse_patch_set`
-- `plan_apply_patch`
-- `parse_apply_patch`
-- `apply_context_hunks`
-
-The module supports both diffy unified/git patches and a bespoke `*** Begin Patch` format. The candidate flows duplicate path resolution, symlink checks, file-size checks, UTF-8/binary checks, duplicate-file checks, diff rendering, and plan construction.
-
-**Why this hurts maintainability:**
-
-Patch application is safety-sensitive. Duplicating validation across parser/application branches makes it easy for one format to bypass a check or diverge on edge cases. Embedding a custom mini-language parser inside the write sink also increases the amount of policy that future contributors must understand before changing patch behavior.
-
-**Required restructuring:**
-
-Normalize all patch formats into one typed internal representation before validation/application.
-
-Preferred shape:
-
-```rust
-enum PatchFormat {
-    Unified,
-    Git,
-    LegacyBeginPatch,
-}
-
-struct ParsedPatchFile { ... }
-
-struct PatchPlan { ... }
-```
-
-Then run one shared pipeline:
-
-1. Parse format-specific input into `ParsedPatchFile`.
-2. Resolve paths once.
-3. Run symlink/size/binary/UTF-8/duplicate-file validation once.
-4. Render preview/diff once.
-5. Apply/commit through one path.
-
-If `*** Begin Patch` is only compatibility sugar, consider deleting it and requiring unified/git diffs. If it must stay, isolate it as a parser only; it should not own separate safety semantics.
-
----
-
-### 6. Boundary contracts are too loose or duplicated
-
-**Severity:** Major
-
-Two related boundary issues should be cleaned up before they keep spreading.
-
-#### LLM message types allow invalid role/content states
-
-`src/llm/mod.rs::Message` uses a shared `Vec<MessageContent>` for both user and assistant messages. Invalid combinations are rejected later:
-
-- `src/llm/protocols/openai_chat.rs::append_user_content` rejects user `ToolCall` / `Reasoning`.
-- `src/llm/protocols/shared.rs::assistant_parts` rejects assistant `ToolResult`.
-
-That means role invariants are not encoded where messages are constructed. Every protocol lowerer must remember to defend against illegal combinations.
-
-**Remedy:** split content by role:
-
-```rust
-enum UserContent {
-    Text(...),
-    ToolResult(...),
-    Opaque(...),
-}
-
-enum AssistantContent {
-    Text(...),
-    ToolCall(...),
-    Reasoning(...),
-    Opaque(...),
-}
-```
-
-Keep serde/transcript compatibility at the boundary if needed, but make protocol lowering consume role-valid structures.
-
-#### Tool schema and argument parsing are two sources of truth
-
-`src/tools/schema.rs` hand-builds model-visible schemas/defaults/enums, while `src/tools/args.rs` separately defines serde structs/defaults/aliases. Defaults, enum values, numeric leniency, and aliases are duplicated.
-
-Examples called out in the candidates:
-
-- `DEFAULT_LIMIT` and numeric string handling appear in both schema construction and custom deserializers.
-- Search/replace modes exist as serde enums and schema `enum_values`.
-- `todo` aliases are documented in schema and reimplemented in `TodoArgs::deserialize`.
-
-**Remedy:** each tool should own one local argument contract. Either collocate the `Args` type and schema next to the implementation, or extract small shared constants for defaults/enums/aliases used by both schema and serde. Avoid a magical generic schema generator; the needed fix is to remove central catalogue drift, not add another abstraction layer.
-
----
-
-### 7. Audit input collection is carrying too many policies
-
-**Severity:** Major
-
-**Evidence:**
-
-`src/audit/input.rs` contains collection, skip rules, security-priority scoring, security-index keyword scanning, manifest rendering, chunking, language detection, and path normalization.
-
-The policy lists are already conceptually at odds: candidates note that `SKIP_FILENAME_SUBSTRINGS` skips filenames containing `"token"`, while `security_path_score` prioritizes paths containing `"token"`.
-
-**Why this hurts maintainability:**
-
-- Disclosure policy and prioritization policy are entangled in one collector.
-- Special cases will accumulate as ad-hoc string lists.
-- Security-relevant files can be silently omitted by one rule while another rule says they are important.
-- Chunking and manifest formatting changes require touching collection policy.
-
-**Required restructuring:**
-
-Split the collector into focused modules:
-
-- `skip_policy`
-- `classify` / `priority`
-- `security_index`
-- `manifest`
-- `chunking`
-- `language`
-
-Use a single path-classification API:
-
-```rust
-enum PathClassification {
-    Skip { reason: SkipReason },
-    Review { language, priority, security_tags },
-}
-```
-
-Add tests for skip-vs-priority edge cases, especially `token`, `auth`, `secret`, and config filenames.
+**Simplification:** Add a direct file-search path for `target.is_file()` that scans only that file with the selected regex/literal mode. Keep `fff` grep for directory targets and delete the parent-base plus post-filter special case.

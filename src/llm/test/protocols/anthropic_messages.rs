@@ -13,6 +13,7 @@ fn request() -> LlmRequest {
             },
             query_params: None,
             additional_params: None,
+            default_output_tokens: None,
         },
         system_prompt: "You are terse".to_string(),
         system_cache: Some(CacheHint::Ephemeral {
@@ -58,6 +59,17 @@ fn request_body_lowers_messages_tools_cache_and_generation() {
 }
 
 #[test]
+fn request_body_uses_route_output_limit_when_generation_max_tokens_absent() {
+    let mut request = request();
+    request.generation = None;
+    request.route.default_output_tokens = Some(8192);
+
+    let body = request_body(&request).unwrap();
+
+    assert_eq!(body["max_tokens"], 8192);
+}
+
+#[test]
 fn stream_parser_maps_text_tool_usage_and_finish() {
     let mut state = StreamState::default();
     let mut events = Vec::new();
@@ -97,5 +109,83 @@ fn stream_parser_maps_text_tool_usage_and_finish() {
             reason: FinishReason::ToolCalls,
             ..
         }
+    )));
+}
+
+#[test]
+fn stream_parser_preserves_signature_and_provider_executed_server_tools() {
+    let mut state = StreamState::default();
+    let mut events = Vec::new();
+    events.extend(
+        parse_stream_event(
+            &mut state,
+            &json!({
+                "type": "content_block_delta",
+                "delta": {"type": "signature_delta", "signature": "sig-1"}
+            }),
+        )
+        .unwrap(),
+    );
+    events.extend(
+        parse_stream_event(
+            &mut state,
+            &json!({
+                "type": "content_block_start",
+                "index": 2,
+                "content_block": {"type": "server_tool_use", "id": "srv_1", "name": "web_search"}
+            }),
+        )
+        .unwrap(),
+    );
+    events.extend(
+        parse_stream_event(
+            &mut state,
+            &json!({
+                "type": "content_block_delta",
+                "index": 2,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"rust\"}"}
+            }),
+        )
+        .unwrap(),
+    );
+    events.extend(
+        parse_stream_event(
+            &mut state,
+            &json!({
+                "type": "content_block_stop",
+                "index": 2
+            }),
+        )
+        .unwrap(),
+    );
+    events.extend(
+        parse_stream_event(
+            &mut state,
+            &json!({
+                "type": "content_block_start",
+                "content_block": {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srv_1",
+                    "content": {"results": []}
+                }
+            }),
+        )
+        .unwrap(),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        LlmEvent::ReasoningItem { value }
+            if value.pointer("/anthropic/signature").and_then(serde_json::Value::as_str) == Some("sig-1")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        LlmEvent::ToolCall { provider_executed: true, call }
+            if call.name == "web_search"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        LlmEvent::ToolResult { provider_executed: true, name, .. }
+            if name == "web_search"
     )));
 }

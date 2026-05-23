@@ -115,22 +115,12 @@ export OPENAI_BASE_URL=https://your-endpoint.example/v1  # optional
 oy model openai/gpt-4.1
 ```
 
-`oy`'s Rust-native LLM backend follows the provider families in OpenCode's LLM package: OpenAI, GitHub Copilot, OpenAI-compatible profiles, OpenRouter, xAI, Anthropic Messages, Google Gemini, Azure OpenAI, Cloudflare AI Gateway/Workers AI, and Amazon Bedrock Converse. Transcripts, tool schemas, cache hints, streamed events, and tool execution use `oy`-owned types. Newer reasoning models that require `/responses` are handled by narrow compatibility shims; Copilot routes require a Copilot API token rather than a GitHub access token.
+Provider setup is intentionally OpenCode-shaped: use OpenCode's [provider docs](https://opencode.ai/docs/providers) and [model/provider config docs](https://opencode.ai/docs/config#models) for credentials, provider options, route defaults, cache behavior, and streamed event shapes. The Rust-native backend tracks OpenCode's [LLM provider/protocol package](https://github.com/anomalyco/opencode/tree/dev/packages/llm); `oy` documents only local differences here:
 
-Provider-specific direct environment variables:
-
-| Provider | Variables |
-|---|---|
-| OpenAI | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL` |
-| GitHub Copilot | `GITHUB_COPILOT_API_KEY` or `COPILOT_API_KEY` |
-| xAI | `XAI_API_KEY`, optional `XAI_BASE_URL` |
-| OpenRouter | `OPENROUTER_API_KEY`, optional `OPENROUTER_BASE_URL`, optional `OPENROUTER_PROVIDER_OPTIONS` JSON for OpenRouter request-body options such as usage/reasoning/prompt cache key |
-| Azure OpenAI | `AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`; optional `AZURE_OPENAI_API_VERSION` |
-| Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN` or `CF_AIG_TOKEN`, plus `CLOUDFLARE_AI_GATEWAY_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID`; optional `CLOUDFLARE_AI_GATEWAY_ID` |
-| Cloudflare Workers AI | `CLOUDFLARE_API_KEY` or `CLOUDFLARE_WORKERS_AI_TOKEN`, plus `CLOUDFLARE_WORKERS_AI_BASE_URL` or `CLOUDFLARE_ACCOUNT_ID` |
-| Anthropic | `ANTHROPIC_API_KEY`; optional `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION`, `ANTHROPIC_PROVIDER_OPTIONS` |
-| Google Gemini | `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY`; optional `GOOGLE_BASE_URL` or `GEMINI_BASE_URL` |
-| Amazon Bedrock | `BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`, or SigV4 via `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; optional `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `BEDROCK_BASE_URL` |
+- `oy model` reads model metadata from `opencode models --verbose`; OpenCode remains the source of provider/model listings.
+- Copilot routes require a Copilot API token (`GITHUB_COPILOT_API_KEY` or `COPILOT_API_KEY`), not a GitHub access token.
+- Direct OpenAI works without OpenCode metadata via `OPENAI_API_KEY`; provider options still use OpenCode's shapes.
+- Extra `oy` env aliases beyond OpenCode: `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `GOOGLE_PROVIDER_OPTIONS`, `OPENROUTER_BASE_URL`, `XAI_BASE_URL`/`XAI_PROVIDER_OPTIONS`, `AZURE_BASE_URL`, `BEDROCK_BASE_URL`/`AWS_BEDROCK_BASE_URL`, and `CLOUDFLARE_AI_GATEWAY_PROVIDER_API_KEY` for Cloudflare AI Gateway downstream bearer auth.
 
 The last five saved model selections are kept as a local quick history. When two or more recent models exist, interactive `oy model` and `/model` show that recent list first, with options to inspect the full OpenCode listing or clear the recent history.
 
@@ -149,7 +139,7 @@ The model does not get file-edit tools, shell access, or live search during an a
 
 ## Review
 
-`oy review [target]` runs a strict no-tools maintainability review inspired by thermo-nuclear code-quality review rules: structural simplification, code-judo opportunities, spaghetti branching, abstraction/type boundaries, and 1000-line decomposition risks. With a target, it reviews `git diff <target> --` against the current workspace; without one, it reviews the whole workspace. By default it writes `REVIEW.md`.
+`oy review [target]` runs a strict no-tools maintainability review focused on structural simplification, code-judo opportunities, spaghetti branching, abstraction/type boundaries, and 1000-line decomposition risks. With a target, it reviews `git diff <target> --` against the current workspace; without one, it reviews the whole workspace. By default it writes `REVIEW.md`.
 
 ```bash
 oy review
@@ -219,10 +209,7 @@ Default local paths:
 | `OY_COLOR` | `auto`, `always`, or `never`; `NO_COLOR` disables color |
 | `OY_MAX_TOOL_ROUNDS` | Tool-call budget per prompt; default `512` |
 | `OY_MAX_BASH_CMD_BYTES` | Maximum `bash` command size in bytes; default `1048576` |
-| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI auth/endpoint |
-| `GITHUB_COPILOT_API_KEY`, `COPILOT_API_KEY` | Copilot API-token auth |
-| `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `AZURE_OPENAI_API_KEY` | Direct provider auth for Anthropic, OpenRouter, xAI, and Azure OpenAI |
-| `BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Amazon Bedrock auth |
+| Provider auth/options | Follow OpenCode [provider docs](https://opencode.ai/docs/providers), [model/provider config](https://opencode.ai/docs/config#models), and [LLM provider source](https://github.com/anomalyco/opencode/tree/dev/packages/llm/src/providers); `oy` extras are listed in the model section above |
 | `OY_TITLE` | Terminal title/zellij pane progress: `off`, `never`, `0` disable; `on`, `always`, `1` force in human output modes |
 | `LOCAL_API_KEY` | Optional local `local-<port>` shim key; defaults to `oy-local` |
 

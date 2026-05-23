@@ -9,6 +9,7 @@ pub(crate) struct PendingTool {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) input: String,
+    pub(crate) provider_executed: bool,
 }
 
 pub(crate) type State<K> = HashMap<K, PendingTool>;
@@ -42,6 +43,7 @@ where
         id: id.to_string(),
         name: name.to_string(),
         input: String::new(),
+        provider_executed: false,
     });
     tool.id = id.to_string();
     tool.name = name.to_string();
@@ -137,7 +139,7 @@ fn finish_events(
         },
         LlmEvent::ToolCall {
             call,
-            provider_executed: false,
+            provider_executed: tool.provider_executed,
         },
     ])
 }

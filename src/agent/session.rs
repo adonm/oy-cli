@@ -258,31 +258,32 @@ async fn run_prompt_with_policy(
     prompt: &str,
     policy_override: Option<ToolPolicy>,
 ) -> Result<String> {
-    session.transcript.messages.push(Message::user_text(prompt));
+    let mut staged = session.clone();
+    staged.transcript.messages.push(Message::user_text(prompt));
     let max_tool_rounds = config::max_tool_rounds(DEFAULT_MAX_TOOL_ROUNDS);
 
-    let mut tool_context = session.tool_context();
+    let mut tool_context = staged.tool_context();
     if let Some(policy) = policy_override {
         tool_context.env.policy = policy;
     }
     let tool_context = Arc::new(Mutex::new(tool_context));
-    let model_spec = session.model.trim().to_string();
-    ensure_context_budget(session, &model_spec).await?;
+    let model_spec = staged.model.trim().to_string();
+    ensure_context_budget(&mut staged, &model_spec).await?;
     let preamble = {
         let ctx = tool_context.lock().await;
-        session
+        staged
             .transcript
-            .request_preamble(&session.system_prompt, &ctx)
+            .request_preamble(&staged.system_prompt, &ctx)
     };
-    let messages = session.transcript.to_messages();
+    let messages = staged.transcript.to_messages();
     let tool_specs = {
         let ctx = tool_context.lock().await;
         crate::tools::tool_specs(&ctx)
     };
     let llm_tools = crate::tools::llm_tools(tool_context.clone()).await;
-    crate::ui::title_progress(session.wait_status(&model_spec));
+    crate::ui::title_progress(staged.wait_status(&model_spec));
     if !crate::ui::is_quiet() {
-        crate::ui::err_line(format_args!("{}", session.wait_status(&model_spec)));
+        crate::ui::err_line(format_args!("{}", staged.wait_status(&model_spec)));
     }
     let response = model::exec_chat(
         &model_spec,
@@ -293,15 +294,17 @@ async fn run_prompt_with_policy(
         max_tool_rounds,
     )
     .await?;
-    session.todos = tool_context.lock().await.todos().to_vec();
+    staged.todos = tool_context.lock().await.todos().to_vec();
     if let Some(messages) = response.messages {
-        session.transcript.messages.extend(messages);
+        staged.transcript.messages.extend(messages);
     } else {
-        session
+        staged
             .transcript
             .messages
             .push(Message::assistant_text(response.output.clone()));
     }
+    session.transcript = staged.transcript;
+    session.todos = staged.todos;
     Ok(response.output)
 }
 

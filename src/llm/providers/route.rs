@@ -15,6 +15,7 @@ struct OpenCodeRouteProfile {
     model_id: String,
     base_url: String,
     protocol: Protocol,
+    default_output_tokens: Option<u64>,
 }
 
 impl OpenCodeRouteProfile {
@@ -53,12 +54,18 @@ impl OpenCodeRouteProfile {
             model_id: profile.model_id,
             base_url: profile.base_url,
             protocol: profile.protocol,
+            default_output_tokens: (info.limits().output > 0)
+                .then_some(info.limits().output as u64),
         })
     }
 }
 
 pub(crate) fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
     let profile = crate::llm::providers::openai_profile(model, env_value("OPENAI_BASE_URL"));
+    let provider_options = crate::llm::providers::openai_body_options(
+        env_json("OPENAI_PROVIDER_OPTIONS").as_ref(),
+        profile.protocol,
+    );
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
@@ -67,7 +74,8 @@ pub(crate) fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
         ),
         base_url: Some(profile.base_url),
         query_params: None,
-        additional_params: None,
+        additional_params: provider_options,
+        default_output_tokens: None,
     })
 }
 
@@ -77,6 +85,10 @@ fn env_json(name: &str) -> Option<serde_json::Value> {
 
 pub(crate) fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
     let profile = crate::llm::providers::xai_profile(model, env_value("XAI_BASE_URL"));
+    let provider_options = crate::llm::providers::openai_body_options(
+        env_json("XAI_PROVIDER_OPTIONS").as_ref(),
+        profile.protocol,
+    );
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
@@ -85,7 +97,8 @@ pub(crate) fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
         ),
         base_url: Some(profile.base_url),
         query_params: None,
-        additional_params: None,
+        additional_params: provider_options,
+        default_output_tokens: None,
     })
 }
 
@@ -105,6 +118,7 @@ pub(crate) fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
         base_url: Some(profile.base_url),
         query_params: None,
         additional_params: provider_options,
+        default_output_tokens: None,
     })
 }
 
@@ -117,6 +131,9 @@ pub(crate) fn prepare_google_chat(model: &str) -> Result<ModelRoute> {
         &model_id,
         env_value("GOOGLE_BASE_URL").or_else(|| env_value("GEMINI_BASE_URL")),
     );
+    let provider_options = env_json("GEMINI_PROVIDER_OPTIONS")
+        .or_else(|| env_json("GOOGLE_PROVIDER_OPTIONS"))
+        .and_then(|value| crate::llm::providers::gemini_body_options(Some(&value)));
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
@@ -129,7 +146,8 @@ pub(crate) fn prepare_google_chat(model: &str) -> Result<ModelRoute> {
         },
         base_url: Some(profile.base_url),
         query_params: None,
-        additional_params: None,
+        additional_params: provider_options,
+        default_output_tokens: None,
     })
 }
 
@@ -140,6 +158,9 @@ pub(crate) fn prepare_anthropic_chat(model: &str) -> Result<ModelRoute> {
         .unwrap_or_else(|| model.to_string());
     let profile =
         crate::llm::providers::anthropic_profile(&model_id, env_value("ANTHROPIC_BASE_URL"));
+    let provider_options = crate::llm::providers::anthropic_body_options(
+        env_json("ANTHROPIC_PROVIDER_OPTIONS").as_ref(),
+    );
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
@@ -156,7 +177,8 @@ pub(crate) fn prepare_anthropic_chat(model: &str) -> Result<ModelRoute> {
         ]),
         base_url: Some(profile.base_url),
         query_params: None,
-        additional_params: env_json("ANTHROPIC_PROVIDER_OPTIONS"),
+        additional_params: provider_options,
+        default_output_tokens: None,
     })
 }
 
@@ -185,6 +207,7 @@ pub(crate) fn prepare_azure_chat(model: &str) -> Result<ModelRoute> {
             env_value("AZURE_OPENAI_API_VERSION").unwrap_or_else(|| "v1".to_string()),
         )]),
         additional_params: None,
+        default_output_tokens: None,
     })
 }
 
@@ -198,7 +221,8 @@ pub(crate) fn prepare_cloudflare_ai_gateway_chat(model: &str) -> Result<ModelRou
         })
     }).context("Cloudflare AI Gateway requires CLOUDFLARE_AI_GATEWAY_BASE_URL or CLOUDFLARE_ACCOUNT_ID")?;
     let gateway_key = env_value("CLOUDFLARE_API_TOKEN").or_else(|| env_value("CF_AIG_TOKEN"));
-    let api_key = env_value("OPENAI_API_KEY");
+    let api_key =
+        env_value("CLOUDFLARE_AI_GATEWAY_PROVIDER_API_KEY").or_else(|| env_value("OPENAI_API_KEY"));
     let auth = match (gateway_key, api_key) {
         (Some(gateway_key), Some(api_key)) => RouteAuth::Composite(vec![
             RouteAuth::Header {
@@ -223,6 +247,7 @@ pub(crate) fn prepare_cloudflare_ai_gateway_chat(model: &str) -> Result<ModelRou
         base_url: Some(base_url),
         query_params: None,
         additional_params: None,
+        default_output_tokens: None,
     })
 }
 
@@ -242,6 +267,7 @@ pub(crate) fn prepare_cloudflare_workers_ai_chat(model: &str) -> Result<ModelRou
         base_url: Some(base_url),
         query_params: None,
         additional_params: None,
+        default_output_tokens: None,
     })
 }
 
@@ -269,11 +295,13 @@ pub(crate) fn prepare_github_copilot_chat(model: &str) -> Result<ModelRoute> {
         base_url: Some(route_profile.base_url),
         query_params: None,
         additional_params: None,
+        default_output_tokens: profile.and_then(|profile| profile.default_output_tokens),
     })
 }
 
 pub(crate) fn prepare_bedrock_chat(provider: &str, model: &str) -> Result<ModelRoute> {
-    let model_id = opencode_models::find(provider, model)
+    let model_info = opencode_models::find(provider, model);
+    let model_id = model_info
         .as_ref()
         .map(|info| info.api_id().to_string())
         .unwrap_or_else(|| model.to_string());
@@ -292,6 +320,9 @@ pub(crate) fn prepare_bedrock_chat(provider: &str, model: &str) -> Result<ModelR
         base_url: Some(profile.base_url),
         query_params: None,
         additional_params: None,
+        default_output_tokens: model_info
+            .as_ref()
+            .and_then(|info| (info.limits().output > 0).then_some(info.limits().output as u64)),
     })
 }
 
@@ -323,9 +354,16 @@ pub(crate) fn prepare_opencode_compatible_chat(provider: &str, model: &str) -> R
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
-        auth: RouteAuth::ApiKey(api_key),
+        auth: RouteAuth::Composite(vec![
+            RouteAuth::ApiKey(api_key),
+            RouteAuth::Headers(vec![
+                ("x-opencode-client".to_string(), "oy".to_string()),
+                ("user-agent".to_string(), "oy".to_string()),
+            ]),
+        ]),
         base_url: Some(profile.base_url),
         query_params: None,
         additional_params: None,
+        default_output_tokens: profile.default_output_tokens,
     })
 }

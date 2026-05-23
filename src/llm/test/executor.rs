@@ -22,13 +22,13 @@ fn shared_tool_round_budget_helper_preserves_protocol_messages() {
     let chat = ensure_tool_round_budget(1, 1, "chat").unwrap_err();
     assert_eq!(
         chat.to_string(),
-        "native OpenAI chat exceeded the tool round budget"
+        "native chat exceeded the tool round budget"
     );
 
     let responses = ensure_tool_round_budget(1, 1, "Responses").unwrap_err();
     assert_eq!(
         responses.to_string(),
-        "native OpenAI Responses exceeded the tool round budget"
+        "native Responses exceeded the tool round budget"
     );
 }
 
@@ -347,7 +347,7 @@ fn chat_stream_defers_finish_until_usage_arrives_after_finish_reason() {
 
 #[test]
 fn responses_request_serializes_function_call_output_golden() {
-    let input = openai_responses::input_from_llm(
+    let input = openai_responses::input_from_llm_with_store(
         "system",
         vec![
             Message::user_text("inspect"),
@@ -373,6 +373,7 @@ fn responses_request_serializes_function_call_output_golden() {
                 }],
             },
         ],
+        Some(false),
     )
     .unwrap();
     let body = openai_responses::request_body(
@@ -442,8 +443,12 @@ fn responses_request_serializes_function_call_output_golden() {
 
 #[test]
 fn responses_request_lowers_opencode_tool_choice_and_generation_options() {
-    let input =
-        openai_responses::input_from_llm("system", vec![Message::user_text("inspect")]).unwrap();
+    let input = openai_responses::input_from_llm_with_store(
+        "system",
+        vec![Message::user_text("inspect")],
+        Some(false),
+    )
+    .unwrap();
 
     let body = openai_responses::request_body(
         "gpt-5.1",
@@ -473,6 +478,80 @@ fn responses_request_lowers_opencode_tool_choice_and_generation_options() {
 }
 
 #[test]
+fn responses_request_round_trips_reasoning_item_metadata() {
+    let input = openai_responses::input_from_llm_with_store(
+        "",
+        vec![Message::Assistant {
+            id: None,
+            content: vec![MessageContent::Reasoning {
+                value: json!({
+                    "text": "summary",
+                    "openai": {
+                        "itemId": "rs_1",
+                        "reasoningEncryptedContent": "encrypted"
+                    }
+                }),
+            }],
+        }],
+        Some(false),
+    )
+    .unwrap();
+
+    assert_eq!(
+        input,
+        vec![json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "summary"}],
+            "encrypted_content": "encrypted"
+        })]
+    );
+}
+
+#[test]
+fn responses_request_allows_reasoning_without_encrypted_state_when_store_true() {
+    let messages = vec![Message::Assistant {
+        id: None,
+        content: vec![MessageContent::Reasoning {
+            value: json!({
+                "text": "persisted summary",
+                "openai": {"itemId": "rs_persisted"}
+            }),
+        }],
+    }];
+
+    let skipped =
+        openai_responses::input_from_llm_with_store("", messages.clone(), Some(false)).unwrap();
+    assert!(skipped.is_empty());
+
+    let input = openai_responses::input_from_llm_with_store("", messages, Some(true)).unwrap();
+    assert_eq!(
+        input,
+        vec![json!({
+            "type": "reasoning",
+            "id": "rs_persisted",
+            "summary": [{"type": "summary_text", "text": "persisted summary"}],
+            "encrypted_content": null
+        })]
+    );
+}
+
+#[test]
+fn responses_stream_parses_reasoning_text_delta() {
+    let mut state = openai_responses::StreamState::default();
+    let events = openai_responses::parse_stream_event(
+        &mut state,
+        &json!({"type": "response.reasoning_text.delta", "delta": "thinking"}),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        events.as_slice(),
+        [crate::llm::schema::LlmEvent::ReasoningDelta { text }] if text == "thinking"
+    ));
+}
+
+#[test]
 fn responses_stream_parses_text_and_tool_calls() {
     let mut state = openai_responses::StreamState::default();
     let events = [
@@ -495,6 +574,51 @@ fn responses_stream_parses_text_and_tool_calls() {
         response.tool_calls[0].arguments_value().unwrap(),
         json!({"path": "Cargo.toml"})
     );
+}
+
+#[test]
+fn responses_stream_preserves_reasoning_item_metadata_and_nested_errors() {
+    let mut state = openai_responses::StreamState::default();
+    let mut step = StepAccumulator::default();
+    for event in openai_responses::parse_stream_event(
+        &mut state,
+        &json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "summary"}],
+                "encrypted_content": "encrypted"
+            }
+        }),
+    )
+    .unwrap()
+    {
+        step.push(event).unwrap();
+    }
+    assert_eq!(
+        step.reasoning_content,
+        Some(json!({
+            "text": "summary",
+            "openai": {
+                "itemId": "rs_1",
+                "reasoningEncryptedContent": "encrypted"
+            }
+        }))
+    );
+
+    let error = openai_responses::parse_stream_event(
+        &mut state,
+        &json!({
+            "type": "response.failed",
+            "response": {"error": {"code": "bad_request", "message": "nested failure"}}
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        &error[0],
+        crate::llm::schema::LlmEvent::ProviderError { message, .. } if message == "nested failure"
+    ));
 }
 
 #[test]

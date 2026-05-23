@@ -23,6 +23,7 @@ pub(crate) use exec::prepare_chat;
 #[cfg(test)]
 pub(crate) use metadata::{
     CachedModelInfo, ProviderInfo, canonical_cache_key, replace_cached_model_info,
+    restore_cached_model_info,
 };
 #[cfg(test)]
 pub(crate) use reasoning::reasoning_capable_fallback;

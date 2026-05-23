@@ -508,6 +508,30 @@ fn search_stops_at_requested_limit() {
 }
 
 #[test]
+fn search_exact_file_does_not_spend_limit_on_siblings() {
+    let (dir, ctx) = test_context(auto_policy(), false);
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/aaa.rs"), "hit\nhit\nhit\n").unwrap();
+    fs::write(dir.path().join("src/target.rs"), "hit\n").unwrap();
+
+    let value = workspace::tool_search(
+        &ctx,
+        SearchArgs {
+            pattern: "hit".into(),
+            path: "src/target.rs".into(),
+            exclude: None,
+            limit: 1,
+            mode: SearchMode::Literal,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value["match_count"], 1);
+    assert_eq!(value["matches"][0]["path"], "src/target.rs");
+    assert_eq!(value["truncated"], false);
+}
+
+#[test]
 fn replace_skips_oversized_workspace_file() {
     let (dir, ctx) = test_context(auto_policy(), false);
     fs::write(

@@ -222,6 +222,8 @@ pub(crate) struct ModelRoute {
     pub query_params: Option<Vec<(String, String)>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_params: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

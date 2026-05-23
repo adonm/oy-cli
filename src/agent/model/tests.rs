@@ -42,7 +42,7 @@ impl Drop for EnvGuard {
 }
 
 struct ModelInfoCacheGuard {
-    saved: Option<CachedModelInfo>,
+    saved: std::collections::HashMap<String, CachedModelInfo>,
 }
 
 impl ModelInfoCacheGuard {
@@ -55,7 +55,7 @@ impl ModelInfoCacheGuard {
 
 impl Drop for ModelInfoCacheGuard {
     fn drop(&mut self) {
-        replace_cached_model_info(self.saved.take());
+        restore_cached_model_info(std::mem::take(&mut self.saved));
     }
 }
 
@@ -109,7 +109,7 @@ fn parsed_model_spec_captures_provider_model_and_reasoning_suffix() {
 }
 
 #[test]
-fn prepare_chat_builds_openai_chat_plan() {
+fn prepare_chat_builds_openai_responses_plan() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let _env = EnvGuard::set(&[
         ("OPENAI_API_KEY", Some("test-openai-key")),
@@ -120,7 +120,7 @@ fn prepare_chat_builds_openai_chat_plan() {
         ),
     ]);
     let chat = prepare_chat("openai::gpt-4.1-mini").unwrap();
-    assert_eq!(chat.protocol, Protocol::OpenAiChat);
+    assert_eq!(chat.protocol, Protocol::OpenAiResponses);
     assert_eq!(chat.model, "gpt-4.1-mini");
     assert_eq!(chat.auth, RouteAuth::ApiKey("test-openai-key".to_string()));
     assert_eq!(chat.base_url.as_deref(), Some("https://openai.example/v1"));
@@ -170,12 +170,13 @@ fn prepare_chat_adds_openai_gpt5_defaults_and_preserves_explicit_effort() {
 
     let chat = prepare_chat("openai::gpt-5.5-low").unwrap();
 
-    assert_eq!(chat.protocol, Protocol::OpenAiChat);
+    assert_eq!(chat.protocol, Protocol::OpenAiResponses);
     assert_eq!(
         chat.additional_params,
         Some(serde_json::json!({
             "store": false,
-            "reasoning_effort": "low",
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "text": {"verbosity": "low"},
         }))
     );
 }

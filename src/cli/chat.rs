@@ -148,84 +148,62 @@ async fn run_prompt_interruptible(session: &mut Session, prompt: &str) -> Result
 async fn run_prompt_with_context_recovery(session: &mut Session, prompt: &str) -> Result<()> {
     let mut recovery_attempts = 0usize;
     loop {
-        match run_prompt_interruptible(session, prompt).await {
-            Ok(answer) => {
-                if !answer.is_empty() {
-                    crate::ui::markdown(&format!("{answer}\n"));
-                }
+        let err = match run_prompt_interruptible(session, prompt).await {
+            Ok(answer) => return complete_chat_turn(answer),
+            Err(err) if err.is::<ChatTurnInterrupted>() => {
+                crate::ui::warn("interrupted current turn; still in chat");
                 return Ok(());
             }
-            Err(err) => {
-                if err.is::<ChatTurnInterrupted>() {
-                    crate::ui::warn("interrupted current turn; still in chat");
-                    return Ok(());
-                }
-                let Some(budget_err) = err
-                    .downcast_ref::<session::ContextBudgetExceeded>()
-                    .copied()
-                else {
-                    return handle_llm_error(session, prompt, err).await;
-                };
-                recovery_attempts += 1;
-                crate::ui::err_line(format_args!("model call failed: {err}"));
-                if recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
-                    offer_save_after_context_failures(session)?;
-                    return Ok(());
-                }
-                if !recover_context_budget(session, recovery_attempts, budget_err)? {
-                    return Ok(());
-                }
+            Err(err) => err,
+        };
+
+        if let Some(budget_err) = err
+            .downcast_ref::<session::ContextBudgetExceeded>()
+            .copied()
+        {
+            recovery_attempts += 1;
+            crate::ui::err_line(format_args!("model call failed: {err}"));
+            if recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
+                offer_save_after_context_failures(session)?;
+                return Ok(());
             }
+            if !recover_context_budget(session, recovery_attempts, budget_err)? {
+                return Ok(());
+            }
+            continue;
+        }
+
+        if !prompt_retry_after_llm_error(&err)? {
+            return Ok(());
         }
     }
 }
 
-async fn handle_llm_error(
-    session: &mut Session,
-    prompt: &str,
-    initial_err: anyhow::Error,
-) -> Result<()> {
-    let mut last_err = initial_err;
+fn complete_chat_turn(answer: String) -> Result<()> {
+    if !answer.is_empty() {
+        crate::ui::markdown(&format!("{answer}\n"));
+    }
+    Ok(())
+}
 
-    loop {
-        crate::ui::err_line(format_args!("model call failed: {last_err}"));
+fn prompt_retry_after_llm_error(err: &anyhow::Error) -> Result<bool> {
+    crate::ui::err_line(format_args!("model call failed: {err}"));
 
-        if !config::can_prompt() {
-            return Err(last_err);
-        }
+    if !config::can_prompt() {
+        return Err(anyhow::anyhow!(err.to_string()));
+    }
 
-        let choices = vec![
-            "Retry".to_string(),
-            "Return to chat".to_string(),
-            "Exit".to_string(),
-        ];
+    let choices = vec![
+        "Retry".to_string(),
+        "Return to chat".to_string(),
+        "Exit".to_string(),
+    ];
+    let choice = ask("LLM call failed. What do you want to do?", Some(&choices))?;
 
-        let choice = ask("LLM call failed. What do you want to do?", Some(&choices))?;
-
-        match choice.as_str() {
-            "Retry" => match run_prompt_interruptible(session, prompt).await {
-                Ok(answer) => {
-                    if !answer.is_empty() {
-                        crate::ui::markdown(&format!("{answer}\n"));
-                    }
-                    return Ok(());
-                }
-                Err(err) if err.is::<ChatTurnInterrupted>() => {
-                    crate::ui::warn("interrupted current turn; still in chat");
-                    return Ok(());
-                }
-                Err(err)
-                    if err
-                        .downcast_ref::<session::ContextBudgetExceeded>()
-                        .is_some() =>
-                {
-                    return Err(err);
-                }
-                Err(err) => last_err = err,
-            },
-            "Return to chat" => return Ok(()),
-            _ => return Err(last_err),
-        }
+    match choice.as_str() {
+        "Retry" => Ok(true),
+        "Return to chat" => Ok(false),
+        _ => Err(anyhow::anyhow!(err.to_string())),
     }
 }
 

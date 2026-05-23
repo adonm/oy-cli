@@ -13,6 +13,7 @@ fn request() -> LlmRequest {
             },
             query_params: None,
             additional_params: None,
+            default_output_tokens: None,
         },
         system_prompt: "You are concise.".to_string(),
         system_cache: None,

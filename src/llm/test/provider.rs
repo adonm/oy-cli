@@ -51,6 +51,11 @@ fn provider_registry_matches_opencode_provider_surface() {
         provider_metadata("deepseek").unwrap().family,
         ProviderFamily::OpenAiCompatible
     );
+    assert_eq!(provider_metadata("bedrock").unwrap().id, "amazon-bedrock");
+    assert_eq!(provider_metadata("gemini").unwrap().id, "google");
+    assert_eq!(provider_metadata("copilot").unwrap().id, "github-copilot");
+    assert!(is_bedrock_provider("amazon-bedrock"));
+    assert!(is_bedrock_provider("bedrock"));
 }
 
 #[test]
@@ -82,6 +87,81 @@ fn openrouter_body_options_match_opencode_projection() {
             "usage": {"include": true},
             "reasoning": {"effort": "high"},
             "prompt_cache_key": "abc"
+        }))
+    );
+}
+
+#[test]
+fn openai_direct_defaults_to_responses_like_opencode_facade() {
+    assert_eq!(
+        openai_profile("gpt-4.1", None).protocol,
+        Protocol::OpenAiResponses
+    );
+}
+
+#[test]
+fn openai_body_options_project_opencode_provider_options() {
+    assert_eq!(
+        openai_body_options(
+            Some(&serde_json::json!({
+                "openai": {
+                    "store": true,
+                    "promptCacheKey": "session-1",
+                    "reasoningEffort": "high",
+                    "reasoningSummary": "auto",
+                    "includeEncryptedReasoning": true,
+                    "textVerbosity": "low",
+                    "instructions": "Prefer concise answers"
+                }
+            })),
+            Protocol::OpenAiResponses,
+        ),
+        Some(serde_json::json!({
+            "store": true,
+            "instructions": "Prefer concise answers",
+            "prompt_cache_key": "session-1",
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "text": {"verbosity": "low"}
+        }))
+    );
+    assert_eq!(
+        openai_body_options(
+            Some(&serde_json::json!({"reasoningEffort": "low", "promptCacheKey": "ignored"})),
+            Protocol::OpenAiChat,
+        ),
+        Some(serde_json::json!({"reasoning_effort": "low"}))
+    );
+}
+
+#[test]
+fn anthropic_body_options_project_opencode_thinking_options() {
+    assert_eq!(
+        anthropic_body_options(Some(&serde_json::json!({
+            "anthropic": {"thinking": {"type": "enabled", "budgetTokens": 4096}}
+        }))),
+        Some(serde_json::json!({
+            "thinking": {"type": "enabled", "budget_tokens": 4096}
+        }))
+    );
+    assert_eq!(
+        anthropic_body_options(Some(&serde_json::json!({
+            "thinking": {"type": "enabled", "budget_tokens": 2048}
+        }))),
+        Some(serde_json::json!({
+            "thinking": {"type": "enabled", "budget_tokens": 2048}
+        }))
+    );
+}
+
+#[test]
+fn gemini_body_options_project_opencode_thinking_config() {
+    assert_eq!(
+        gemini_body_options(Some(&serde_json::json!({
+            "gemini": {"thinkingConfig": {"thinkingBudget": 1024, "includeThoughts": true}}
+        }))),
+        Some(serde_json::json!({
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": 1024, "includeThoughts": true}}
         }))
     );
 }

@@ -185,6 +185,9 @@ pub(crate) enum LlmEvent {
     ReasoningDelta {
         text: String,
     },
+    ReasoningItem {
+        value: Value,
+    },
     ToolInputStart {
         id: String,
         name: String,
@@ -243,6 +246,9 @@ impl StepAccumulator {
                     }
                     None => self.reasoning_content = Some(Value::String(text)),
                 }
+            }
+            LlmEvent::ReasoningItem { value } => {
+                self.reasoning_content = Some(value);
             }
             LlmEvent::ToolCall {
                 call,

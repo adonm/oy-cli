@@ -155,6 +155,7 @@ fn test_request() -> LlmRequest {
             auth: RouteAuth::ApiKey("test".to_string()),
             query_params: None,
             additional_params: None,
+            default_output_tokens: None,
         },
         system_prompt: "system".to_string(),
         system_cache: None,
