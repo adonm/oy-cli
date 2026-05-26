@@ -25,7 +25,11 @@ impl OpenCodeRouteProfile {
         model: &str,
         info: &opencode_models::OpenCodeModel,
     ) -> Result<Self> {
-        if !info.is_openai_compatible_api() && !info.is_bedrock_api() && !info.is_gemini_api() {
+        if !info.is_openai_compatible_api()
+            && !info.is_anthropic_api()
+            && !info.is_bedrock_api()
+            && !info.is_gemini_api()
+        {
             bail!("OpenCode model `{provider}/{model}` is not supported by the native LLM backend");
         }
         let model_id = info.api_id().to_string();
@@ -48,6 +52,11 @@ impl OpenCodeRouteProfile {
             })?;
         let profile = if info.is_gemini_api() {
             crate::llm::providers::gemini_profile(&model_id, Some(base_url.clone()))
+        } else if info.is_anthropic_api() {
+            crate::llm::providers::anthropic_profile(
+                &model_id,
+                Some(strip_endpoint_suffix(&base_url, "messages")),
+            )
         } else {
             crate::llm::providers::opencode_profile(provider, &model_id, &base_url)
         };
@@ -59,6 +68,14 @@ impl OpenCodeRouteProfile {
                 .then_some(info.limits().output as u64),
         })
     }
+}
+
+fn strip_endpoint_suffix(base_url: &str, suffix: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    trimmed
+        .strip_suffix(&format!("/{suffix}"))
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 pub(crate) fn prepare_chat(
@@ -381,6 +398,13 @@ pub(crate) fn prepare_opencode_compatible_chat(provider: &str, model: &str) -> R
                 name: "x-goog-api-key".to_string(),
                 value: api_key,
             },
+            opencode_client_headers(),
+        ]),
+        Protocol::AnthropicMessages => RouteAuth::Composite(vec![
+            RouteAuth::Headers(vec![
+                ("x-api-key".to_string(), api_key),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ]),
             opencode_client_headers(),
         ]),
         _ => RouteAuth::Composite(vec![RouteAuth::ApiKey(api_key), opencode_client_headers()]),

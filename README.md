@@ -103,7 +103,7 @@ OY_ROOT=../my-project oy run "summarize this repo"
 
 If you don't have a model provider yet, [OpenCode Go](https://opencode.ai/go) is a decent starting subscription for open-weight models — it provides access to DeepSeek V4, Qwen, Kimi, GLM, and others for $10/month. Install and configure OpenCode, subscribe to Go, then `oy` will pick up the credentials automatically.
 
-`oy model` uses `opencode models --verbose` as the model metadata source. That keeps provider/model listings in OpenCode; `oy` only keeps the small route/profile metadata needed by its Rust-native backend. Install and configure OpenCode credentials for the providers you want listed, then run:
+`oy model` uses `opencode models --verbose` as the model metadata source. That keeps provider/model listings in OpenCode; `oy` only keeps the small route/profile metadata needed by its Rust-native backend. OpenCode Go models are routed according to that metadata, including OpenAI-compatible, Anthropic Messages, and Gemini API shapes. Install and configure OpenCode credentials for the providers you want listed, then run:
 
 ```bash
 oy model                 # list currently routable models from opencode models --verbose

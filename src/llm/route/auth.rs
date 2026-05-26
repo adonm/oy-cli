@@ -51,7 +51,9 @@ fn apply_json_headers_inner(
                         HeaderValue::from_str(value).context("invalid auth header value")?,
                     ),
                     RouteAuth::Headers(headers) => apply_header_pairs(builder, headers)?,
-                    RouteAuth::Composite(_) => apply_json_headers_inner(builder, auth, endpoint, body)?,
+                    RouteAuth::Composite(_) => {
+                        apply_json_headers_inner(builder, auth, endpoint, body)?
+                    }
                     RouteAuth::AwsSigV4(credentials) => {
                         builder.headers(sigv4_headers(endpoint, body, credentials)?)
                     }

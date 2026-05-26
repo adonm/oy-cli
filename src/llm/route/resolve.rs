@@ -6,7 +6,7 @@
 use anyhow::{Result, bail};
 
 use crate::config;
-use crate::llm::{merge_json_objects, ModelRoute, Protocol};
+use crate::llm::{ModelRoute, Protocol, merge_json_objects};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ParsedModelSpec<'a> {
@@ -139,5 +139,3 @@ pub(crate) fn merge_additional_params(
         }
     }
 }
-
-

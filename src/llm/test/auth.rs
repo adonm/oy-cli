@@ -131,12 +131,10 @@ fn test_recursive_composite_auth() {
     let builder = client.post("https://api.openai.com/v1/chat/completions");
     let auth = RouteAuth::Composite(vec![
         RouteAuth::ApiKey("secret_key_1".to_string()),
-        RouteAuth::Composite(vec![
-            RouteAuth::Header {
-                name: "X-Custom".to_string(),
-                value: "value_2".to_string(),
-            },
-        ]),
+        RouteAuth::Composite(vec![RouteAuth::Header {
+            name: "X-Custom".to_string(),
+            value: "value_2".to_string(),
+        }]),
     ]);
 
     let builder_with_headers = apply_json_headers(

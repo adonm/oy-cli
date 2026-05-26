@@ -232,12 +232,13 @@ impl OpenCodeModel {
         self.api.npm.as_deref().is_some_and(|api| {
             matches!(
                 api,
-                "@ai-sdk/openai"
-                    | "@ai-sdk/openai-compatible"
-                    | "@ai-sdk/github-copilot"
-                    | "@ai-sdk/anthropic"
+                "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/github-copilot"
             )
         })
+    }
+
+    pub(crate) fn is_anthropic_api(&self) -> bool {
+        self.api.npm.as_deref() == Some("@ai-sdk/anthropic") || self.provider_id == "anthropic"
     }
 
     pub(crate) fn is_bedrock_api(&self) -> bool {
@@ -253,7 +254,10 @@ impl OpenCodeModel {
         if self.provider_id == "vertexai" {
             return false;
         }
-        self.is_openai_compatible_api() || self.is_bedrock_api() || self.is_gemini_api()
+        self.is_openai_compatible_api()
+            || self.is_anthropic_api()
+            || self.is_bedrock_api()
+            || self.is_gemini_api()
     }
 }
 
@@ -361,7 +365,7 @@ opencode/claude-test
         assert_eq!(model.api_id(), "gpt-5.5");
         assert_eq!(model.api_url(), Some("https://api.githubcopilot.com"));
         let groups = listing.into_adapter_models();
-        // Both models are OpenAI-compatible (github-copilot + opencode proxying anthropic)
+        // Both models are supported by the native backend (github-copilot + Anthropic Messages).
         assert_eq!(groups.len(), 2);
         // groups are sorted by adapter name
         assert_eq!(groups[0].models(), &["github-copilot/gpt-5.5".to_string()]);

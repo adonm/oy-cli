@@ -56,7 +56,7 @@ pub(super) struct EnhanceArgs {
     pub(super) focus: Vec<String>,
 }
 
-use crate::audit::report::{FindingSource, EnhanceFinding as Finding, parse_findings};
+use crate::audit::report::{EnhanceFinding as Finding, FindingSource, parse_findings};
 
 #[derive(Debug, Clone)]
 struct EnhancePlan {
@@ -200,8 +200,6 @@ pub(super) async fn enhance_command(args: EnhanceArgs) -> Result<i32> {
     }
     Ok(0)
 }
-
-
 
 impl EnhanceState {
     fn into_plan(self) -> Result<EnhancePlan> {
@@ -500,8 +498,6 @@ fn collect_findings(audit_report: &str, review_report: &str) -> Vec<Finding> {
     findings
 }
 
-
-
 fn read_report(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
 }
@@ -573,8 +569,6 @@ fn short_hash(hash: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
 
     #[test]
     fn commit_messages_are_short_and_source_specific() {

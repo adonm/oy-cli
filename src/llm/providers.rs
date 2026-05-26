@@ -580,8 +580,6 @@ fn gpt5_default_provider_options_for_protocol(
     Some(options)
 }
 
-
-
 fn percent_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
 }

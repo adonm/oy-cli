@@ -1,10 +1,10 @@
 //! Report post-processing: transparency lines, succinct findings
 //! summaries, finding extraction, and shell quoting.
 
+use anyhow::{Result, bail};
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use anyhow::{Result, bail};
 use serde_json::Value;
 use std::path::PathBuf;
 

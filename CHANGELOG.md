@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## [0.10.5] - 2026-05-27
+
+### Added
+- Native Anthropic Messages protocol support for OpenCode-routed models (e.g. direct Anthropic API via OpenCode), with dedicated provider profile and endpoint stripping.
+
+### Changed
+- Moved Anthropic routing out of the OpenAI-compatible bucket into its own `is_anthropic_api()` classifier and added coverage to the opencode models tests.
+- Minor style and import-ordering cleanups in `audit/report`, `cli/app/enhance_cmd`, and LLM route modules.
+
 ## [0.10.4] - 2026-05-23
 
 ### Changed

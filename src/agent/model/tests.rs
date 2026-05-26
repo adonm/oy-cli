@@ -477,6 +477,52 @@ fn prepare_chat_keeps_opencode_go_openai_compatible_bearer_auth() {
 }
 
 #[test]
+fn prepare_chat_routes_opencode_go_anthropic_models_to_messages_api() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let _env = EnvGuard::set(&[
+        ("OPENCODE_API_KEY", Some("test-opencode-key")),
+        ("OPENCODE_GO_API_KEY", None),
+    ]);
+    let _models = OpenCodeModelsCacheGuard::replace(
+        r#"opencode-go/qwen3.7-max
+{
+  "id": "qwen3.7-max",
+  "providerID": "opencode-go",
+  "api": {
+    "id": "qwen3.7-max",
+    "url": "https://opencode.ai/zen/go/v1/messages",
+    "npm": "@ai-sdk/anthropic"
+  },
+  "limit": { "context": 1000000, "output": 64000 }
+}
+"#,
+    );
+
+    let chat = prepare_chat("opencode-go/qwen3.7-max").unwrap();
+
+    assert_eq!(chat.protocol, Protocol::AnthropicMessages);
+    assert_eq!(chat.model, "qwen3.7-max");
+    assert_eq!(
+        chat.base_url.as_deref(),
+        Some("https://opencode.ai/zen/go/v1")
+    );
+    assert_eq!(chat.default_output_tokens, Some(64000));
+    assert_eq!(
+        chat.auth,
+        RouteAuth::Composite(vec![
+            RouteAuth::Headers(vec![
+                ("x-api-key".to_string(), "test-opencode-key".to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ]),
+            RouteAuth::Headers(vec![
+                ("x-opencode-client".to_string(), "oy".to_string()),
+                ("user-agent".to_string(), "oy".to_string()),
+            ]),
+        ])
+    );
+}
+
+#[test]
 fn reasoning_defaults_to_high_for_capable_models_and_allows_suffix_override() {
     assert_eq!(default_reasoning_effort("gpt-5.5").as_deref(), Some("high"));
     assert_eq!(
