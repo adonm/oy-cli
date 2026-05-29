@@ -418,6 +418,7 @@ fn read_missing_path_suggests_fuzzy_matches_without_reading_them() {
             path: "wrkspc".into(),
             offset: 1,
             limit: 10,
+            tail_lines: None,
         },
     )
     .unwrap_err();
@@ -509,6 +510,7 @@ fn read_rejects_oversized_workspace_file_before_loading() {
             path: "large.txt".into(),
             offset: 1,
             limit: 1,
+            tail_lines: None,
         },
     )
     .unwrap_err();
@@ -615,6 +617,7 @@ fn read_rejects_zip_virtual_member() {
             path: "sample.zip::docs/readme.txt".into(),
             offset: 1,
             limit: 10,
+            tail_lines: None,
         },
     )
     .unwrap_err();

@@ -320,6 +320,10 @@ struct ToolLoopConfig {
     include_reasoning_in_transcript: bool,
 }
 
+// The tool loop requires separate closures for each wire operation to maintain type
+// inference across the generic parameters. Grouping them into a struct breaks closure
+// type inference at call sites.
+#[allow(clippy::too_many_arguments)]
 async fn run_tool_loop<
     WireState,
     BuildBody,
@@ -349,7 +353,6 @@ where
     let tools_by_name = tool_runtime::tools_by_name(tools);
     let mut transcript = Vec::new();
     let mut loop_state = tool_runtime::ToolLoopState::default();
-
     for turn in 0..=config.max_turns {
         let body = build_body(&wire_state)?;
         let assistant = retry_transient_http_call(|| stream_assistant(body.clone())).await?;

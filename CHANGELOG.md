@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [0.10.6] - 2026-05-30
+
+### Added
+- New workspace tools: `repo_clone` (git clone/refresh for remote repo analysis), `outline` (structural file outline), `snapshot` (conversation context checkpoints), and `think` (structured reasoning).
+- `read_multiple_files` now supports `tail_lines` per file; preview tool for bat-backed file previews.
+
+### Changed
+- Bumped MSRV to Rust 1.96 and refreshed Cargo.lock (30 crate updates including fff-grep/search 0.8.4, reqwest 0.13.4, hyper 1.10.1).
+- Session and transcript improvements; refactored tool registry and schema/args modules.
+- Native Gemini/Anthropic/Bedrock protocol fixes and OpenAI route tweaks.
+
 ## [0.10.5] - 2026-05-27
 
 ### Added

@@ -50,7 +50,7 @@ cargo run -- chat
 
 - `bash`
 - a model provider credential, or a local OpenAI-compatible server
-- Rust only if building from source
+- Rust 1.96 or later (if building from source)
 
 Start with:
 

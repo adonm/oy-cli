@@ -14,16 +14,20 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 mod args;
+mod clone;
 mod llm;
 mod network;
+mod outline;
 mod output;
 mod policy;
 mod preview;
 mod registry;
 mod schema;
 mod shell;
+mod snapshot;
 #[cfg(test)]
 mod tests;
+mod think;
 mod todo;
 mod workspace;
 

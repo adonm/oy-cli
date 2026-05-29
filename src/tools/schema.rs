@@ -40,6 +40,11 @@ impl Schema {
         Self(json!({"type": "null"}))
     }
 
+    pub fn max_items(mut self, max: usize) -> Self {
+        self.0["maxItems"] = json!(max);
+        self
+    }
+
     /// AnyOf combinator for nullable or union types.
     pub fn any_of(schemas: Vec<Schema>) -> Self {
         let items: Vec<Value> = schemas.into_iter().map(|s| s.0).collect();
@@ -173,7 +178,78 @@ pub(super) fn schema_read() -> Value {
                 "Maximum lines to return from offset; prefer the narrowest slice needed.",
             ),
         )
+        .property(
+            "tail_lines",
+            Schema::any_of(vec![Schema::integer(), Schema::null()])
+                .describe("Number of lines to return from the end of the file. Mutually exclusive with offset; pass at most one of the two."),
+        )
         .required(&["path"])
+        .build()
+}
+
+pub(super) fn schema_read_multiple_files() -> Value {
+    let file_schema = Schema::object()
+        .property("path", Schema::string().describe("File path to read"))
+        .property("offset", Schema::integer().default(1).describe("Starting line number (1-indexed)"))
+        .property("limit", Schema::integer().default(DEFAULT_LIMIT).describe("Maximum lines to return"))
+        .property("tail_lines", Schema::integer().describe("Number of lines from end (mutually exclusive with offset)"))
+        .required(&["path"])
+        .build_schema();
+    
+    Schema::object()
+        .property(
+            "files",
+            Schema::array(file_schema)
+                .max_items(20)
+                .describe("Array of files to read (max 20)"),
+        )
+        .required(&["files"])
+        .build()
+}
+
+pub(super) fn schema_think() -> Value {
+    Schema::object()
+        .property(
+            "thought",
+            Schema::string().describe("Your reasoning or analysis to think through a problem"),
+        )
+        .required(&["thought"])
+        .build()
+}
+
+pub(super) fn schema_outline() -> Value {
+    Schema::object()
+        .property(
+            "path",
+            Schema::string().describe("File path to analyze"),
+        )
+        .property(
+            "depth",
+            Schema::integer()
+                .default(2)
+                .describe("Maximum nesting depth to show (0 = top-level only, 2 = default)"),
+        )
+        .required(&["path"])
+        .build()
+}
+
+pub(super) fn schema_snapshot() -> Value {
+    Schema::object()
+        .property(
+            "action",
+            Schema::string()
+                .enum_values(&["save", "restore", "cancel", "status"])
+                .describe("Action to perform: save checkpoint, restore from checkpoint, cancel checkpoint, or check status"),
+        )
+        .property(
+            "label",
+            Schema::string().describe("Label for the checkpoint (required for 'save' action)"),
+        )
+        .property(
+            "summary",
+            Schema::string().describe("Summary of exploration to collapse (required for 'restore' action)"),
+        )
+        .required(&["action"])
         .build()
 }
 
@@ -251,6 +327,28 @@ pub(super) fn schema_ask() -> Value {
             Schema::any_of(vec![Schema::array(Schema::string()), Schema::null()]),
         )
         .required(&["question"])
+        .build()
+}
+
+pub(super) fn schema_repo_clone() -> Value {
+    Schema::object()
+        .property(
+            "repository",
+            Schema::string().describe(
+                "Repository to clone, as a git URL, host/path reference, or GitHub owner/repo shorthand",
+            ),
+        )
+        .property(
+            "branch",
+            Schema::any_of(vec![Schema::string(), Schema::null()])
+                .describe("Branch or ref to clone and inspect"),
+        )
+        .property(
+            "refresh",
+            Schema::any_of(vec![Schema::boolean(), Schema::null()])
+                .describe("When true, fetches the latest remote state into the managed cache"),
+        )
+        .required(&["repository"])
         .build()
 }
 

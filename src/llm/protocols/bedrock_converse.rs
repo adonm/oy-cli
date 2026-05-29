@@ -25,24 +25,11 @@ pub(crate) fn endpoint_path(model_id: &str) -> String {
 }
 
 pub(crate) fn request_body(request: &LlmRequest) -> Result<Value> {
+    // Allocate the 4-breakpoint budget in invalidation order: tools → system →
+    // messages. Tools live highest in the cache hierarchy, so when callers
+    // over-mark we keep their tool hints and shed the message-tail ones first.
     let mut breakpoints = bedrock_cache::breakpoints();
-    let mut body = Map::from_iter([
-        ("modelId".to_string(), json!(request.route.model)),
-        (
-            "messages".to_string(),
-            Value::Array(lower_messages(&request.messages, &mut breakpoints)?),
-        ),
-    ]);
-    let system = lower_system(
-        &request.system_prompt,
-        request.system_cache.as_ref(),
-        &request.messages,
-        &mut breakpoints,
-    );
-    if !system.is_empty() {
-        body.insert("system".to_string(), Value::Array(system));
-    }
-    if !request.tools.is_empty() && !matches!(request.tool_choice, Some(ToolChoice::None)) {
+    let tools = if !request.tools.is_empty() && !matches!(request.tool_choice, Some(ToolChoice::None)) {
         let mut tool_config = Map::from_iter([(
             "tools".to_string(),
             Value::Array(lower_tools(&request.tools, &mut breakpoints)?),
@@ -50,7 +37,28 @@ pub(crate) fn request_body(request: &LlmRequest) -> Result<Value> {
         if let Some(tool_choice) = lower_tool_choice(request.tool_choice.as_ref())? {
             tool_config.insert("toolChoice".to_string(), tool_choice);
         }
-        body.insert("toolConfig".to_string(), Value::Object(tool_config));
+        Some(Value::Object(tool_config))
+    } else {
+        None
+    };
+    let system = lower_system(
+        &request.system_prompt,
+        request.system_cache.as_ref(),
+        &request.messages,
+        &mut breakpoints,
+    );
+    let mut body = Map::from_iter([
+        ("modelId".to_string(), json!(request.route.model)),
+        (
+            "messages".to_string(),
+            Value::Array(lower_messages(&request.messages, &mut breakpoints)?),
+        ),
+    ]);
+    if !system.is_empty() {
+        body.insert("system".to_string(), Value::Array(system));
+    }
+    if let Some(tool_config) = tools {
+        body.insert("toolConfig".to_string(), tool_config);
     }
     if let Some(inference_config) = lower_inference_config(request.generation.as_ref()) {
         body.insert("inferenceConfig".to_string(), inference_config);

@@ -18,6 +18,12 @@ pub(super) struct ReadOutput {
     pub text: String,
     pub line_count: usize,
     pub truncated: bool,
+    pub checksum: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ReadMultipleFilesOutput {
+    pub files: Vec<ReadOutput>,
 }
 
 #[derive(Debug, Serialize)]

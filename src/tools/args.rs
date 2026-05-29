@@ -69,6 +69,62 @@ fn default_patch_strip() -> usize {
     1
 }
 
+fn default_thought_number() -> usize {
+    1
+}
+
+fn default_mode() -> String {
+    "thinking".to_string()
+}
+
+fn default_total_thoughts() -> usize {
+    3
+}
+
+fn default_next_thought_needed() -> bool {
+    true
+}
+
+fn default_depth() -> usize {
+    2
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct SnapshotArgs {
+    pub(super) action: String,
+    #[serde(default)]
+    pub(super) label: Option<String>,
+    #[serde(default)]
+    pub(super) summary: Option<String>,
+}
+
+fn deserialize_option_usize<'de, D>(deserializer: D) -> std::result::Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Integer(usize),
+        String(String),
+    }
+    
+    let opt = Option::<Number>::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(Number::Integer(value)) => Ok(Some(value)),
+        Some(Number::String(value)) => {
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                value.trim().parse::<usize>().map(Some).map_err(|_| {
+                    serde::de::Error::custom(format!("expected unsigned integer, got {value:?}"))
+                })
+            }
+        }
+    }
+}
+
 fn deserialize_usize<'de, D>(deserializer: D) -> std::result::Result<usize, D::Error>
 where
     D: Deserializer<'de>,
@@ -131,6 +187,42 @@ pub(super) struct ReadArgs {
         deserialize_with = "deserialize_usize"
     )]
     pub(super) limit: usize,
+    #[serde(default)]
+    pub(super) tail_lines: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ReadMultipleFilesArgs {
+    pub(super) files: Vec<ReadArgs>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct OutlineArgs {
+    pub(super) path: String,
+    /// Maximum nesting depth for recursive outline expansion.
+    ///
+    /// Currently unused by the parser (reserved for future implementation).
+    #[serde(default = "default_depth", deserialize_with = "deserialize_usize")]
+    pub(super) depth: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ThinkArgs {
+    #[serde(default = "default_thought_number", deserialize_with = "deserialize_usize")]
+    pub(super) thought_number: usize,
+    pub(super) thought: String,
+    #[serde(default = "default_mode")]
+    pub(super) mode: String,
+    #[serde(default, deserialize_with = "deserialize_option_usize")]
+    pub(super) revises_thought: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_option_usize")]
+    pub(super) branch_from_thought: Option<usize>,
+    #[serde(default)]
+    pub(super) branch_id: Option<String>,
+    #[serde(default = "default_total_thoughts", deserialize_with = "deserialize_usize")]
+    pub(super) total_thoughts: usize,
+    #[serde(default = "default_next_thought_needed")]
+    pub(super) next_thought_needed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +308,15 @@ pub(super) struct AskArgs {
     pub(super) question: String,
     #[serde(default)]
     pub(super) choices: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct RepoCloneArgs {
+    pub(super) repository: String,
+    #[serde(default)]
+    pub(super) branch: Option<String>,
+    #[serde(default)]
+    pub(super) refresh: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

@@ -12,7 +12,7 @@ use crate::llm::ToolSpec;
 use serde_json::Value;
 
 use super::policy::{Approval, NetworkAccess};
-use super::{ToolContext, parse_tool_args};
+use super::{ToolContext, clone, parse_tool_args};
 
 // === Tool dispatch registry ===
 //
@@ -35,14 +35,19 @@ pub(super) enum ToolGate {
 pub(super) enum ToolId {
     List,
     Read,
+    ReadMultipleFiles,
     Search,
     Sloc,
     Todo,
     Ask,
     Webfetch,
+    RepoClone,
     Replace,
     Patch,
     Bash,
+    Think,
+    Outline,
+    Snapshot,
 }
 
 impl ToolId {
@@ -50,14 +55,19 @@ impl ToolId {
         match self {
             Self::List => "list",
             Self::Read => "read",
+            Self::ReadMultipleFiles => "read_multiple_files",
             Self::Search => "search",
             Self::Sloc => "sloc",
             Self::Todo => "todo",
             Self::Ask => "ask",
             Self::Webfetch => "webfetch",
+            Self::RepoClone => "repo_clone",
             Self::Replace => "replace",
             Self::Patch => "patch",
             Self::Bash => "bash",
+            Self::Think => "think",
+            Self::Outline => "outline",
+            Self::Snapshot => "snapshot",
         }
     }
 }
@@ -105,7 +115,7 @@ pub(super) fn find_def(name: &str) -> Option<&'static ToolDef> {
 
 // Import preview functions so we can reference them in TOOL_DEFS.
 use super::preview;
-use super::{network, shell, todo, workspace};
+use super::{network, outline, shell, snapshot, think, todo, workspace};
 
 fn no_external_side_effect(_: &Value) -> bool {
     false
@@ -127,6 +137,10 @@ fn invoke_list(ctx: &mut ToolContext, args: Value) -> Result<Value> {
 
 fn invoke_read(ctx: &mut ToolContext, args: Value) -> Result<Value> {
     parse_tool_args(args).and_then(|args| workspace::tool_read(ctx, args))
+}
+
+fn invoke_read_multiple_files(ctx: &mut ToolContext, args: Value) -> Result<Value> {
+    parse_tool_args(args).and_then(|args| workspace::tool_read_multiple_files(ctx, args))
 }
 
 fn invoke_search(ctx: &mut ToolContext, args: Value) -> Result<Value> {
@@ -160,11 +174,30 @@ fn invoke_webfetch<'a>(ctx: &'a mut ToolContext, args: Value) -> ToolFuture<'a> 
     })
 }
 
+fn invoke_repo_clone<'a>(ctx: &'a mut ToolContext, args: Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args = parse_tool_args(args)?;
+        clone::tool_repo_clone(ctx, args).await
+    })
+}
+
 fn invoke_bash<'a>(ctx: &'a mut ToolContext, args: Value) -> ToolFuture<'a> {
     Box::pin(async move {
         let args = parse_tool_args(args)?;
         shell::tool_bash(ctx, args).await
     })
+}
+
+fn invoke_think(ctx: &mut ToolContext, args: Value) -> Result<Value> {
+    parse_tool_args(args).and_then(|args| think::tool_think(ctx, args))
+}
+
+fn invoke_outline(ctx: &mut ToolContext, args: Value) -> Result<Value> {
+    parse_tool_args(args).and_then(|args| outline::tool_outline(ctx, args))
+}
+
+fn invoke_snapshot(ctx: &mut ToolContext, args: Value) -> Result<Value> {
+    parse_tool_args(args).and_then(|args| snapshot::tool_snapshot(ctx, args))
 }
 
 const TOOL_DEFS: &[ToolDef] = &[
@@ -186,6 +219,16 @@ const TOOL_DEFS: &[ToolDef] = &[
         summary: preview::summary_read,
         output: preview::preview_read,
         executor: ToolExecutor::Sync(invoke_read),
+        external_side_effect: no_external_side_effect,
+    },
+    ToolDef {
+        id: ToolId::ReadMultipleFiles,
+        description: "Read multiple UTF-8 workspace files in a single call. Accepts up to 20 files with individual offset/limit/tail_lines parameters. Returns file contents with metadata.",
+        gate: ToolGate::Always,
+        schema: super::schema::schema_read_multiple_files,
+        summary: preview::summary_read_multiple_files,
+        output: preview::preview_read_multiple_files,
+        executor: ToolExecutor::Sync(invoke_read_multiple_files),
         external_side_effect: no_external_side_effect,
     },
     ToolDef {
@@ -239,6 +282,16 @@ const TOOL_DEFS: &[ToolDef] = &[
         external_side_effect: no_external_side_effect,
     },
     ToolDef {
+        id: ToolId::RepoClone,
+        description: "Clone or refresh a git repository into the oy cache directory. Returns repository info including local path, status (cloned/cached/refreshed), and HEAD commit. Use before read/search/list when analyzing code outside the current workspace.",
+        gate: ToolGate::Network,
+        schema: super::schema::schema_repo_clone,
+        summary: preview::summary_repo_clone,
+        output: preview::preview_repo_clone,
+        executor: ToolExecutor::Async(invoke_repo_clone),
+        external_side_effect: no_external_side_effect,
+    },
+    ToolDef {
         id: ToolId::Replace,
         description: "Replace text across fff-indexed workspace files under an exact file/dir. Default mode is Rust regex with captures; use `mode=literal` for exact text. Reports diffs. Inspect/search before changing.",
         gate: ToolGate::FilesWrite,
@@ -267,6 +320,36 @@ const TOOL_DEFS: &[ToolDef] = &[
         output: preview::preview_bash,
         executor: ToolExecutor::Async(invoke_bash),
         external_side_effect: always_external_side_effect,
+    },
+    ToolDef {
+        id: ToolId::Think,
+        description: "Structured reasoning tool for step-by-step problem solving with numbered thoughts, revisions, and branching comparisons.",
+        gate: ToolGate::Always,
+        schema: super::schema::schema_think,
+        summary: preview::summary_think,
+        output: preview::preview_think,
+        executor: ToolExecutor::Sync(invoke_think),
+        external_side_effect: no_external_side_effect,
+    },
+    ToolDef {
+        id: ToolId::Outline,
+        description: "Show structural outline of a file: classes, functions, and top-level declarations without bodies. Useful for surveying code before reading specific sections.",
+        gate: ToolGate::Always,
+        schema: super::schema::schema_outline,
+        summary: preview::summary_outline,
+        output: preview::preview_outline,
+        executor: ToolExecutor::Sync(invoke_outline),
+        external_side_effect: no_external_side_effect,
+    },
+    ToolDef {
+        id: ToolId::Snapshot,
+        description: "Manage conversation context checkpoints. Save checkpoints before exploration, restore to collapse exploration into summaries, keeping context clean.",
+        gate: ToolGate::Always,
+        schema: super::schema::schema_snapshot,
+        summary: preview::summary_snapshot,
+        output: preview::preview_snapshot,
+        executor: ToolExecutor::Sync(invoke_snapshot),
+        external_side_effect: no_external_side_effect,
     },
 ];
 
@@ -328,8 +411,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "list", "read", "search", "sloc", "todo", "ask", "webfetch", "replace", "patch",
-                "bash",
+                "list", "read", "read_multiple_files", "search", "sloc", "todo", "ask", "webfetch",
+                "repo_clone", "replace", "patch", "bash", "think", "outline", "snapshot",
             ]
         );
     }

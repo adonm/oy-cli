@@ -90,6 +90,7 @@ fn file_tools_deny_out_of_workspace_paths_in_all_modes() {
                 path: "/etc/hosts".into(),
                 offset: 1,
                 limit: 1,
+                tail_lines: None,
             },
         )
         .unwrap_err();

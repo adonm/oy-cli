@@ -8,7 +8,7 @@
 #   just fix            # auto-fix formatting and clippy lints, then check
 #   just run -- "summarize this repo"
 #
-# Requires: cargo, rustc >= 1.91.1, and just. Optional CI-parity recipes below
+# Requires: cargo, rustc >= 1.96, and just. Optional CI-parity recipes below
 # require cargo-nextest and/or nightly Miri.
 
 _default:

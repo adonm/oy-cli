@@ -40,23 +40,14 @@ pub fn can_prompt() -> bool {
 
 /// Build a [`ContextConfig`] with model-derived defaults.
 ///
-/// `input_limit` is the model's input limit (from metadata).
-/// `output_limit` overrides the default `OY_CONTEXT_OUTPUT_RESERVE` (12 000, or 10% of output).
-/// `interactive` caps context at 128k for snappy chat; set false for audits/reviews.
-/// The env var `OY_CONTEXT_LIMIT` always takes precedence.
+/// `input_limit` overrides the hard-coded default for `OY_CONTEXT_LIMIT` (128 000).
+/// `output_limit` overrides the default `OY_CONTEXT_OUTPUT_RESERVE` (12 000, or 10% of output).
+/// The env vars `OY_CONTEXT_LIMIT` / `OY_CONTEXT_OUTPUT_RESERVE` always take precedence.
 pub fn context_config_for_model(
     input_limit: Option<usize>,
     output_limit: Option<usize>,
-    interactive: bool,
 ) -> ContextConfig {
-    const INTERACTIVE_CONTEXT_CAP: usize = 128_000;
-    let model_limit = input_limit.unwrap_or(INTERACTIVE_CONTEXT_CAP);
-    let default_limit = if interactive {
-        model_limit.min(INTERACTIVE_CONTEXT_CAP)
-    } else {
-        model_limit
-    }
-    .max(1_000);
+    let default_limit = input_limit.unwrap_or(128_000).max(1_000);
     let default_output_reserve = output_limit
         .map(|out| (out as f64 * 0.10) as usize)
         .unwrap_or(12_000)

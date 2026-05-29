@@ -21,7 +21,15 @@ pub(crate) struct StreamState {
 }
 
 pub(crate) fn request_body(request: &LlmRequest) -> Result<Value> {
+    // Allocate the 4-breakpoint budget in invalidation order: tools → system →
+    // messages. Tools live highest in the cache hierarchy, so when callers
+    // over-mark we keep their tool hints and shed the message-tail ones first.
     let mut breakpoints = crate::llm::cache_policy::Breakpoints::new(BREAKPOINT_CAP);
+    let tools = if !request.tools.is_empty() && !matches!(request.tool_choice, Some(ToolChoice::None)) {
+        Some(lower_tools(&request.tools, &mut breakpoints)?)
+    } else {
+        None
+    };
     let system = lower_system(
         &request.system_prompt,
         request.system_cache.as_ref(),
@@ -48,11 +56,8 @@ pub(crate) fn request_body(request: &LlmRequest) -> Result<Value> {
     if !system.is_empty() {
         body.insert("system".to_string(), Value::Array(system));
     }
-    if !request.tools.is_empty() && !matches!(request.tool_choice, Some(ToolChoice::None)) {
-        body.insert(
-            "tools".to_string(),
-            Value::Array(lower_tools(&request.tools, &mut breakpoints)?),
-        );
+    if let Some(tools) = tools {
+        body.insert("tools".to_string(), Value::Array(tools));
     }
     if let Some(tool_choice) = lower_tool_choice(request.tool_choice.as_ref())? {
         body.insert("tool_choice".to_string(), tool_choice);

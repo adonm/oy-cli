@@ -87,17 +87,18 @@ async fn bash_output_preserves_terminal_sequences_raw() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn bash_filters_credential_like_environment_variables() {
-    let _guard = crate::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let old_secret = std::env::var("OY_TEST_SECRET_TOKEN").ok();
-    let old_public = std::env::var("OY_TEST_PUBLIC_VALUE").ok();
-    unsafe {
-        std::env::set_var("OY_TEST_SECRET_TOKEN", "do-not-leak");
-        std::env::set_var("OY_TEST_PUBLIC_VALUE", "visible");
-    }
+    let (old_secret, old_public, _dir, ctx) = {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let old_secret = std::env::var("OY_TEST_SECRET_TOKEN").ok();
+        let old_public = std::env::var("OY_TEST_PUBLIC_VALUE").ok();
+        unsafe {
+            std::env::set_var("OY_TEST_SECRET_TOKEN", "do-not-leak");
+            std::env::set_var("OY_TEST_PUBLIC_VALUE", "visible");
+        }
+        let (_dir, ctx) = test_context(auto_policy(), false);
+        (old_secret, old_public, _dir, ctx)
+    };
 
-    let (_dir, ctx) = test_context(auto_policy(), false);
     let value = tool_bash(
         &ctx,
         BashArgs {
@@ -110,6 +111,7 @@ async fn bash_filters_credential_like_environment_variables() {
     .await
     .unwrap();
 
+    let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     match old_secret {
         Some(value) => unsafe { std::env::set_var("OY_TEST_SECRET_TOKEN", value) },
         None => unsafe { std::env::remove_var("OY_TEST_SECRET_TOKEN") },

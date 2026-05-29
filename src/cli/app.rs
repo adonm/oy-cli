@@ -24,7 +24,7 @@ use session_cmd::{ChatArgs, RunArgs};
     name = "oy",
     version,
     about = "Small local AI coding assistant for your shell.",
-    after_help = "Examples:\n  oy doctor\n  oy model\n  oy run \"inspect this repo and summarize risks\"\n  oy chat --mode plan\n  oy run --out plan.md \"write a migration plan\"\n\nSafety: file tools stay inside the workspace, but oy is not a sandbox. Use --mode plan or a container/VM for untrusted repos."
+    after_help = "Examples:\n  oy                              (start interactive chat)\n  oy doctor\n  oy model\n  oy run \"inspect this repo and summarize risks\"\n  oy chat --mode plan\n  oy run --out plan.md \"write a migration plan\"\n\nDefault: running `oy` with no subcommand starts an interactive chat. Use `oy run \"prompt\"` for one-shot tasks.\n\nSafety: file tools stay inside the workspace, but oy is not a sandbox. Use --mode plan or a container/VM for untrusted repos."
 )]
 struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Suppress normal progress output")]
@@ -33,8 +33,16 @@ struct Cli {
     verbose: bool,
     #[arg(long, global = true, conflicts_with_all = ["quiet", "verbose"], help = "Print machine-readable JSON where supported")]
     json: bool,
+    #[arg(
+        long,
+        alias = "agent",
+        default_value = "default",
+        global = true,
+        help = "Safety mode: plan, ask, edit, or auto (default: balanced)"
+    )]
+    mode: crate::config::SafetyMode,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -82,16 +90,16 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
     let cli = Cli::parse_from(std::iter::once("oy".to_string()).chain(argv));
     crate::ui::init_output_mode(cli_output_mode(&cli));
     match cli.command {
-        Command::Run(args) => session_cmd::run_command(args).await,
-        Command::Chat(args) => session_cmd::chat_command(args).await,
-        Command::Model(args) => model_cmd::model_command(args).await,
-        Command::Doctor(args) => doctor_cmd::doctor_command(args).await,
-        Command::Audit {
+        Some(Command::Run(args)) => session_cmd::run_command(args).await,
+        Some(Command::Chat(args)) => session_cmd::chat_command(args).await,
+        Some(Command::Model(args)) => model_cmd::model_command(args).await,
+        Some(Command::Doctor(args)) => doctor_cmd::doctor_command(args).await,
+        Some(Command::Audit {
             format,
             out,
             max_chunks,
             focus,
-        } => {
+        }) => {
             audit_cmd::audit_command(AuditArgs {
                 focus,
                 out: out.unwrap_or_else(|| audit::default_output_path(format.into())),
@@ -100,8 +108,19 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             })
             .await
         }
-        Command::Review(args) => review_cmd::review_command(args).await,
-        Command::Enhance(args) => enhance_cmd::enhance_command(args).await,
+        Some(Command::Review(args)) => review_cmd::review_command(args).await,
+        Some(Command::Enhance(args)) => enhance_cmd::enhance_command(args).await,
+        None => {
+            // Default: interactive chat.
+            let args = ChatArgs {
+                shared: session_cmd::SharedModeArgs {
+                    mode: cli.mode,
+                    continue_session: false,
+                    resume: String::new(),
+                },
+            };
+            session_cmd::chat_command(args).await
+        }
     }
 }
 
@@ -140,9 +159,9 @@ mod audit_tests {
     #[test]
     fn audit_accepts_max_chunks_flag() {
         let cli = parse_cli_for_test(&["oy", "audit", "--max-chunks", "240", "auth paths"]);
-        let Command::Audit {
+        let Some(Command::Audit {
             max_chunks, focus, ..
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected audit command");
         };
@@ -173,7 +192,7 @@ mod audit_tests {
             "--max-chunks",
             "120",
         ]);
-        let Command::Review(args) = cli.command else {
+        let Some(Command::Review(args)) = cli.command else {
             panic!("expected review command");
         };
         assert_eq!(args.target.as_deref(), Some("main"));
@@ -184,7 +203,7 @@ mod audit_tests {
     #[test]
     fn audit_accepts_sarif_format() {
         let cli = parse_cli_for_test(&["oy", "audit", "--format", "sarif", "auth paths"]);
-        let Command::Audit { format, out, .. } = cli.command else {
+        let Some(Command::Audit { format, out, .. }) = cli.command else {
             panic!("expected audit command");
         };
         assert_eq!(format, AuditFormat::Sarif);
@@ -202,7 +221,7 @@ mod audit_tests {
             "main",
             "security",
         ]);
-        let Command::Enhance(args) = cli.command else {
+        let Some(Command::Enhance(args)) = cli.command else {
             panic!("expected enhance command");
         };
         assert_eq!(args.mode, crate::config::SafetyMode::AutoAll);
@@ -224,5 +243,11 @@ mod audit_tests {
         assert!(model_cmd::is_exact_model_spec("copilot::gpt-5.5"));
         assert!(!model_cmd::is_exact_model_spec("gpt"));
         assert!(!model_cmd::is_exact_model_spec("nova"));
+    }
+
+    #[test]
+    fn no_subcommand_defaults_to_chat() {
+        let cli = parse_cli_for_test(&["oy"]);
+        assert!(cli.command.is_none(), "expected None for default-to-chat");
     }
 }

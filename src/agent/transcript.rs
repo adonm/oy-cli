@@ -134,8 +134,44 @@ impl Transcript {
                     if text.contains("[tool output compacted]") {
                         continue;
                     }
+                    let original_len = text.len();
                     *text = compact_text(text, max_bytes, "tool output compacted");
-                    if text.contains("[tool output compacted]") {
+                    if text.len() < original_len {
+                        compacted += 1;
+                    }
+                }
+            }
+        }
+        (
+            Self {
+                summary: self.summary.clone(),
+                messages,
+            },
+            compacted,
+        )
+    }
+
+    /// Aggressive compaction: compact ALL tool outputs with smaller budget.
+    /// Used when we need maximum space savings before dropping old messages.
+    pub fn with_all_tool_outputs_compacted(&self, max_bytes: usize) -> (Self, usize) {
+        let mut messages = self.messages.clone();
+        let mut compacted = 0;
+        for message in &mut messages {
+            let Message::User { content } = message else {
+                continue;
+            };
+            for item in content.iter_mut() {
+                let MessageContent::ToolResult { content, .. } = item else {
+                    continue;
+                };
+                for part in content.iter_mut() {
+                    let ToolResultContent::Text { text } = part else {
+                        continue;
+                    };
+                    let original_len = text.len();
+                    // Always re-compact, even if already marked
+                    *text = compact_text(text, max_bytes, "tool output compacted");
+                    if text.len() < original_len {
                         compacted += 1;
                     }
                 }

@@ -73,6 +73,12 @@ pub(super) fn summary_todo(args: &Value) -> String {
     todo_call_summary(args)
 }
 
+pub(super) fn summary_think(args: &Value) -> String {
+    let thought_num = args.get("thought_number").and_then(Value::as_u64).unwrap_or(0);
+    let total = args.get("total_thoughts").and_then(Value::as_u64).unwrap_or(0);
+    format!("thought {thought_num}/{total}")
+}
+
 fn compact_kvs(args: &Value, keys: &[(&str, usize)]) -> String {
     keys.iter()
         .filter_map(|(key, max)| {
@@ -274,6 +280,32 @@ pub(super) fn preview_read(value: &Value) -> String {
         out
     })
 }
+
+pub(super) fn summary_read_multiple_files(args: &Value) -> String {
+    if let Some(files) = args.get("files").and_then(|v| v.as_array()) {
+        format!("{} files", files.len())
+    } else {
+        "0 files".to_string()
+    }
+}
+
+pub(super) fn preview_read_multiple_files(output: &Value) -> String {
+    if let Some(files) = output.get("files").and_then(|v| v.as_array()) {
+        let total_lines: usize = files
+            .iter()
+            .filter_map(|f| f.get("line_count").and_then(|v| v.as_u64()))
+            .map(|v| v as usize)
+            .sum();
+        format!(
+            "{} files · {} total lines",
+            files.len(),
+            total_lines
+        )
+    } else {
+        "0 files".to_string()
+    }
+}
+
 pub(super) fn preview_search(value: &Value) -> String {
     let matches = value
         .get("matches")
@@ -605,6 +637,27 @@ pub(super) fn preview_webfetch(value: &Value) -> String {
         out.trim_start().to_string()
     })
 }
+pub(super) fn summary_repo_clone(args: &Value) -> String {
+    compact_kvs(args, &[("repository", 80), ("branch", 30)])
+}
+
+pub(super) fn preview_repo_clone(value: &Value) -> String {
+    let repo = value_str(value, "repository");
+    let status = value_str(value, "status");
+    let path = value_str(value, "local_path");
+    let branch = value.get("branch").and_then(Value::as_str).unwrap_or("");
+    let head = value.get("head").and_then(Value::as_str).unwrap_or("");
+    let mut out = format!("repo_clone · {status} · {repo}\n  path: {path}");
+    if !branch.is_empty() {
+        out.push_str(&format!("\n  branch: {branch}"));
+    }
+    if !head.is_empty() {
+        let short = if head.len() > 8 { &head[..8] } else { head };
+        out.push_str(&format!("\n  head: {short}"));
+    }
+    out
+}
+
 pub(super) fn preview_sloc(value: &Value) -> String {
     let total = value
         .pointer("/output/Total/code")
@@ -671,6 +724,72 @@ pub(super) fn preview_todo(value: &Value) -> String {
         .unwrap_or(&[]);
     limited_preview_body(&super::todo::format_todo_preview_from_values(items))
 }
+pub(super) fn preview_think(value: &Value) -> String {
+    let number = value_usize(value, "thought_number");
+    let total = value_usize(value, "total_thoughts");
+    let next = value_bool(value, "next_thought_needed");
+    let thought = value_str(value, "thought");
+    let summary = format!(
+        "thought {number}/{total}{}",
+        if next { " · more to come" } else { " · done" }
+    );
+    with_verbose(summary, || {
+        let mut out = String::new();
+        append_preview_lines(&mut out, thought, "reasoning");
+        out.trim_start().to_string()
+    })
+}
+
+pub(super) fn summary_outline(args: &Value) -> String {
+    let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+    let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(2);
+    format!("path={} depth={}", path, depth)
+}
+
+pub(super) fn preview_outline(value: &Value) -> String {
+    let path = value_str(value, "path");
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let summary = format!("path={} · {} items", path, items.len());
+    with_verbose(summary, || {
+        let mut out = String::new();
+        for item in items.iter().take(PREVIEW_ITEMS) {
+            let kind = item.get("kind").and_then(Value::as_str).unwrap_or("");
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            let line = item.get("line").and_then(Value::as_u64).unwrap_or(0);
+            let depth = item.get("depth").and_then(Value::as_u64).unwrap_or(0);
+            let indent = "  ".repeat(depth as usize);
+            let _ = write!(out, "\n  {}{}{} ({})", indent, kind, name, line);
+        }
+        if items.len() > PREVIEW_ITEMS {
+            let _ = write!(out, "\n  … {} more items", items.len() - PREVIEW_ITEMS);
+        }
+        out.trim_start().to_string()
+    })
+}
+
+pub(super) fn summary_snapshot(args: &Value) -> String {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+    let label = args.get("label").and_then(Value::as_str).unwrap_or("");
+    if label.is_empty() {
+        format!("action={}", action)
+    } else {
+        format!("action={} label={}", action, label)
+    }
+}
+
+pub(super) fn preview_snapshot(value: &Value) -> String {
+    let action = value_str(value, "action");
+    let success = value_bool(value, "success");
+    let message = value_str(value, "message");
+    let status = if success { "ok" } else { "error" };
+    let summary = format!("action={} · {} · {}", action, status, message);
+    summary
+}
+
 pub(super) fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
