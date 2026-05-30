@@ -74,8 +74,14 @@ pub(super) fn summary_todo(args: &Value) -> String {
 }
 
 pub(super) fn summary_think(args: &Value) -> String {
-    let thought_num = args.get("thought_number").and_then(Value::as_u64).unwrap_or(0);
-    let total = args.get("total_thoughts").and_then(Value::as_u64).unwrap_or(0);
+    let thought_num = args
+        .get("thought_number")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total = args
+        .get("total_thoughts")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     format!("thought {thought_num}/{total}")
 }
 
@@ -296,11 +302,7 @@ pub(super) fn preview_read_multiple_files(output: &Value) -> String {
             .filter_map(|f| f.get("line_count").and_then(|v| v.as_u64()))
             .map(|v| v as usize)
             .sum();
-        format!(
-            "{} files · {} total lines",
-            files.len(),
-            total_lines
-        )
+        format!("{} files · {} total lines", files.len(), total_lines)
     } else {
         "0 files".to_string()
     }

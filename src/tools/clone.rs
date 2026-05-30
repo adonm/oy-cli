@@ -8,8 +8,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::process::Command;
 
-use super::args::RepoCloneArgs;
 use super::ToolContext;
+use super::args::RepoCloneArgs;
 
 #[derive(Debug, Serialize)]
 pub(super) struct RepoCloneOutput {
@@ -24,13 +24,13 @@ pub(super) struct RepoCloneOutput {
 
 pub(super) async fn tool_repo_clone(_ctx: &ToolContext, args: RepoCloneArgs) -> Result<Value> {
     let reference = parse_repository_reference(&args.repository)?;
-    
+
     if let Some(ref branch) = args.branch {
         validate_branch(branch)?;
     }
 
     let local_path = cache_path_for_reference(&reference);
-    
+
     let (status, head) = if local_path.exists() && local_path.join(".git").exists() {
         // Already cloned, optionally refresh
         if args.refresh == Some(true) {
@@ -71,7 +71,7 @@ fn parse_repository_reference(input: &str) -> Result<RepositoryReference> {
         .replace('#', "")
         .trim_end_matches('/')
         .to_string();
-    
+
     if cleaned.is_empty() {
         bail!("repository reference cannot be empty");
     }
@@ -90,7 +90,10 @@ fn parse_repository_reference(input: &str) -> Result<RepositoryReference> {
     }
 
     // Full git URL
-    if cleaned.starts_with("http://") || cleaned.starts_with("https://") || cleaned.starts_with("git@") {
+    if cleaned.starts_with("http://")
+        || cleaned.starts_with("https://")
+        || cleaned.starts_with("git@")
+    {
         let url = url::Url::parse(&cleaned).context("invalid repository URL")?;
         let host = url.host_str().unwrap_or("unknown").to_string();
         let path = url.path().trim_start_matches('/').replace(".git", "");
@@ -100,7 +103,7 @@ fn parse_repository_reference(input: &str) -> Result<RepositoryReference> {
         } else {
             format!("{}/{}", host, segments.join("/"))
         };
-        
+
         return Ok(RepositoryReference {
             remote: cleaned,
             label,
@@ -113,9 +116,11 @@ fn parse_repository_reference(input: &str) -> Result<RepositoryReference> {
 }
 
 fn validate_branch(branch: &str) -> Result<()> {
-    if !branch.chars().all(|c| c.is_alphanumeric() || matches!(c, '/' | '_' | '.' | '-')) 
-        || branch.starts_with('-') 
-        || branch.contains("..") 
+    if !branch
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+        || branch.starts_with('-')
+        || branch.contains("..")
     {
         bail!(
             "branch must contain only alphanumeric characters, /, _, ., and -, and cannot start with - or contain .."
@@ -154,10 +159,7 @@ async fn clone_repository(remote: &str, local_path: &PathBuf, branch: Option<&st
         cmd.arg("--branch").arg(branch);
     }
 
-    let output = cmd
-        .output()
-        .await
-        .context("failed to execute git clone")?;
+    let output = cmd.output().await.context("failed to execute git clone")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -181,10 +183,7 @@ async fn fetch_latest(local_path: &PathBuf, branch: Option<&str>) -> Result<()> 
         cmd.arg(branch);
     }
 
-    let output = cmd
-        .output()
-        .await
-        .context("failed to execute git fetch")?;
+    let output = cmd.output().await.context("failed to execute git fetch")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

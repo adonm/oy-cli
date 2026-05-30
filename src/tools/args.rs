@@ -108,7 +108,7 @@ where
         Integer(usize),
         String(String),
     }
-    
+
     let opt = Option::<Number>::deserialize(deserializer)?;
     match opt {
         None => Ok(None),
@@ -208,7 +208,10 @@ pub(super) struct OutlineArgs {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ThinkArgs {
-    #[serde(default = "default_thought_number", deserialize_with = "deserialize_usize")]
+    #[serde(
+        default = "default_thought_number",
+        deserialize_with = "deserialize_usize"
+    )]
     pub(super) thought_number: usize,
     pub(super) thought: String,
     #[serde(default = "default_mode")]
@@ -219,7 +222,10 @@ pub(super) struct ThinkArgs {
     pub(super) branch_from_thought: Option<usize>,
     #[serde(default)]
     pub(super) branch_id: Option<String>,
-    #[serde(default = "default_total_thoughts", deserialize_with = "deserialize_usize")]
+    #[serde(
+        default = "default_total_thoughts",
+        deserialize_with = "deserialize_usize"
+    )]
     pub(super) total_thoughts: usize,
     #[serde(default = "default_next_thought_needed")]
     pub(super) next_thought_needed: bool,

@@ -25,11 +25,12 @@ pub(crate) fn request_body(request: &LlmRequest) -> Result<Value> {
     // messages. Tools live highest in the cache hierarchy, so when callers
     // over-mark we keep their tool hints and shed the message-tail ones first.
     let mut breakpoints = crate::llm::cache_policy::Breakpoints::new(BREAKPOINT_CAP);
-    let tools = if !request.tools.is_empty() && !matches!(request.tool_choice, Some(ToolChoice::None)) {
-        Some(lower_tools(&request.tools, &mut breakpoints)?)
-    } else {
-        None
-    };
+    let tools =
+        if !request.tools.is_empty() && !matches!(request.tool_choice, Some(ToolChoice::None)) {
+            Some(lower_tools(&request.tools, &mut breakpoints)?)
+        } else {
+            None
+        };
     let system = lower_system(
         &request.system_prompt,
         request.system_cache.as_ref(),

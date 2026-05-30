@@ -30,7 +30,9 @@ pub(super) fn reject_out_of_workspace_path(
     if raw.components().any(|c| matches!(c, Component::ParentDir)) {
         bail!("path outside workspace is not allowed: {path} (parent-directory path)");
     }
-    if let Some(resolved) = resolved.filter(|resolved| !within_root(root, resolved) && !within_root(&repos_cache, resolved)) {
+    if let Some(resolved) = resolved
+        .filter(|resolved| !within_root(root, resolved) && !within_root(&repos_cache, resolved))
+    {
         bail!(
             "path outside workspace is not allowed: {path} -> {}",
             resolved.display()

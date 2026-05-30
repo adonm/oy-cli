@@ -1,14 +1,14 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
-use std::fs;
-use std::path::Path;
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 use super::super::ToolContext;
 use super::super::args::{ReadArgs, ReadMultipleFilesArgs};
 use super::MAX_WORKSPACE_FILE_BYTES;
-use super::output::{ReadOutput, ReadMultipleFilesOutput};
+use super::output::{ReadMultipleFilesOutput, ReadOutput};
 use super::paths::{rel_path, resolve_read_path};
 
 fn compute_checksum(content: &str) -> String {
@@ -100,7 +100,9 @@ pub(crate) fn tool_read_multiple_files(
         });
     }
 
-    Ok(serde_json::to_value(ReadMultipleFilesOutput { files: results })?)
+    Ok(serde_json::to_value(ReadMultipleFilesOutput {
+        files: results,
+    })?)
 }
 
 struct SearchText {

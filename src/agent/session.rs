@@ -138,7 +138,7 @@ impl Session {
 
     pub fn compact_deterministic(&mut self) -> Option<CompactionStats> {
         let config = context_config_for_model(&self.model, self.interactive);
-        
+
         // Cache-aware compaction: minimize prompt cache invalidation.
         //
         // Prompt caching (KV cache) works on exact prefix matching. When messages
@@ -149,26 +149,26 @@ impl Session {
         // 1. Drop old messages first (preserves cache for remaining messages)
         // 2. Compact tool outputs only if still needed (invalidates cache but necessary)
         // 3. Aggressive re-compaction as last resort (more cache invalidation)
-        
+
         let model_spec = &self.model;
         let current_tokens = self
             .transcript
             .token_estimate(model_spec, &self.system_prompt, &self.todos)
             .total_tokens;
         let trigger = config.trigger_tokens();
-        
+
         // Early exit if already under trigger
         if current_tokens <= trigger {
             return None;
         }
-        
+
         let mut stats = CompactionStats {
             removed_messages: 0,
             compacted_tools: 0,
             summarized: false,
         };
         let mut did_anything = false;
-        
+
         // Phase 1: Drop old messages (preserves cache for remaining messages)
         if let Some((transcript, msg_stats)) = self.transcript.deterministically_compacted(
             config.recent_messages,
@@ -178,7 +178,7 @@ impl Session {
             stats.removed_messages = msg_stats.removed_messages;
             stats.summarized = msg_stats.summarized;
             did_anything = true;
-            
+
             // Check if dropping messages was sufficient
             let new_tokens = self
                 .transcript
@@ -188,17 +188,17 @@ impl Session {
                 return Some(stats);
             }
         }
-        
+
         // Phase 2: Compact tool outputs (invalidates cache but necessary)
         let (after_compact, compacted_count) = self
             .transcript
             .with_compacted_tool_outputs(tokens_to_compaction_bytes(config.tool_output_tokens));
-        
+
         if compacted_count > 0 {
             self.transcript = after_compact;
             stats.compacted_tools = compacted_count;
             did_anything = true;
-            
+
             // Check if compaction was sufficient
             let new_tokens = self
                 .transcript
@@ -208,23 +208,21 @@ impl Session {
                 return Some(stats);
             }
         }
-        
+
         // Phase 3: Aggressive re-compaction (last resort, more cache invalidation)
-        let (after_aggressive, aggressive_count) = self
-            .transcript
-            .with_all_tool_outputs_compacted(tokens_to_compaction_bytes(config.tool_output_tokens / 2));
-        
+        let (after_aggressive, aggressive_count) =
+            self.transcript
+                .with_all_tool_outputs_compacted(tokens_to_compaction_bytes(
+                    config.tool_output_tokens / 2,
+                ));
+
         if aggressive_count > 0 {
             self.transcript = after_aggressive;
             stats.compacted_tools += aggressive_count;
             did_anything = true;
         }
-        
-        if did_anything {
-            Some(stats)
-        } else {
-            None
-        }
+
+        if did_anything { Some(stats) } else { None }
     }
 
     pub fn save(&self, name: Option<&str>) -> Result<std::path::PathBuf> {
@@ -270,7 +268,10 @@ async fn ensure_context_budget(session: &mut Session, model_spec: &str) -> Resul
         {
             crate::ui::err_line(format_args!(
                 "compacted context: {} old messages, {} tool outputs to {:.1}k tokens (round {})",
-                stats.removed_messages, stats.compacted_tools, after as f64 / 1000.0, round + 1
+                stats.removed_messages,
+                stats.compacted_tools,
+                after as f64 / 1000.0,
+                round + 1
             ));
         }
 

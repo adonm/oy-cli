@@ -190,12 +190,25 @@ pub(super) fn schema_read() -> Value {
 pub(super) fn schema_read_multiple_files() -> Value {
     let file_schema = Schema::object()
         .property("path", Schema::string().describe("File path to read"))
-        .property("offset", Schema::integer().default(1).describe("Starting line number (1-indexed)"))
-        .property("limit", Schema::integer().default(DEFAULT_LIMIT).describe("Maximum lines to return"))
-        .property("tail_lines", Schema::integer().describe("Number of lines from end (mutually exclusive with offset)"))
+        .property(
+            "offset",
+            Schema::integer()
+                .default(1)
+                .describe("Starting line number (1-indexed)"),
+        )
+        .property(
+            "limit",
+            Schema::integer()
+                .default(DEFAULT_LIMIT)
+                .describe("Maximum lines to return"),
+        )
+        .property(
+            "tail_lines",
+            Schema::integer().describe("Number of lines from end (mutually exclusive with offset)"),
+        )
         .required(&["path"])
         .build_schema();
-    
+
     Schema::object()
         .property(
             "files",
@@ -219,10 +232,7 @@ pub(super) fn schema_think() -> Value {
 
 pub(super) fn schema_outline() -> Value {
     Schema::object()
-        .property(
-            "path",
-            Schema::string().describe("File path to analyze"),
-        )
+        .property("path", Schema::string().describe("File path to analyze"))
         .property(
             "depth",
             Schema::integer()

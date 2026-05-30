@@ -9,9 +9,9 @@ use serde_json::Value;
 use std::path::Path;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
+use super::ToolContext;
 use super::args::OutlineArgs;
 use super::workspace;
-use super::ToolContext;
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct OutlineItem {

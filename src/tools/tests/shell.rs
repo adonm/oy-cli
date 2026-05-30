@@ -88,7 +88,9 @@ async fn bash_output_preserves_terminal_sequences_raw() {
 #[cfg_attr(miri, ignore)]
 async fn bash_filters_credential_like_environment_variables() {
     let (old_secret, old_public, _dir, ctx) = {
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let old_secret = std::env::var("OY_TEST_SECRET_TOKEN").ok();
         let old_public = std::env::var("OY_TEST_PUBLIC_VALUE").ok();
         unsafe {
@@ -111,7 +113,9 @@ async fn bash_filters_credential_like_environment_variables() {
     .await
     .unwrap();
 
-    let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let _guard = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     match old_secret {
         Some(value) => unsafe { std::env::set_var("OY_TEST_SECRET_TOKEN", value) },
         None => unsafe { std::env::remove_var("OY_TEST_SECRET_TOKEN") },

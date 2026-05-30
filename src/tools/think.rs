@@ -7,8 +7,8 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::args::ThinkArgs;
 use super::ToolContext;
+use super::args::ThinkArgs;
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct Thought {

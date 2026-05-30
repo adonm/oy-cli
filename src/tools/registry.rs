@@ -411,8 +411,21 @@ mod tests {
         assert_eq!(
             names,
             [
-                "list", "read", "read_multiple_files", "search", "sloc", "todo", "ask", "webfetch",
-                "repo_clone", "replace", "patch", "bash", "think", "outline", "snapshot",
+                "list",
+                "read",
+                "read_multiple_files",
+                "search",
+                "sloc",
+                "todo",
+                "ask",
+                "webfetch",
+                "repo_clone",
+                "replace",
+                "patch",
+                "bash",
+                "think",
+                "outline",
+                "snapshot",
             ]
         );
     }

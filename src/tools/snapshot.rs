@@ -7,8 +7,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::args::SnapshotArgs;
 use super::ToolContext;
+use super::args::SnapshotArgs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SnapshotCheckpoint {
@@ -29,7 +29,9 @@ pub(super) struct SnapshotOutput {
 pub(super) fn tool_snapshot(_ctx: &mut ToolContext, args: SnapshotArgs) -> Result<Value> {
     match args.action.as_str() {
         "save" => {
-            let label = args.label.ok_or_else(|| anyhow::anyhow!("label required for save action"))?;
+            let label = args
+                .label
+                .ok_or_else(|| anyhow::anyhow!("label required for save action"))?;
             let checkpoint = SnapshotCheckpoint {
                 label: label.clone(),
                 timestamp: std::time::SystemTime::now()
@@ -38,7 +40,7 @@ pub(super) fn tool_snapshot(_ctx: &mut ToolContext, args: SnapshotArgs) -> Resul
                     .as_secs(),
                 message_index: 0, // Would track actual message index in real implementation
             };
-            
+
             Ok(serde_json::to_value(SnapshotOutput {
                 action: "save".to_string(),
                 success: true,
@@ -47,8 +49,10 @@ pub(super) fn tool_snapshot(_ctx: &mut ToolContext, args: SnapshotArgs) -> Resul
             })?)
         }
         "restore" => {
-            let summary = args.summary.ok_or_else(|| anyhow::anyhow!("summary required for restore action"))?;
-            
+            let summary = args
+                .summary
+                .ok_or_else(|| anyhow::anyhow!("summary required for restore action"))?;
+
             Ok(serde_json::to_value(SnapshotOutput {
                 action: "restore".to_string(),
                 success: true,
@@ -56,22 +60,18 @@ pub(super) fn tool_snapshot(_ctx: &mut ToolContext, args: SnapshotArgs) -> Resul
                 checkpoint: None,
             })?)
         }
-        "cancel" => {
-            Ok(serde_json::to_value(SnapshotOutput {
-                action: "cancel".to_string(),
-                success: true,
-                message: "Checkpoint cancelled".to_string(),
-                checkpoint: None,
-            })?)
-        }
-        "status" => {
-            Ok(serde_json::to_value(SnapshotOutput {
-                action: "status".to_string(),
-                success: true,
-                message: "No active checkpoint".to_string(),
-                checkpoint: None,
-            })?)
-        }
+        "cancel" => Ok(serde_json::to_value(SnapshotOutput {
+            action: "cancel".to_string(),
+            success: true,
+            message: "Checkpoint cancelled".to_string(),
+            checkpoint: None,
+        })?),
+        "status" => Ok(serde_json::to_value(SnapshotOutput {
+            action: "status".to_string(),
+            success: true,
+            message: "No active checkpoint".to_string(),
+            checkpoint: None,
+        })?),
         _ => bail!("unknown snapshot action: {}", args.action),
     }
 }
