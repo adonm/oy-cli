@@ -6,8 +6,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 
 const PLAN_SYSTEM: &str = r#"PLAN mode. Stay read-only. Use only list, read, search, sloc, todo for in-memory planning, ask when interactive, and webfetch when available. Keep files unchanged, skip shell commands, and describe changes as proposed rather than applied."#;
-const ACCEPT_EDITS_SYSTEM: &str = r#"ACCEPT-EDITS mode. File edits may run without asking. Keep edits small and targeted, inspect before changing, and reach for `bash` only when genuinely necessary."#;
-const AUTO_APPROVE_SYSTEM: &str = r#"AUTO-APPROVE mode. Tools may run without asking. Still avoid destructive commands, broad rewrites, credential exposure, persistence changes, and network/file/process expansion unless clearly needed. Treat shell and replacement tools as strict side effects: inspect first, then run the smallest command/edit."#;
+const ACCEPT_EDITS_SYSTEM: &str = r#"ACCEPT-EDITS mode. File edits may run without asking. Shell commands still require approval."#;
+const AUTO_APPROVE_SYSTEM: &str = r#"AUTO-APPROVE mode. Tools may run without asking."#;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum SafetyMode {
