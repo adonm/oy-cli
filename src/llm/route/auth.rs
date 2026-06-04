@@ -132,10 +132,7 @@ fn is_loopback_or_private_host(host: &str) -> bool {
 }
 
 fn is_loopback_or_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
-    }
+    !crate::net::is_public_ip(ip)
 }
 
 fn apply_header_pairs(

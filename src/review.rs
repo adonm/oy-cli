@@ -10,6 +10,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::audit::input::{self, AuditChunk, AuditFile};
 use crate::audit::{reduce::compact_to_tokens, report};
 use crate::{config, session};
 
@@ -41,29 +42,8 @@ pub struct ReviewResult {
 struct ReviewInput {
     source: String,
     manifest: String,
-    chunks: Vec<ReviewChunk>,
+    chunks: Vec<AuditChunk>,
     item_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct ReviewChunk {
-    text: String,
-    tokens: usize,
-    item_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct DiffItem {
-    path: String,
-    text: String,
-    tokens: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NumstatEntry {
-    added: Option<usize>,
-    deleted: Option<usize>,
-    path: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,7 +99,7 @@ pub async fn run(options: ReviewOptions) -> Result<ReviewResult> {
             &options.focus,
             &input.source,
             &input.manifest,
-            &input.chunks[0].text,
+            &input::chunk_text(&input.chunks[0]),
         );
         session::run_prompt_once_no_tools(&options.model, &system, &prompt).await?
     } else {
@@ -133,7 +113,7 @@ pub async fn run(options: ReviewOptions) -> Result<ReviewResult> {
                     &input.manifest,
                     idx + 1,
                     chunk_count,
-                    &chunk.text,
+                    &input::chunk_text(chunk),
                 );
                 let system = &system;
                 let model = &options.model;
@@ -216,24 +196,16 @@ fn prepare_workspace_input(
     model: &str,
     target_tokens: usize,
 ) -> Result<ReviewInput> {
-    let files = crate::audit::input::collect_files(root, Some(output_path), model)?;
+    let files = input::collect_files(root, Some(output_path), model)?;
     if files.is_empty() {
         bail!("no reviewable text files found for review");
     }
-    let mut manifest = crate::audit::input::build_manifest(&files);
+    let mut manifest = input::build_manifest(&files);
     manifest.push('\n');
     manifest.push_str(&workspace_size_index(&files));
-    let chunks = crate::audit::input::chunk_files(files, target_tokens);
-    crate::audit::input::ensure_chunks_fit_prompt(&chunks, target_tokens)?;
+    let chunks = input::chunk_files(files, target_tokens);
+    input::ensure_chunks_fit_prompt(&chunks, target_tokens)?;
     let item_count = chunks.iter().map(|chunk| chunk.files.len()).sum::<usize>();
-    let chunks = chunks
-        .into_iter()
-        .map(|chunk| ReviewChunk {
-            tokens: chunk.tokens,
-            item_count: chunk.files.len(),
-            text: crate::audit::input::chunk_text(&chunk),
-        })
-        .collect();
     Ok(ReviewInput {
         source: "whole workspace".into(),
         manifest,
@@ -267,17 +239,17 @@ fn prepare_diff_input(
     if diff.trim().is_empty() {
         bail!("no git diff found against target {target}");
     }
-    let stats = parse_numstat(&git_output(root, &["diff", "--numstat", target, "--"])?);
-    let items = split_git_diff_items(&diff, model);
+    let stats = input::parse_numstat(&git_output(root, &["diff", "--numstat", target, "--"])?);
+    let items = input::collect_diff_files(&diff, model);
     if items.is_empty() {
         bail!("no reviewable text diff found against target {target}");
     }
-    let mut manifest = diff_manifest(target, &items, &stats);
+    let mut manifest = input::build_diff_manifest(target, &items, &stats);
     manifest.push('\n');
     manifest.push_str(&diff_size_index(root, &items, &stats));
     let item_count = items.len();
-    let chunks = chunk_diff_items(items, target_tokens);
-    ensure_chunks_fit(&chunks, target_tokens)?;
+    let chunks = input::chunk_files(items, target_tokens);
+    input::ensure_chunks_fit_prompt(&chunks, target_tokens)?;
     Ok(ReviewInput {
         source: format!("git diff against {target}"),
         manifest,
@@ -316,133 +288,7 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout).context("git output was not UTF-8")
 }
 
-fn split_git_diff_items(diff: &str, model: &str) -> Vec<DiffItem> {
-    let mut items = Vec::new();
-    let mut current = String::new();
-    for line in diff.lines() {
-        if line.starts_with("diff --git ") && !current.is_empty() {
-            push_diff_item(&mut items, &current, model);
-            current.clear();
-        }
-        current.push_str(line);
-        current.push('\n');
-    }
-    if !current.is_empty() {
-        push_diff_item(&mut items, &current, model);
-    }
-    items
-}
-
-fn push_diff_item(items: &mut Vec<DiffItem>, text: &str, model: &str) {
-    if text
-        .lines()
-        .any(|line| line.starts_with("Binary files ") || line.starts_with("GIT binary patch"))
-    {
-        return;
-    }
-    let path = diff_item_path(text).unwrap_or_else(|| format!("diff-{}", items.len() + 1));
-    items.push(DiffItem {
-        path,
-        text: text.to_string(),
-        tokens: crate::compaction::count_tokens(model, text).max(1),
-    });
-}
-
-fn diff_item_path(text: &str) -> Option<String> {
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("+++ b/") {
-            return Some(path.to_string());
-        }
-        if let Some(path) = line.strip_prefix("rename to ") {
-            return Some(path.to_string());
-        }
-    }
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git a/")
-            && let Some((_, path)) = rest.split_once(" b/")
-        {
-            return Some(path.to_string());
-        }
-    }
-    None
-}
-
-fn chunk_diff_items(items: Vec<DiffItem>, target_tokens: usize) -> Vec<ReviewChunk> {
-    let mut chunks = Vec::new();
-    let mut current = Vec::new();
-    let mut total = 0usize;
-    let mut count = 0usize;
-    for item in items {
-        if !current.is_empty() && total + item.tokens > target_tokens {
-            chunks.push(ReviewChunk {
-                text: current.join("\n"),
-                tokens: total,
-                item_count: count,
-            });
-            current = Vec::new();
-            total = 0;
-            count = 0;
-        }
-        current.push(format!("\n## {}\n\n{}", item.path, item.text));
-        total += item.tokens;
-        count += 1;
-    }
-    if !current.is_empty() {
-        chunks.push(ReviewChunk {
-            text: current.join("\n"),
-            tokens: total,
-            item_count: count,
-        });
-    }
-    chunks
-}
-
-fn ensure_chunks_fit(chunks: &[ReviewChunk], target_tokens: usize) -> Result<()> {
-    if let Some(chunk) = chunks.iter().find(|chunk| chunk.tokens > target_tokens) {
-        bail!(
-            "review chunk would exceed the model input budget without truncating review input ({} tokens > {} target tokens, {} item(s)); rerun with a narrower target or a larger-context model",
-            chunk.tokens,
-            target_tokens,
-            chunk.item_count
-        );
-    }
-    Ok(())
-}
-
-fn parse_numstat(text: &str) -> Vec<NumstatEntry> {
-    text.lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            Some(NumstatEntry {
-                added: parts.next()?.parse().ok(),
-                deleted: parts.next()?.parse().ok(),
-                path: parts.next()?.to_string(),
-            })
-        })
-        .collect()
-}
-
-fn diff_manifest(target: &str, items: &[DiffItem], stats: &[NumstatEntry]) -> String {
-    let estimated_tokens = items.iter().map(|item| item.tokens).sum::<usize>();
-    let added = stats.iter().filter_map(|entry| entry.added).sum::<usize>();
-    let deleted = stats
-        .iter()
-        .filter_map(|entry| entry.deleted)
-        .sum::<usize>();
-    let mut out = String::new();
-    let _ = writeln!(out, "source: git diff against {target}");
-    let _ = writeln!(out, "changed_files: {}", items.len());
-    let _ = writeln!(out, "estimated_tokens: {estimated_tokens}");
-    let _ = writeln!(out, "added_lines: {added}");
-    let _ = writeln!(out, "deleted_lines: {deleted}");
-    out.push_str("changed files:\n");
-    for item in items.iter().take(80) {
-        let _ = writeln!(out, "- {} ({} tokens)", item.path, item.tokens);
-    }
-    out
-}
-
-fn workspace_size_index(files: &[crate::audit::input::AuditFile]) -> String {
+fn workspace_size_index(files: &[AuditFile]) -> String {
     let mut entries = files
         .iter()
         .map(|file| (file.path.as_str(), file.text.lines().count()))
@@ -468,7 +314,11 @@ fn workspace_size_index(files: &[crate::audit::input::AuditFile]) -> String {
     out
 }
 
-fn diff_size_index(root: &Path, items: &[DiffItem], stats: &[NumstatEntry]) -> String {
+fn diff_size_index(
+    root: &Path,
+    items: &[AuditFile],
+    stats: &[(Option<usize>, Option<usize>, String)],
+) -> String {
     let mut out = String::from("Large-file/decomposition index:\n");
     let mut rows = Vec::new();
     for item in items {
@@ -477,8 +327,8 @@ fn diff_size_index(root: &Path, items: &[DiffItem], stats: &[NumstatEntry]) -> S
         };
         let before = stats
             .iter()
-            .find(|entry| entry.path == item.path)
-            .and_then(|entry| Some(current.saturating_sub(entry.added?) + entry.deleted?));
+            .find(|(_, _, path)| path == &item.path)
+            .and_then(|(added, deleted, _)| Some(current.saturating_sub((*added)?) + (*deleted)?));
         let crosses = before.is_some_and(|before| before < 1_000 && current >= 1_000);
         if current >= 900 || crosses {
             rows.push((item.path.as_str(), current, before, crosses));
@@ -663,7 +513,7 @@ mod tests {
     #[test]
     fn split_git_diff_items_skips_binary_and_keeps_file_patches() {
         let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\ndiff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-one\n+two\n";
-        let items = split_git_diff_items(diff, "gpt-4o");
+        let items = input::collect_diff_files(diff, "gpt-4o");
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].path, "src/a.rs");
         assert_eq!(items[1].path, "src/b.rs");
@@ -702,10 +552,10 @@ mod tests {
 
     #[test]
     fn numstat_parser_handles_binary_entries() {
-        let stats = parse_numstat("3\t2\tsrc/a.rs\n-\t-\tlogo.png\n");
-        assert_eq!(stats[0].added, Some(3));
-        assert_eq!(stats[0].deleted, Some(2));
-        assert_eq!(stats[1].added, None);
-        assert_eq!(stats[1].deleted, None);
+        let stats = input::parse_numstat("3\t2\tsrc/a.rs\n-\t-\tlogo.png\n");
+        assert_eq!(stats[0].0, Some(3));
+        assert_eq!(stats[0].1, Some(2));
+        assert_eq!(stats[1].0, None);
+        assert_eq!(stats[1].1, None);
     }
 }

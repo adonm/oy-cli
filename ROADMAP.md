@@ -3,9 +3,9 @@
 > Three-month plan addressing the five findings in `REVIEW.md` (2026-06-04).
 > Each item references its REVIEW.md finding. Work is ordered by impact: security boundary → duplication elimination → decomposition → hygiene.
 
-## Month 1 — Security boundary & input pipeline consolidation
+## Month 1 — Security boundary & input pipeline consolidation ✅ COMPLETE (2026-07)
 
-### Week 1–2: Extract shared public-IP helper (REVIEW #1)
+### Week 1–2: Extract shared public-IP helper (REVIEW #1) ✅ DONE
 
 **Problem:** `is_public_ip` in `src/tools/network.rs` and `is_loopback_or_private_ip` in `src/llm/route/auth.rs` are two independent IP classifiers that have already drifted on edge cases (IPv4-mapped-IPv6, site-local, unique-local). A future change to one could inadvertently relax the other.
 
@@ -17,7 +17,7 @@
 - Existing webfetch IP tests and route auth tests pass unchanged
 - One new test covering IPv4-mapped-IPv6 and unique-local alignment between the two call sites
 
-### Week 3–4: Merge review input collection into audit input abstraction (REVIEW #2)
+### Week 3–4: Merge review input collection into audit input abstraction (REVIEW #2) ✅ DONE
 
 **Problem:** `src/review.rs` (~666 lines) duplicates audit's file collection, chunking, token counting, oversize checks, and manifest/index construction with its own `ReviewChunk`/`DiffItem` structs instead of reusing `AuditChunk`/`AuditFile`. ~200 lines of duplicated chunking machinery. Any future improvement to audit input handling must be replicated manually.
 
@@ -29,9 +29,9 @@
 - All 34 audit tests and all review tests pass unchanged
 - Running `oy review` produces identical output to before the change
 
-## Month 2 — Module decomposition
+## Month 2 — Module decomposition ✅ COMPLETE (2026-07)
 
-### Week 1–3: Split `src/tools/preview.rs` by tool category (REVIEW #3)
+### Week 1–3: Split `src/tools/preview.rs` by tool category (REVIEW #3) ✅ DONE
 
 **Problem:** 799-line file mixing per-tool preview functions for 15+ tools with no separation between workspace, network, and process tool previews. Hard to locate the rendering for a specific tool.
 
@@ -49,7 +49,7 @@ Keep the registry-driven dispatch in `src/tools.rs` intact. No behavior changes.
 - All existing preview tests pass unchanged
 - `just check` clean
 
-### Week 4: Extract Windows ACL code to platform module (REVIEW #4)
+### Week 4: Extract Windows ACL code to platform module (REVIEW #4) ✅ DONE
 
 **Problem:** `restrict_to_owner` in `src/cli/config/paths.rs` (lines 282-345) is a long block of `unsafe` Windows API calls inside a general-purpose paths module that also handles home-directory expansion and workspace output validation.
 
@@ -60,9 +60,9 @@ Keep the registry-driven dispatch in `src/tools.rs` intact. No behavior changes.
 - `#[cfg(windows)]` gating is correct
 - `just check` passes on Linux; Windows build confirmed via CI
 
-## Month 3 — Test hygiene & regression prevention
+## Month 3 — Test hygiene & regression prevention ✅ COMPLETE (2026-07)
 
-### Week 1–2: Split model live tests into separate file (REVIEW #5)
+### Week 1–2: Split model live tests into separate file (REVIEW #5) ✅ DONE
 
 **Problem:** `src/agent/model/tests.rs` (741 lines) mixes fast unit tests with `#[ignore]` live integration tests. Unit test runs still compile live-test scaffolding.
 

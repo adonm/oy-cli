@@ -6,6 +6,7 @@ mod env_config;
 mod mode;
 mod model_config;
 mod paths;
+mod platform;
 mod prompt;
 mod sessions;
 

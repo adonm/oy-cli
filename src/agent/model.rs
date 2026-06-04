@@ -86,3 +86,7 @@ pub async fn inspect_models() -> Result<ModelListing> {
 #[cfg(test)]
 #[path = "model/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model/live_tests.rs"]
+mod live_tests;

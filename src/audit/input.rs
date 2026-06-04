@@ -360,6 +360,103 @@ pub(crate) fn chunk_text(chunk: &AuditChunk) -> String {
     out
 }
 
+// -----------------------------------------------------------------------
+// Git‑diff input source (used by `oy review`)
+// -----------------------------------------------------------------------
+
+/// Parses `git diff --no-ext-diff …` output into `AuditFile` items, one per
+/// file-level hunk. Binary diffs are silently skipped.
+pub(crate) fn collect_diff_files(diff: &str, model: &str) -> Vec<AuditFile> {
+    let mut files = Vec::new();
+    let mut current = String::new();
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") && !current.is_empty() {
+            push_diff_file(&mut files, &current, model);
+            current.clear();
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.is_empty() {
+        push_diff_file(&mut files, &current, model);
+    }
+    files
+}
+
+fn push_diff_file(files: &mut Vec<AuditFile>, text: &str, model: &str) {
+    if text
+        .lines()
+        .any(|line| line.starts_with("Binary files ") || line.starts_with("GIT binary patch"))
+    {
+        return;
+    }
+    let path = diff_file_path(text).unwrap_or_else(|| format!("diff-{}", files.len() + 1));
+    let tokens = crate::compaction::count_tokens(model, text).max(1);
+    files.push(AuditFile {
+        path,
+        language: "Diff",
+        bytes: text.len() as u64,
+        tokens,
+        text: text.to_string(),
+    });
+}
+
+fn diff_file_path(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            return Some(path.to_string());
+        }
+        if let Some(path) = line.strip_prefix("rename to ") {
+            return Some(path.to_string());
+        }
+    }
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git a/")
+            && let Some((_, path)) = rest.split_once(" b/")
+        {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+/// Parses `git diff --numstat` output into `(added, deleted, path)` rows.
+/// Binary entries use `-` instead of a number.
+pub(crate) fn parse_numstat(text: &str) -> Vec<(Option<usize>, Option<usize>, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            Some((
+                parts.next()?.parse().ok(),
+                parts.next()?.parse().ok(),
+                parts.next()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Builds a manifest string for a git‑diff input source.
+pub(crate) fn build_diff_manifest(
+    target: &str,
+    files: &[AuditFile],
+    stats: &[(Option<usize>, Option<usize>, String)],
+) -> String {
+    let estimated_tokens = files.iter().map(|f| f.tokens).sum::<usize>();
+    let added = stats.iter().filter_map(|e| e.0).sum::<usize>();
+    let deleted = stats.iter().filter_map(|e| e.1).sum::<usize>();
+    let mut out = String::new();
+    let _ = writeln!(out, "source: git diff against {target}");
+    let _ = writeln!(out, "changed_files: {}", files.len());
+    let _ = writeln!(out, "estimated_tokens: {estimated_tokens}");
+    let _ = writeln!(out, "added_lines: {added}");
+    let _ = writeln!(out, "deleted_lines: {deleted}");
+    out.push_str("changed files:\n");
+    for file in files.iter().take(80) {
+        let _ = writeln!(out, "- {} ({} tokens)", file.path, file.tokens);
+    }
+    out
+}
+
 fn rel_path(root: &Path, path: &Path) -> Result<String> {
     let resolved = path
         .canonicalize()

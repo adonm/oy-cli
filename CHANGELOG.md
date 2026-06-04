@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+- `src/net.rs` — shared `is_public_ip()` helper used by both webfetch (`src/tools/network.rs`) and credential transport (`src/llm/route/auth.rs`). Normalises IPv4-mapped-IPv6 addresses and blocks multicast and deprecated site-local IPv6 ranges. Added focused tests for IPv4-mapped-IPv6 and unique-local alignment (REVIEW #1).
+
+### Changed
+- `src/tools/preview.rs` — split 862-line file into sub-modules under `src/tools/preview/`: `common.rs` (shared helpers), `workspace.rs` (list, read, search, replace, patch, sloc, outline), `network.rs` (webfetch, repo_clone), `process.rs` (bash), `planning.rs` (todo, think, ask). The parent file is now a 99-line re-export shell. All files under 400 lines; all preview tests pass unchanged (REVIEW #3).
+- `src/cli/config/paths.rs` — moved `restrict_to_owner` (Windows ACL) to `src/cli/config/platform/windows.rs` behind `#[cfg(windows)]`. Added `src/cli/config/platform/mod.rs` with `#[cfg(windows)]` re-export. The two call sites in `write_private_file` and `create_private_dir_all` now route through `super::platform::restrict_to_owner` (REVIEW #4).
+- `src/agent/model/tests.rs` — moved 10 `#[ignore]` live integration tests and helpers (`is_auth_error`, `assert_model_responds`, `assert_model_uses_tool`, `Echo`, `EchoArgs`) to new `src/agent/model/live_tests.rs`. Unit test file drops from 841 lines to ~675 lines; live tests stay `#[ignore]` and run with `cargo test --lib --ignored` (REVIEW #5).
+- `src/audit/input.rs` now includes git-diff input support: `collect_diff_files` (parses `git diff` output into `AuditFile` items, skipping binary diffs), `parse_numstat`, and `build_diff_manifest`. These replace the previous `ReviewChunk`/`DiffItem`/`NumstatEntry` types and duplicated chunking/validation functions in `src/review.rs` (REVIEW #2).
+- `src/review.rs` — deleted `ReviewChunk`, `DiffItem`, `NumstatEntry` structs and five duplicated functions (`split_git_diff_items`, `chunk_diff_items`, `ensure_chunks_fit`, `parse_numstat`, `diff_manifest`). Both `prepare_workspace_input` and `prepare_diff_input` now go through the shared `AuditFile`/`AuditChunk` types and `chunk_files`/`ensure_chunks_fit_prompt`/`chunk_text` helpers. All tests pass unchanged.
+- `src/llm/route/auth.rs` — `is_loopback_or_private_ip` now delegates to `!crate::net::is_public_ip`, gaining IPv4-mapped-IPv6 normalisation and site-local IPv6 blocking that the previous `IpAddr::is_*` methods missed.
+
 ### Removed
 - `snapshot` tool. The 0.10.6 implementation was a model-callable stub that returned `success: true` for no-op actions; it has been removed from the registry, schema, args, and preview surface. Any in-flight model call that names `snapshot` will now surface as `unknown tool: snapshot` through the documented fail-closed path.
 - Dead `GrepMode::Fuzzy` arm in `search_exact_file`. The only producer of `GrepMode` in the crate (`search_mode`) emits `Regex` or `PlainText`; the third arm now uses `unreachable!()` so the match stays exhaustive (a future enum addition breaks the build here) while the intent is honest.

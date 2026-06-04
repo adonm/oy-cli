@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use super::schema::ToolCall;
 use super::{LlmTool, LlmTools};
 
-const TOOL_ONLY_CHURN_LIMIT: usize = 64;
+const TOOL_ONLY_CHURN_LIMIT: usize = 256;
 
 pub(crate) type ToolMap = HashMap<String, Box<dyn LlmTool>>;
 

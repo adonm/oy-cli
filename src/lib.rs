@@ -10,6 +10,7 @@ mod agent;
 mod audit;
 mod cli;
 mod llm;
+mod net;
 mod review;
 mod tools;
 

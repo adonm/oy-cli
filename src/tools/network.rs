@@ -269,27 +269,11 @@ fn validate_public_host(host: &str) -> Result<()> {
 }
 
 fn validate_public_ip(ip: IpAddr) -> Result<()> {
-    if is_public_ip(ip) {
+    if crate::net::is_public_ip(ip) {
         Ok(())
     } else {
         bail!("webfetch blocks localhost and private IP targets");
     }
-}
-
-fn is_public_ip(ip: IpAddr) -> bool {
-    let normalized_ip = match ip {
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4() {
-                IpAddr::V4(v4)
-            } else {
-                IpAddr::V6(v6)
-            }
-        }
-        IpAddr::V4(v4) => IpAddr::V4(v4),
-    };
-    ip_rfc::global(&normalized_ip)
-        && !normalized_ip.is_multicast()
-        && !matches!(normalized_ip, IpAddr::V6(ip) if (ip.segments()[0] & 0xffc0) == 0xfec0)
 }
 
 fn normalize_scrape_url(input: &str) -> String {
@@ -399,7 +383,7 @@ mod tests {
             "::ffff:169.254.169.254".parse().unwrap(),
             "::ffff:192.168.1.1".parse().unwrap(),
         ] {
-            assert!(!is_public_ip(ip), "{ip} should be blocked");
+            assert!(!crate::net::is_public_ip(ip), "{ip} should be blocked");
         }
 
         for ip in [
@@ -408,7 +392,7 @@ mod tests {
             "192.0.0.10".parse().unwrap(),
             "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
         ] {
-            assert!(is_public_ip(ip), "{ip} should be allowed");
+            assert!(crate::net::is_public_ip(ip), "{ip} should be allowed");
         }
     }
 
