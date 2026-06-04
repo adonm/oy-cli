@@ -5,6 +5,7 @@
 mod env_config;
 mod mode;
 mod model_config;
+mod atomic_write;
 mod paths;
 mod platform;
 mod prompt;

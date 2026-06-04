@@ -17,6 +17,7 @@ mod args;
 mod clone;
 mod llm;
 mod network;
+#[cfg(feature = "outline")]
 mod outline;
 mod output;
 mod policy;

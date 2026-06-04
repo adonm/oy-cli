@@ -325,12 +325,14 @@ pub(crate) fn preview_sloc(value: &Value) -> String {
     })
 }
 
+#[cfg(feature = "outline")]
 pub(crate) fn summary_outline(args: &Value) -> String {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(2);
     format!("path={} depth={}", path, depth)
 }
 
+#[cfg(feature = "outline")]
 pub(crate) fn preview_outline(value: &Value) -> String {
     let path = value_str(value, "path");
     let items = value

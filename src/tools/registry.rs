@@ -46,6 +46,7 @@ pub(super) enum ToolId {
     Patch,
     Bash,
     Think,
+    #[cfg(feature = "outline")]
     Outline,
 }
 
@@ -65,6 +66,7 @@ impl ToolId {
             Self::Patch => "patch",
             Self::Bash => "bash",
             Self::Think => "think",
+            #[cfg(feature = "outline")]
             Self::Outline => "outline",
         }
     }
@@ -113,7 +115,9 @@ pub(super) fn find_def(name: &str) -> Option<&'static ToolDef> {
 
 // Import preview functions so we can reference them in TOOL_DEFS.
 use super::preview;
-use super::{network, outline, shell, think, todo, workspace};
+use super::{network, shell, think, todo, workspace};
+#[cfg(feature = "outline")]
+use super::outline;
 
 fn no_external_side_effect(_: &Value) -> bool {
     false
@@ -190,6 +194,7 @@ fn invoke_think(ctx: &mut ToolContext, args: Value) -> Result<Value> {
     parse_tool_args(args).and_then(|args| think::tool_think(ctx, args))
 }
 
+#[cfg(feature = "outline")]
 fn invoke_outline(ctx: &mut ToolContext, args: Value) -> Result<Value> {
     parse_tool_args(args).and_then(|args| outline::tool_outline(ctx, args))
 }
@@ -328,6 +333,7 @@ const TOOL_DEFS: &[ToolDef] = &[
         executor: ToolExecutor::Sync(invoke_think),
         external_side_effect: no_external_side_effect,
     },
+    #[cfg(feature = "outline")]
     ToolDef {
         id: ToolId::Outline,
         description: "Show structural outline of a file: classes, functions, and top-level declarations without bodies. Useful for surveying code before reading specific sections.",
@@ -395,6 +401,7 @@ mod tests {
     #[test]
     fn registry_names_are_tool_ids() {
         let names = TOOL_DEFS.iter().map(|def| def.name()).collect::<Vec<_>>();
+        #[cfg(feature = "outline")]
         assert_eq!(
             names,
             [
@@ -412,6 +419,25 @@ mod tests {
                 "bash",
                 "think",
                 "outline",
+            ]
+        );
+        #[cfg(not(feature = "outline"))]
+        assert_eq!(
+            names,
+            [
+                "list",
+                "read",
+                "read_multiple_files",
+                "search",
+                "sloc",
+                "todo",
+                "ask",
+                "webfetch",
+                "repo_clone",
+                "replace",
+                "patch",
+                "bash",
+                "think",
             ]
         );
     }

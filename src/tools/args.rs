@@ -85,6 +85,7 @@ fn default_next_thought_needed() -> bool {
     true
 }
 
+#[cfg(feature = "outline")]
 fn default_depth() -> usize {
     2
 }
@@ -187,6 +188,7 @@ pub(super) struct ReadMultipleFilesArgs {
     pub(super) files: Vec<ReadArgs>,
 }
 
+#[cfg(feature = "outline")]
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct OutlineArgs {
     pub(super) path: String,

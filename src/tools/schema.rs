@@ -230,6 +230,7 @@ pub(super) fn schema_think() -> Value {
         .build()
 }
 
+#[cfg(feature = "outline")]
 pub(super) fn schema_outline() -> Value {
     Schema::object()
         .property("path", Schema::string().describe("File path to analyze"))
