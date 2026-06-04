@@ -20,7 +20,6 @@ fn list_supports_fuzzy_file_queries() {
     assert_eq!(items.first().unwrap(), "src/tools/workspace.rs");
 }
 
-
 #[test]
 fn list_does_not_expand_zip_members() {
     let (dir, ctx) = test_context(auto_policy(), false);

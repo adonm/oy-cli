@@ -21,4 +21,3 @@ fn sloc_accepts_space_separated_paths() {
     assert_eq!(value["output"]["Markdown"]["comments"], 1);
     assert!(value["output"]["Total"].is_object());
 }
-

@@ -32,9 +32,9 @@ pub(super) use planning::{
 };
 pub(super) use process::{preview_bash, summary_bash};
 pub(super) use workspace::{
-    preview_list, preview_patch, preview_read, preview_read_multiple_files,
-    preview_replace, preview_search, preview_sloc, summary_list, summary_patch,
-    summary_read, summary_read_multiple_files, summary_replace, summary_search, summary_sloc,
+    preview_list, preview_patch, preview_read, preview_read_multiple_files, preview_replace,
+    preview_search, preview_sloc, summary_list, summary_patch, summary_read,
+    summary_read_multiple_files, summary_replace, summary_search, summary_sloc,
 };
 #[cfg(feature = "outline")]
 pub(super) use workspace::{preview_outline, summary_outline};

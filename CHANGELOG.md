@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.10.7] - 2026-06-04
 
 ### Added
 - `src/net.rs` — shared `is_public_ip()` helper used by both webfetch (`src/tools/network.rs`) and credential transport (`src/llm/route/auth.rs`). Normalises IPv4-mapped-IPv6 addresses and blocks multicast and deprecated site-local IPv6 ranges. Added focused tests for IPv4-mapped-IPv6 and unique-local alignment (REVIEW #1).

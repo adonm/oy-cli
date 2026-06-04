@@ -97,7 +97,6 @@ fn search_auto_treats_plain_identifier_as_literal_and_suggests_read_path() {
     assert_eq!(value["match_count"], 0);
 }
 
-
 #[test]
 fn directory_exclude_applies_to_search_and_replace_file_targets() {
     let (dir, ctx) = test_context(auto_policy(), false);
@@ -137,7 +136,6 @@ fn directory_exclude_applies_to_search_and_replace_file_targets() {
         "hit\n"
     );
 }
-
 
 #[test]
 fn search_stops_at_requested_limit() {
@@ -184,7 +182,6 @@ fn search_exact_file_does_not_spend_limit_on_siblings() {
     assert_eq!(value["truncated"], false);
 }
 
-
 #[test]
 fn search_file_treats_zip_as_binary_file() {
     let (dir, ctx) = test_context(auto_policy(), false);
@@ -202,4 +199,3 @@ fn search_file_treats_zip_as_binary_file() {
     .unwrap();
     assert_eq!(value["match_count"], 0);
 }
-

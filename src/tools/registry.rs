@@ -114,10 +114,10 @@ pub(super) fn find_def(name: &str) -> Option<&'static ToolDef> {
 }
 
 // Import preview functions so we can reference them in TOOL_DEFS.
-use super::preview;
-use super::{network, shell, think, todo, workspace};
 #[cfg(feature = "outline")]
 use super::outline;
+use super::preview;
+use super::{network, shell, think, todo, workspace};
 
 fn no_external_side_effect(_: &Value) -> bool {
     false

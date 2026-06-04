@@ -37,14 +37,14 @@ fn tool_description(name: &str) -> String {
         .unwrap_or_else(|| panic!("missing tool description for {name}"))
 }
 
-mod network;
-mod policy;
-mod schema;
-mod shell;
-mod todo;
 mod list;
+mod network;
 mod patch;
+mod policy;
 mod read;
 mod replace;
+mod schema;
 mod search;
+mod shell;
 mod sloc;
+mod todo;
