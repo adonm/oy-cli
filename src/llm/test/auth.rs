@@ -126,7 +126,7 @@ fn test_sigv4_headers_with_custom_port() {
 }
 
 #[test]
-fn test_recursive_composite_auth() {
+fn nested_composite_auth_is_rejected() {
     let client = reqwest::Client::new();
     let builder = client.post("https://api.openai.com/v1/chat/completions");
     let auth = RouteAuth::Composite(vec![
@@ -137,17 +137,17 @@ fn test_recursive_composite_auth() {
         }]),
     ]);
 
-    let builder_with_headers = apply_json_headers(
+    let err = apply_json_headers(
         builder,
         &auth,
         "https://api.openai.com/v1/chat/completions",
         "{}",
     )
-    .unwrap();
+    .unwrap_err();
 
-    let request = builder_with_headers.build().unwrap();
-    let headers = request.headers();
-
-    assert_eq!(headers.get("authorization").unwrap(), "Bearer secret_key_1");
-    assert_eq!(headers.get("x-custom").unwrap(), "value_2");
+    assert!(
+        err.to_string()
+            .contains("nested RouteAuth::Composite is not supported"),
+        "{err}"
+    );
 }

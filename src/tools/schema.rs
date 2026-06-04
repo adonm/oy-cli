@@ -243,26 +243,6 @@ pub(super) fn schema_outline() -> Value {
         .build()
 }
 
-pub(super) fn schema_snapshot() -> Value {
-    Schema::object()
-        .property(
-            "action",
-            Schema::string()
-                .enum_values(&["save", "restore", "cancel", "status"])
-                .describe("Action to perform: save checkpoint, restore from checkpoint, cancel checkpoint, or check status"),
-        )
-        .property(
-            "label",
-            Schema::string().describe("Label for the checkpoint (required for 'save' action)"),
-        )
-        .property(
-            "summary",
-            Schema::string().describe("Summary of exploration to collapse (required for 'restore' action)"),
-        )
-        .required(&["action"])
-        .build()
-}
-
 pub(super) fn schema_search() -> Value {
     Schema::object()
         .property(

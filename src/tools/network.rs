@@ -82,57 +82,10 @@ impl PublicWebfetchClient {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many redirects");
             }
-
-            let (scheme, host, port) = {
-                let url = attempt.url();
-                let scheme = url.scheme().to_string();
-                let host = match url.host_str() {
-                    Some(h) => h.to_string(),
-                    None => return attempt.error("redirect URL must include a host"),
-                };
-                let port = url.port_or_known_default();
-                (scheme, host, port)
-            };
-
-            if !matches!(scheme.as_str(), "http" | "https") {
-                return attempt.error("webfetch only supports http(s) redirects");
+            match validate_public_url_target(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(err) => attempt.error(err.to_string()),
             }
-
-            if let Err(err) = validate_public_host(&host) {
-                return attempt.error(err.to_string());
-            }
-
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                if let Err(err) = validate_public_ip(ip) {
-                    return attempt.error(err.to_string());
-                }
-            } else {
-                let port = match port {
-                    Some(p) => p,
-                    None => return attempt.error("redirect URL must include a valid port"),
-                };
-
-                use std::net::ToSocketAddrs;
-                match (&host as &str, port).to_socket_addrs() {
-                    Ok(addrs) => {
-                        let mut resolved_any = false;
-                        for addr in addrs {
-                            resolved_any = true;
-                            if let Err(err) = validate_public_ip(addr.ip()) {
-                                return attempt.error(err.to_string());
-                            }
-                        }
-                        if !resolved_any {
-                            return attempt.error(format!("failed to resolve {host}"));
-                        }
-                    }
-                    Err(err) => {
-                        return attempt.error(format!("failed to resolve {host}: {err}"));
-                    }
-                }
-            }
-
-            attempt.follow()
         });
         let mut builder = reqwest::Client::builder()
             .redirect(custom_policy)
@@ -181,16 +134,15 @@ struct PublicWebfetchTarget {
 impl PublicWebfetchTarget {
     async fn resolve(input: &str) -> Result<Self> {
         let url = Url::parse(&normalize_scrape_url(input)).context("Invalid URL")?;
-        if !matches!(url.scheme(), "http" | "https") {
-            bail!("webfetch only supports http(s) URLs");
-        }
+        // Run the same scheme/host/IP-literal rules as the redirect policy
+        // so a public-at-first host cannot drift to a private-IP target
+        // before the request is even built.
+        validate_public_url_target(&url)?;
         let host = url
             .host_str()
             .context("URL must include a host")?
             .to_string();
-        validate_public_host(&host)?;
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            validate_public_ip(ip)?;
+        if let Ok(_ip) = host.parse::<IpAddr>() {
             return Ok(Self {
                 url,
                 host,
@@ -201,6 +153,9 @@ impl PublicWebfetchTarget {
         let port = url
             .port_or_known_default()
             .context("URL must include a valid port")?;
+        // Async DNS to collect the resolved addrs and pin them in the
+        // client builder; per-addr validation is already done by
+        // `resolve_public_addrs`.
         let resolved_addrs = resolve_public_addrs(&host, port).await?;
         Ok(Self {
             url,
@@ -245,6 +200,47 @@ async fn read_capped_response_body(
     }
 
     Ok((String::from_utf8_lossy(&body).to_string(), truncated))
+}
+
+/// Per-URL public-boundary check shared by the initial request resolve
+/// and the redirect policy. Performs scheme allowlist, host validation,
+/// and (for non-IP-literal hosts) per-socket `validate_public_ip` against
+/// the resolved addresses so a host that resolves to a private range is
+/// rejected.
+///
+/// This is the sync variant — the redirect policy closure cannot be
+/// async, so it accepts the brief blocking DNS lookup. The initial
+/// resolve additionally calls [`resolve_public_addrs`] to pin the
+/// resolved addrs in the client builder and avoid re-resolution.
+fn validate_public_url_target(url: &Url) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("webfetch only supports http(s) URLs");
+    }
+    let host = url
+        .host_str()
+        .context("URL must include a host")?
+        .to_string();
+    validate_public_host(&host)?;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        validate_public_ip(ip)?;
+        return Ok(());
+    }
+    let port = url
+        .port_or_known_default()
+        .context("URL must include a valid port")?;
+    use std::net::ToSocketAddrs;
+    let mut resolved_any = false;
+    for addr in (&host as &str, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve {host}"))?
+    {
+        resolved_any = true;
+        validate_public_ip(addr.ip())?;
+    }
+    if !resolved_any {
+        bail!("failed to resolve {host}");
+    }
+    Ok(())
 }
 
 async fn resolve_public_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
@@ -421,6 +417,29 @@ mod tests {
         assert!(validate_public_host("localhost").is_err());
         assert!(validate_public_host("api.localhost").is_err());
         assert!(validate_public_host("example.com").is_ok());
+    }
+
+    #[test]
+    fn validate_public_url_target_rejects_non_http_schemes_and_private_hosts() {
+        assert!(validate_public_url_target(&Url::parse("ftp://example.com").unwrap()).is_err());
+        assert!(validate_public_url_target(&Url::parse("file:///etc/hosts").unwrap()).is_err());
+        assert!(validate_public_url_target(&Url::parse("http://localhost/path").unwrap()).is_err());
+        assert!(validate_public_url_target(&Url::parse("http://127.0.0.1/path").unwrap()).is_err());
+    }
+
+    #[test]
+    fn validate_public_url_target_accepts_public_ip_literal() {
+        // 93.184.216.34 is the example.com range (representative public IPv4).
+        let url = Url::parse("http://93.184.216.34/path").unwrap();
+        assert!(validate_public_url_target(&url).is_ok());
+    }
+
+    #[test]
+    fn validate_public_url_target_rejects_unresolvable_host() {
+        // A host that cannot be resolved must fail closed, mirroring
+        // `resolve_public_addrs`.
+        let url = Url::parse("http://no-such-host.invalid./").unwrap();
+        assert!(validate_public_url_target(&url).is_err());
     }
 
     #[test]

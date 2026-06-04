@@ -70,11 +70,8 @@ pub(super) async fn model_command(args: ModelArgs) -> Result<i32> {
     print_model_listing(&listing);
     if config::can_prompt()
         && !listing.all_models.is_empty()
-        && let Some(chosen) = crate::chat::choose_model_with_initial_list(
-            listing.current.as_deref(),
-            &listing.all_models,
-            false,
-        )?
+        && let Some(chosen) =
+            crate::chat::choose_model(listing.current.as_deref(), &listing.all_models)?
     {
         config::save_model_config(&chosen)?;
         print_saved_model(&chosen);

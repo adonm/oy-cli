@@ -773,25 +773,6 @@ pub(super) fn preview_outline(value: &Value) -> String {
     })
 }
 
-pub(super) fn summary_snapshot(args: &Value) -> String {
-    let action = args.get("action").and_then(Value::as_str).unwrap_or("");
-    let label = args.get("label").and_then(Value::as_str).unwrap_or("");
-    if label.is_empty() {
-        format!("action={}", action)
-    } else {
-        format!("action={} label={}", action, label)
-    }
-}
-
-pub(super) fn preview_snapshot(value: &Value) -> String {
-    let action = value_str(value, "action");
-    let success = value_bool(value, "success");
-    let message = value_str(value, "message");
-    let status = if success { "ok" } else { "error" };
-    let summary = format!("action={} · {} · {}", action, status, message);
-    summary
-}
-
 pub(super) fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }

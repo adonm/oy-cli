@@ -89,15 +89,6 @@ fn default_depth() -> usize {
     2
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct SnapshotArgs {
-    pub(super) action: String,
-    #[serde(default)]
-    pub(super) label: Option<String>,
-    #[serde(default)]
-    pub(super) summary: Option<String>,
-}
-
 fn deserialize_option_usize<'de, D>(deserializer: D) -> std::result::Result<Option<usize>, D::Error>
 where
     D: Deserializer<'de>,

@@ -63,7 +63,7 @@ pub fn chat_help_text() -> String {
         "/save [name], /load [name] -- save or load a session",
         "/clear (/c) -- restart this chat session",
         "/quit (/q), /exit -- end session",
-        "Advanced: /tokens, /compact [llm|deterministic], /thinking [auto|off|effort]",
+        "Advanced: /tokens, /compact [deterministic], /thinking [auto|off|effort]",
     ]
     .join("\n")
 }
@@ -88,7 +88,7 @@ fn tokens_command(session: &Session) -> Result<bool> {
         format_args!("~{} tokens", status.estimate.system_tokens),
     );
     crate::ui::kv(
-        "messages",
+        "message-tokens",
         format_args!("~{} tokens", status.estimate.message_tokens),
     );
     crate::ui::kv(
@@ -134,7 +134,7 @@ fn thinking_command(value: Option<&str>, session: &Session) -> Result<bool> {
 
 async fn compact_command(mode: Option<&str>, session: &mut Session) -> Result<bool> {
     let stats = match mode.unwrap_or("deterministic") {
-        "" | "deterministic" | "det" | "fast" | "llm" | "smart" => session.compact_deterministic(),
+        "" | "deterministic" | "det" | "fast" => session.compact_deterministic(),
         other => anyhow::bail!("compact mode must be deterministic; got {other}"),
     };
     crate::ui::section("Compaction");
@@ -255,7 +255,7 @@ fn clear_command(session: &mut Session) -> Result<bool> {
 }
 
 pub(crate) fn choose_model(current: Option<&str>, items: &[String]) -> Result<Option<String>> {
-    choose_model_with_initial_list(current, items, true)
+    choose_model_from_items(current, items, "Models")
 }
 
 pub(crate) fn choose_recent_model(
@@ -299,17 +299,6 @@ pub(crate) enum RecentModelChoice {
     Inspect,
     Clear,
     Cancelled,
-}
-
-pub(crate) fn choose_model_with_initial_list(
-    current: Option<&str>,
-    items: &[String],
-    _print_initial_list: bool,
-) -> Result<Option<String>> {
-    if items.is_empty() || !config::can_prompt() {
-        return Ok(None);
-    }
-    choose_model_from_items(current, items, "Models")
 }
 
 fn choose_model_from_items(
@@ -375,6 +364,19 @@ mod tests {
     #[test]
     fn chat_help_snapshot() {
         insta::assert_snapshot!(chat_help_text());
+    }
+
+    #[test]
+    fn chat_help_advertises_only_deterministic_compact() {
+        let help = chat_help_text();
+        assert!(
+            help.contains("/compact [deterministic]"),
+            "help should advertise only the deterministic mode; got:\n{help}"
+        );
+        assert!(
+            !help.contains("/compact [llm"),
+            "help must not advertise the non-existent llm mode; got:\n{help}"
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub fn markdown(text: &str) {
 }
 
 fn render_markdown(text: &str) -> String {
-    if let Some(rendered) = render_plain_with_bat("markdown.md", text.as_bytes()) {
+    if let Some(rendered) = render_bat("markdown.md", text.as_bytes(), None) {
         return preserve_trailing(text, rendered);
     }
     text.to_string()
@@ -70,7 +70,7 @@ pub fn code_lines(path: &str, lines: &[(usize, &str)]) -> String {
             .map(|(line, _)| LineRange::new((*line).max(1), (*line).max(1)))
             .collect::<Vec<_>>(),
     );
-    let rendered = render_with_bat(title, content.as_bytes(), ranges)
+    let rendered = render_bat(title, content.as_bytes(), Some(ranges))
         .unwrap_or_else(|| fallback_preview_lines(lines));
     out.push_str(rendered.trim_end());
     out.trim_end().to_string()
@@ -93,18 +93,10 @@ fn preview_block(title: &str, text: &str, first_line: usize) -> String {
     let content = offset_preview_content(text, first_line);
     let last_line = first_line.saturating_add(text.lines().count().max(1).saturating_sub(1));
     let ranges = LineRanges::from(vec![LineRange::new(first_line.max(1), last_line.max(1))]);
-    let rendered = render_with_bat(title, content.as_bytes(), ranges)
+    let rendered = render_bat(title, content.as_bytes(), Some(ranges))
         .unwrap_or_else(|| fallback_preview_text(text));
     out.push_str(rendered.trim_end());
     out.trim_end().to_string()
-}
-
-fn render_with_bat(title: &str, bytes: &[u8], ranges: LineRanges) -> Option<String> {
-    render_bat(title, bytes, Some(ranges))
-}
-
-fn render_plain_with_bat(title: &str, bytes: &[u8]) -> Option<String> {
-    render_bat(title, bytes, None)
 }
 
 fn render_bat(title: &str, bytes: &[u8], ranges: Option<LineRanges>) -> Option<String> {
@@ -140,7 +132,7 @@ fn fallback_preview_lines(lines: &[(usize, &str)]) -> String {
 }
 
 pub fn diff(text: &str) -> String {
-    if let Some(rendered) = render_plain_with_bat("changes.diff", text.as_bytes()) {
+    if let Some(rendered) = render_bat("changes.diff", text.as_bytes(), None) {
         return preserve_trailing(text, rendered);
     }
     text.to_string()

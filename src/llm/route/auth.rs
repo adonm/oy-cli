@@ -51,11 +51,17 @@ fn apply_json_headers_inner(
                         HeaderValue::from_str(value).context("invalid auth header value")?,
                     ),
                     RouteAuth::Headers(headers) => apply_header_pairs(builder, headers)?,
-                    RouteAuth::Composite(_) => {
-                        apply_json_headers_inner(builder, auth, endpoint, body)?
-                    }
                     RouteAuth::AwsSigV4(credentials) => {
                         builder.headers(sigv4_headers(endpoint, body, credentials)?)
+                    }
+                    RouteAuth::Composite(_) => {
+                        // Nested composites are flattened at construction time
+                        // (see RouteAuth::Composite builders in providers/route.rs);
+                        // reaching this branch means a builder produced a nested
+                        // Composite, which is a programming error.
+                        bail!(
+                            "nested RouteAuth::Composite is not supported; flatten at construction"
+                        );
                     }
                 };
             }

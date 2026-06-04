@@ -1,15 +1,29 @@
 //! Repository cloning tool for fetching external codebases into a managed cache.
+//!
+//! Process boundary: `git clone`/`fetch`/`rev-parse` are wrapped in
+//! `tokio::time::timeout` and `repo_clone` is registered as an
+//! `external_side_effect` tool so the side-effect retry guard in
+//! `tools::invoke_inner` covers it. The git process inherits the
+//! shell's credential-env filter only by virtue of running from a
+//! shell that already removed them; the clone tool does not run a
+//! child shell.
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use super::ToolContext;
 use super::args::RepoCloneArgs;
+
+const CLONE_TIMEOUT: Duration = Duration::from_secs(300);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(300);
+const REV_PARSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Serialize)]
 pub(super) struct RepoCloneOutput {
@@ -64,13 +78,62 @@ struct RepositoryReference {
     segments: Vec<String>,
 }
 
+/// Peel an optional `git+` prefix and a `#fragment` (treated as a
+/// sub-path/ref annotation, not a URL fragment). The fragment is
+/// preserved on the label but stripped from the remote used to
+/// invoke `git`.
+fn split_git_uri(input: &str) -> (String, Option<String>) {
+    let trimmed = input.trim();
+    let (no_git_plus, _) = trimmed
+        .strip_prefix("git+")
+        .map_or((trimmed, ()), |s| (s, ()));
+    let (url_part, fragment) = match no_git_plus.split_once('#') {
+        Some((url, frag)) => (url, Some(frag.to_string())),
+        None => (no_git_plus, None),
+    };
+    (url_part.trim_end_matches('/').to_string(), fragment)
+}
+
+/// Parse an scp-style `git@host:owner/repo[.git]` reference. Returns
+/// `None` if the input does not match the scp shape; the caller is
+/// expected to fall through to a URL parse for other shapes.
+fn parse_scp_reference(input: &str) -> Option<RepositoryReference> {
+    let (user_host, path) = input.split_once(':')?;
+    if path.is_empty() || path.contains("://") {
+        return None;
+    }
+    let (user, host) = user_host.split_once('@')?;
+    if user.is_empty() || host.is_empty() {
+        return None;
+    }
+    if host.contains('@') || host.contains('/') {
+        return None;
+    }
+    let segments: Vec<String> = path
+        .trim_start_matches('/')
+        .replace(".git", "")
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if segments.is_empty() {
+        return None;
+    }
+    let label = if host == "github.com" && segments.len() == 2 {
+        segments.join("/")
+    } else {
+        format!("{}/{}", host, segments.join("/"))
+    };
+    Some(RepositoryReference {
+        remote: input.to_string(),
+        label,
+        host: host.to_string(),
+        segments,
+    })
+}
+
 fn parse_repository_reference(input: &str) -> Result<RepositoryReference> {
-    let cleaned = input
-        .trim()
-        .replace("git+", "")
-        .replace('#', "")
-        .trim_end_matches('/')
-        .to_string();
+    let (cleaned, _fragment) = split_git_uri(input);
 
     if cleaned.is_empty() {
         bail!("repository reference cannot be empty");
@@ -89,15 +152,24 @@ fn parse_repository_reference(input: &str) -> Result<RepositoryReference> {
         }
     }
 
-    // Full git URL
-    if cleaned.starts_with("http://")
-        || cleaned.starts_with("https://")
-        || cleaned.starts_with("git@")
+    // scp-style: git@host:owner/repo[.git]
+    if cleaned.contains('@')
+        && cleaned.contains(':')
+        && let Some(reference) = parse_scp_reference(&cleaned)
     {
+        return Ok(reference);
+    }
+
+    // Full http(s):// or git+ssh:// URL
+    if cleaned.starts_with("http://") || cleaned.starts_with("https://") {
         let url = url::Url::parse(&cleaned).context("invalid repository URL")?;
         let host = url.host_str().unwrap_or("unknown").to_string();
         let path = url.path().trim_start_matches('/').replace(".git", "");
-        let segments: Vec<String> = path.split('/').map(String::from).collect();
+        let segments: Vec<String> = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
         let label = if host == "github.com" && segments.len() == 2 {
             segments.join("/")
         } else {
@@ -153,13 +225,17 @@ async fn clone_repository(remote: &str, local_path: &PathBuf, branch: Option<&st
         .arg(remote)
         .arg(local_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     if let Some(branch) = branch {
         cmd.arg("--branch").arg(branch);
     }
 
-    let output = cmd.output().await.context("failed to execute git clone")?;
+    let output = match timeout(CLONE_TIMEOUT, cmd.output()).await {
+        Ok(result) => result.context("failed to execute git clone")?,
+        Err(_) => bail!("git clone timed out after {}s", CLONE_TIMEOUT.as_secs()),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -177,13 +253,17 @@ async fn fetch_latest(local_path: &PathBuf, branch: Option<&str>) -> Result<()> 
         .arg("1")
         .arg("origin")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     if let Some(branch) = branch {
         cmd.arg(branch);
     }
 
-    let output = cmd.output().await.context("failed to execute git fetch")?;
+    let output = match timeout(FETCH_TIMEOUT, cmd.output()).await {
+        Ok(result) => result.context("failed to execute git fetch")?,
+        Err(_) => bail!("git fetch timed out after {}s", FETCH_TIMEOUT.as_secs()),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -194,13 +274,21 @@ async fn fetch_latest(local_path: &PathBuf, branch: Option<&str>) -> Result<()> 
 }
 
 async fn get_head(local_path: &PathBuf) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(local_path)
+    let mut cmd = Command::new("git");
+    cmd.current_dir(local_path)
         .arg("rev-parse")
         .arg("HEAD")
-        .output()
-        .await
-        .context("failed to execute git rev-parse")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = match timeout(REV_PARSE_TIMEOUT, cmd.output()).await {
+        Ok(result) => result.context("failed to execute git rev-parse")?,
+        Err(_) => bail!(
+            "git rev-parse timed out after {}s",
+            REV_PARSE_TIMEOUT.as_secs()
+        ),
+    };
 
     if !output.status.success() {
         bail!("git rev-parse failed");
@@ -208,4 +296,67 @@ async fn get_head(local_path: &PathBuf) -> Result<String> {
 
     let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(head)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_git_uri_strips_fragment_and_prefix() {
+        assert_eq!(
+            split_git_uri("https://github.com/foo/bar.git#v1.2"),
+            (
+                "https://github.com/foo/bar.git".to_string(),
+                Some("v1.2".to_string())
+            )
+        );
+        assert_eq!(
+            split_git_uri("git+https://github.com/foo/bar.git"),
+            ("https://github.com/foo/bar.git".to_string(), None)
+        );
+        assert_eq!(
+            split_git_uri("  https://github.com/foo/bar/  "),
+            ("https://github.com/foo/bar".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parse_scp_reference_recognises_ssh_shapes() {
+        let reference = parse_scp_reference("git@github.com:foo/bar.git").unwrap();
+        assert_eq!(reference.host, "github.com");
+        assert_eq!(reference.segments, vec!["foo", "bar"]);
+        assert_eq!(reference.label, "foo/bar");
+        assert_eq!(reference.remote, "git@github.com:foo/bar.git");
+    }
+
+    #[test]
+    fn parse_scp_reference_rejects_non_scp_shapes() {
+        assert!(parse_scp_reference("https://github.com/foo/bar").is_none());
+        assert!(parse_scp_reference("github.com:foo/bar").is_none());
+        assert!(parse_scp_reference("git@github.com").is_none());
+    }
+
+    #[test]
+    fn parse_repository_reference_handles_url_fragments() {
+        let reference = parse_repository_reference("https://github.com/foo/bar.git#v1.2").unwrap();
+        assert_eq!(reference.remote, "https://github.com/foo/bar.git");
+        assert_eq!(reference.host, "github.com");
+        assert_eq!(reference.segments, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn parse_repository_reference_handles_scp_urls() {
+        let reference = parse_repository_reference("git@github.com:foo/bar.git").unwrap();
+        assert_eq!(reference.remote, "git@github.com:foo/bar.git");
+        assert_eq!(reference.host, "github.com");
+        assert_eq!(reference.segments, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn parse_repository_reference_rejects_empty_and_garbage() {
+        assert!(parse_repository_reference("").is_err());
+        assert!(parse_repository_reference("#fragment-only").is_err());
+        assert!(parse_repository_reference("git@").is_err());
+    }
 }

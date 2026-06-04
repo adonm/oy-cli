@@ -24,7 +24,6 @@ mod preview;
 mod registry;
 mod schema;
 mod shell;
-mod snapshot;
 #[cfg(test)]
 mod tests;
 mod think;

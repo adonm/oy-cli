@@ -99,7 +99,7 @@ pub(super) async fn enhance_command(args: EnhanceArgs) -> Result<i32> {
         crate::ui::kv("workspace", root.display());
         crate::ui::kv("model", &model);
         crate::ui::kv("mode", args.mode.name());
-        crate::ui::kv("remediate", remediation_mode(args.mode).name());
+        crate::ui::kv("remediate", SafetyMode::AutoAll.name());
         crate::ui::kv(
             "review target",
             args.review_target.as_deref().unwrap_or("whole workspace"),
@@ -142,7 +142,7 @@ pub(super) async fn enhance_command(args: EnhanceArgs) -> Result<i32> {
             crate::ui::kv("finding", finding.summary());
         }
 
-        match address_one(&root, &model, args.mode, &plan.focus, &finding).await {
+        match address_one(&root, &model, &plan.focus, &finding).await {
             Ok(AddressOutcome::Committed(hash)) => {
                 addressed += 1;
                 plan.next += 1;
@@ -411,7 +411,6 @@ enum AddressOutcome {
 async fn address_one(
     root: &Path,
     model: &str,
-    mode: SafetyMode,
     focus: &str,
     finding: &Finding,
 ) -> Result<AddressOutcome> {
@@ -420,7 +419,7 @@ async fn address_one(
         root.to_path_buf(),
         model.to_string(),
         false,
-        remediation_mode(mode),
+        SafetyMode::AutoAll,
     );
     let prompt = remediation_prompt(focus, finding);
     let answer = session::run_prompt(&mut session, &prompt).await?;
@@ -432,11 +431,6 @@ async fn address_one(
     commit_all(root, &message)?;
     let hash = git_output(root, ["rev-parse", "HEAD"])?;
     Ok(AddressOutcome::Committed(hash.trim().to_string()))
-}
-
-fn remediation_mode(requested: SafetyMode) -> SafetyMode {
-    let _ = requested;
-    SafetyMode::AutoAll
 }
 
 fn remediation_prompt(focus: &str, finding: &Finding) -> String {
@@ -580,13 +574,6 @@ mod tests {
         let message = commit_message(&finding);
         assert!(message.starts_with("Fix review finding: High:"));
         assert!(message.len() <= "Fix review finding: ".len() + 75);
-    }
-
-    #[test]
-    fn remediation_always_uses_auto_mode() {
-        assert_eq!(remediation_mode(SafetyMode::Default), SafetyMode::AutoAll);
-        assert_eq!(remediation_mode(SafetyMode::Plan), SafetyMode::AutoAll);
-        assert_eq!(remediation_mode(SafetyMode::AutoAll), SafetyMode::AutoAll);
     }
 
     #[test]

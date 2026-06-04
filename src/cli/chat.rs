@@ -19,9 +19,7 @@ mod commands;
 mod history;
 
 use commands::handle_slash_command;
-pub(crate) use commands::{
-    RecentModelChoice, ask, choose_model, choose_model_with_initial_list, choose_recent_model,
-};
+pub(crate) use commands::{RecentModelChoice, ask, choose_model, choose_recent_model};
 use history::history_path;
 
 const HISTORY_SIZE: usize = 10_000;

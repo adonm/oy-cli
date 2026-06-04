@@ -193,7 +193,11 @@ fn search_exact_file(
             Regex::new(pattern).with_context(|| format!("invalid regex: {pattern}"))?
         }
         GrepMode::PlainText => Regex::new(&regex::escape(pattern))?,
-        GrepMode::Fuzzy => anyhow::bail!("fuzzy grep mode is not supported for workspace search"),
+        // `search_mode` is the only producer of `GrepMode` in this crate and
+        // it only emits `Regex` or `PlainText`. Guarding the third arm with
+        // `unreachable!` keeps the match exhaustive (so a future addition to
+        // the enum breaks the build here) while making the intent honest.
+        GrepMode::Fuzzy => unreachable!("GrepMode::Fuzzy is not produced by search_mode"),
     };
 
     let mut matches = Vec::new();

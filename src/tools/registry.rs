@@ -47,7 +47,6 @@ pub(super) enum ToolId {
     Bash,
     Think,
     Outline,
-    Snapshot,
 }
 
 impl ToolId {
@@ -67,7 +66,6 @@ impl ToolId {
             Self::Bash => "bash",
             Self::Think => "think",
             Self::Outline => "outline",
-            Self::Snapshot => "snapshot",
         }
     }
 }
@@ -115,7 +113,7 @@ pub(super) fn find_def(name: &str) -> Option<&'static ToolDef> {
 
 // Import preview functions so we can reference them in TOOL_DEFS.
 use super::preview;
-use super::{network, outline, shell, snapshot, think, todo, workspace};
+use super::{network, outline, shell, think, todo, workspace};
 
 fn no_external_side_effect(_: &Value) -> bool {
     false
@@ -194,10 +192,6 @@ fn invoke_think(ctx: &mut ToolContext, args: Value) -> Result<Value> {
 
 fn invoke_outline(ctx: &mut ToolContext, args: Value) -> Result<Value> {
     parse_tool_args(args).and_then(|args| outline::tool_outline(ctx, args))
-}
-
-fn invoke_snapshot(ctx: &mut ToolContext, args: Value) -> Result<Value> {
-    parse_tool_args(args).and_then(|args| snapshot::tool_snapshot(ctx, args))
 }
 
 const TOOL_DEFS: &[ToolDef] = &[
@@ -289,7 +283,10 @@ const TOOL_DEFS: &[ToolDef] = &[
         summary: preview::summary_repo_clone,
         output: preview::preview_repo_clone,
         executor: ToolExecutor::Async(invoke_repo_clone),
-        external_side_effect: no_external_side_effect,
+        // Spawns a child `git` process and writes outside the workspace
+        // into the oy repos cache; transient provider retries must not
+        // replay this side effect. See tools::invoke_inner::mark_external_side_effect.
+        external_side_effect: always_external_side_effect,
     },
     ToolDef {
         id: ToolId::Replace,
@@ -341,16 +338,6 @@ const TOOL_DEFS: &[ToolDef] = &[
         executor: ToolExecutor::Sync(invoke_outline),
         external_side_effect: no_external_side_effect,
     },
-    ToolDef {
-        id: ToolId::Snapshot,
-        description: "Manage conversation context checkpoints. Save checkpoints before exploration, restore to collapse exploration into summaries, keeping context clean.",
-        gate: ToolGate::Always,
-        schema: super::schema::schema_snapshot,
-        summary: preview::summary_snapshot,
-        output: preview::preview_snapshot,
-        executor: ToolExecutor::Sync(invoke_snapshot),
-        external_side_effect: no_external_side_effect,
-    },
 ];
 
 fn tool_enabled(ctx: &ToolContext, def: &ToolDef) -> bool {
@@ -390,7 +377,7 @@ mod tests {
 
     #[test]
     fn registry_owns_side_effect_classification() {
-        for name in ["bash", "replace", "patch"] {
+        for name in ["bash", "replace", "patch", "repo_clone"] {
             let def = find_def(name).expect("registered tool");
             assert!((def.external_side_effect)(&json!({})), "{name}");
         }
@@ -425,7 +412,6 @@ mod tests {
                 "bash",
                 "think",
                 "outline",
-                "snapshot",
             ]
         );
     }

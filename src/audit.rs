@@ -17,12 +17,15 @@ use std::time::Instant;
 
 use crate::{config, session};
 
+pub(crate) mod enhance;
+pub(crate) mod findings;
 pub(crate) mod input;
 mod progress;
 mod prompts;
 pub(crate) mod reduce;
 pub(crate) mod report;
 mod sarif;
+pub(crate) mod transparency;
 
 use input::{
     build_manifest, build_security_index, chunk_files, chunk_text, collect_files,
@@ -135,11 +138,38 @@ pub struct AuditResult {
 
 pub async fn run(options: AuditOptions) -> Result<AuditResult> {
     let started = Instant::now();
-    let model_spec = options.model.trim().to_string();
     let _title = crate::ui::title_scope(format_args!(
         "oy audit · {}",
         crate::ui::compact_preview(&options.focus, 48)
     ));
+    let plan = prepare(options, started).await?;
+    let raw_report = execute(&plan).await?;
+    finalize(plan, raw_report)
+}
+
+/// All inputs and intermediate state collected before any model prompt
+/// runs. `prepare` builds it once; `execute` consumes it; `finalize` uses
+/// the original options to render and write the report.
+struct AuditPlan {
+    options: AuditOptions,
+    model_spec: String,
+    system_prompt: String,
+    manifest: String,
+    index: String,
+    chunks: Vec<input::AuditChunk>,
+    sizing: AuditSizing,
+    existing_issues: Option<String>,
+    output_path: PathBuf,
+    file_count: usize,
+    chunk_count: usize,
+    progress: AuditProgress,
+}
+
+/// Collect files, build the manifest, security index, and chunk plan,
+/// load any prior `ISSUES.md`, and validate against `--max-chunks`.
+/// No model calls happen here.
+async fn prepare(options: AuditOptions, started: Instant) -> Result<AuditPlan> {
+    let model_spec = options.model.trim().to_string();
     let _ = crate::agent::model::cache_model_limits(&model_spec).await;
     let output_path = config::resolve_workspace_output_path(&options.root, &options.out)?;
     let files = collect_files(&options.root, Some(&output_path), &model_spec)?;
@@ -179,116 +209,146 @@ pub async fn run(options: AuditOptions) -> Result<AuditResult> {
         None
     };
 
-    let system_prompt = prompts::audit_system_prompt();
-    let report = if chunks.len() == 1 && chunks[0].tokens <= sizing.small_repo_tokens {
-        let repo_text = chunk_text(&chunks[0]);
-        let prompt = prompts::audit_full_prompt(
-            &options.focus,
-            &manifest,
-            &index,
-            &repo_text,
-            existing_issues.as_deref(),
-        );
-        progress.review_started(None);
-        let report =
-            session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?;
-        progress.review_finished(1);
-        report
-    } else {
-        progress.review_started(Some(DEFAULT_AUDIT_PARALLELISM));
-        let completed_chunks = Arc::new(AtomicUsize::new(0));
-        let mut chunk_findings = stream::iter(chunks.iter().enumerate())
-            .map(|(idx, chunk)| {
-                let chunk_id = idx + 1;
-                let prompt = prompts::audit_chunk_prompt(
-                    &options.focus,
-                    &manifest,
-                    &index,
-                    chunk_id,
-                    chunk_count,
-                    &chunk_text(chunk),
-                );
-                let model = &options.model;
-                let system_prompt = &system_prompt;
-                let completed_chunks = Arc::clone(&completed_chunks);
-                async move {
-                    let findings =
-                        session::run_prompt_once_no_tools(model, system_prompt, &prompt).await?;
-                    let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                    progress.review_finished(completed);
-                    Ok::<_, anyhow::Error>((chunk_id, findings))
-                }
-            })
-            .buffer_unordered(DEFAULT_AUDIT_PARALLELISM)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-        chunk_findings.sort_by_key(|(chunk_id, _)| *chunk_id);
-
-        let reduce_findings_budget = reduce_candidate_findings_budget(
-            &model_spec,
-            &options.focus,
-            &manifest,
-            existing_issues.as_deref(),
-            sizing.reduce_prompt_max_tokens,
-            sizing.reduce_findings_min_tokens,
-            sizing.reduce_findings_token_reserve,
-        );
-        let per_chunk_findings_limit = sizing.findings_per_chunk_limit_tokens.min(
-            reduce_findings_budget
-                .saturating_div(chunk_findings.len().max(1))
-                .max(1),
-        );
-        let mut candidate_findings = String::new();
-        for (chunk_id, findings) in chunk_findings {
-            let compact = compact_to_tokens(&model_spec, findings.trim(), per_chunk_findings_limit);
-            let _ = writeln!(
-                candidate_findings,
-                "\n## Candidate findings from chunk {chunk_id}\n"
-            );
-            candidate_findings.push_str(compact.trim());
-            candidate_findings.push('\n');
-        }
-        let candidate_findings = bounded_reduce_findings(
-            &model_spec,
-            &options.focus,
-            &manifest,
-            &candidate_findings,
-            existing_issues.as_deref(),
-            ReducePromptLimits {
-                max_prompt_tokens: sizing.reduce_prompt_max_tokens,
-                min_tokens: sizing.reduce_findings_min_tokens,
-                reserve_tokens: sizing.reduce_findings_token_reserve,
-            },
-        );
-        let prompt = prompts::audit_reduce_prompt(
-            &options.focus,
-            &manifest,
-            &candidate_findings,
-            existing_issues.as_deref(),
-        );
-        progress.summarise_started();
-        let report =
-            session::run_prompt_once_no_tools(&options.model, &system_prompt, &prompt).await?;
-        progress.summarise_finished();
-        report
-    };
-
-    let report = with_transparency_line(&report, &transparency_snippet(&options));
-    let report = with_structured_findings_block(&report, "audit");
-    let report = with_succinct_findings_summary(&report);
-    let output = match options.format {
-        AuditOutputFormat::Markdown => report,
-        AuditOutputFormat::Sarif => render_sarif(&report)?,
-    };
-    progress.write_started(&output_path);
-    config::write_workspace_file(&output_path, output.as_bytes())?;
-    progress.write_finished(&output_path);
-    Ok(AuditResult {
+    Ok(AuditPlan {
+        system_prompt: prompts::audit_system_prompt(),
+        options,
+        model_spec,
+        manifest,
+        index,
+        chunks,
+        sizing,
+        existing_issues,
         output_path,
         file_count,
         chunk_count,
+        progress,
+    })
+}
+
+/// Run the model prompts that produce the raw audit report. The
+/// single-chunk fast path stays inline; the multi-chunk path streams
+/// chunk prompts with bounded parallelism, then runs the reduce prompt
+/// to merge per-chunk findings into a single report.
+async fn execute(plan: &AuditPlan) -> Result<String> {
+    if plan.chunks.len() == 1 && plan.chunks[0].tokens <= plan.sizing.small_repo_tokens {
+        let repo_text = chunk_text(&plan.chunks[0]);
+        let prompt = prompts::audit_full_prompt(
+            &plan.options.focus,
+            &plan.manifest,
+            &plan.index,
+            &repo_text,
+            plan.existing_issues.as_deref(),
+        );
+        plan.progress.review_started(None);
+        let report =
+            session::run_prompt_once_no_tools(&plan.options.model, &plan.system_prompt, &prompt)
+                .await?;
+        plan.progress.review_finished(1);
+        return Ok(report);
+    }
+
+    plan.progress
+        .review_started(Some(DEFAULT_AUDIT_PARALLELISM));
+    let completed_chunks = Arc::new(AtomicUsize::new(0));
+    let mut chunk_findings = stream::iter(plan.chunks.iter().enumerate())
+        .map(|(idx, chunk)| {
+            let chunk_id = idx + 1;
+            let prompt = prompts::audit_chunk_prompt(
+                &plan.options.focus,
+                &plan.manifest,
+                &plan.index,
+                chunk_id,
+                plan.chunk_count,
+                &chunk_text(chunk),
+            );
+            let model = &plan.options.model;
+            let system_prompt = &plan.system_prompt;
+            let progress = &plan.progress;
+            let completed_chunks = Arc::clone(&completed_chunks);
+            async move {
+                let findings =
+                    session::run_prompt_once_no_tools(model, system_prompt, &prompt).await?;
+                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                progress.review_finished(completed);
+                Ok::<_, anyhow::Error>((chunk_id, findings))
+            }
+        })
+        .buffer_unordered(DEFAULT_AUDIT_PARALLELISM)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    chunk_findings.sort_by_key(|(chunk_id, _)| *chunk_id);
+
+    let reduce_findings_budget = reduce_candidate_findings_budget(
+        &plan.model_spec,
+        &plan.options.focus,
+        &plan.manifest,
+        plan.existing_issues.as_deref(),
+        plan.sizing.reduce_prompt_max_tokens,
+        plan.sizing.reduce_findings_min_tokens,
+        plan.sizing.reduce_findings_token_reserve,
+    );
+    let per_chunk_findings_limit = plan.sizing.findings_per_chunk_limit_tokens.min(
+        reduce_findings_budget
+            .saturating_div(chunk_findings.len().max(1))
+            .max(1),
+    );
+    let mut candidate_findings = String::new();
+    for (chunk_id, findings) in chunk_findings {
+        let compact =
+            compact_to_tokens(&plan.model_spec, findings.trim(), per_chunk_findings_limit);
+        let _ = writeln!(
+            candidate_findings,
+            "\n## Candidate findings from chunk {chunk_id}\n"
+        );
+        candidate_findings.push_str(compact.trim());
+        candidate_findings.push('\n');
+    }
+    let candidate_findings = bounded_reduce_findings(
+        &plan.model_spec,
+        &plan.options.focus,
+        &plan.manifest,
+        &candidate_findings,
+        plan.existing_issues.as_deref(),
+        ReducePromptLimits {
+            max_prompt_tokens: plan.sizing.reduce_prompt_max_tokens,
+            min_tokens: plan.sizing.reduce_findings_min_tokens,
+            reserve_tokens: plan.sizing.reduce_findings_token_reserve,
+        },
+    );
+    let prompt = prompts::audit_reduce_prompt(
+        &plan.options.focus,
+        &plan.manifest,
+        &candidate_findings,
+        plan.existing_issues.as_deref(),
+    );
+    plan.progress.summarise_started();
+    let report =
+        session::run_prompt_once_no_tools(&plan.options.model, &plan.system_prompt, &prompt)
+            .await?;
+    plan.progress.summarise_finished();
+    Ok(report)
+}
+
+/// Apply the post-processing pass (transparency line, structured-findings
+/// block, succinct summary, optional SARIF rendering) and write the
+/// final report to the workspace output path.
+fn finalize(plan: AuditPlan, raw_report: String) -> Result<AuditResult> {
+    let report = with_transparency_line(&raw_report, &transparency_snippet(&plan.options));
+    let report = with_structured_findings_block(&report, "audit");
+    let report = with_succinct_findings_summary(&report);
+    let output = match plan.options.format {
+        AuditOutputFormat::Markdown => report,
+        AuditOutputFormat::Sarif => render_sarif(&report)?,
+    };
+    plan.progress.write_started(&plan.output_path);
+    config::write_workspace_file(&plan.output_path, output.as_bytes())?;
+    plan.progress.write_finished(&plan.output_path);
+    Ok(AuditResult {
+        output_path: plan.output_path,
+        file_count: plan.file_count,
+        chunk_count: plan.chunk_count,
     })
 }
 

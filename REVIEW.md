@@ -1,73 +1,132 @@
 # Code Quality Review
 
-> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=github-copilot/gpt-5.5 oy review` · 2026-05-23
-
+> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `OY_MODEL=opencode-go/deepseek-v4-pro oy review` · 2026-06-04
 
 ## Verdict
-
 Needs work
 
 ## Findings summary
 
-- **Medium** — Session turns are committed piecemeal, leaving partial saved state on failures: `src/agent/session.rs::run_prompt_with_policy`
-- **Medium** — Provider/model routing metadata has multiple sources of truth: `src/llm/providers.rs`, `src/llm/route/resolve.rs::model_route`, `src/llm/providers/route.rs`, `src/agent/model/reasoning.rs`
-- **Medium** — `oy review` duplicates the audit map/reduce pipeline instead of reusing it: `src/review.rs`, `src/audit.rs`, `src/audit/report.rs`
-- **Medium** — Native LLM execution repeats the same tool loop across protocol paths: `src/llm/openai.rs::{run_gemini,run_anthropic_messages,run_bedrock_converse,run_chat_completions,run_responses}`
-- **Medium** — Audit input skip rules exclude security-relevant source files by basename: `src/audit/input.rs::should_skip_path`
-- **Medium** — Exact-file search greps the parent directory and post-filters results: `src/tools/workspace/search.rs::fff_search_target`
+- **Medium** `src/tools/network.rs` / `src/llm/route/auth.rs` — Duplicate public‑IP classification drifts between webfetch and credential‑transport checks, risking inconsistent security decisions.
+- **Medium** `src/review.rs` — Duplicate chunking and manifest logic re‑implements audit input abstractions; merged shared helpers would delete ~200 lines.
+- **Low** `src/tools/preview.rs` — 862‑line file mixes per‑tool preview functions; splitting by tool category would make ownership clearer.
+- **Low** `src/cli/config/paths.rs` — Inline Windows‑specific ACL code (unsafe) could be extracted to a dedicated platform module for safer maintenance.
+- **Low** `src/agent/model/tests.rs` — 841‑line test file mixes live integration tests with unit tests; live tests could move to their own file for faster focused test runs.
 
 ## Detailed findings
 
-### Medium — Session turns are committed piecemeal
+### 1. Duplicate public‑IP classification (`src/tools/network.rs` and `src/llm/route/auth.rs`)
 
-**Evidence:** `src/agent/session.rs::run_prompt_with_policy` pushes the user message into `session.transcript.messages` before later steps run: context-budget checks, tool context construction, route/auth resolution, model execution, todo updates, and assistant/tool transcript appends.
+**Severity:** Medium  
+**Category:** design  
+**Locations:** `src/tools/network.rs::is_public_ip`, `src/llm/route/auth.rs::is_loopback_or_private_ip`
 
-**Structural impact:** A failure after the initial push leaves the persisted session with a user prompt but no corresponding assistant/tool turn. Retrying can duplicate the prompt or continue from misleading state. If tool execution partially happened before a later failure, transcript state and external side effects can also diverge.
+The webfetch tool classifies addresses as public via `ip_rfc::global` plus multicast/site‑local checks (`src/tools/network.rs:252‑259`), while the credential‑transport guard uses `IpAddr::is_loopback()`, `is_private()`, `is_link_local()` (`src/llm/route/auth.rs:63‑68`). Although the policies differ (webfetch blocks private; credential transport allows them), the underlying classification diverges: `auth.rs` does not handle IPv4‑mapped‑IPv6 or site‑local ranges, and the network tool does not handle unique‑local addresses in the same way. A future change to one classification could inadvertently relax the other.
 
-**Simplification:** Stage the whole turn locally: build a candidate transcript/tool context, run budget checks and model/tool execution against that staged state, then commit transcript and todos together on success. If failed tool turns need to be preserved, commit an explicit failed-turn/tool-error record rather than silently keeping only the user message.
+**Concrete simplification:** Extract a single `is_public_ip()` helper (using `ip_rfc` as the webfetch tool already does) into a shared crate‑private module and use it in both places. Keep the separate policy layers at the call sites (webfetch denies non‑public, credential transport permits loopback/private). This removes the drift risk and makes the security boundary easier to audit.
 
-### Medium — Provider/model routing metadata has multiple sources of truth
+### 2. Review module duplicates audit input chunking (`src/review.rs`)
 
-**Evidence:**
+**Severity:** Medium  
+**Category:** design  
+**Locations:** `src/review.rs::split_git_diff_items`, `src/review.rs::chunk_diff_items`, `src/review.rs::ensure_chunks_fit`, `src/review.rs::diff_manifest`, `src/review.rs::workspace_size_index`
 
-- `src/llm/providers.rs::PROVIDERS` defines provider family, auth envs, default URLs, and support state.
-- `src/llm/route/resolve.rs::model_route` separately matches provider strings to `prepare_*` functions.
-- `src/llm/providers/route.rs` separately hardcodes auth/env/base-url handling per provider.
-- `src/agent/model/reasoning.rs::reasoning_effort_option` also owns provider/model capability quirks, including Moonshot/Kimi handling, OpenCode metadata lookup, and a static fallback list.
-- Alias drift already exists: metadata lists `amazon-bedrock`, while routing accepts both `"bedrock" | "amazon-bedrock"`.
+The `oy review` command collects and chunks review input (workspace files or git diffs) in `prepare_workspace_input` and `prepare_diff_input` (`src/review.rs:124‑229`). This logic mirrors the audit module’s `src/audit/input::collect_files`, `chunk_files`, `build_manifest`, and `build_security_index` but with duplicate chunk‑construction, token‑counting, and oversize‑check loops. The review module also defines its own `ReviewChunk` and `DiffItem` structs instead of reusing `AuditChunk` and `AuditFile`.
 
-**Structural impact:** Adding or changing a provider requires coordinated edits across metadata, route dispatch, provider-specific builders, auth handling, and agent reasoning policy. Provider capability behavior is no longer locally reasoned about in the LLM routing layer.
+The duplicated chunking machinery (~200 lines) makes it harder to change chunk‑budget semantics (e.g., deriving context limits from model metadata) for both commands simultaneously. Any future improvement to audit input handling must be replicated manually.
 
-**Simplification:** Make one provider descriptor the source of truth: canonical id, aliases, family, default URL, auth envs, support state, route builder, and model capability/reasoning policy. Resolve the descriptor once in `model_route`, then dispatch by descriptor/family. Keep `agent::model` passing user/env overrides rather than encoding provider-specific rules.
+**Concrete simplification:** Merge review input collection into the audit input abstraction: introduce a single `ChunkInput` trait or shared functions that accept a file/diff source. The audit module’s `collect_files`, `chunk_files`, and `build_manifest` already cover whole‑workspace collection; extend them with a git‑diff source that produces `AuditFile`‑like items. Delete `ReviewChunk`, `DiffItem`, and the duplicated chunking/validation functions from `src/review.rs`.
 
-### Medium — `oy review` duplicates the audit map/reduce pipeline
+### 3. Large preview file (`src/tools/preview.rs`)
 
-**Evidence:** `src/review.rs::{run,sizing,prepare_workspace_input,compact_to_tokens,transparency_snippet,shell_quote,with_transparency_line}` mirrors orchestration and helpers from `src/audit.rs::{run,audit_constants}` and `src/audit/report.rs::{transparency_snippet,shell_quote,with_transparency_line}`. `review.rs` already depends on audit input helpers such as `collect_files`, `build_manifest`, `chunk_files`, and `ensure_chunks_fit_prompt`.
+**Severity:** Low  
+**Category:** maintainability  
+**Location:** `src/tools/preview.rs` (862 lines)
 
-**Structural impact:** The no-tools workspace review flow now has two owners for sizing, chunk fan-out, reduce budgeting, transparency output, shell quoting, and output insertion. Fixes to deterministic map/reduce behavior can drift between `audit` and `review`.
+The preview module contains one standalone summary/output function per tool plus shared helpers like `append_search_hits` and `compact_kvs`. All preview logic for 15+ tools is mixed in a single file, making it harder to locate the rendering for a specific tool and to keep the file under the common 1,000‑line decomposition threshold.
 
-**Simplification:** Extract a shared no-tools map/reduce runner parameterized by prompts, report title/source label, output format, and existing-report behavior. Leave `audit` and `review` as thin specializations. Move transparency-line insertion and shell quoting into the shared report helper.
+**Concrete simplification:** Split the file into sub‑modules grouped by tool category (e.g., `workspace_previews`, `network_previews`, `process_previews`) or into per‑tool files. Keep the shared formatting helpers (`preview_value`, `with_verbose`, `append_preview_lines`) in a common sibling module. This keeps the registry‑driven dispatch intact while shrinking the source unit.
 
-### Medium — Native LLM execution repeats the same tool loop across protocol paths
+### 4. Windows ACL code in‑line (`src/cli/config/paths.rs`)
 
-**Evidence:** `src/llm/openai.rs::{run_gemini,run_anthropic_messages,run_bedrock_converse,run_chat_completions,run_responses}` each repeats the same control flow: build request body, stream assistant output, convert assistant state, return when no tool calls remain, enforce tool-round budget, record assistant turn, execute tool calls, and append tool results.
+**Severity:** Low  
+**Category:** maintainability  
+**Location:** `src/cli/config/paths.rs::restrict_to_owner` (lines 266‑345)
 
-**Structural impact:** Tool-loop behavior is a cross-protocol invariant but must be fixed in five places. Drift is already visible in naming: `ensure_tool_round_budget` reports `native OpenAI {protocol} exceeded...` even for Gemini, Anthropic, and Bedrock protocol paths.
+The `restrict_to_owner` function (Windows only) is a long block of `unsafe` Windows API calls that constructs an ACL and sets file security. It lives in the middle of a module that also handles home‑directory expansion, workspace output validations, and private file writes.
 
-**Simplification:** Extract the shared loop around a small protocol adapter: `build_body`, `stream_step`, `append_assistant`, and `append_tool_result`. Keep protocol wire-format lowering local, but make budget enforcement, transcript updates, tool execution, and stop/return behavior single-owner.
+**Concrete simplification:** Move the entire function to a dedicated `src/cli/config/platform/windows.rs` (conditional compilation) so the unsafe, platform‑specific security code can be reviewed in isolation. The public API in `paths.rs` would remain the same.
 
-### Medium — Audit input skip rules exclude security-relevant source files by basename
+### 5. Test file mixes live integration tests (`src/agent/model/tests.rs`)
 
-**Evidence:** `src/audit/input.rs::should_skip_path` applies `SKIP_FILENAME_SUBSTRINGS = ["credential", "secret", "token"]` to filenames globally. The same audit path scoring later prioritizes security concepts such as auth/token/secret.
+**Severity:** Low  
+**Category:** maintainability  
+**Location:** `src/agent/model/tests.rs` (841 lines)
 
-**Structural impact:** The collector conflates likely secret artifacts with security-relevant source code. Files such as `token.rs`, `secret_manager.rs`, or `credential_store.go` can be silently omitted from audit input, making audit coverage hard to trust.
+The test file contains many fast unit tests for model routing and reasoning, as well as several `#[ignore]` live integration tests that require network access and OpenCode metadata. Running unit tests now also compiles the live‑test scaffolding (helper functions, imports, test definitions), which adds noise.
 
-**Simplification:** Split the policy: skip known secret/config artifacts such as `.env*`, private keys, `.netrc`, and credential dotfiles, but do not skip recognized source extensions solely because the basename contains `token`, `secret`, or `credential`. If needed, redact suspicious literal contents inside source files instead.
+**Concrete simplification:** Move the live integration tests (functions starting with `live_`) into a separate file `src/agent/model/live_tests.rs` gated behind a feature flag or kept ignored. This keeps the unit test file focused and makes it trivial to run only fast tests.
 
-### Medium — Exact-file search greps the parent directory and post-filters
+## Machine-readable findings
 
-**Evidence:** `src/tools/workspace/search.rs::fff_search_target` uses `target.parent()` as the grep base when `target.is_file()`, runs `picker.grep(... page_limit: limit)` across the parent directory, then filters matches by `exact_target` afterward.
-
-**Structural impact:** Exact-file search is not enforced at the search boundary. Sibling file matches can consume the page limit before the target file is filtered in, so results for an exact file can be truncated or omitted depending on directory contents/index order.
-
-**Simplification:** Add a direct file-search path for `target.is_file()` that scans only that file with the selected regex/literal mode. Keep `fff` grep for directory targets and delete the parent-base plus post-filter special case.
+```json oy-findings
+[
+  {
+    "source": "review",
+    "severity": "Medium",
+    "title": "Duplicate public‑IP classification between webfetch and credential‑transport",
+    "locations": [
+      { "path": "src/tools/network.rs", "line": 252 },
+      { "path": "src/llm/route/auth.rs", "line": 63 }
+    ],
+    "evidence": "is_public_ip() uses ip_rfc::global plus multicast checks; is_loopback_or_private_ip() uses IpAddr methods only. The two classifiers can drift and produce inconsistent decisions for edge‑case addresses.",
+    "body": "Extract a single `is_public_ip()` helper (using `ip_rfc`) into a shared crate‑private module and use it in both locations. Keep policy differences at the call sites.",
+    "category": "design"
+  },
+  {
+    "source": "review",
+    "severity": "Medium",
+    "title": "Review module duplicates audit input chunking logic",
+    "locations": [
+      { "path": "src/review.rs", "symbol": "split_git_diff_items" },
+      { "path": "src/review.rs", "symbol": "chunk_diff_items" }
+    ],
+    "evidence": "Functions `prepare_workspace_input` and `prepare_diff_input` recreate chunk construction, token counting, and oversize checks already present in `src/audit/input`. The review module defines its own `ReviewChunk` and `DiffItem` structs instead of reusing `AuditChunk`/`AuditFile`.",
+    "body": "Merge review input collection into the audit input abstraction. Extend audit input with git‑diff source support, delete the duplicated chunking and validation functions, and reuse the existing `AuditChunk` and `AuditFile` types.",
+    "category": "design"
+  },
+  {
+    "source": "review",
+    "severity": "Low",
+    "title": "Large preview file mixes all tool preview functions",
+    "locations": [
+      { "path": "src/tools/preview.rs", "line": 1 }
+    ],
+    "evidence": "862 lines in a single file with per‑tool summary and output functions. No clear separation between workspace tools, network tools, and shell tools.",
+    "body": "Split the file into sub‑modules grouped by tool category (workspace, network, process, etc.) or into per‑tool files. Keep shared formatting helpers in a common sibling module.",
+    "category": "maintainability"
+  },
+  {
+    "source": "review",
+    "severity": "Low",
+    "title": "Inline Windows‑specific unsafe ACL code",
+    "locations": [
+      { "path": "src/cli/config/paths.rs", "line": 266 }
+    ],
+    "evidence": "`restrict_to_owner` contains a long block of unsafe Windows API calls inside a general‑purpose paths module, mixing platform‑specific safety concerns with path resolution and file writes.",
+    "body": "Extract the function to a dedicated `src/cli/config/platform/windows.rs` file (conditional compilation) so it can be maintained in isolation.",
+    "category": "maintainability"
+  },
+  {
+    "source": "review",
+    "severity": "Low",
+    "title": "Model tests file mixes live integration tests with unit tests",
+    "locations": [
+      { "path": "src/agent/model/tests.rs", "line": 1 }
+    ],
+    "evidence": "841‑line test file contains many fast unit tests and also several `#[ignore]` live integration tests. Unit test runs still compile the live test scaffolding.",
+    "body": "Move live integration tests to a separate file (`live_tests.rs`) to keep unit tests focused and enable faster isolated test compilation.",
+    "category": "maintainability"
+  }
+]
+```

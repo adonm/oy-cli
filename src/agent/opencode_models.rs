@@ -146,7 +146,7 @@ impl OpenCodeModelListing {
     pub(crate) fn into_adapter_models(self) -> Vec<AdapterModels> {
         let mut groups = std::collections::BTreeMap::<String, Vec<String>>::new();
         for model in self.models {
-            if !model.is_supported_by_native_openai() {
+            if !model.is_supported_by_native_backend() {
                 continue;
             }
             groups
@@ -250,7 +250,12 @@ impl OpenCodeModel {
         self.api.npm.as_deref() == Some("@ai-sdk/google") || self.provider_id == "google"
     }
 
-    fn is_supported_by_native_openai(&self) -> bool {
+    /// True when the model is handled by the native Rust LLM backend,
+    /// regardless of which protocol (OpenAI-compatible, Anthropic,
+    /// Bedrock Converse, or Gemini) the model uses. Vertex AI is the
+    /// only OpenCode provider id that is not yet wired to a native
+    /// protocol and is therefore excluded.
+    fn is_supported_by_native_backend(&self) -> bool {
         if self.provider_id == "vertexai" {
             return false;
         }

@@ -100,25 +100,6 @@ pub(crate) fn prepare_chat(
     }
 }
 
-pub(crate) fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
-    let profile = crate::llm::providers::openai_profile(model, env_value("OPENAI_BASE_URL"));
-    let provider_options = crate::llm::providers::openai_body_options(
-        env_json("OPENAI_PROVIDER_OPTIONS").as_ref(),
-        profile.protocol,
-    );
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::ApiKey(
-            provider_auth_value("openai").context("OpenAI auth is not configured")?,
-        ),
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: provider_options,
-        default_output_tokens: None,
-    })
-}
-
 fn env_json(name: &str) -> Option<serde_json::Value> {
     env_value(name).and_then(|value| serde_json::from_str(&value).ok())
 }
@@ -128,42 +109,69 @@ fn provider_auth_value(provider: &str) -> Option<String> {
         .and_then(|metadata| metadata.first_auth_value(env_value))
 }
 
-pub(crate) fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
-    let profile = crate::llm::providers::xai_profile(model, env_value("XAI_BASE_URL"));
-    let provider_options = crate::llm::providers::openai_body_options(
-        env_json("XAI_PROVIDER_OPTIONS").as_ref(),
-        profile.protocol,
-    );
+/// Build a `ModelRoute` for an OpenAI-shaped provider (OpenAI, xAI,
+/// OpenRouter, ...) that uses a single bearer/API key auth header.
+///
+/// Each caller supplies the per-provider [`RouteProfile`], the
+/// `auth_provider` id used to look up the credential in provider
+/// metadata, a context message for the missing-auth error, and the
+/// already-resolved `additional_params` body options.
+fn build_api_key_route(
+    profile: crate::llm::providers::RouteProfile,
+    auth_provider: &str,
+    auth_missing_msg: &'static str,
+    additional_params: Option<serde_json::Value>,
+) -> Result<ModelRoute> {
     Ok(ModelRoute {
         protocol: profile.protocol,
         model: profile.model_id,
-        auth: RouteAuth::ApiKey(
-            provider_auth_value("xai").context("xAI auth is not configured; set XAI_API_KEY")?,
-        ),
+        auth: RouteAuth::ApiKey(provider_auth_value(auth_provider).context(auth_missing_msg)?),
         base_url: Some(profile.base_url),
         query_params: None,
-        additional_params: provider_options,
+        additional_params,
         default_output_tokens: None,
     })
+}
+
+pub(crate) fn prepare_openai_chat(model: &str) -> Result<ModelRoute> {
+    let profile = crate::llm::providers::openai_profile(model, env_value("OPENAI_BASE_URL"));
+    let additional_params = crate::llm::providers::openai_body_options(
+        env_json("OPENAI_PROVIDER_OPTIONS").as_ref(),
+        profile.protocol,
+    );
+    build_api_key_route(
+        profile,
+        "openai",
+        "OpenAI auth is not configured",
+        additional_params,
+    )
+}
+
+pub(crate) fn prepare_xai_chat(model: &str) -> Result<ModelRoute> {
+    let profile = crate::llm::providers::xai_profile(model, env_value("XAI_BASE_URL"));
+    let additional_params = crate::llm::providers::openai_body_options(
+        env_json("XAI_PROVIDER_OPTIONS").as_ref(),
+        profile.protocol,
+    );
+    build_api_key_route(
+        profile,
+        "xai",
+        "xAI auth is not configured; set XAI_API_KEY",
+        additional_params,
+    )
 }
 
 pub(crate) fn prepare_openrouter_chat(model: &str) -> Result<ModelRoute> {
     let profile =
         crate::llm::providers::openrouter_profile(model, env_value("OPENROUTER_BASE_URL"));
-    let provider_options = env_json("OPENROUTER_PROVIDER_OPTIONS")
+    let additional_params = env_json("OPENROUTER_PROVIDER_OPTIONS")
         .and_then(|value| crate::llm::providers::openrouter_body_options(Some(&value)));
-    Ok(ModelRoute {
-        protocol: profile.protocol,
-        model: profile.model_id,
-        auth: RouteAuth::ApiKey(
-            provider_auth_value("openrouter")
-                .context("OpenRouter auth is not configured; set OPENROUTER_API_KEY")?,
-        ),
-        base_url: Some(profile.base_url),
-        query_params: None,
-        additional_params: provider_options,
-        default_output_tokens: None,
-    })
+    build_api_key_route(
+        profile,
+        "openrouter",
+        "OpenRouter auth is not configured; set OPENROUTER_API_KEY",
+        additional_params,
+    )
 }
 
 pub(crate) fn prepare_google_chat(model: &str) -> Result<ModelRoute> {
@@ -425,4 +433,99 @@ fn opencode_client_headers() -> RouteAuth {
         ("x-opencode-client".to_string(), "oy".to_string()),
         ("user-agent".to_string(), "oy".to_string()),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Each builder reads its own env-var (OPENAI_API_KEY / XAI_API_KEY /
+    // OPENROUTER_API_KEY) through `provider_auth_value`; the test sets
+    // stubs so the helper can be exercised without real credentials.
+    fn stub_auth_env() -> [(&'static str, &'static str); 3] {
+        [
+            ("OPENAI_API_KEY", "test-openai-key"),
+            ("XAI_API_KEY", "test-xai-key"),
+            ("OPENROUTER_API_KEY", "test-openrouter-key"),
+        ]
+    }
+
+    #[test]
+    fn build_api_key_route_copies_profile_into_route_with_api_key_auth() {
+        for (name, value) in stub_auth_env() {
+            // SAFETY: tests in this module own the env mutation; they run
+            // serially within the same process.
+            unsafe { std::env::set_var(name, value) };
+        }
+        let profile = crate::llm::providers::openai_profile("gpt-4.1", None);
+        let route = build_api_key_route(
+            profile.clone(),
+            "openai",
+            "OpenAI auth is not configured",
+            None,
+        )
+        .unwrap();
+        assert_eq!(route.protocol, profile.protocol);
+        assert_eq!(route.model, profile.model_id);
+        assert_eq!(route.base_url.as_deref(), Some(profile.base_url.as_str()));
+        assert!(route.query_params.is_none());
+        assert!(route.additional_params.is_none());
+        assert!(route.default_output_tokens.is_none());
+        match route.auth {
+            RouteAuth::ApiKey(value) => assert_eq!(value, "test-openai-key"),
+            other => panic!("expected RouteAuth::ApiKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_api_key_route_preserves_protocol_for_each_provider() {
+        for (name, value) in stub_auth_env() {
+            // SAFETY: see `build_api_key_route_copies_profile_into_route_with_api_key_auth`.
+            unsafe { std::env::set_var(name, value) };
+        }
+        // The point of this test is to lock the contract that the
+        // helper copies the profile's protocol verbatim rather than
+        // substituting its own. The three OpenAI-shaped profiles
+        // currently resolve to Responses (OpenAI/xAI) and Chat
+        // (OpenRouter); we assert that the route matches the profile
+        // for each one.
+        let cases = [
+            (
+                "openai",
+                crate::llm::providers::openai_profile("gpt-4.1", None),
+            ),
+            ("xai", crate::llm::providers::xai_profile("grok-2", None)),
+            (
+                "openrouter",
+                crate::llm::providers::openrouter_profile("openai/gpt-4.1", None),
+            ),
+        ];
+        for (provider, profile) in cases {
+            let route = build_api_key_route(profile.clone(), provider, "x", None).unwrap();
+            assert_eq!(
+                route.protocol, profile.protocol,
+                "{provider} route protocol must match profile"
+            );
+        }
+    }
+
+    #[test]
+    fn build_api_key_route_surfaces_missing_auth_with_caller_message() {
+        // Use a known-missing provider id so the test does not depend on
+        // (and cannot leak into) the process env. The caller's
+        // missing-auth message must be forwarded verbatim, proving the
+        // helper does not bake its own context.
+        let profile = crate::llm::providers::openai_profile("gpt-4.1", None);
+        let err = build_api_key_route(
+            profile,
+            "definitely-no-such-provider",
+            "caller-supplied message must surface",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("caller-supplied message must surface")
+        );
+    }
 }

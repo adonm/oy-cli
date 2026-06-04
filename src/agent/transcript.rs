@@ -118,30 +118,7 @@ impl Transcript {
 
     pub fn with_compacted_tool_outputs(&self, max_bytes: usize) -> (Self, usize) {
         let mut messages = self.messages.clone();
-        let mut compacted = 0;
-        for message in &mut messages {
-            let Message::User { content } = message else {
-                continue;
-            };
-            for item in content.iter_mut() {
-                let MessageContent::ToolResult { content, .. } = item else {
-                    continue;
-                };
-                for part in content.iter_mut() {
-                    let ToolResultContent::Text { text } = part else {
-                        continue;
-                    };
-                    if text.contains("[tool output compacted]") {
-                        continue;
-                    }
-                    let original_len = text.len();
-                    *text = compact_text(text, max_bytes, "tool output compacted");
-                    if text.len() < original_len {
-                        compacted += 1;
-                    }
-                }
-            }
-        }
+        let compacted = compact_tool_outputs(&mut messages, max_bytes, false);
         (
             Self {
                 summary: self.summary.clone(),
@@ -155,28 +132,7 @@ impl Transcript {
     /// Used when we need maximum space savings before dropping old messages.
     pub fn with_all_tool_outputs_compacted(&self, max_bytes: usize) -> (Self, usize) {
         let mut messages = self.messages.clone();
-        let mut compacted = 0;
-        for message in &mut messages {
-            let Message::User { content } = message else {
-                continue;
-            };
-            for item in content.iter_mut() {
-                let MessageContent::ToolResult { content, .. } = item else {
-                    continue;
-                };
-                for part in content.iter_mut() {
-                    let ToolResultContent::Text { text } = part else {
-                        continue;
-                    };
-                    let original_len = text.len();
-                    // Always re-compact, even if already marked
-                    *text = compact_text(text, max_bytes, "tool output compacted");
-                    if text.len() < original_len {
-                        compacted += 1;
-                    }
-                }
-            }
-        }
+        let compacted = compact_tool_outputs(&mut messages, max_bytes, true);
         (
             Self {
                 summary: self.summary.clone(),
@@ -266,4 +222,39 @@ fn is_user_prompt(message: &Message) -> bool {
     content
         .iter()
         .any(|item| matches!(item, MessageContent::Text { text, .. } if !text.trim().is_empty()))
+}
+
+/// Compact every tool-result text part in `messages` down to `max_bytes`,
+/// re-marking them with the standard "tool output compacted" notice.
+///
+/// When `re_compact` is `false`, parts already marked as compacted are
+/// skipped so the aggressive path is the only one that re-shrinks
+/// already-shrunk text. Returns the number of parts whose length actually
+/// shrank.
+fn compact_tool_outputs(messages: &mut [Message], max_bytes: usize, re_compact: bool) -> usize {
+    let mut compacted = 0;
+    for message in messages {
+        let Message::User { content } = message else {
+            continue;
+        };
+        for item in content.iter_mut() {
+            let MessageContent::ToolResult { content, .. } = item else {
+                continue;
+            };
+            for part in content.iter_mut() {
+                let ToolResultContent::Text { text } = part else {
+                    continue;
+                };
+                if !re_compact && text.contains("[tool output compacted]") {
+                    continue;
+                }
+                let original_len = text.len();
+                *text = compact_text(text, max_bytes, "tool output compacted");
+                if text.len() < original_len {
+                    compacted += 1;
+                }
+            }
+        }
+    }
+    compacted
 }

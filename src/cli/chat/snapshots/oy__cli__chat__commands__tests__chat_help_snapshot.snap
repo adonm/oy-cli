@@ -10,4 +10,4 @@ Enter sends; Alt/Shift+Enter inserts newline; Ctrl-C interrupts an active turn o
 /save [name], /load [name] -- save or load a session
 /clear (/c) -- restart this chat session
 /quit (/q), /exit -- end session
-Advanced: /tokens, /compact [llm|deterministic], /thinking [auto|off|effort]
+Advanced: /tokens, /compact [deterministic], /thinking [auto|off|effort]

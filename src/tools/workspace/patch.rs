@@ -98,47 +98,25 @@ fn plan_patch(ctx: &ToolContext, args: &PatchArgs) -> Result<(usize, Vec<PatchPl
     let mut plans = Vec::new();
     for file_patch in patches {
         let (patch_path, path) = resolve_patch_target(ctx, &file_patch, args.strip)?;
-        if path.is_dir() {
-            bail!("cannot patch directory: {patch_path}");
+        let updated = build_patch_plan(ctx, &path, &patch_path, |text| {
+            let text_patch = file_patch
+                .patch()
+                .as_text()
+                .ok_or_else(|| anyhow!("binary patches are not supported: {patch_path}"))?;
+            apply(text, text_patch).map_err(|err| {
+                anyhow!(
+                    "failed applying patch for {patch_path}: {err}; re-read the file and regenerate the hunk with current context"
+                )
+            })
+        })?;
+        let Some(plan) = updated else { continue };
+        if !seen.insert(plan.display_path.clone()) {
+            bail!(
+                "patch contains multiple changes for the same file: {}",
+                plan.display_path
+            );
         }
-        if ctx.root().join(&patch_path).is_symlink() || path.is_symlink() {
-            bail!("cannot patch symlink: {patch_path}");
-        }
-        if fs::metadata(&path)?.len() > MAX_WORKSPACE_FILE_BYTES {
-            bail!("cannot patch file over workspace read cap: {patch_path}");
-        }
-
-        let raw = fs::read(&path)?;
-        let text = match crate::decode_utf8(raw) {
-            Ok(text) => text,
-            Err(crate::TextDecodeError::Binary) => bail!("cannot patch binary file: {patch_path}"),
-            Err(crate::TextDecodeError::NonUtf8) => bail!("cannot decode utf-8: {patch_path}"),
-        };
-        let text_patch = file_patch
-            .patch()
-            .as_text()
-            .ok_or_else(|| anyhow!("binary patches are not supported: {patch_path}"))?;
-        let updated = match apply(&text, text_patch) {
-            Ok(updated) => updated,
-            Err(err) => bail!(
-                "failed applying patch for {patch_path}: {err}; re-read the file and regenerate the hunk with current context"
-            ),
-        };
-        if updated == text {
-            continue;
-        }
-
-        let display_path = rel_path(ctx.root(), &path);
-        if !seen.insert(display_path.clone()) {
-            bail!("patch contains multiple changes for the same file: {display_path}");
-        }
-        let diff = unified_diff(&display_path, &text, &updated);
-        plans.push(PatchPlan {
-            path,
-            display_path,
-            updated,
-            diff,
-        });
+        plans.push(plan);
     }
     Ok((patch_count, plans))
 }
@@ -155,41 +133,68 @@ fn plan_apply_patch(ctx: &ToolContext, text: &str) -> Result<(usize, Vec<PatchPl
 
     for file in files {
         let path = resolve_existing_path(ctx, &file.path)?;
-        if path.is_dir() {
-            bail!("cannot patch directory: {}", file.path);
+        let patch_path = file.path.clone();
+        let updated = build_patch_plan(ctx, &path, &patch_path, |text| {
+            apply_context_hunks(text, &file)
+        })?;
+        let Some(plan) = updated else { continue };
+        if !seen.insert(plan.display_path.clone()) {
+            bail!(
+                "patch contains multiple changes for the same file: {}",
+                plan.display_path
+            );
         }
-        if ctx.root().join(&file.path).is_symlink() || path.is_symlink() {
-            bail!("cannot patch symlink: {}", file.path);
-        }
-        if fs::metadata(&path)?.len() > MAX_WORKSPACE_FILE_BYTES {
-            bail!("cannot patch file over workspace read cap: {}", file.path);
-        }
-
-        let raw = fs::read(&path)?;
-        let text = match crate::decode_utf8(raw) {
-            Ok(text) => text,
-            Err(crate::TextDecodeError::Binary) => bail!("cannot patch binary file: {}", file.path),
-            Err(crate::TextDecodeError::NonUtf8) => bail!("cannot decode utf-8: {}", file.path),
-        };
-        let updated = apply_context_hunks(&text, &file)?;
-        if updated == text {
-            continue;
-        }
-
-        let display_path = rel_path(ctx.root(), &path);
-        if !seen.insert(display_path.clone()) {
-            bail!("patch contains multiple changes for the same file: {display_path}");
-        }
-        let diff = unified_diff(&display_path, &text, &updated);
-        plans.push(PatchPlan {
-            path,
-            display_path,
-            updated,
-            diff,
-        });
+        plans.push(plan);
     }
 
     Ok((patch_count, plans))
+}
+
+/// Shared per-file pipeline for the two patch formats.
+///
+/// `apply` is the only step that differs between unified diff and
+/// `*** Begin Patch`: it receives the decoded file text and must return
+/// the new text. The helper owns the directory/symlink/size/read/decode
+/// guards, the skip-if-unchanged short-circuit, the display-path dedup
+/// check, and the diff computation.
+///
+/// Returns `Ok(None)` when the patched text is identical to the input
+/// (no work to write), and `Ok(Some(plan))` otherwise.
+fn build_patch_plan(
+    ctx: &ToolContext,
+    path: &std::path::Path,
+    patch_path: &str,
+    apply: impl FnOnce(&str) -> Result<String>,
+) -> Result<Option<PatchPlan>> {
+    if path.is_dir() {
+        bail!("cannot patch directory: {patch_path}");
+    }
+    if ctx.root().join(patch_path).is_symlink() || path.is_symlink() {
+        bail!("cannot patch symlink: {patch_path}");
+    }
+    if fs::metadata(path)?.len() > MAX_WORKSPACE_FILE_BYTES {
+        bail!("cannot patch file over workspace read cap: {patch_path}");
+    }
+
+    let raw = fs::read(path)?;
+    let text = match crate::decode_utf8(raw) {
+        Ok(text) => text,
+        Err(crate::TextDecodeError::Binary) => bail!("cannot patch binary file: {patch_path}"),
+        Err(crate::TextDecodeError::NonUtf8) => bail!("cannot decode utf-8: {patch_path}"),
+    };
+    let updated = apply(&text)?;
+    if updated == text {
+        return Ok(None);
+    }
+
+    let display_path = rel_path(ctx.root(), path);
+    let diff = unified_diff(&display_path, &text, &updated);
+    Ok(Some(PatchPlan {
+        path: path.to_path_buf(),
+        display_path,
+        updated,
+        diff,
+    }))
 }
 
 fn parse_apply_patch(text: &str) -> Result<Vec<ApplyPatchFile>> {
