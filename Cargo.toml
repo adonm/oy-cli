@@ -1,6 +1,6 @@
 [package]
 name = "oy-cli"
-version = "0.10.7"
+version = "0.10.8"
 edition = "2024"
 rust-version = "1.96"
 description = "Local AI coding CLI for inspecting, editing, running commands, and auditing repositories"

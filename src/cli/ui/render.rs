@@ -100,6 +100,14 @@ fn preview_block(title: &str, text: &str, first_line: usize) -> String {
 }
 
 fn render_bat(title: &str, bytes: &[u8], ranges: Option<LineRanges>) -> Option<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_bat_inner(title, bytes, ranges)
+    }))
+    .ok()
+    .flatten()
+}
+
+fn render_bat_inner(title: &str, bytes: &[u8], ranges: Option<LineRanges>) -> Option<String> {
     let mut out = String::new();
     let mut printer = PrettyPrinter::new();
     printer.input(Input::from_bytes(bytes).name(title));

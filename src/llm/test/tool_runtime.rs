@@ -5,6 +5,8 @@ struct FailingTool;
 
 struct EchoTool;
 
+struct PanickingTool;
+
 impl LlmTool for FailingTool {
     fn name(&self) -> &str {
         "fail"
@@ -22,6 +24,16 @@ impl LlmTool for EchoTool {
 
     fn call<'a>(&'a self, args: String) -> crate::llm::LlmToolFuture<'a> {
         Box::pin(async move { Ok(args) })
+    }
+}
+
+impl LlmTool for PanickingTool {
+    fn name(&self) -> &str {
+        "panic"
+    }
+
+    fn call<'a>(&'a self, _args: String) -> crate::llm::LlmToolFuture<'a> {
+        Box::pin(async move { panic!("kaboom") })
     }
 }
 
@@ -47,6 +59,32 @@ async fn tool_call_failure_is_returned_to_model_as_tool_output() {
     assert!(output.contains("TOOL_ERROR: tool `fail` failed: boom"));
     assert!(output.contains("RECOVERY:"));
     assert!(output.contains("Do not retry the same tool call unchanged"));
+}
+
+#[tokio::test]
+async fn tool_panic_is_returned_to_model_as_tool_output() {
+    let tools: ToolMap = HashMap::from([(
+        "panic".to_string(),
+        Box::new(PanickingTool) as Box<dyn LlmTool>,
+    )]);
+    let call = call("panic", "{}");
+    let mut state = ToolLoopState::default();
+
+    let first = execute_tool_call(&tools, &mut state, &call).await;
+    let second = execute_tool_call(&tools, &mut state, &call).await;
+
+    assert!(first.failed);
+    assert!(
+        first
+            .output
+            .contains("TOOL_ERROR: tool `panic` panicked: kaboom")
+    );
+    assert!(first.output.contains("RECOVERY:"));
+    assert!(
+        second
+            .output
+            .contains("repeated identical failed tool call `panic` after 1 failure(s)")
+    );
 }
 
 #[tokio::test]

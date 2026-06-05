@@ -119,6 +119,35 @@ fn read_only_exposes_research_tools_but_not_mutation_tools() {
     }
 }
 
+#[test]
+fn non_interactive_tool_surface_excludes_interactive_tools() {
+    let (_dir, ctx) = test_context(auto_policy(), false);
+    let names = tool_specs(&ctx)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(
+        !names.iter().any(|name| name.as_str() == "ask"),
+        "run/non-interactive sessions must not expose ask"
+    );
+    assert!(
+        names.iter().any(|name| name.as_str() == "read"),
+        "non-interactive sessions still expose normal enabled tools"
+    );
+}
+
+#[test]
+fn interactive_tool_surface_includes_interactive_tools() {
+    let (_dir, ctx) = test_context(auto_policy(), true);
+    let names = tool_specs(&ctx)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.iter().any(|name| name.as_str() == "ask"));
+}
+
 #[tokio::test]
 async fn invoke_accepts_numeric_strings_and_aliases() {
     let (dir, mut ctx) = test_context(auto_policy(), false);

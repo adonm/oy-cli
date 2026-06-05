@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use futures_util::FutureExt;
 use std::collections::HashMap;
 
 use super::schema::ToolCall;
@@ -112,15 +113,35 @@ pub(crate) async fn call_tool(tools: &ToolMap, call: &ToolCall) -> ToolCallOutco
         return ToolCallOutcome::failure(unknown_tool_output(&call.name, tools));
     };
 
-    match tool.call(call.arguments.clone()).await {
-        Ok(output) => ToolCallOutcome::success(output),
-        Err(err) => ToolCallOutcome::failure(tool_failure_output(&call.name, &err)),
+    let future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tool.call(call.arguments.clone())
+    })) {
+        Ok(future) => future,
+        Err(payload) => return ToolCallOutcome::failure(tool_panic_output(&call.name, payload)),
+    };
+
+    match std::panic::AssertUnwindSafe(future).catch_unwind().await {
+        Ok(Ok(output)) => ToolCallOutcome::success(output),
+        Ok(Err(err)) => ToolCallOutcome::failure(tool_failure_output(&call.name, &err)),
+        Err(payload) => ToolCallOutcome::failure(tool_panic_output(&call.name, payload)),
     }
 }
 
 fn tool_failure_output(name: &str, err: &anyhow::Error) -> String {
     tool_error_output(
         &format!("tool `{name}` failed: {err}"),
+        "Do not retry the same tool call unchanged. Fix the arguments, choose another tool, or report this blocker.",
+    )
+}
+
+fn tool_panic_output(name: &str, payload: Box<dyn std::any::Any + Send>) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("panic payload unavailable");
+    tool_error_output(
+        &format!("tool `{name}` panicked: {message}"),
         "Do not retry the same tool call unchanged. Fix the arguments, choose another tool, or report this blocker.",
     )
 }
