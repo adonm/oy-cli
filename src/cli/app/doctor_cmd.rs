@@ -23,7 +23,9 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     let policy = config::tool_policy(mode);
     let opencode_ok = command_ok("opencode", &["--version"]);
     let oy_mcp_ok = command_ok("oy", &["mcp"]);
-    let opencode_config = root.join(".opencode/opencode.json");
+    let global_config = crate::opencode::global_config_path()?;
+    let workspace_config = crate::opencode::workspace_config_path()?;
+    let configured = global_config.exists() || workspace_config.exists();
 
     if crate::ui::is_json() {
         let payload = serde_json::json!({
@@ -32,8 +34,10 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             "policy": policy,
             "opencode": opencode_ok,
             "oy_mcp_command": oy_mcp_ok,
-            "opencode_config": opencode_config,
-            "next_step": recommended_next_step(opencode_ok, opencode_config.exists()),
+            "global_opencode_config": global_config,
+            "workspace_opencode_config": workspace_config,
+            "configured": configured,
+            "next_step": recommended_next_step(opencode_ok, configured),
         });
         crate::ui::line(serde_json::to_string_pretty(&payload)?);
         return Ok(0);
@@ -48,12 +52,25 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         "opencode",
         crate::ui::status_text(opencode_ok, if opencode_ok { "ok" } else { "missing" }),
     );
-    crate::ui::kv("config", opencode_config.display());
+    crate::ui::kv(
+        "global config",
+        crate::ui::status_text(
+            global_config.exists(),
+            format_args!("{}", global_config.display()),
+        ),
+    );
+    crate::ui::kv(
+        "workspace config",
+        crate::ui::status_text(
+            workspace_config.exists(),
+            format_args!("{}", workspace_config.display()),
+        ),
+    );
     crate::ui::line("");
     crate::ui::section("Recommended next step");
     crate::ui::line(format_args!(
         "  {}",
-        recommended_next_step(opencode_ok, opencode_config.exists())
+        recommended_next_step(opencode_ok, configured)
     ));
     crate::ui::line("");
     crate::ui::section("Container hint");

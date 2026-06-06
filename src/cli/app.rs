@@ -24,7 +24,7 @@ use session_cmd::{ChatArgs, RunArgs};
     name = "oy",
     version,
     about = "OpenCode launcher plus deterministic oy MCP tools.",
-    after_help = "Examples:\n  oy                              (setup integration and launch OpenCode)\n  oy setup\n  oy doctor\n  oy model\n  oy run \"inspect this repo and summarize risks\"\n  oy audit auth paths\n  oy review main --focus tests\n\nDefault: running `oy` with no subcommand launches OpenCode after ensuring the oy MCP integration is installed. Legacy commands delegate to OpenCode.\n\nSafety: OpenCode owns model execution, UI, sessions, and permissions. oy MCP tools are deterministic repo-analysis/report helpers."
+    after_help = "Examples:\n  oy                              (setup global integration and launch OpenCode with --agent oy)\n  oy setup\n  oy setup --workspace\n  oy doctor\n  oy model\n  oy run \"inspect this repo and summarize risks\"\n  oy audit auth paths\n  oy review main --focus tests\n\nDefault: running `oy` with no subcommand installs/updates global OpenCode oy integration and launches OpenCode with an oy agent matching --mode. Legacy commands delegate to OpenCode.\n\nSafety: OpenCode owns model execution, UI, sessions, and permissions. oy MCP tools are deterministic repo-analysis/report helpers."
 )]
 struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Suppress normal progress output")]
@@ -47,8 +47,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Install OpenCode integration files in the current workspace.
-    Setup,
+    /// Install OpenCode integration files globally, or in this workspace with --workspace.
+    Setup(SetupArgs),
     /// Launch OpenCode with oy MCP wiring.
     Open(OpenArgs),
     /// Start the oy MCP server over stdio for OpenCode.
@@ -93,6 +93,16 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
+struct SetupArgs {
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Install project-local .opencode files instead of global OpenCode config"
+    )]
+    workspace: bool,
+}
+
+#[derive(Debug, Args)]
 struct OpenArgs {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -101,9 +111,10 @@ struct OpenArgs {
 pub async fn run(argv: Vec<String>) -> Result<i32> {
     let cli = Cli::parse_from(std::iter::once("oy".to_string()).chain(argv));
     crate::ui::init_output_mode(cli_output_mode(&cli));
+    let mode = cli.mode;
     match cli.command {
-        Some(Command::Setup) => crate::opencode::setup_command(),
-        Some(Command::Open(args)) => crate::opencode::launch_command(args.args),
+        Some(Command::Setup(args)) => crate::opencode::setup_command(args.workspace),
+        Some(Command::Open(args)) => crate::opencode::launch_command(args.args, mode),
         Some(Command::Mcp) => crate::mcp::serve_stdio().await,
         Some(Command::Run(args)) => crate::opencode::legacy_run_command(
             args.task,
@@ -143,7 +154,7 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             args.review_max_chunks,
             args.mode,
         ),
-        None => crate::opencode::launch_command(Vec::new()),
+        None => crate::opencode::launch_command(Vec::new(), mode),
     }
 }
 

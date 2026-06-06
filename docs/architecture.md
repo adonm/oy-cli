@@ -1,102 +1,122 @@
 # Architecture
 
-`oy` is a local AI coding CLI. It runs from a workspace, sends prompts and selected context to a configured model provider, and exposes explicit tools for workspace reads, edits, shell commands, public web fetches, and in-memory planning.
+`oy` is now a small OpenCode integration layer. It does not own model execution, chat UI, sessions, provider routing, shell execution, file editing, web fetching, or a native LLM tool loop. OpenCode owns those surfaces.
 
-## Runtime flow
+`oy` owns three things:
+
+- setup and launch convenience for OpenCode
+- a local stdio MCP server with deterministic repository helpers
+- compatibility wrappers for old `oy` command names
+
+## Runtime Flow
 
 ```text
 user argv/stdin
   -> src/main.rs
   -> oy::run in src/lib.rs
   -> cli::app in src/cli/app.rs
-  -> cli::app::{session_cmd, model_cmd, doctor_cmd, audit_cmd}
-  -> agent::session in src/agent/session.rs
-  -> agent::{chat, transcript, compaction, model, auth, opencode_models}
-  -> llm::{LlmRequest, Message, ToolSpec, ModelRoute, ChatBackend, NativeOpenAiBackend, LlmTool}
-  -> tools::{registry, native LLM tool adapter}
-  -> model provider / native tool loop
-  -> src/tools.rs and src/tools/ for local capabilities
+  -> opencode wrappers in src/opencode.rs
+       -> oy setup writes ~/.config/opencode/* by default
+       -> opencode --agent oy...
+
+OpenCode
+  -> starts local MCP command: oy mcp
+  -> src/mcp.rs JSON-RPC stdio loop
+  -> deterministic helpers in audit/tools modules
 ```
 
-1. `src/main.rs` converts process errors into a user-facing exit code.
-2. `src/lib.rs` keeps the public crate surface small.
-3. `cli::app` parses explicit subcommands and delegates command bodies to `cli::app/*_cmd.rs`.
-4. `cli::config` is a facade over focused config modules for modes, paths, prompts, model config, environment knobs, and saved sessions.
-5. `agent::session` owns session orchestration and saved sessions; transcript storage uses `llm::Message`, while context compaction, provider chat/retry logic, auth status, and endpoint discovery live in sibling `agent/` modules.
-6. `agent::model` is a facade over focused model lifecycle modules: selection/listing stay in the facade, while `agent::model::{exec,metadata,reasoning}` own chat execution handoff, best-effort model-limit caching, and reasoning-effort policy. Route construction and provider-support enforcement live in `llm::route::resolve`; metadata caching is not an execution gate. Provider/protocol behavior follows OpenCode's [provider docs](https://opencode.ai/docs/providers), [model/provider config docs](https://opencode.ai/docs/config#models), and [LLM package](https://github.com/anomalyco/opencode/tree/dev/packages/llm) instead of being re-documented here. `oy` keeps local transcript and tool-loop types. `agent::opencode_models` remains the only source of verbose model listings and limits; `llm::providers` only stores route/profile metadata that cannot be derived from the listing.
-7. `agent::auth` owns environment/OpenCode/Copilot API-token credential lookup; callers should not duplicate provider auth probing.
-8. `src/tools.rs` and `src/tools/` validate tool arguments and enforce approval, workspace, network, and mutation boundaries. `src/tools/registry.rs` is the single `oy` tool schema registry; `src/tools/llm.rs` adapts enabled tools to the native `llm::LlmTool` trait.
-9. `src/audit.rs` is separate from the tool loop: it orchestrates collection, chunk review/reduce, rendering, and report writing through focused `src/audit/` modules.
-
-## Main modules
+## Main Modules
 
 | Path | Responsibility |
 |---|---|
-| `src/agent.rs`, `src/agent/` | Model selection, auth discovery, OpenCode model metadata, sessions, `llm::Message` transcripts, context compaction, chat/tool loop orchestration |
-| `src/llm/` | `oy`-owned LLM request/response, message, tool-spec, route/profile metadata, protocols, transport/framing/auth, cache policy, backend seam, and native tool loop |
-| `src/audit.rs`, `src/audit/` | Deterministic no-tools audit orchestration, input collection, chunking, prompt construction, report/SARIF writing |
-| `src/cli.rs`, `src/cli/` | Command parsing/dispatch, command handlers, config paths, safety modes, terminal UI, interactive chat shell |
-| `src/tools.rs`, `src/tools/` | Tool schema registry, native LLM tool adapter, tool dispatch, previews, todos, workspace filesystem boundary, webfetch network boundary, mutation approval |
-| `src/lib.rs` | Small public facade used by the binary and tests |
-| `src/main.rs` | Tokio entry point and process exit handling |
-| `src/**/tests.rs`, `src/**/test/`, `src/**/snapshots/` | Unit, protocol golden, boundary, and snapshot tests close to the code under test |
+| `src/main.rs` | Tokio process entrypoint and exit code handling |
+| `src/lib.rs` | Small public facade exposing `run` and diagnostics |
+| `src/cli/app.rs` | CLI parsing and dispatch |
+| `src/opencode.rs` | `oy setup`, OpenCode launch, generated agents/skills/commands, legacy wrapper commands |
+| `src/mcp.rs` | Minimal MCP server over newline-delimited stdio JSON-RPC |
+| `src/audit/input.rs` | Gitignore-aware repo collection, manifest/security index, chunking, git diff input |
+| `src/audit/findings.rs` | Markdown/structured finding extraction and machine-readable findings block |
+| `src/audit/sarif.rs` | SARIF rendering from findings |
+| `src/tools/workspace/sloc.rs` | Source line counting via `tokei` |
+| `src/tools/outline.rs` | Tree-sitter structural outline extraction |
+| `src/cli/config/paths.rs` | Workspace root and safe output-path handling |
+| `src/cli/config/mode.rs` | Legacy safety-mode parsing for wrapper compatibility |
 
-The current layout keeps top-level Rust files as facades/orchestrators where practical. When splitting files, prefer mechanical extraction with no behavior changes, keep trust-boundary validation near entry points, and keep `src/lib.rs` stable.
+Deleted legacy modules include `src/agent/`, `src/llm/`, native chat/session handling, native provider routing, and the old model-callable tool registry.
 
-## LLM boundary
+## OpenCode Setup
 
-The LLM path is OpenCode-shaped but `oy`-sized:
+`oy setup` writes global files under `~/.config/opencode/` by default:
 
 ```text
-transcript/tools -> LlmRequest -> ModelRoute -> Protocol -> Transport -> LlmResponse
-                                      ^                         |
-                                      |                         v
-                              OpenCode metadata             tool loop
+~/.config/opencode/opencode.json
+~/.config/opencode/agents/oy.md
+~/.config/opencode/agents/oy-plan.md
+~/.config/opencode/agents/oy-edit.md
+~/.config/opencode/agents/oy-auto.md
+~/.config/opencode/agents/oy-auditor.md
+~/.config/opencode/agents/oy-reviewer.md
+~/.config/opencode/agents/oy-enhancer.md
+~/.config/opencode/skills/oy-audit/SKILL.md
+~/.config/opencode/skills/oy-review/SKILL.md
 ```
 
-Current ownership rules:
+`oy setup --workspace` writes the same generated files under `.opencode/` for project-local overrides:
 
-- `oy` owns `LlmRequest`, `LlmResponse`, messages, tool definitions, model routes, cache hints, and the local tool loop.
-- `agent::opencode_models` is the only source for verbose OpenCode model listings and limits.
-- `agent::auth` and `llm::route::auth` own credential lookup/signing; callers should not probe credentials ad hoc.
-- `llm::providers` keeps only narrow route/profile data and provider quirks that cannot be derived from OpenCode listings; provider/protocol behavior should stay aligned with OpenCode's [provider docs](https://opencode.ai/docs/providers) and [LLM package](https://github.com/anomalyco/opencode/tree/dev/packages/llm) instead of being re-documented here.
-- Protocol modules lower common messages/tools/cache hints into provider wire bodies and parse streamed events. Route resolution is the fail-closed provider-support boundary.
-- Prefer request/response golden tests and focused route/auth tests over broad live-provider tests.
+```text
+.opencode/opencode.json
+.opencode/agents/oy.md
+.opencode/agents/oy-plan.md
+.opencode/agents/oy-edit.md
+.opencode/agents/oy-auto.md
+.opencode/agents/oy-auditor.md
+.opencode/agents/oy-reviewer.md
+.opencode/agents/oy-enhancer.md
+.opencode/skills/oy-audit/SKILL.md
+.opencode/skills/oy-review/SKILL.md
+```
 
-## Trust boundaries
+The config registers `oy mcp` as a local MCP server and adds OpenCode commands for audit, review, and enhance workflows. Generated primary agents (`oy`, `oy-plan`, `oy-edit`, `oy-auto`) closely match old v0.10 run/chat mode prompts and permissions. `oy` passes `--agent` when launching OpenCode instead of setting `default_agent`, so direct `opencode` usage keeps the user's normal default. Running OpenCode sessions need to be restarted after setup changes because OpenCode loads config at startup.
 
-| Boundary | Entry point | Sink | Required posture |
-|---|---|---|---|
-| Workspace files | Tool paths, `OY_ROOT`, audit collector, `--out` | Reads/writes under the workspace | Validate near path resolution; fail closed outside workspace; test symlinks and traversal |
-| Shell/process | `bash` tool, provider helper CLIs | User shell/process environment | Ask or deny by mode; filter credential-like child env vars; avoid implicit process execution; add timeouts |
-| Network | `webfetch`, model providers, routing shims | HTTP requests and provider APIs | Separate model egress from tool egress; webfetch uses Spider's default HTTP crawler setup |
-| Model provider | Prompts, snippets, tool output, audit chunks | External or local model endpoint | Treat sent text as disclosed to that provider; avoid secrets by default |
-| Local state | Config, sessions, history, `TODO.md` persistence | `~/.config/oy-rust/` and workspace files | Store only intentionally; use private local files; document sensitivity |
-| Approval | Tool call from model | File writes and shell commands | Default-deny where non-interactive or read-only; preview before asking |
-| Retry | Provider transient failure after tool execution | Replayed prompt/tool loop | Retry only before external side-effect attempts; fail closed after write/shell/persistent todo attempts |
+## MCP Boundary
 
-## Modes and policies
+`src/mcp.rs` implements the small MCP subset needed by OpenCode:
 
-Safety modes are defined in `cli::config::SafetyMode` and converted to `tools::ToolPolicy`:
+- `initialize`
+- `ping`
+- `tools/list`
+- `tools/call`
 
-- `default` / `ask`: read tools are available; file writes and shell ask.
-- `plan` / `read`: no file writes or shell; intended for first looks and untrusted repos.
-- `accept-edits` / `edit`: file writes auto-approve; shell still asks.
-- `auto-approve` / `auto`: file writes and shell auto-approve for trusted unattended work.
-- `/ask`: research-only chat submode.
+The server is intentionally deterministic. It returns manifests, chunks, diffs, SLOC, outlines, and report-rendering results. It does not call an LLM.
 
-When changing capabilities, update `README.md`, `SECURITY.md`, and tests that assert tool exposure.
+Tools exposed by `oy mcp`:
 
-## Audit pipeline
+| Tool | Side effects |
+|---|---|
+| `repo_manifest` | Reads workspace files |
+| `repo_chunks` | Reads workspace files |
+| `git_diff_input` | Runs `git diff`/`git rev-parse` read-only commands |
+| `sloc` | Reads file metadata/content through `tokei` |
+| `outline` | Reads one source file and parses it when the default `outline` feature is enabled |
+| `render_audit_report` | Writes requested audit report path inside workspace |
+| `render_review_report` | Writes requested review report path inside workspace |
 
-`oy audit` does not expose tools to the model. It:
+## Trust Boundaries
 
-1. resolves the workspace and output path,
-2. collects reviewable text files with skip rules and size caps,
-3. builds a manifest and security index,
-4. chunks large repositories,
-5. runs one no-tools model prompt for small repos or map/reduce prompts for large repos,
-6. inserts a transparency line and findings summary,
-7. writes the report to the requested workspace path.
+| Boundary | Owner | Posture |
+|---|---|---|
+| Model prompts/provider traffic | OpenCode | Configure providers and credentials in OpenCode |
+| UI/sessions/history | OpenCode | OpenCode owns storage and session lifecycle |
+| File edits/shell/web/repo clone | OpenCode | Use OpenCode permissions and agents |
+| Workspace reads for chunks/outlines/SLOC | oy MCP | Stay inside `OY_ROOT`/cwd; skip likely secrets and oversized files |
+| Report writes | oy MCP | Resolve output path inside workspace and reject symlink destinations |
+| Setup writes | oy CLI | Merge generated config into global OpenCode config by default; generated agent/skill files refuse to overwrite non-generated files |
 
-Audit still sends collected repository text to the configured model provider. Keep skip/redaction behavior conservative and document any override that increases disclosure.
+## Design Rules
+
+- Do not reintroduce an LLM client or model tool loop in `oy`.
+- Prefer OpenCode agents, commands, skills, and permissions for orchestration.
+- Keep MCP tools deterministic and narrow.
+- Keep workspace path validation close to reads/writes.
+- If OpenCode already has a tool, do not duplicate it in `oy mcp`.
+- Update generated setup docs and schemas when changing MCP tool names or command templates.

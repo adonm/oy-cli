@@ -1,4 +1,4 @@
-# justfile for oy-cli — a local AI coding CLI
+# justfile for oy-cli — OpenCode launcher and oy MCP helpers
 #
 # Run `just` or `just --list` to see available recipes.
 #
@@ -6,7 +6,7 @@
 #   just dev            # fast checks (fmt + cargo check)
 #   just check          # standard local checks using only stable Cargo
 #   just fix            # auto-fix formatting and clippy lints, then check
-#   just run -- "summarize this repo"
+#   just run -- --help
 #
 # Requires: cargo, rustc >= 1.96, and just. Optional CI-parity recipes below
 # require cargo-nextest and/or nightly Miri.
@@ -86,6 +86,6 @@ package:
 
 # === Run the binary ===
 
-# Run oy with arguments. Example: just run -- chat
+# Run oy with arguments. Example: just run -- mcp
 run *args:
     cargo run --locked -- {{args}}

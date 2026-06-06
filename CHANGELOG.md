@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `oy` now delegates AI workflows to OpenCode. The default `oy` command installs/updates global OpenCode integration files and launches `opencode --agent oy`.
+- Legacy commands (`oy run`, `oy chat`, `oy model`, `oy audit`, `oy review`, `oy enhance`) are compatibility wrappers around OpenCode commands.
+- Audit/review/enhance workflows now live in generated OpenCode agents, skills, and commands.
+- `oy run`, `oy chat`, and default `oy` map old safety modes to generated OpenCode primary agents: `oy`, `oy-plan`, `oy-edit`, and `oy-auto`.
+
+### Added
+- `oy setup` writes `~/.config/opencode/opencode.json`, oy agents, and oy skills. Use `oy setup --workspace` for project-local `.opencode` setup.
+- `oy mcp` starts a local stdio MCP server exposing deterministic repository helpers: `repo_manifest`, `repo_chunks`, `git_diff_input`, `sloc`, `outline`, `render_audit_report`, and `render_review_report`.
+
+### Removed
+- Removed the legacy native LLM/provider/session/chat/tool-loop stack from `src/agent/`, `src/llm/`, and the old model-callable tool registry.
+- Removed native implementations of shell, edit, webfetch, repo clone, todo, ask, think, search, read, and patch tools. OpenCode owns those capabilities.
+- Removed the obsolete good-first-issues document; starter work should now come from the OpenCode/MCP roadmap.
+
 ## [0.10.7] - 2026-06-04
 
 ### Added
