@@ -10,7 +10,7 @@ Native `oy` can:
 
 - write global integration files during `oy setup`, or `.opencode` files with `oy setup --workspace`,
 - launch the `opencode` process,
-- read workspace files for MCP manifests/chunks/outlines/SLOC,
+- read workspace files for MCP manifests/chunks/SLOC/outlines,
 - run read-only `git` commands for diff input,
 - write generated audit/review reports inside the workspace.
 

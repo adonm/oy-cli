@@ -32,8 +32,7 @@ pub(crate) fn resolve_existing_path(ctx: &ToolContext, path: &str) -> Result<Pat
         .with_context(|| format!("path does not exist: {path}"))
 }
 
-#[cfg(feature = "outline")]
-pub(crate) fn resolve_read_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
+pub(super) fn resolve_read_path(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
     let resolved = resolve_existing_path(ctx, path)?;
     if !resolved.starts_with(ctx.root()) {
         bail!("path outside workspace is not allowed: {path}");

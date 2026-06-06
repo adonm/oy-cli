@@ -57,7 +57,7 @@ Keep `Cargo.lock` in sync with `Cargo.toml` after dependency changes.
 | `src/audit/input.rs` | Repo file collection, manifest, security index, chunking, git diff input |
 | `src/audit/findings.rs` | Finding extraction and structured findings blocks |
 | `src/audit/sarif.rs` | SARIF rendering |
-| `src/tools/outline.rs` | Tree-sitter outline helper |
+| `src/tools/workspace/outline.rs` | Optional outline helper via Universal Ctags |
 | `src/tools/workspace/sloc.rs` | SLOC helper |
 | `src/cli/config/paths.rs` | Workspace output path safety |
 | `.github/workflows/ci.yml` | CI checks |

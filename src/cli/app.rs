@@ -129,7 +129,6 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             args.shared.continue_session,
             args.shared.resume,
             args.shared.mode,
-            args.out,
         ),
         Some(Command::Chat(args)) => crate::opencode::chat_command(
             args.shared.continue_session,

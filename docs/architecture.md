@@ -37,8 +37,8 @@ opencode
 | `src/audit/input.rs` | Gitignore-aware repo collection, manifest/security index, chunking, git diff input |
 | `src/audit/findings.rs` | Markdown/structured finding extraction and machine-readable findings block |
 | `src/audit/sarif.rs` | SARIF rendering from findings |
-| `src/tools/workspace/sloc.rs` | Source line counting via `tokei` |
-| `src/tools/outline.rs` | Tree-sitter structural outline extraction |
+| `src/tools/workspace/outline.rs` | Optional structural outline extraction via external Universal Ctags |
+| `src/tools/workspace/sloc.rs` | Optional source line counting via external `tokei` |
 | `src/cli/config/paths.rs` | Workspace root and safe output-path handling |
 | `src/cli/config/mode.rs` | Safety-mode parsing for launcher convenience modes |
 
@@ -96,8 +96,8 @@ Tools exposed by `oy mcp`:
 | `repo_manifest` | Reads workspace files |
 | `repo_chunks` | Reads workspace files |
 | `git_diff_input` | Runs `git diff`/`git rev-parse` read-only commands |
-| `sloc` | Reads file metadata/content through `tokei` |
-| `outline` | Reads one source file and parses it when the default `outline` feature is enabled |
+| `sloc` | Reads file metadata/content through external `tokei`; exposed only when `tokei` is on `PATH` |
+| `outline` | Reads one source file through external Universal Ctags; exposed only when Universal Ctags is on `PATH` |
 | `render_audit_report` | Writes requested audit report path inside workspace |
 | `render_review_report` | Writes requested review report path inside workspace |
 
@@ -108,7 +108,7 @@ Tools exposed by `oy mcp`:
 | Model prompts/provider traffic | host | Configure providers and credentials there |
 | UI/sessions/history | host | Host owns storage and session lifecycle |
 | File edits/shell/web/repo clone | host | Use host permissions and agents |
-| Workspace reads for chunks/outlines/SLOC | oy MCP | Stay inside `OY_ROOT`/cwd; skip likely secrets and oversized files |
+| Workspace reads for chunks/SLOC/outlines | oy MCP | Stay inside `OY_ROOT`/cwd; skip likely secrets and oversized files |
 | Report writes | oy MCP | Resolve output path inside workspace and reject symlink destinations |
 | Setup writes | oy CLI | Merge generated config into global config by default; generated agent/skill files refuse to overwrite non-generated files |
 

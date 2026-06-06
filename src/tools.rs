@@ -6,12 +6,18 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 mod args;
-#[cfg(feature = "outline")]
-mod outline;
 pub(crate) mod policy;
 mod workspace;
 
 pub(crate) use policy::{Approval, ToolPolicy};
+
+pub(crate) fn has_external_sloc_counter() -> bool {
+    workspace::has_tokei()
+}
+
+pub(crate) fn has_external_outline_tool() -> bool {
+    workspace::has_universal_ctags()
+}
 
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -39,9 +45,8 @@ pub(crate) async fn invoke_read_only_deterministic(
 ) -> Result<Value> {
     let ctx = ToolContext::new(root);
     match name {
+        "outline" => parse_tool_args(args).and_then(|args| workspace::tool_outline(&ctx, args)),
         "sloc" => parse_tool_args(args).and_then(|args| workspace::tool_sloc(&ctx, args)),
-        #[cfg(feature = "outline")]
-        "outline" => parse_tool_args(args).and_then(|args| outline::tool_outline(&ctx, args)),
         other => anyhow::bail!("unknown deterministic tool: {other}"),
     }
 }

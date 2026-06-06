@@ -7,15 +7,22 @@
 - Convenience commands (`oy run`, `oy chat`, `oy model`, `oy audit`, `oy review`, `oy enhance`) wrap generated opencode commands; unknown top-level `oy` args pass through to opencode.
 - Audit/review/enhance workflows now live in generated agents, skills, and commands.
 - `oy run`, `oy chat`, and default `oy` map old safety modes to generated primary agents: `oy`, `oy-plan`, `oy-edit`, and `oy-auto`.
+- Generated agents now emit short phase markers during longer non-interactive work.
+- `sloc` now shells out to `tokei` when available instead of embedding the `tokei` crate; the tool is omitted from MCP listings when `tokei` is not on `PATH`.
+- `outline` now shells out to Universal Ctags when available instead of embedding tree-sitter grammars; the tool is omitted from MCP listings when Universal Ctags is not on `PATH`.
+- `oy doctor` now reports optional `tokei`/Universal Ctags availability and prints `mise`/Homebrew install hints when they are missing.
 
 ### Added
 - `oy setup` writes `~/.config/opencode/opencode.json`, agents, and skills. Use `oy setup --workspace` for project-local `.opencode` setup.
-- `oy mcp` starts a local stdio MCP server exposing deterministic repository helpers: `repo_manifest`, `repo_chunks`, `git_diff_input`, `sloc`, `outline`, `render_audit_report`, and `render_review_report`.
+- `oy mcp` starts a local stdio MCP server exposing deterministic repository helpers: `repo_manifest`, `repo_chunks`, `git_diff_input`, optional `sloc`, optional `outline`, `render_audit_report`, and `render_review_report`.
 
 ### Removed
 - Removed the legacy native LLM/provider/session/chat/tool-loop stack from `src/agent/`, `src/llm/`, and the old model-callable tool registry.
 - Removed native implementations of shell, edit, webfetch, repo clone, todo, ask, think, search, read, and patch tools; opencode owns those capabilities.
+- Removed embedded tree-sitter grammar dependencies; install Universal Ctags separately to enable the optional `outline` MCP tool.
+- Removed the embedded `tokei` dependency; install `tokei` separately to enable the optional `sloc` MCP tool.
 - Removed the obsolete good-first-issues document; starter work should now come from the current MCP roadmap.
+- Removed `oy run --out`; `oy run` now always streams opencode output directly. Use shell redirection to save output.
 
 ## [0.10.7] - 2026-06-04
 

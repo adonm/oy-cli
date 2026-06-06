@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use tokei::{Config as TokeiConfig, Languages as TokeiLanguages, Sort as TokeiSort};
+use std::path::Path;
+use std::process::Command;
 
 use super::super::ToolContext;
 use super::super::args::{ExcludeArg, SlocArgs};
@@ -14,32 +15,7 @@ pub(crate) fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
         .as_ref()
         .map(ExcludeArg::patterns)
         .unwrap_or_default();
-    let targets = targets
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    let target_refs = targets.iter().map(String::as_str).collect::<Vec<_>>();
-    let excluded = exclude.iter().map(String::as_str).collect::<Vec<_>>();
-
-    let config = TokeiConfig {
-        hidden: Some(false),
-        no_ignore: Some(false),
-        no_ignore_parent: Some(false),
-        no_ignore_dot: Some(false),
-        no_ignore_vcs: Some(false),
-        ..TokeiConfig::default()
-    };
-    let mut languages = TokeiLanguages::new();
-    languages.get_statistics(&target_refs, &excluded, &config);
-    sort_tokei_reports(&mut languages);
-
-    let mut output = serde_json::to_value(&languages)?;
-    if let Value::Object(ref mut map) = output {
-        map.insert(
-            "Total".to_string(),
-            serde_json::to_value(languages.total())?,
-        );
-    }
+    let output = run_tokei(ctx.root(), &targets, &exclude)?;
 
     Ok(serde_json::to_value(SlocOutput {
         path: args.path,
@@ -49,8 +25,32 @@ pub(crate) fn tool_sloc(ctx: &ToolContext, args: SlocArgs) -> Result<Value> {
     })?)
 }
 
-fn sort_tokei_reports(languages: &mut TokeiLanguages) {
-    for language in languages.values_mut() {
-        language.sort_by(TokeiSort::Code);
+pub(crate) fn has_tokei() -> bool {
+    Command::new("tokei").arg("--version").output().is_ok()
+}
+
+fn run_tokei(root: &Path, targets: &[std::path::PathBuf], exclude: &[String]) -> Result<Value> {
+    let mut command = Command::new("tokei");
+    command
+        .current_dir(root)
+        .arg("--output")
+        .arg("json")
+        .arg("--sort")
+        .arg("code");
+    for pattern in exclude {
+        command.arg("--exclude").arg(pattern);
     }
+    for target in targets {
+        command.arg(target);
+    }
+
+    let output = command.output().context("failed to run tokei")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!("tokei failed with status {}", output.status);
+        }
+        bail!("tokei failed with status {}: {stderr}", output.status);
+    }
+    serde_json::from_slice(&output.stdout).context("tokei output was not valid JSON")
 }

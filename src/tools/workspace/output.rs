@@ -2,6 +2,14 @@ use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Debug, Serialize)]
+pub(super) struct OutlineOutput {
+    pub path: String,
+    pub format: &'static str,
+    pub command: String,
+    pub output: String,
+}
+
+#[derive(Debug, Serialize)]
 pub(super) struct SlocOutput {
     pub path: String,
     pub format: &'static str,

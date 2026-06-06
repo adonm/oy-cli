@@ -29,7 +29,6 @@ fn default_dot() -> String {
     ".".to_string()
 }
 
-#[cfg(feature = "outline")]
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct OutlineArgs {
     pub(super) path: String,

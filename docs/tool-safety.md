@@ -11,10 +11,20 @@ This document covers only the deterministic tools served by `oy mcp`.
 | `repo_manifest` | Build gitignore-aware file inventory, token estimates, language summary, optional security index | No | Skips dependencies, build outputs, lockfiles, hidden/likely-secret files |
 | `repo_chunks` | Build deterministic workspace chunks and optionally return one chunk's text | No | Used by audit/review agents |
 | `git_diff_input` | Build deterministic chunks from `git diff <target>` | No workspace mutation | Runs read-only `git` commands in the workspace |
-| `sloc` | Count source lines with `tokei` | No | Reads paths inside workspace |
-| `outline` | Extract source definitions with tree-sitter | No | Reads one exact source file inside workspace; available when the default `outline` feature is enabled |
+| `sloc` | Count source lines with external `tokei` | No | Exposed only when `tokei` is on `PATH`; reads paths inside workspace |
+| `outline` | Extract source definitions with external Universal Ctags | No | Exposed only when Universal Ctags is on `PATH`; reads one exact source file inside workspace |
 | `render_audit_report` | Render markdown or SARIF audit report | Yes | Writes only to a validated workspace output path |
 | `render_review_report` | Render markdown review report | Yes | Writes only to a validated workspace output path |
+
+Install optional local helper CLIs with:
+
+```bash
+mise use cargo:tokei
+mise use aqua:universal-ctags/ctags
+# or: brew install tokei universal-ctags
+```
+
+Run `oy doctor` to check whether the optional MCP tools are currently exposed.
 
 ## What oy MCP Does Not Provide
 

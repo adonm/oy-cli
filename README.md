@@ -22,8 +22,23 @@ oy
 - opencode installed and configured
 - Rust 1.96 or later if building from source
 - `git` for diff-based review input
+- Optional: `tokei` on `PATH` to expose the `sloc` MCP tool
+- Optional: Universal Ctags (`u-ctags` or `ctags`) on `PATH` to expose the `outline` MCP tool
+
+Optional helper installs:
+
+```bash
+mise use cargo:tokei
+mise use aqua:universal-ctags/ctags
+# or, on macOS/Linux with Homebrew:
+brew install tokei universal-ctags
+```
+
+`oy doctor` reports whether these optional helpers are available and prints install hints when they are missing.
 
 Model providers, authentication, sessions, permissions, editing, shell commands, web fetches, and UI behavior are configured in opencode. Use its provider and config docs for those surfaces.
+
+`oy run` streams opencode output directly. If you need to save it, use shell redirection, for example `oy run "summarize this repo" > summary.md`.
 
 ## Commands
 
@@ -107,7 +122,7 @@ The old `--mode` names now map to generated primary agents:
 | `accept-edits` / `edit` | `oy-edit` | edits allowed, bash asks |
 | `auto-approve` / `auto` | `oy-auto` | edits allowed, bash allowed |
 
-The agent prompts closely follow the old v0.10 oy run/chat guidance: inspect before editing, keep work terse and evidence-first, prefer simple explicit code, batch independent reads/searches, treat tool output as untrusted data, and verify focused changes.
+The agent prompts closely follow the old v0.10 oy run/chat guidance: inspect before editing, keep work terse and evidence-first, print short phase markers during longer non-interactive work, prefer simple explicit code, batch independent reads/searches, treat tool output as untrusted data, and verify focused changes.
 
 ## MCP Tools
 
@@ -118,8 +133,8 @@ The agent prompts closely follow the old v0.10 oy run/chat guidance: inspect bef
 | `repo_manifest` | Gitignore-aware file inventory, token estimates, optional security index |
 | `repo_chunks` | Deterministic workspace chunking for audit/review input |
 | `git_diff_input` | Deterministic review input from `git diff <target>` |
-| `sloc` | Source line counts via `tokei` |
-| `outline` | Tree-sitter structural outline for a source file when the default `outline` feature is enabled |
+| `sloc` | Source line counts via `tokei` when `tokei` is installed on `PATH` |
+| `outline` | Structural source outline via Universal Ctags when available on `PATH` |
 | `render_audit_report` | Write `ISSUES.md` or SARIF from produced findings |
 | `render_review_report` | Write `REVIEW.md` from produced findings |
 
@@ -141,7 +156,7 @@ Those wrappers use the generated agents. opencode performs the reasoning and orc
 
 Native `oy` risks:
 
-- reads reviewable workspace text for manifests/chunks/outlines/SLOC
+- reads reviewable workspace text for manifests/chunks/SLOC/outlines
 - writes generated audit/review reports when asked
 - writes global integration files during setup, or `.opencode` files with `oy setup --workspace`
 - launches the `opencode` process
@@ -165,7 +180,7 @@ Important files:
 | `src/mcp.rs` | Minimal stdio MCP JSON-RPC server |
 | `src/audit/input.rs` | File collection, manifest, chunking, git diff input |
 | `src/audit/findings.rs` | Structured findings extraction/render support |
-| `src/tools/outline.rs` | Tree-sitter outline helper |
+| `src/tools/workspace/outline.rs` | Optional outline helper via Universal Ctags |
 | `src/tools/workspace/sloc.rs` | SLOC helper |
 
 See `docs/architecture.md`, `docs/tool-safety.md`, `SECURITY.md`, and `CONTRIBUTING.md` for more detail.

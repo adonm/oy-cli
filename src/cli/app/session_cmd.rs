@@ -1,7 +1,6 @@
 //! `oy run` and `oy chat` convenience argument types.
 
 use clap::Args;
-use std::path::PathBuf;
 
 use crate::config;
 
@@ -33,12 +32,6 @@ pub(super) struct SharedModeArgs {
 pub(super) struct RunArgs {
     #[command(flatten)]
     pub(super) shared: SharedModeArgs,
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "Write command stdout to a workspace file"
-    )]
-    pub(super) out: Option<PathBuf>,
     #[arg(
         value_name = "PROMPT",
         help = "Task prompt; omitted means read stdin or launch opencode in a TTY"

@@ -95,9 +95,8 @@ async fn handle_tool_call(params: Value) -> Result<Value> {
         "repo_manifest" => repo_manifest(args)?,
         "repo_chunks" => repo_chunks(args)?,
         "git_diff_input" => git_diff_input(args)?,
-        "sloc" => builtin_tool("sloc", args).await?,
-        #[cfg(feature = "outline")]
-        "outline" => builtin_tool("outline", args).await?,
+        "outline" if tools::has_external_outline_tool() => builtin_tool("outline", args).await?,
+        "sloc" if tools::has_external_sloc_counter() => builtin_tool("sloc", args).await?,
         "render_audit_report" => render_audit_report(args)?,
         "render_review_report" => render_review_report(args)?,
         other => bail!("unknown oy MCP tool: {other}"),
@@ -136,7 +135,7 @@ fn jsonrpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
 }
 
 fn tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         tool_def(
             "repo_manifest",
             "Build a deterministic, gitignore-aware repository manifest for audit/review planning.",
@@ -177,9 +176,52 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }),
         ),
+    ];
+
+    if let Some(definition) = sloc_tool_definition() {
+        tools.push(definition);
+    }
+    if let Some(definition) = outline_tool_definition() {
+        tools.push(definition);
+    }
+
+    tools.extend([
+        tool_def(
+            "render_audit_report",
+            "Render and write a deterministic audit report from agent-produced markdown/structured findings.",
+            render_report_schema("ISSUES.md", true),
+        ),
+        tool_def(
+            "render_review_report",
+            "Render and write a deterministic review report from agent-produced markdown/structured findings.",
+            render_report_schema("REVIEW.md", false),
+        ),
+    ]);
+
+    tools
+}
+
+fn outline_tool_definition() -> Option<Value> {
+    tools::has_external_outline_tool().then(|| {
+        tool_def(
+            "outline",
+            "Extract structural definitions from a source file using Universal Ctags when it is installed on PATH.",
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
+        )
+    })
+}
+
+fn sloc_tool_definition() -> Option<Value> {
+    tools::has_external_sloc_counter().then(|| {
         tool_def(
             "sloc",
-            "Count source lines by language using tokei.",
+            "Count source lines by language using tokei when it is installed on PATH.",
             json!({
                 "type": "object",
                 "required": ["path"],
@@ -193,30 +235,8 @@ fn tool_definitions() -> Vec<Value> {
                     }
                 }
             }),
-        ),
-        tool_def(
-            "render_audit_report",
-            "Render and write a deterministic audit report from agent-produced markdown/structured findings.",
-            render_report_schema("ISSUES.md", true),
-        ),
-        tool_def(
-            "render_review_report",
-            "Render and write a deterministic review report from agent-produced markdown/structured findings.",
-            render_report_schema("REVIEW.md", false),
-        ),
-        #[cfg(feature = "outline")]
-        tool_def(
-            "outline",
-            "Extract structural definitions from a source file using tree-sitter.",
-            json!({
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                    "path": { "type": "string" }
-                }
-            }),
-        ),
-    ]
+        )
+    })
 }
 
 fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
@@ -592,5 +612,21 @@ mod tests {
                 .unwrap()
                 .contains("unknown MCP method: missing/method")
         );
+    }
+
+    #[test]
+    fn sloc_tool_is_listed_only_when_tokei_is_available() {
+        let tools = tool_definitions();
+        let has_sloc = tools.iter().any(|tool| tool["name"] == "sloc");
+
+        assert_eq!(has_sloc, crate::tools::has_external_sloc_counter());
+    }
+
+    #[test]
+    fn outline_tool_is_listed_only_when_ctags_is_available() {
+        let tools = tool_definitions();
+        let has_outline = tools.iter().any(|tool| tool["name"] == "outline");
+
+        assert_eq!(has_outline, crate::tools::has_external_outline_tool());
     }
 }

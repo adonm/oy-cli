@@ -6,6 +6,9 @@ use std::path::Path;
 
 use crate::config;
 
+const TOKEI_HINT: &str = "mise use cargo:tokei || brew install tokei";
+const CTAGS_HINT: &str = "mise use aqua:universal-ctags/ctags || brew install universal-ctags";
+
 #[derive(Debug, Args, Clone)]
 pub(super) struct DoctorArgs {
     #[arg(
@@ -23,6 +26,8 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     let policy = config::tool_policy(mode);
     let opencode_ok = command_ok("opencode", &["--version"]);
     let oy_mcp_ok = command_ok("oy", &["mcp"]);
+    let tokei_ok = crate::tools::has_external_sloc_counter();
+    let ctags_ok = crate::tools::has_external_outline_tool();
     let global_config = crate::opencode::global_config_path()?;
     let workspace_config = crate::opencode::workspace_config_path()?;
     let configured = global_config.exists() || workspace_config.exists();
@@ -34,6 +39,18 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             "policy": policy,
             "opencode": opencode_ok,
             "oy_mcp_command": oy_mcp_ok,
+            "optional_tools": {
+                "tokei": {
+                    "available": tokei_ok,
+                    "enables": "sloc MCP tool",
+                    "install": TOKEI_HINT,
+                },
+                "universal_ctags": {
+                    "available": ctags_ok,
+                    "enables": "outline MCP tool",
+                    "install": CTAGS_HINT,
+                }
+            },
             "global_opencode_config": global_config,
             "workspace_opencode_config": workspace_config,
             "configured": configured,
@@ -51,6 +68,28 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     crate::ui::kv(
         "opencode",
         crate::ui::status_text(opencode_ok, if opencode_ok { "ok" } else { "missing" }),
+    );
+    crate::ui::kv(
+        "optional tokei",
+        crate::ui::status_text(
+            tokei_ok,
+            if tokei_ok {
+                "ok; enables sloc MCP tool".to_string()
+            } else {
+                format!("missing; install with `{TOKEI_HINT}`")
+            },
+        ),
+    );
+    crate::ui::kv(
+        "optional ctags",
+        crate::ui::status_text(
+            ctags_ok,
+            if ctags_ok {
+                "ok; enables outline MCP tool".to_string()
+            } else {
+                format!("missing; install Universal Ctags with `{CTAGS_HINT}`")
+            },
+        ),
     );
     crate::ui::kv(
         "global config",
