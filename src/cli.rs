@@ -5,6 +5,5 @@
 //! handlers, config paths, safety modes, rendering, and the REPL.
 
 pub(crate) mod app;
-pub(crate) mod chat;
 pub(crate) mod config;
 pub(crate) mod ui;

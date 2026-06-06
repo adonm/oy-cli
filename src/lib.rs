@@ -5,20 +5,15 @@
 //! binary is still evolving.
 
 #![recursion_limit = "256"]
-#![allow(dead_code)]
 
-mod agent;
 mod audit;
 mod cli;
-mod llm;
 mod mcp;
-mod net;
 mod opencode;
 mod review;
 mod tools;
 
-pub(crate) use agent::{compaction, model, session};
-pub(crate) use cli::{chat, config, ui};
+pub(crate) use cli::{config, ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextDecodeError {
@@ -42,6 +37,3 @@ pub async fn run(argv: Vec<String>) -> anyhow::Result<i32> {
 pub fn err_line(args: std::fmt::Arguments<'_>) {
     ui::err_line(args);
 }
-
-#[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

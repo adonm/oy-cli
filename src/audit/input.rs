@@ -8,8 +8,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use crate::compaction;
-
 use super::MAX_FILE_BYTES;
 
 #[derive(Debug, Clone)]
@@ -75,7 +73,7 @@ pub(crate) fn collect_files(
         if text.trim().is_empty() {
             continue;
         }
-        let tokens = compaction::count_tokens(model_spec, &text).max(1);
+        let tokens = count_tokens(model_spec, &text).max(1);
         files.push(AuditFile {
             language: language_for_path(&rel),
             path: rel,
@@ -391,7 +389,7 @@ fn push_diff_file(files: &mut Vec<AuditFile>, text: &str, model: &str) {
         return;
     }
     let path = diff_file_path(text).unwrap_or_else(|| format!("diff-{}", files.len() + 1));
-    let tokens = crate::compaction::count_tokens(model, text).max(1);
+    let tokens = count_tokens(model, text).max(1);
     files.push(AuditFile {
         path,
         language: "Diff",
@@ -399,6 +397,12 @@ fn push_diff_file(files: &mut Vec<AuditFile>, text: &str, model: &str) {
         tokens,
         text: text.to_string(),
     });
+}
+
+fn count_tokens(_model: &str, text: &str) -> usize {
+    // A deterministic approximation is enough for MCP chunk planning now that
+    // OpenCode owns model execution and context management.
+    text.split_whitespace().count().max(text.len() / 4)
 }
 
 fn diff_file_path(text: &str) -> Option<String> {

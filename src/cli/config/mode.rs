@@ -1,13 +1,9 @@
 //! Safety modes: [`SafetyMode`] enum and conversion to [`ToolPolicy`]
 //! with ask/edit/plan/auto variants.
 
-use crate::tools::{Approval, FileAccess, ToolPolicy};
+use crate::tools::{Approval, ToolPolicy};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
-
-const PLAN_SYSTEM: &str = r#"PLAN mode. Stay read-only. Use only list, read, search, sloc, todo for in-memory planning, ask when interactive, and webfetch when available. Keep files unchanged, skip shell commands, and describe changes as proposed rather than applied."#;
-const ACCEPT_EDITS_SYSTEM: &str = r#"ACCEPT-EDITS mode. File edits may run without asking. Shell commands still require approval."#;
-const AUTO_APPROVE_SYSTEM: &str = r#"AUTO-APPROVE mode. Tools may run without asking."#;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum SafetyMode {
@@ -42,15 +38,6 @@ impl SafetyMode {
         }
     }
 
-    pub(super) fn system_prompt_suffix(self) -> &'static str {
-        match self {
-            Self::Default => "",
-            Self::Plan => PLAN_SYSTEM,
-            Self::AutoEdits => ACCEPT_EDITS_SYSTEM,
-            Self::AutoAll => AUTO_APPROVE_SYSTEM,
-        }
-    }
-
     pub fn policy(self) -> ToolPolicy {
         match self {
             Self::Plan => ToolPolicy::read_only(),
@@ -81,13 +68,4 @@ impl<'de> Deserialize<'de> for SafetyMode {
 
 pub fn tool_policy(mode: SafetyMode) -> ToolPolicy {
     mode.policy()
-}
-
-pub fn policy_risk_label(policy: &ToolPolicy) -> &'static str {
-    match (policy.files, policy.shell) {
-        (FileAccess::ReadOnly, _) => "read-only: no file edits or shell",
-        (_, Approval::Auto) => "high: auto shell",
-        (FileAccess::Write(Approval::Auto), _) => "medium: auto edits",
-        _ => "normal: asks before edits/shell",
-    }
 }

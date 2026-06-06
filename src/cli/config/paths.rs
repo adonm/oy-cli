@@ -1,14 +1,8 @@
-//! Config and workspace paths: `~/.config/oy-rust/` layout,
-//! private file helpers, workspace output resolution, and
-//! symlink-destination rejection.
-//!
-//! Atomic batch-write logic lives in [`super::atomic_write`].
+//! Workspace path resolution and safe workspace writes.
 
 use anyhow::{Context, Result, bail};
-use dirs::config_dir;
 use std::env;
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use super::atomic_write;
@@ -24,24 +18,9 @@ impl<'a> WorkspaceWrite<'a> {
     }
 }
 
-pub(super) const DEFAULT_CONFIG_DIR_NAME: &str = "oy-rust";
-
-pub fn config_root() -> PathBuf {
-    if let Ok(raw) = env::var("OY_CONFIG") {
-        return PathBuf::from(&raw)
-            .expand_home()
-            .unwrap_or_else(|_| PathBuf::from(raw));
-    }
-    config_dir()
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join(DEFAULT_CONFIG_DIR_NAME)
-        .join("config.json")
-}
-
 pub fn oy_root() -> Result<PathBuf> {
     let raw_root = env::var("OY_ROOT").unwrap_or_else(|_| ".".to_string());
-    let path = PathBuf::from(&raw_root)
-        .expand_home()
+    let path = expand_home(PathBuf::from(&raw_root))
         .unwrap_or_else(|_| PathBuf::from(raw_root))
         .canonicalize()
         .context("failed to resolve workspace root")?;
@@ -51,25 +30,8 @@ pub fn oy_root() -> Result<PathBuf> {
     Ok(path)
 }
 
-pub fn config_dir_path() -> PathBuf {
-    config_root()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(format!(".config/{DEFAULT_CONFIG_DIR_NAME}")))
-}
-
-pub fn sessions_dir() -> Result<PathBuf> {
-    let dir = config_dir_path().join("sessions");
-    create_private_dir_all(&dir)?;
-    Ok(dir)
-}
-
 pub fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write::write_workspace_batch(&[WorkspaceWrite::new(path, bytes)])
-}
-
-pub fn write_workspace_batch(writes: &[WorkspaceWrite<'_>]) -> Result<()> {
-    atomic_write::write_workspace_batch(writes)
 }
 
 pub fn resolve_workspace_output_path(root: &Path, requested: &Path) -> Result<PathBuf> {
@@ -139,76 +101,19 @@ pub fn reject_symlink_destination(path: &Path) -> Result<()> {
     }
 }
 
-pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        if let Some(parent) = path.parent() {
-            create_private_dir_all(parent)?;
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("failed writing {}", path.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("failed writing {}", path.display()))?;
-        let mut perms = file.metadata()?.permissions();
-        perms.set_mode(0o600);
-        file.set_permissions(perms)?;
-        Ok(())
+fn expand_home(path: PathBuf) -> Result<PathBuf> {
+    let text = path.to_string_lossy();
+    if text == "~" || text.starts_with("~/") {
+        let home = dirs::home_dir().context("home directory not found")?;
+        let suffix = text
+            .strip_prefix('~')
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        return Ok(if suffix.is_empty() {
+            home
+        } else {
+            home.join(suffix)
+        });
     }
-    #[cfg(not(unix))]
-    {
-        if let Some(parent) = path.parent() {
-            create_private_dir_all(parent)?;
-        }
-        fs::write(path, bytes).with_context(|| format!("failed writing {}", path.display()))?;
-        #[cfg(windows)]
-        {
-            super::platform::restrict_to_owner(path)?;
-        }
-        Ok(())
-    }
-}
-
-pub fn create_private_dir_all(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut perms = fs::metadata(path)?.permissions();
-        perms.set_mode(0o700);
-        fs::set_permissions(path, perms)?;
-    }
-    #[cfg(windows)]
-    {
-        super::platform::restrict_to_owner(path)?;
-    }
-    Ok(())
-}
-
-pub(super) trait ExpandHome {
-    fn expand_home(self) -> Result<PathBuf>;
-}
-
-impl ExpandHome for PathBuf {
-    fn expand_home(self) -> Result<PathBuf> {
-        let text = self.to_string_lossy();
-        if text == "~" || text.starts_with("~/") {
-            let home = dirs::home_dir().context("home directory not found")?;
-            let suffix = text
-                .strip_prefix('~')
-                .unwrap_or_default()
-                .trim_start_matches('/');
-            return Ok(if suffix.is_empty() {
-                home
-            } else {
-                home.join(suffix)
-            });
-        }
-        Ok(self)
-    }
+    Ok(path)
 }
