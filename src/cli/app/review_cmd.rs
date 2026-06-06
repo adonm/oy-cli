@@ -1,4 +1,4 @@
-//! `oy review` compatibility argument types.
+//! `oy review` convenience argument types.
 
 use clap::Args;
 use std::path::PathBuf;

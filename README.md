@@ -3,9 +3,9 @@
 [![Crates.io](https://img.shields.io/crates/v/oy-cli.svg)](https://crates.io/crates/oy-cli)
 [![docs.rs](https://docs.rs/oy-cli/badge.svg)](https://docs.rs/oy-cli)
 
-`oy` is an OpenCode launcher plus deterministic MCP helpers for repository audit and review workflows.
+`oy` launches opencode with deterministic repository helpers for audit and review workflows.
 
-OpenCode owns the model, UI, sessions, permissions, editing, shell, web, and general tool loop. `oy` adds a small local MCP server for deterministic repo inputs and report rendering, then installs OpenCode agents/commands that use those helpers.
+opencode owns the model, UI, sessions, permissions, editing, shell, web, and general tool loop. `oy` adds a small local MCP server for deterministic repository inputs and report rendering, then installs agents, skills, and commands that use those helpers.
 
 ## Quick Start
 
@@ -15,36 +15,36 @@ oy setup
 oy
 ```
 
-`oy setup` writes global OpenCode integration files under `~/.config/opencode/`. `oy` with no subcommand ensures that integration exists and launches `opencode --agent oy`.
+`oy setup` writes global integration files under `~/.config/opencode/`. `oy` with no subcommand ensures that integration exists and launches `opencode --agent oy`.
 
 ## Requirements
 
-- OpenCode installed and configured
+- opencode installed and configured
 - Rust 1.96 or later if building from source
 - `git` for diff-based review input
 
-Model providers, authentication, sessions, permissions, editing, shell commands, web fetches, and UI behavior are configured in OpenCode. Use OpenCode's provider and config documentation for those surfaces.
+Model providers, authentication, sessions, permissions, editing, shell commands, web fetches, and UI behavior are configured in opencode. Use its provider and config docs for those surfaces.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `oy` | Install/update global OpenCode integration silently, then launch OpenCode with the `oy` agent |
-| `oy setup` | Write `~/.config/opencode/opencode.json`, oy agents, and oy skills |
+| `oy` | Install/update global integration silently, then launch opencode with the `oy` agent |
+| `oy setup` | Write `~/.config/opencode/opencode.json`, agents, and skills |
 | `oy setup --workspace` | Write project-local `.opencode` integration files instead |
-| `oy mcp` | Start the local stdio MCP server used by OpenCode |
+| `oy mcp` | Start the local stdio MCP server |
 | `oy open ...` | Pass arguments through to `opencode` |
 | `oy run "prompt"` | Compatibility wrapper for `opencode run --agent oy "prompt"` |
-| `oy chat` | Compatibility wrapper that launches OpenCode with `--agent oy` |
+| `oy chat` | Compatibility wrapper that launches opencode with `--agent oy` |
 | `oy model [provider]` | Compatibility wrapper for `opencode models [provider]` |
 | `oy audit [focus]` | Compatibility wrapper for `opencode run --command oy-audit ...` |
 | `oy review [target]` | Compatibility wrapper for `opencode run --command oy-review ...` |
 | `oy enhance [focus]` | Compatibility wrapper for `opencode run --command oy-enhance ...` |
-| `oy doctor` | Check OpenCode and oy integration status |
+| `oy doctor` | Check opencode and oy integration status |
 
-Legacy command names are kept for muscle memory. Their AI behavior now runs through OpenCode.
+Legacy command names are kept for muscle memory. Their AI behavior now runs through opencode.
 
-## Generated OpenCode Integration
+## Generated Integration
 
 `oy setup` creates global files:
 
@@ -76,7 +76,7 @@ Legacy command names are kept for muscle memory. Their AI behavior now runs thro
 .opencode/skills/oy-review/SKILL.md
 ```
 
-The generated config registers the local MCP server:
+The generated config registers `oy mcp` as a local MCP server:
 
 ```jsonc
 {
@@ -92,15 +92,15 @@ The generated config registers the local MCP server:
 }
 ```
 
-OpenCode namespaces MCP tools by server name, so the model sees tools such as `oy_repo_manifest` and `oy_render_review_report`.
+MCP tools are namespaced by server name, so the model sees tools such as `oy_repo_manifest` and `oy_render_review_report`.
 
-`oy` does not set OpenCode's global `default_agent`; it passes `--agent` when launched through `oy`. Direct `opencode` usage keeps your normal OpenCode default.
+`oy` does not set the global `default_agent`; it passes `--agent` when launched through `oy`. Direct `opencode` usage keeps your normal default.
 
 ## oy Modes
 
-The old `--mode` names now map to generated OpenCode primary agents:
+The old `--mode` names now map to generated primary agents:
 
-| oy mode | OpenCode agent | Permissions |
+| oy mode | agent | Permissions |
 |---|---|---|
 | `default` / `ask` | `oy` | edits ask, bash asks |
 | `plan` / `read` | `oy-plan` | edits denied, bash denied |
@@ -120,12 +120,12 @@ The agent prompts closely follow the old v0.10 oy run/chat guidance: inspect bef
 | `git_diff_input` | Deterministic review input from `git diff <target>` |
 | `sloc` | Source line counts via `tokei` |
 | `outline` | Tree-sitter structural outline for a source file when the default `outline` feature is enabled |
-| `render_audit_report` | Write `ISSUES.md` or SARIF from OpenCode-produced findings |
-| `render_review_report` | Write `REVIEW.md` from OpenCode-produced findings |
+| `render_audit_report` | Write `ISSUES.md` or SARIF from produced findings |
+| `render_review_report` | Write `REVIEW.md` from produced findings |
 
 ## Audit And Review
 
-The old standalone `oy audit`, `oy review`, and `oy enhance` pipelines have been replaced by OpenCode commands/agents.
+The old standalone `oy audit`, `oy review`, and `oy enhance` pipelines have been replaced by generated commands/agents.
 
 ```bash
 oy audit "security and complexity"
@@ -133,20 +133,20 @@ oy review main --focus "types and boundaries"
 oy enhance --review-target main
 ```
 
-Those wrappers ask OpenCode to use the generated oy agents. OpenCode performs the reasoning and orchestration; oy MCP provides deterministic input chunks and report rendering.
+Those wrappers use the generated agents. opencode performs the reasoning and orchestration; oy MCP provides deterministic input chunks and report rendering.
 
 ## Safety
 
-`oy` is not a sandbox, but its native MCP server is intentionally narrow. The risky capabilities live in OpenCode and are governed by OpenCode permissions.
+`oy` is not a sandbox, but its MCP server is intentionally narrow. Risky capabilities live in opencode and are governed by its permissions.
 
 Native `oy` risks:
 
 - reads reviewable workspace text for manifests/chunks/outlines/SLOC
-- writes generated audit/review reports when asked by OpenCode
-- writes global OpenCode integration files during setup, or `.opencode` files with `oy setup --workspace`
+- writes generated audit/review reports when asked
+- writes global integration files during setup, or `.opencode` files with `oy setup --workspace`
 - launches the `opencode` process
 
-Use OpenCode plan/read-only modes and disposable containers for untrusted repositories.
+Use plan/read-only modes and disposable containers for untrusted repositories.
 
 ## Development
 
@@ -161,7 +161,7 @@ Important files:
 
 | Path | Role |
 |---|---|
-| `src/opencode.rs` | Setup, generated OpenCode config, legacy command wrappers |
+| `src/opencode.rs` | Setup, generated config, legacy command wrappers |
 | `src/mcp.rs` | Minimal stdio MCP JSON-RPC server |
 | `src/audit/input.rs` | File collection, manifest, chunking, git diff input |
 | `src/audit/findings.rs` | Structured findings extraction/render support |

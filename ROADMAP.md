@@ -1,14 +1,14 @@
 # Roadmap
 
-`oy` has pivoted from a standalone AI coding CLI to an OpenCode launcher with deterministic MCP helpers. The old roadmap for the native LLM/tool stack is complete and obsolete.
+`oy` has pivoted from a standalone AI coding CLI to an opencode launcher with deterministic MCP helpers. The old roadmap for the native LLM/tool stack is complete and obsolete.
 
 ## Current Priorities
 
-### 1. Harden OpenCode Setup
+### 1. Harden Setup
 
 - Validate generated global and workspace `opencode.json` files against `https://opencode.ai/config.json` in tests.
 - Add idempotency coverage for `oy setup`.
-- Preserve user-authored OpenCode config while updating only generated oy entries.
+- Preserve user-authored config while updating only generated oy entries.
 - Document restart requirements clearly after setup changes.
 
 ### 2. Test MCP Protocol Behavior
@@ -19,18 +19,18 @@
 
 ### 3. Improve Generated Agents
 
-- Tighten `oy-auditor`, `oy-reviewer`, and `oy-enhancer` prompts based on real OpenCode runs.
-- Keep agents explicit about using OpenCode native tools for edits/shell and oy MCP only for deterministic inputs/reports.
+- Tighten `oy-auditor`, `oy-reviewer`, and `oy-enhancer` prompts based on real runs.
+- Keep agents explicit about using edit/bash tools for changes and oy MCP only for deterministic inputs/reports.
 - Add examples for `/oy-audit`, `/oy-review`, and `/oy-enhance` workflows.
 
 ### 4. Keep The Native Surface Small
 
 - Do not reintroduce provider routing, native chat/session state, or a model tool loop.
 - Remove dependencies when deterministic helpers no longer need them.
-- Prefer OpenCode built-ins over new oy MCP tools.
+- Prefer host built-ins over new oy MCP tools.
 
 ## Non-Goals
 
-- Rebuilding OpenCode features inside `oy`.
+- Rebuilding host features inside `oy`.
 - Adding shell, edit, webfetch, or repo clone to `oy mcp`.
 - Persisting chat/session/model state in `oy`.

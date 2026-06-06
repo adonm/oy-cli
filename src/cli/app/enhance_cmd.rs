@@ -1,4 +1,4 @@
-//! `oy enhance` compatibility argument types.
+//! `oy enhance` convenience argument types.
 
 use clap::Args;
 
@@ -10,7 +10,7 @@ pub(super) struct EnhanceArgs {
         long,
         alias = "agent",
         default_value = "default",
-        help = "Remediation mode mapped to OpenCode where possible"
+        help = "Remediation mode mapped to the host where possible"
     )]
     pub(super) mode: SafetyMode,
     #[arg(

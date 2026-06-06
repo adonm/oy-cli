@@ -1,4 +1,4 @@
-//! `oy audit` compatibility argument types.
+//! `oy audit` convenience argument types.
 
 use clap::ValueEnum;
 

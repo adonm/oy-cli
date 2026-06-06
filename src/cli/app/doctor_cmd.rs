@@ -1,4 +1,4 @@
-//! `oy doctor` checks the OpenCode integration and local deterministic helpers.
+//! `oy doctor` checks the integration and local deterministic helpers.
 
 use anyhow::Result;
 use clap::Args;
@@ -90,9 +90,9 @@ fn command_ok(command: &str, args: &[&str]) -> bool {
 
 fn recommended_next_step(opencode_ok: bool, configured: bool) -> &'static str {
     match (opencode_ok, configured) {
-        (false, _) => "Install OpenCode, then run `oy setup`.",
-        (true, false) => "Run `oy setup`, then restart OpenCode.",
-        (true, true) => "Run `oy` to launch OpenCode with oy MCP tools.",
+        (false, _) => "Install opencode, then run `oy setup`.",
+        (true, false) => "Run `oy setup`, then restart opencode.",
+        (true, true) => "Run `oy` to launch with the oy integration.",
     }
 }
 

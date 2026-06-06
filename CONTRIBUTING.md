@@ -1,6 +1,6 @@
 # Contributing
 
-Keep `oy` small. OpenCode owns AI behavior; `oy` should remain a setup wrapper plus deterministic MCP helpers.
+Keep `oy` small. opencode owns AI behavior; `oy` should remain a setup wrapper plus deterministic MCP helpers.
 
 ## Quick Start
 
@@ -41,18 +41,18 @@ Keep `Cargo.lock` in sync with `Cargo.toml` after dependency changes.
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
-- Prefer OpenCode config, agents, skills, commands, and permissions for orchestration.
+- Prefer host config, agents, skills, commands, and permissions for orchestration.
 - Keep MCP tools deterministic and narrow.
-- Do not duplicate OpenCode built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
+- Do not duplicate built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
 - Validate workspace paths near every read/write boundary.
-- Keep generated global and workspace OpenCode files schema-valid against `https://opencode.ai/config.json`.
+- Keep generated global and workspace config files schema-valid against `https://opencode.ai/config.json`.
 - Refuse to overwrite non-generated user files during setup.
 
 ## Important Paths
 
 | Path | Role |
 |---|---|
-| `src/opencode.rs` | OpenCode setup, generated config/agents/skills, launch wrappers |
+| `src/opencode.rs` | Setup, generated config/agents/skills, launch wrappers |
 | `src/mcp.rs` | Minimal stdio MCP JSON-RPC server |
 | `src/audit/input.rs` | Repo file collection, manifest, security index, chunking, git diff input |
 | `src/audit/findings.rs` | Finding extraction and structured findings blocks |
@@ -72,4 +72,4 @@ See also:
 
 ## Release Notes
 
-Update `CHANGELOG.md` for user-visible behavior changes. Keep historical release notes factual, but current docs should describe the OpenCode/MCP architecture.
+Update `CHANGELOG.md` for user-visible behavior changes. Keep historical release notes factual, but current docs should describe the MCP integration architecture.

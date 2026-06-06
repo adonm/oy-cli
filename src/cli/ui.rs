@@ -1,4 +1,4 @@
-//! Minimal terminal output helpers for the OpenCode wrapper.
+//! Minimal terminal output helpers for the launcher.
 
 use std::fmt::Display;
 use std::io::IsTerminal as _;

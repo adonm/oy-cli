@@ -1,4 +1,4 @@
-//! Minimal safety-mode policy types retained for wrapper compatibility.
+//! Minimal safety-mode policy types for oy launcher modes.
 
 use serde::{Deserialize, Serialize};
 

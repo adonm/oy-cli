@@ -2,23 +2,23 @@
 
 ## Threat Model
 
-`oy` is not a sandbox. It is an OpenCode launcher plus a local MCP server for deterministic repository analysis helpers.
+`oy` is not a sandbox. It launches opencode with a local MCP server for deterministic repository analysis helpers.
 
-OpenCode owns model traffic, chat UI, sessions, permissions, edits, shell commands, web fetches, and other high-risk tools. Configure those surfaces in OpenCode and review OpenCode's security guidance for provider credentials and tool permissions.
+opencode owns model traffic, chat UI, sessions, permissions, edits, shell commands, web fetches, and other high-risk tools. Configure those surfaces there and review its security guidance for provider credentials and tool permissions.
 
 Native `oy` can:
 
-- write global OpenCode integration files during `oy setup`, or `.opencode` files with `oy setup --workspace`,
+- write global integration files during `oy setup`, or `.opencode` files with `oy setup --workspace`,
 - launch the `opencode` process,
 - read workspace files for MCP manifests/chunks/outlines/SLOC,
 - run read-only `git` commands for diff input,
 - write generated audit/review reports inside the workspace.
 
-Repository text returned by `oy mcp` can be sent by OpenCode to the configured model provider. Treat selected workspace content as disclosed to that provider.
+Repository text returned by `oy mcp` can be sent to the configured model provider. Treat selected workspace content as disclosed to that provider.
 
 ## Safer Use For Untrusted Repositories
 
-Prefer a disposable container or VM. Let OpenCode run with restrictive permissions first, then opt into writes only when you trust the workspace and proposed changes.
+Prefer a disposable container or VM. Start with restrictive permissions, then opt into writes only when you trust the workspace and proposed changes.
 
 ```bash
 docker run --rm -it \
@@ -27,7 +27,7 @@ docker run --rm -it \
   oy-image oy
 ```
 
-For audit/review report writing, mount the workspace read-write but keep OpenCode permissions conservative:
+For audit/review report writing, mount the workspace read-write but keep permissions conservative:
 
 ```bash
 docker run --rm -it \
@@ -42,7 +42,7 @@ Avoid mounting the host Docker socket into AI-assisted containers. Docker socket
 
 `oy setup` writes generated files under `~/.config/opencode/` by default. `oy setup --workspace` writes generated files under `.opencode/`. Generated agent and skill files refuse to overwrite non-generated files at generated paths. `opencode.json` is merged so existing user config is preserved except for the generated `mcp.oy` and `command.oy-*` entries that `oy` owns.
 
-OpenCode owns its own local state. Treat OpenCode sessions, logs, and config as sensitive because they may contain prompts, source snippets, command output, or provider metadata.
+opencode owns its own local state. Treat sessions, logs, and config as sensitive because they may contain prompts, source snippets, command output, or provider metadata.
 
 ## Reporting A Vulnerability
 

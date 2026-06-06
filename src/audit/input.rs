@@ -401,7 +401,7 @@ fn push_diff_file(files: &mut Vec<AuditFile>, text: &str, model: &str) {
 
 fn count_tokens(_model: &str, text: &str) -> usize {
     // A deterministic approximation is enough for MCP chunk planning now that
-    // OpenCode owns model execution and context management.
+    // the host owns model execution and context management.
     text.split_whitespace().count().max(text.len() / 4)
 }
 

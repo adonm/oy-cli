@@ -1,4 +1,4 @@
-//! `oy run` and `oy chat` compatibility argument types.
+//! `oy run` and `oy chat` convenience argument types.
 
 use clap::Args;
 use std::path::PathBuf;
@@ -17,14 +17,14 @@ pub(super) struct SharedModeArgs {
     #[arg(
         long = "continue-session",
         default_value_t = false,
-        help = "Resume the most recent OpenCode session"
+        help = "Resume the most recent session"
     )]
     pub(super) continue_session: bool,
     #[arg(
         long,
         default_value = "",
         value_name = "SESSION_ID",
-        help = "Resume an OpenCode session id"
+        help = "Resume a session id"
     )]
     pub(super) resume: String,
 }
@@ -36,12 +36,12 @@ pub(super) struct RunArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write OpenCode stdout to a workspace file"
+        help = "Write command stdout to a workspace file"
     )]
     pub(super) out: Option<PathBuf>,
     #[arg(
         value_name = "PROMPT",
-        help = "Task prompt; omitted means read stdin or launch OpenCode in a TTY"
+        help = "Task prompt; omitted means read stdin or launch opencode in a TTY"
     )]
     pub(super) task: Vec<String>,
 }

@@ -1,4 +1,4 @@
-//! Minimal stdio MCP server exposing deterministic oy primitives to OpenCode.
+//! Minimal stdio MCP server exposing deterministic oy primitives.
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -40,8 +40,8 @@ pub(crate) async fn serve_stdio() -> Result<i32> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let params = request.get("params").cloned().unwrap_or(Value::Null);
-        let response = match handle_request(id.clone(), method, params).await {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        let response = match handle_request(method, params).await {
+            Ok(response) => response.into_json(id),
             Err(err) => jsonrpc_error(id, -32603, err.to_string()),
         };
         write_response(&mut stdout, response)?;
@@ -49,21 +49,36 @@ pub(crate) async fn serve_stdio() -> Result<i32> {
     Ok(0)
 }
 
-async fn handle_request(id: Value, method: &str, params: Value) -> Result<Value> {
+async fn handle_request(method: &str, params: Value) -> Result<JsonRpcResponse> {
     match method {
-        "initialize" => Ok(json!({
+        "initialize" => Ok(JsonRpcResponse::Result(json!({
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "oy", "version": env!("CARGO_PKG_VERSION") }
-        })),
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_definitions() })),
-        "tools/call" => handle_tool_call(params).await,
-        other => Ok(jsonrpc_error(
-            id,
-            -32601,
-            format!("unknown MCP method: {other}"),
+        }))),
+        "ping" => Ok(JsonRpcResponse::Result(json!({}))),
+        "tools/list" => Ok(JsonRpcResponse::Result(
+            json!({ "tools": tool_definitions() }),
         )),
+        "tools/call" => handle_tool_call(params).await.map(JsonRpcResponse::Result),
+        other => Ok(JsonRpcResponse::Error {
+            code: -32601,
+            message: format!("unknown MCP method: {other}"),
+        }),
+    }
+}
+
+enum JsonRpcResponse {
+    Result(Value),
+    Error { code: i32, message: String },
+}
+
+impl JsonRpcResponse {
+    fn into_json(self, id: Value) -> Value {
+        match self {
+            Self::Result(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Self::Error { code, message } => jsonrpc_error(id, code, message),
+        }
     }
 }
 
@@ -121,7 +136,7 @@ fn jsonrpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
 }
 
 fn tool_definitions() -> Vec<Value> {
-    let mut tools = vec![
+    vec![
         tool_def(
             "repo_manifest",
             "Build a deterministic, gitignore-aware repository manifest for audit/review planning.",
@@ -189,21 +204,19 @@ fn tool_definitions() -> Vec<Value> {
             "Render and write a deterministic review report from agent-produced markdown/structured findings.",
             render_report_schema("REVIEW.md", false),
         ),
-    ];
-    #[cfg(feature = "outline")]
-    tools.push(tool_def(
-        "outline",
-        "Extract structural definitions from a source file using tree-sitter.",
-        json!({
-            "type": "object",
-            "required": ["path"],
-            "properties": {
-                "path": { "type": "string" },
-                "depth": { "type": "integer", "default": 2 }
-            }
-        }),
-    ));
-    tools
+        #[cfg(feature = "outline")]
+        tool_def(
+            "outline",
+            "Extract structural definitions from a source file using tree-sitter.",
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
+        ),
+    ]
 }
 
 fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
@@ -556,4 +569,28 @@ fn default_target_tokens() -> usize {
 
 fn default_markdown() -> String {
     "markdown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_method_returns_top_level_jsonrpc_error() {
+        let response = handle_request("missing/method", Value::Null)
+            .await
+            .unwrap()
+            .into_json(json!(7));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        assert!(response.get("result").is_none());
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown MCP method: missing/method")
+        );
+    }
 }

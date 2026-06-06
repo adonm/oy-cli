@@ -1,6 +1,6 @@
 # Tool Safety
 
-`oy` no longer exposes a native model-callable tool registry. OpenCode owns the general tool surface: file reads/edits, bash, web fetches, task/subagent tools, questions, todos, repository cloning, and permissions.
+`oy` no longer exposes a native model-callable tool registry. The host owns the general tool surface: file reads/edits, bash, web fetches, task/subagent tools, questions, todos, repository cloning, and permissions.
 
 This document covers only the deterministic tools served by `oy mcp`.
 
@@ -9,7 +9,7 @@ This document covers only the deterministic tools served by `oy mcp`.
 | MCP tool | Capability | Mutation | Notes |
 |---|---|---:|---|
 | `repo_manifest` | Build gitignore-aware file inventory, token estimates, language summary, optional security index | No | Skips dependencies, build outputs, lockfiles, hidden/likely-secret files |
-| `repo_chunks` | Build deterministic workspace chunks and optionally return one chunk's text | No | Used by OpenCode audit/review agents |
+| `repo_chunks` | Build deterministic workspace chunks and optionally return one chunk's text | No | Used by audit/review agents |
 | `git_diff_input` | Build deterministic chunks from `git diff <target>` | No workspace mutation | Runs read-only `git` commands in the workspace |
 | `sloc` | Count source lines with `tokei` | No | Reads paths inside workspace |
 | `outline` | Extract source definitions with tree-sitter | No | Reads one exact source file inside workspace; available when the default `outline` feature is enabled |
@@ -29,7 +29,7 @@ This document covers only the deterministic tools served by `oy mcp`.
 - model calls
 - session persistence
 
-Use OpenCode's built-in tools and permissions for those capabilities. When launched through `oy`, the generated `oy`, `oy-plan`, `oy-edit`, and `oy-auto` OpenCode agents map old oy safety modes onto OpenCode permissions.
+Use built-in tools and permissions for those capabilities. When launched through `oy`, the generated `oy`, `oy-plan`, `oy-edit`, and `oy-auto` agents map old oy safety modes onto host permissions.
 
 ## Filesystem Boundary
 
@@ -47,17 +47,17 @@ When changing this boundary:
 
 ## Disclosure Boundary
 
-OpenCode decides what to send to the selected model. `oy mcp` can return repository text chunks to OpenCode, so returned chunk content may become model input.
+The host decides what to send to the selected model. `oy mcp` can return repository text chunks, so returned chunk content may become model input.
 
 The collector skips common dependency/build directories and likely-secret file names by default. Keep this conservative.
 
 ## Permission Boundary
 
-OpenCode handles user approval for its own tools. `oy mcp` report-writing tools are exposed as MCP tools, so OpenCode may ask or allow based on its MCP/permission configuration. Keep generated agents explicit about when they call report renderers.
+The host handles user approval for its own tools. `oy mcp` report-writing tools are exposed as MCP tools, so permission behavior follows the host MCP/tool configuration. Keep generated agents explicit about when they call report renderers.
 
 ## Adding A New MCP Tool
 
-Only add a tool if it is deterministic repo analysis or deterministic report rendering that OpenCode does not already provide.
+Only add a tool if it is deterministic repo analysis or deterministic report rendering that the host does not already provide.
 
 Checklist:
 

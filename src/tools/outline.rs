@@ -26,7 +26,7 @@ pub(super) struct OutlineOutput {
     pub items: Vec<OutlineItem>,
 }
 
-pub(super) fn tool_outline(ctx: &mut ToolContext, args: OutlineArgs) -> Result<Value> {
+pub(super) fn tool_outline(ctx: &ToolContext, args: OutlineArgs) -> Result<Value> {
     let path = workspace::resolve_read_path(ctx, &args.path)?;
     if path.is_dir() {
         bail!("outline path is a directory: {}", args.path);
@@ -35,7 +35,7 @@ pub(super) fn tool_outline(ctx: &mut ToolContext, args: OutlineArgs) -> Result<V
     let content = workspace::read_file_content(ctx.root(), &path)?;
     let lang = detect_language(&path);
     let items = match lang {
-        Some(lang) => parse_outline(&content, lang, args.depth)?,
+        Some(lang) => parse_outline(&content, lang)?,
         None => {
             // Fallback: return empty outline for unknown languages
             Vec::new()
@@ -353,10 +353,7 @@ fn node_kind_to_label(ts_kind: &str) -> &'static str {
 }
 
 /// Parse a source file and extract definitions using tree-sitter.
-///
-/// The `_depth` parameter is reserved for future recursive expansion but currently unused
-/// as the parser only extracts top-level definitions.
-fn parse_outline(source: &str, lang: &LangDef, _depth: usize) -> Result<Vec<OutlineItem>> {
+fn parse_outline(source: &str, lang: &LangDef) -> Result<Vec<OutlineItem>> {
     let language = (lang.language)();
     let mut parser = Parser::new();
     parser

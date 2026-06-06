@@ -1,4 +1,4 @@
-//! Review compatibility constants used by OpenCode wrappers.
+//! Review constants used by launcher convenience wrappers.
 
 use std::path::PathBuf;
 

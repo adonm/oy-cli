@@ -37,11 +37,11 @@ pub(crate) async fn invoke_read_only_deterministic(
     name: &str,
     args: Value,
 ) -> Result<Value> {
-    let mut ctx = ToolContext::new(root);
+    let ctx = ToolContext::new(root);
     match name {
         "sloc" => parse_tool_args(args).and_then(|args| workspace::tool_sloc(&ctx, args)),
         #[cfg(feature = "outline")]
-        "outline" => parse_tool_args(args).and_then(|args| outline::tool_outline(&mut ctx, args)),
+        "outline" => parse_tool_args(args).and_then(|args| outline::tool_outline(&ctx, args)),
         other => anyhow::bail!("unknown deterministic tool: {other}"),
     }
 }

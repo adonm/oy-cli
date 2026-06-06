@@ -37,12 +37,22 @@ pub(super) fn write_workspace_batch(writes: &[WorkspaceWrite<'_>]) -> Result<()>
 fn commit_workspace_writes(prepared: Vec<PreparedWorkspaceWrite>) -> Result<()> {
     let mut committed = Vec::with_capacity(prepared.len());
     for prepared_write in prepared {
-        let backup = backup_existing_workspace_file(&prepared_write.path)?;
+        let backup = match backup_existing_workspace_file(&prepared_write.path) {
+            Ok(backup) => backup,
+            Err(err) => {
+                if let Err(rollback_err) = restore_workspace_backups(committed) {
+                    return Err(err).context(format!("rollback failed: {rollback_err:#}"));
+                }
+                return Err(err);
+            }
+        };
         let path = prepared_write.path.clone();
         match prepared_write.commit() {
             Ok(()) => committed.push(CommittedWorkspaceWrite { path, backup }),
             Err(err) => {
-                restore_workspace_backups(committed);
+                if let Err(rollback_err) = restore_workspace_backups(committed) {
+                    return Err(err).context(format!("rollback failed: {rollback_err:#}"));
+                }
                 return Err(err);
             }
         }
@@ -69,14 +79,17 @@ fn backup_existing_workspace_file(path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(backup))
 }
 
-fn restore_workspace_backups(committed: Vec<CommittedWorkspaceWrite>) {
+fn restore_workspace_backups(committed: Vec<CommittedWorkspaceWrite>) -> Result<()> {
+    let mut rollback_error = None;
     for committed_write in committed.into_iter().rev() {
-        if let Some(backup) = committed_write.backup {
-            let _ = fs::rename(&backup, &committed_write.path);
-        } else {
-            let _ = fs::remove_file(&committed_write.path);
+        if let Err(err) = committed_write.rollback() {
+            rollback_error.get_or_insert(err);
         }
     }
+    if let Some(err) = rollback_error {
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn prevalidate_workspace_write(path: &Path) -> Result<()> {
@@ -156,5 +169,92 @@ impl CommittedWorkspaceWrite {
         if let Some(backup) = self.backup {
             let _ = fs::remove_file(backup);
         }
+    }
+
+    fn rollback(self) -> Result<()> {
+        if let Some(backup) = self.backup {
+            replace_file(&backup, &self.path)
+                .with_context(|| format!("failed restoring backup for {}", self.path.display()))
+        } else {
+            remove_file_if_exists(&self.path)
+                .with_context(|| format!("failed removing {}", self.path.display()))
+        }
+    }
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() {
+        fs::remove_file(destination)
+            .with_context(|| format!("failed removing {}", destination.display()))?;
+    }
+    fs::rename(source, destination).with_context(|| {
+        format!(
+            "failed moving {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed removing {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_file_overwrites_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("destination");
+        fs::write(&source, "backup").unwrap();
+        fs::write(&destination, "current").unwrap();
+
+        replace_file(&source, &destination).unwrap();
+
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "backup");
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn batch_rolls_back_committed_writes_when_later_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.md");
+        let invalid_destination = dir.path().join("directory.md");
+        fs::write(&first, "old").unwrap();
+        fs::create_dir(&invalid_destination).unwrap();
+        let writes = [
+            WorkspaceWrite::new(&first, b"new"),
+            WorkspaceWrite::new(&invalid_destination, b"bad"),
+        ];
+
+        let err = write_workspace_batch(&writes).unwrap_err();
+
+        assert!(err.to_string().contains("failed backing up"));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "old");
+    }
+
+    #[test]
+    fn restore_workspace_backups_reports_rollback_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("backup");
+        let destination = dir.path().join("destination");
+        fs::write(&backup, "backup").unwrap();
+        fs::create_dir(&destination).unwrap();
+
+        let err = restore_workspace_backups(vec![CommittedWorkspaceWrite {
+            path: destination,
+            backup: Some(backup.clone()),
+        }])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("failed restoring backup"));
+        assert!(backup.exists());
     }
 }

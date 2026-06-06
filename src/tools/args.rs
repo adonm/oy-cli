@@ -30,16 +30,9 @@ fn default_dot() -> String {
 }
 
 #[cfg(feature = "outline")]
-fn default_depth() -> usize {
-    2
-}
-
-#[cfg(feature = "outline")]
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct OutlineArgs {
     pub(super) path: String,
-    #[serde(default = "default_depth")]
-    pub(super) depth: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

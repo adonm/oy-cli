@@ -1,4 +1,4 @@
-//! `oy model` compatibility argument types.
+//! `oy model` convenience argument types.
 
 use clap::Args;
 
