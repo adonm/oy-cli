@@ -255,7 +255,11 @@ fn render_report_schema(default_out: &str, sarif: bool) -> Value {
             "report": { "type": "string", "description": "Markdown report body" },
             "findings": { "description": "Structured findings array or object with findings" },
             "out": { "type": "string", "default": default_out },
-            "format": format
+            "format": format,
+            "model": { "type": "string", "description": "Model used for the audit/review, included in the transparency line" },
+            "target": { "type": "string", "description": "Review target branch/commit/ref, included in review transparency" },
+            "focus": { "type": "string", "description": "Focus text included in the transparency line" },
+            "max_chunks": { "type": "integer", "description": "Max chunk limit included in the transparency line" }
         }
     })
 }
@@ -305,6 +309,14 @@ struct RenderReportArgs {
     out: Option<PathBuf>,
     #[serde(default = "default_markdown")]
     format: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    focus: Option<String>,
+    #[serde(default)]
+    max_chunks: Option<usize>,
 }
 
 fn repo_manifest(args: Value) -> Result<Value> {
@@ -434,10 +446,32 @@ fn render_audit_report(args: Value) -> Result<Value> {
     let report = report_body(args.report, args.findings, "# Audit Issues")?;
     let output = match args.format.as_str() {
         "markdown" => {
+            let report = audit::report::with_audit_transparency_line(
+                &report,
+                &audit::report::audit_transparency_snippet(
+                    args.model.as_deref(),
+                    args.focus.as_deref(),
+                    &out,
+                    args.max_chunks,
+                    format,
+                ),
+            );
             let report = audit::report::with_structured_findings_block(&report, "audit");
             audit::report::with_succinct_findings_summary(&report)
         }
-        "sarif" => audit::report::render_sarif(&report)?,
+        "sarif" => {
+            let report = audit::report::with_audit_transparency_line(
+                &report,
+                &audit::report::audit_transparency_snippet(
+                    args.model.as_deref(),
+                    args.focus.as_deref(),
+                    &out,
+                    args.max_chunks,
+                    format,
+                ),
+            );
+            audit::report::render_sarif(&report)?
+        }
         other => bail!("unsupported audit report format: {other}"),
     };
     config::write_workspace_file(&output_path, output.as_bytes())?;
@@ -460,6 +494,16 @@ fn render_review_report(args: Value) -> Result<Value> {
     let root = workspace_root()?;
     let output_path = config::resolve_workspace_output_path(&root, &out)?;
     let report = report_body(args.report, args.findings, "# Code Quality Review")?;
+    let report = audit::report::with_review_transparency_line(
+        &report,
+        &audit::report::review_transparency_snippet(
+            args.model.as_deref(),
+            args.target.as_deref(),
+            args.focus.as_deref(),
+            &out,
+            args.max_chunks,
+        ),
+    );
     let output = audit::report::with_structured_findings_block(&report, "review");
     config::write_workspace_file(&output_path, output.as_bytes())?;
     Ok(json!({

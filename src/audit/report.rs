@@ -9,4 +9,7 @@
 
 pub(crate) use super::findings::{Finding, findings_from_report, with_structured_findings_block};
 pub(crate) use super::sarif::render_sarif;
-pub(crate) use super::transparency::{default_output_path, with_succinct_findings_summary};
+pub(crate) use super::transparency::{
+    audit_transparency_snippet, default_output_path, review_transparency_snippet,
+    with_audit_transparency_line, with_review_transparency_line, with_succinct_findings_summary,
+};

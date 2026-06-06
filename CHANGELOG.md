@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.1] - 2026-06-06
+
+### Fixed
+- Restored audit/review report transparency lines for skill-backed opencode workflows by moving command-context rendering into the deterministic MCP report tools.
+
 ## [0.11.0] - 2026-06-06
 
 ### Changed
