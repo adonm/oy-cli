@@ -2,7 +2,7 @@
 
 use crate::audit;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 mod audit_cmd;
@@ -12,7 +12,7 @@ mod model_cmd;
 mod review_cmd;
 mod session_cmd;
 
-use audit_cmd::{AuditArgs, AuditFormat};
+use audit_cmd::AuditFormat;
 use doctor_cmd::DoctorArgs;
 use enhance_cmd::EnhanceArgs;
 use model_cmd::ModelArgs;
@@ -23,8 +23,8 @@ use session_cmd::{ChatArgs, RunArgs};
 #[command(
     name = "oy",
     version,
-    about = "Small local AI coding assistant for your shell.",
-    after_help = "Examples:\n  oy                              (start interactive chat)\n  oy doctor\n  oy model\n  oy run \"inspect this repo and summarize risks\"\n  oy chat --mode plan\n  oy run --out plan.md \"write a migration plan\"\n\nDefault: running `oy` with no subcommand starts an interactive chat. Use `oy run \"prompt\"` for one-shot tasks.\n\nSafety: file tools stay inside the workspace, but oy is not a sandbox. Use --mode plan or a container/VM for untrusted repos."
+    about = "OpenCode launcher plus deterministic oy MCP tools.",
+    after_help = "Examples:\n  oy                              (setup integration and launch OpenCode)\n  oy setup\n  oy doctor\n  oy model\n  oy run \"inspect this repo and summarize risks\"\n  oy audit auth paths\n  oy review main --focus tests\n\nDefault: running `oy` with no subcommand launches OpenCode after ensuring the oy MCP integration is installed. Legacy commands delegate to OpenCode.\n\nSafety: OpenCode owns model execution, UI, sessions, and permissions. oy MCP tools are deterministic repo-analysis/report helpers."
 )]
 struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Suppress normal progress output")]
@@ -47,15 +47,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run one task in the current workspace; prompt can be args or stdin.
+    /// Install OpenCode integration files in the current workspace.
+    Setup,
+    /// Launch OpenCode with oy MCP wiring.
+    Open(OpenArgs),
+    /// Start the oy MCP server over stdio for OpenCode.
+    Mcp,
+    /// Delegate one task to `opencode run`; prompt can be args or stdin.
     Run(RunArgs),
-    /// Start an interactive chat session with slash commands and history.
+    /// Launch OpenCode, preserving legacy `oy chat` entrypoint.
     Chat(ChatArgs),
-    /// List, choose, and save model ids/routing shims.
+    /// Delegate to `opencode models`.
     Model(ModelArgs),
     /// Check setup, auth, paths, and safety-relevant defaults.
     Doctor(DoctorArgs),
-    /// Audit the current workspace and write findings.
+    /// Delegate an oy-style audit to OpenCode.
     Audit {
         #[arg(
             long,
@@ -80,47 +86,64 @@ enum Command {
         #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
         focus: Vec<String>,
     },
-    /// Strict code-quality review for a branch/commit diff or the whole workspace.
+    /// Delegate an oy-style review to OpenCode.
     Review(ReviewArgs),
-    /// Audit, review, then address selected findings one committed change at a time.
+    /// Delegate oy-style finding remediation to OpenCode.
     Enhance(EnhanceArgs),
+}
+
+#[derive(Debug, Args)]
+struct OpenArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 pub async fn run(argv: Vec<String>) -> Result<i32> {
     let cli = Cli::parse_from(std::iter::once("oy".to_string()).chain(argv));
     crate::ui::init_output_mode(cli_output_mode(&cli));
     match cli.command {
-        Some(Command::Run(args)) => session_cmd::run_command(args).await,
-        Some(Command::Chat(args)) => session_cmd::chat_command(args).await,
-        Some(Command::Model(args)) => model_cmd::model_command(args).await,
+        Some(Command::Setup) => crate::opencode::setup_command(),
+        Some(Command::Open(args)) => crate::opencode::launch_command(args.args),
+        Some(Command::Mcp) => crate::mcp::serve_stdio().await,
+        Some(Command::Run(args)) => crate::opencode::legacy_run_command(
+            args.task,
+            args.shared.continue_session,
+            args.shared.resume,
+            args.shared.mode,
+            args.out,
+        ),
+        Some(Command::Chat(args)) => crate::opencode::legacy_chat_command(
+            args.shared.continue_session,
+            args.shared.resume,
+            args.shared.mode,
+        ),
+        Some(Command::Model(args)) => crate::opencode::legacy_model_command(args.model),
         Some(Command::Doctor(args)) => doctor_cmd::doctor_command(args).await,
         Some(Command::Audit {
             format,
             out,
             max_chunks,
             focus,
-        }) => {
-            audit_cmd::audit_command(AuditArgs {
-                focus,
-                out: out.unwrap_or_else(|| audit::default_output_path(format.into())),
-                max_chunks,
-                format: format.into(),
-            })
-            .await
-        }
-        Some(Command::Review(args)) => review_cmd::review_command(args).await,
-        Some(Command::Enhance(args)) => enhance_cmd::enhance_command(args).await,
-        None => {
-            // Default: interactive chat.
-            let args = ChatArgs {
-                shared: session_cmd::SharedModeArgs {
-                    mode: cli.mode,
-                    continue_session: false,
-                    resume: String::new(),
-                },
-            };
-            session_cmd::chat_command(args).await
-        }
+        }) => crate::opencode::legacy_audit_command(
+            focus,
+            out.unwrap_or_else(|| audit::default_output_path(format.into())),
+            max_chunks,
+            format.into(),
+        ),
+        Some(Command::Review(args)) => crate::opencode::legacy_review_command(
+            args.target,
+            args.focus,
+            args.out.unwrap_or_else(review_cmd::default_output_path),
+            args.max_chunks,
+        ),
+        Some(Command::Enhance(args)) => crate::opencode::legacy_enhance_command(
+            args.review_target,
+            args.focus,
+            args.audit_max_chunks,
+            args.review_max_chunks,
+            args.mode,
+        ),
+        None => crate::opencode::launch_command(Vec::new()),
     }
 }
 
@@ -246,8 +269,8 @@ mod audit_tests {
     }
 
     #[test]
-    fn no_subcommand_defaults_to_chat() {
+    fn no_subcommand_launches_opencode() {
         let cli = parse_cli_for_test(&["oy"]);
-        assert!(cli.command.is_none(), "expected None for default-to-chat");
+        assert!(cli.command.is_none(), "expected None for default launch");
     }
 }

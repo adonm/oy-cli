@@ -282,7 +282,7 @@ pub(crate) fn build_manifest(files: &[AuditFile]) -> String {
     out
 }
 
-pub(super) fn build_security_index(files: &[AuditFile], limit: usize) -> String {
+pub(crate) fn build_security_index(files: &[AuditFile], limit: usize) -> String {
     let keywords = [
         "auth",
         "authorize",

@@ -15,7 +15,7 @@ pub(super) struct ModelArgs {
         value_name = "MODEL",
         help = "Model id from `oy model`, e.g. github-copilot/<model-id> or copilot::<model-id>"
     )]
-    model: Option<String>,
+    pub(super) model: Option<String>,
 }
 
 pub(super) async fn model_command(args: ModelArgs) -> Result<i32> {

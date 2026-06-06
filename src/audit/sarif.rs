@@ -7,7 +7,7 @@ use std::path::Path;
 
 use super::report;
 
-pub(super) fn render_sarif(report: &str) -> Result<String> {
+pub(crate) fn render_sarif(report: &str) -> Result<String> {
     let findings = report::findings_from_report(report);
     let mut rules = std::collections::BTreeMap::<String, Value>::new();
     let mut results = Vec::new();

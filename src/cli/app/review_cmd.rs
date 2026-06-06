@@ -37,6 +37,10 @@ pub(super) struct ReviewArgs {
     pub(super) target: Option<String>,
 }
 
+pub(super) fn default_output_path() -> PathBuf {
+    review::default_output_path()
+}
+
 pub(super) async fn review_command(args: ReviewArgs) -> Result<i32> {
     let started = std::time::Instant::now();
     let root = config::oy_root()?;

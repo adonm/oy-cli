@@ -5,12 +5,15 @@
 //! binary is still evolving.
 
 #![recursion_limit = "256"]
+#![allow(dead_code)]
 
 mod agent;
 mod audit;
 mod cli;
 mod llm;
+mod mcp;
 mod net;
+mod opencode;
 mod review;
 mod tools;
 

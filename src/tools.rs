@@ -173,6 +173,15 @@ async fn invoke_inner(ctx: &mut ToolContext, name: &str, args: Value) -> Result<
 
 pub(crate) use todo::format_todos;
 
+pub(crate) async fn invoke_read_only_deterministic(
+    root: PathBuf,
+    name: &str,
+    args: Value,
+) -> Result<Value> {
+    let mut ctx = ToolContext::new(root, false, ToolPolicy::read_only(), Vec::new());
+    invoke_inner(&mut ctx, name, args).await
+}
+
 // === Process and interactive tool implementations ===
 fn tool_ask(ctx: &ToolContext, args: AskArgs) -> Result<Value> {
     if !ctx.interactive() {
