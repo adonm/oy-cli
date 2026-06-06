@@ -120,6 +120,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
 fn command_ok(command: &str, args: &[&str]) -> bool {
     std::process::Command::new(command)
         .args(args)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -153,4 +154,17 @@ fn shell_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_probe_closes_stdin() {
+        assert!(!command_ok(
+            "sh",
+            &["-c", "if read _; then exit 0; else exit 17; fi"]
+        ));
+    }
 }

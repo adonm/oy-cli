@@ -210,12 +210,12 @@ fn opencode_passthrough_args(argv: Vec<String>) -> (Vec<String>, crate::config::
         let arg = argv[idx].as_str();
         if before_action {
             if arg == "--mode" {
-                if let Some(value) = argv.get(idx + 1) {
-                    if let Ok(parsed) = crate::config::SafetyMode::parse(value) {
-                        mode = parsed;
-                        idx += 2;
-                        continue;
-                    }
+                if let Some(value) = argv.get(idx + 1)
+                    && let Ok(parsed) = crate::config::SafetyMode::parse(value)
+                {
+                    mode = parsed;
+                    idx += 2;
+                    continue;
                 }
             } else if let Some(value) = arg.strip_prefix("--mode=") {
                 if let Ok(parsed) = crate::config::SafetyMode::parse(value) {

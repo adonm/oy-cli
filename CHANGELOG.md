@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.11.0] - 2026-06-06
 
 ### Changed
 - `oy` now delegates AI workflows to opencode. The default `oy` command installs/updates global integration files and launches `opencode --agent oy`.
@@ -11,6 +11,7 @@
 - `sloc` now shells out to `tokei` when available instead of embedding the `tokei` crate; the tool is omitted from MCP listings when `tokei` is not on `PATH`.
 - `outline` now shells out to Universal Ctags when available instead of embedding tree-sitter grammars; the tool is omitted from MCP listings when Universal Ctags is not on `PATH`.
 - `oy doctor` now reports optional `tokei`/Universal Ctags availability and prints `mise`/Homebrew install hints when they are missing.
+- Refreshed Cargo.lock to current Rust 1.96-compatible dependency releases.
 
 ### Added
 - `oy setup` writes `~/.config/opencode/opencode.json`, agents, and skills. Use `oy setup --workspace` for project-local `.opencode` setup.
