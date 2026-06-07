@@ -1,7 +1,7 @@
 //! Markdown transparency line, command snippet, and post-processing helpers
 //! shared by audit/review report rendering.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{AuditOutputFormat, DEFAULT_MAX_REVIEW_CHUNKS};
@@ -49,7 +49,7 @@ pub(crate) fn review_transparency_snippet(
     max_chunks: Option<usize>,
 ) -> String {
     let mut command = base_command(model, "review");
-    if out != PathBuf::from("REVIEW.md") {
+    if out != Path::new("REVIEW.md") {
         command.push("--out".to_string());
         command.push(shell_quote(&out.to_string_lossy()));
     }

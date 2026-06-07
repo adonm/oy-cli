@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.2] - 2026-06-07
+
+### Fixed
+- Accepted absolute MCP input paths that resolve inside the workspace for `repo_manifest`, `repo_chunks`, `sloc`, and `outline`, while preserving rejection of parent traversal and paths outside the workspace.
+
 ## [0.11.1] - 2026-06-06
 
 ### Fixed

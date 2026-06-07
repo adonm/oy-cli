@@ -551,19 +551,33 @@ fn resolve_workspace_dir(root: &Path, path: &str) -> Result<PathBuf> {
 }
 
 fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
+    let root = root
+        .canonicalize()
+        .context("failed to resolve workspace root")?;
     let raw = Path::new(path);
-    if raw.is_absolute()
-        || raw
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    if raw
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
     {
         bail!("path must stay inside workspace: {path}");
     }
-    let joined = root.join(raw);
-    let resolved = joined
+    if !raw.is_absolute()
+        && raw
+            .components()
+            .any(|component| matches!(component, Component::Prefix(_)))
+    {
+        bail!("path must stay inside workspace: {path}");
+    }
+
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        root.join(raw)
+    };
+    let resolved = candidate
         .canonicalize()
         .with_context(|| format!("path does not exist: {path}"))?;
-    if !resolved.starts_with(root) {
+    if !resolved.starts_with(&root) {
         bail!("path escapes workspace: {path}");
     }
     Ok(resolved)
@@ -672,5 +686,26 @@ mod tests {
         let has_outline = tools.iter().any(|tool| tool["name"] == "outline");
 
         assert_eq!(has_outline, crate::tools::has_external_outline_tool());
+    }
+
+    #[test]
+    fn mcp_workspace_path_accepts_absolute_path_inside_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("src");
+        std::fs::create_dir(&nested).unwrap();
+
+        let resolved = resolve_workspace_path(dir.path(), nested.to_str().unwrap()).unwrap();
+
+        assert_eq!(resolved, nested.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn mcp_workspace_path_rejects_absolute_path_outside_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let err = resolve_workspace_path(dir.path(), outside.path().to_str().unwrap()).unwrap_err();
+
+        assert!(err.to_string().contains("path escapes workspace"));
     }
 }

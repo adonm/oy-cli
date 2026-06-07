@@ -43,7 +43,7 @@ Use built-in tools and permissions for those capabilities. When launched through
 
 ## Filesystem Boundary
 
-Workspace input tools resolve paths under the current workspace root (`OY_ROOT` or cwd). They reject absolute paths, parent traversal, and resolved paths outside the workspace.
+Workspace input tools resolve paths under the current workspace root (`OY_ROOT` or cwd). They accept workspace-relative paths and absolute paths that resolve inside the workspace. They reject parent traversal and resolved paths outside the workspace.
 
 Report renderers use `config::resolve_workspace_output_path`, which rejects absolute paths, parent traversal, symlink ancestors that escape the workspace, and symlink final destinations.
 
