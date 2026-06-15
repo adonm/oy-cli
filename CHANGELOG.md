@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.11.4] - 2026-06-15
+
+### Fixed
+- Allowed release publishing to use a `RELEASE_TOKEN` repository secret when enterprise policy keeps the default Actions `GITHUB_TOKEN` read-only for release creation.
+- Made GitHub release creation idempotent so rerunning a tag workflow updates release notes and clobbers uploaded assets instead of failing on an existing release.
+
 ## [0.11.3] - 2026-06-15
 
 ### Fixed

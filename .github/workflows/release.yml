@@ -115,20 +115,30 @@ jobs:
           subject-path: dist/*
       - name: Create draft GitHub release with assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           REF_NAME: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
-          gh release create "${REF_NAME}" dist/* \
-            --repo "${REPOSITORY}" \
-            --draft \
-            --target "${SHA}" \
-            --title "${REF_NAME}" \
-            --notes-file release-notes.md
+          if gh release view "${REF_NAME}" --repo "${REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${REF_NAME}" \
+              --repo "${REPOSITORY}" \
+              --draft=true \
+              --target "${SHA}" \
+              --title "${REF_NAME}" \
+              --notes-file release-notes.md
+            gh release upload "${REF_NAME}" dist/* --repo "${REPOSITORY}" --clobber
+          else
+            gh release create "${REF_NAME}" dist/* \
+              --repo "${REPOSITORY}" \
+              --draft \
+              --target "${SHA}" \
+              --title "${REF_NAME}" \
+              --notes-file release-notes.md
+          fi
       - name: Publish GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           REF_NAME: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
         run: gh release edit "${REF_NAME}" --repo "${REPOSITORY}" --draft=false
