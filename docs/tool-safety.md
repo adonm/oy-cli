@@ -8,8 +8,8 @@ This document covers only the deterministic tools served by `oy mcp`.
 
 | MCP tool | Capability | Mutation | Notes |
 |---|---|---:|---|
-| `repo_manifest` | Build gitignore-aware file inventory, token estimates, language summary, optional security index | No | Skips dependencies, build outputs, lockfiles, hidden/likely-secret files |
-| `repo_chunks` | Build deterministic workspace chunks and optionally return one chunk's text | No | Used by audit/review agents |
+| `repo_manifest` | Build gitignore-aware file/directory inventory, token estimates, language summary, optional security index | No | Skips dependencies, build outputs, lockfiles, hidden/likely-secret files |
+| `repo_chunks` | Build deterministic file/directory chunks and optionally return one chunk's text | No | Used by audit/review agents |
 | `git_diff_input` | Build deterministic chunks from `git diff <target>` | No workspace mutation | Runs read-only `git` commands in the workspace |
 | `sloc` | Count source lines with external `tokei` | No | Exposed only when `tokei` is on `PATH`; reads paths inside workspace |
 | `outline` | Extract source definitions with external Universal Ctags | No | Exposed only when Universal Ctags is on `PATH`; reads one exact source file inside workspace |

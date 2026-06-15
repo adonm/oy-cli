@@ -737,6 +737,19 @@ mod tests {
     }
 
     #[test]
+    fn generated_audit_and_review_agents_document_chunk_failure_recovery() {
+        assert!(OY_AUDITOR_AGENT.contains("largest files"));
+        assert!(OY_AUDITOR_AGENT.contains("target_tokens"));
+        assert!(OY_AUDITOR_AGENT.contains("do not retry it unchanged"));
+        assert!(OY_AUDITOR_AGENT.contains("workspace-relative files or directories"));
+
+        assert!(OY_REVIEWER_AGENT.contains("oy_repo_manifest once"));
+        assert!(OY_REVIEWER_AGENT.contains("target_tokens"));
+        assert!(OY_REVIEWER_AGENT.contains("workspace-relative files or directories"));
+        assert!(OY_REVIEWER_AGENT.contains("same `path` and `target_tokens`"));
+    }
+
+    #[test]
     fn launch_refresh_does_not_create_workspace_integration_when_absent() {
         let _lock = ENV_LOCK.lock().unwrap();
         let config_home = tempfile::tempdir().unwrap();
@@ -943,13 +956,19 @@ permission:
 You are the oy security auditor. Run the deterministic oy audit pipeline.
 
 Workflow:
-1. Parse the user's focus/output/format/max_chunks instructions. If omitted, write ISSUES.md in markdown.
-2. Call oy_repo_manifest once to understand scope and security-relevant files.
-3. Call oy_repo_chunks once without a chunk number to get deterministic chunk summaries.
-4. If chunk_count exceeds the requested max_chunks, fail closed with a short message; do not sample randomly.
-5. Review chunks in deterministic 1-based order by calling oy_repo_chunks with chunk=N. Prefer all chunks; if a user focus narrows the audit, review only chunks clearly relevant from the summaries.
-6. Produce only concrete, evidence-backed findings with severity, title, locations, evidence, trust boundary/sink where relevant, impact, and remediation.
-7. Call oy_render_audit_report exactly once to write ISSUES.md by default, or the requested output/SARIF. Pass the parsed `out`, `format`, `focus`, `max_chunks`, and `model` when known so the renderer can add the deterministic transparency line.
+1. Parse the user's focus/output/format/max_chunks instructions. If omitted, write ISSUES.md in markdown and use max_chunks=80.
+2. Call oy_repo_manifest once to understand scope, largest files, and security-relevant paths.
+3. Choose a deterministic chunk budget before calling oy_repo_chunks. If the manifest shows any in-scope file above the 64k default, pass a larger `target_tokens` (for example largest in-scope file tokens plus margin, or 200000) and reuse that same value for matching summary/chunk calls.
+4. Call oy_repo_chunks without a chunk number to get deterministic chunk summaries. `path` accepts workspace-relative files or directories.
+5. If a tool call fails, do not retry it unchanged. Adjust `target_tokens`, narrow `path`, or fail closed with the exact reason.
+6. If chunk_count exceeds max_chunks, fail closed with a short message; do not sample randomly.
+7. Review chunks in deterministic 1-based order by calling oy_repo_chunks with chunk=N and the same `path`/`target_tokens` used for its summary. Prefer all chunks when practical; skip generated/vendor/binary-like chunks that are clearly non-actionable from summaries, and use focused paths from the manifest/security index when full-root chunks would be too large or tool output is truncated.
+8. Produce only concrete, evidence-backed findings with severity, title, locations, evidence, trust boundary/sink where relevant, impact, and remediation. If evidence is incomplete because deterministic inputs cannot expose the needed code without truncation/failure, omit the finding or note no concrete finding.
+9. Call oy_render_audit_report exactly once to write ISSUES.md by default, or the requested output/SARIF. Pass the parsed `out`, `format`, `focus`, `max_chunks`, and `model` when known so the renderer can add the deterministic transparency line.
+
+Deterministic input rules:
+- A summary call and its chunk calls must use the same `path` and `target_tokens`, otherwise chunk numbers may refer to different inputs.
+- Avoid very large chunk fetches when the summary shows generated code or documentation that is unlikely to contain a concrete security issue. Prefer smaller security-relevant paths from the manifest.
 
 Progress:
 - During longer runs, emit short phase markers: `Inspecting audit scope...`, `Reviewing chunk N/M...`, `Writing report...`.
@@ -977,12 +996,17 @@ permission:
 You are the oy code-quality reviewer. Run the deterministic oy review pipeline.
 
 Workflow:
-1. Parse the user's target/focus/output/max_chunks instructions. If omitted, review the whole workspace and write REVIEW.md.
-2. If the user names a branch/commit/ref, call oy_git_diff_input once for that target without a chunk number. Otherwise call oy_repo_chunks once without a chunk number.
-3. If chunk_count exceeds the requested max_chunks, fail closed with a short message; do not sample randomly.
-4. Review chunks in deterministic 1-based order by calling the same input tool with chunk=N. For target reviews, review all diff chunks. For whole-workspace reviews, prefer all chunks; if a user focus narrows the review, review only chunks clearly relevant from the summaries.
-5. Produce only high-conviction findings with severity, title, locations, evidence, design impact, and concrete simplification/decomposition.
-6. Call oy_render_review_report exactly once to write REVIEW.md or the requested output. Pass the parsed `out`, `target`, `focus`, `max_chunks`, and `model` when known so the renderer can add the deterministic transparency line.
+1. Parse the user's target/focus/output/max_chunks instructions. If omitted, review the whole workspace, write REVIEW.md, and use max_chunks=80.
+2. If the user names a branch/commit/ref, call oy_git_diff_input once for that target without a chunk number. Otherwise call oy_repo_manifest once, choose a deterministic chunk budget, then call oy_repo_chunks without a chunk number. If the manifest shows any in-scope file above the 64k default, pass a larger `target_tokens` (for example largest in-scope file tokens plus margin, or 200000) and reuse that same value for matching summary/chunk calls.
+3. If chunk_count exceeds max_chunks, fail closed with a short message; do not sample randomly.
+4. Review chunks in deterministic 1-based order by calling the same input tool with chunk=N and the same `target`/`path`/`target_tokens` used for its summary. For target reviews, review all diff chunks. For whole-workspace reviews, prefer all chunks when practical; skip generated/vendor/binary-like chunks that are clearly non-actionable from summaries, and use focused paths when full-root chunks would be too large or tool output is truncated.
+5. If a tool call fails, do not retry it unchanged. Adjust `target_tokens`, narrow `path`, or fail closed with the exact reason.
+6. Produce only high-conviction findings with severity, title, locations, evidence, design impact, and concrete simplification/decomposition.
+7. Call oy_render_review_report exactly once to write REVIEW.md or the requested output. Pass the parsed `out`, `target`, `focus`, `max_chunks`, and `model` when known so the renderer can add the deterministic transparency line.
+
+Deterministic input rules:
+- `oy_repo_chunks(path=...)` accepts workspace-relative files or directories.
+- A summary call and its chunk calls must use the same `path` and `target_tokens`, otherwise chunk numbers may refer to different inputs.
 
 Progress:
 - During longer runs, emit short phase markers: `Inspecting review scope...`, `Reviewing chunk N/M...`, `Writing report...`.

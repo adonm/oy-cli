@@ -142,7 +142,7 @@ fn tool_definitions() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative directory to inspect", "default": "." },
+                    "path": { "type": "string", "description": "Workspace-relative file or directory to inspect", "default": "." },
                     "model": { "type": "string", "description": "Tokenizer/model name used for token estimates" },
                     "security_index": { "type": "boolean", "default": true },
                     "security_index_limit": { "type": "integer", "default": 120 }
@@ -151,13 +151,13 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool_def(
             "repo_chunks",
-            "Prepare deterministic repository chunks. Omit chunk to list summaries; pass a 1-based chunk number to get that chunk's text.",
+            "Prepare deterministic repository chunks for a workspace-relative file or directory. Omit chunk to list summaries; pass a 1-based chunk number to get that chunk's text.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "default": "." },
                     "model": { "type": "string" },
-                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS },
+                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Target maximum tokens per chunk; increase above the largest in-scope file token count when deterministic input would otherwise fail closed" },
                     "chunk": { "type": "integer", "description": "1-based chunk number to return with full text" }
                 }
             }),
@@ -171,7 +171,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "target": { "type": "string" },
                     "model": { "type": "string" },
-                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS },
+                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Target maximum tokens per chunk; increase above the largest diff item token count when deterministic input would otherwise fail closed" },
                     "chunk": { "type": "integer", "description": "1-based chunk number to return with full diff text" }
                 }
             }),
@@ -322,8 +322,7 @@ struct RenderReportArgs {
 fn repo_manifest(args: Value) -> Result<Value> {
     let args: RepoInputArgs = parse_args(args)?;
     let root = workspace_root()?;
-    let target = resolve_workspace_dir(&root, &args.path)?;
-    let files = input::collect_files(&target, None, &args.model)?;
+    let files = collect_workspace_input_files(&root, &args.path, &args.model)?;
     if files.is_empty() {
         bail!("no reviewable text files found");
     }
@@ -342,8 +341,7 @@ fn repo_manifest(args: Value) -> Result<Value> {
 fn repo_chunks(args: Value) -> Result<Value> {
     let args: ChunkArgs = parse_args(args)?;
     let root = workspace_root()?;
-    let target = resolve_workspace_dir(&root, &args.path)?;
-    let files = input::collect_files(&target, None, &args.model)?;
+    let files = collect_workspace_input_files(&root, &args.path, &args.model)?;
     if files.is_empty() {
         bail!("no reviewable text files found");
     }
@@ -542,12 +540,21 @@ fn workspace_root() -> Result<PathBuf> {
     config::oy_root()
 }
 
-fn resolve_workspace_dir(root: &Path, path: &str) -> Result<PathBuf> {
+fn collect_workspace_input_files(
+    root: &Path,
+    path: &str,
+    model: &str,
+) -> Result<Vec<input::AuditFile>> {
     let resolved = resolve_workspace_path(root, path)?;
-    if !resolved.is_dir() {
-        bail!("path is not a directory: {path}");
+    if resolved.is_dir() {
+        return input::collect_files(&resolved, None, model);
     }
-    Ok(resolved)
+    if !resolved.is_file() {
+        bail!("path is not a file or directory: {path}");
+    }
+    Ok(input::collect_file(root, &resolved, model)?
+        .into_iter()
+        .collect())
 }
 
 fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
@@ -707,5 +714,18 @@ mod tests {
         let err = resolve_workspace_path(dir.path(), outside.path().to_str().unwrap()).unwrap_err();
 
         assert!(err.to_string().contains("path escapes workspace"));
+    }
+
+    #[test]
+    fn repo_input_accepts_file_path_and_preserves_workspace_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("src");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("lib.rs"), "fn main() {}\n").unwrap();
+
+        let files = collect_workspace_input_files(dir.path(), "src/lib.rs", "cl100k_base").unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/lib.rs");
     }
 }

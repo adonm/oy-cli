@@ -130,8 +130,8 @@ The agent prompts closely follow the old v0.10 oy run/chat guidance: inspect bef
 
 | Tool | Purpose |
 |---|---|
-| `repo_manifest` | Gitignore-aware file inventory, token estimates, optional security index |
-| `repo_chunks` | Deterministic workspace chunking for audit/review input |
+| `repo_manifest` | Gitignore-aware file/directory inventory, token estimates, optional security index |
+| `repo_chunks` | Deterministic file/directory chunking for audit/review input |
 | `git_diff_input` | Deterministic review input from `git diff <target>` |
 | `sloc` | Source line counts via `tokei` when `tokei` is installed on `PATH` |
 | `outline` | Structural source outline via Universal Ctags when available on `PATH` |

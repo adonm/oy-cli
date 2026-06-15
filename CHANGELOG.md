@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.3] - 2026-06-15
+
+### Fixed
+- Accepted file paths as well as directory paths for `repo_manifest` and `repo_chunks`, avoiding deterministic MCP failures when audit/review agents target a specific evidence file.
+- Updated generated audit/review agents to raise `target_tokens` for oversized files, keep summary/chunk calls on the same deterministic input, avoid unchanged retries after tool failures, and prefer focused paths when root chunks are too large or noisy.
+- Made oversized chunk errors and MCP schemas point agents at the `target_tokens` recovery path explicitly.
+
 ## [0.11.2] - 2026-06-07
 
 ### Fixed

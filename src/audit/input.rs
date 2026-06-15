@@ -86,6 +86,34 @@ pub(crate) fn collect_files(
     Ok(files)
 }
 
+pub(crate) fn collect_file(
+    root: &Path,
+    path: &Path,
+    model_spec: &str,
+) -> Result<Option<AuditFile>> {
+    let rel = rel_path(root, path)?;
+    if should_skip_path(&rel) {
+        return Ok(None);
+    }
+    let meta = fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+        return Ok(None);
+    }
+    let raw = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let text = match crate::decode_utf8(raw) {
+        Ok(text) if !text.trim().is_empty() => text,
+        _ => return Ok(None),
+    };
+    let tokens = count_tokens(model_spec, &text).max(1);
+    Ok(Some(AuditFile {
+        language: language_for_path(&rel),
+        path: rel,
+        bytes: meta.len(),
+        tokens,
+        text,
+    }))
+}
+
 const SKIP_DIR_PREFIXES: &[&str] = &[".git/", "target/", "node_modules/", ".venv/", ".tmp/"];
 const SKIP_FILENAMES: &[&str] = &[
     "cargo.lock",
@@ -244,10 +272,11 @@ pub(crate) fn ensure_chunks_fit_prompt(chunks: &[AuditChunk], target_tokens: usi
             .collect::<Vec<_>>()
             .join(", ");
         bail!(
-            "audit chunk would exceed the model input budget without truncating review input ({} tokens > {} target tokens): {}; rerun with a more focused repository/path or a larger-context model",
+            "audit chunk would exceed the model input budget without truncating review input ({} tokens > {} target tokens): {}; rerun with a more focused repository/path, a larger-context model, or target_tokens >= {}",
             chunk.tokens,
             target_tokens,
-            files
+            files,
+            chunk.tokens
         );
     }
     Ok(())
