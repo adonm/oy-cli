@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.5] - 2026-06-18
+
+### Changed
+- Updated generated oy agents (`oy-plan`, `oy-edit`, `oy-auto`, `oy-enhancer`) to clone/checkout reference code into the workspace under `.tmp/ref/<name>/` and keep it locally git-ignored via `.git/info/exclude`, instead of `/tmp`, `/tmp/opencode`, or `~/`. Avoids external-directory permission prompts and keeps per-workspace isolation without tracked `.gitignore` changes.
+
 ## [0.11.4] - 2026-06-15
 
 ### Fixed
