@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.6] - 2026-06-18
+
+### Changed
+- `oy setup` now writes `tool_output` (`max_bytes: 262144`, `max_lines: 20000`) into the generated opencode config so a default-sized oy chunk (`DEFAULT_TARGET_TOKENS = 64000` at ~4 chars/token) fits in one tool result instead of being truncated to a preview by opencode's 51_200-byte default. opencode exposes this knob only at the config root, so the bump applies to all agents in the written scope (global by default, workspace under `--workspace`); existing user values for these two keys are overwritten and unknown sibling keys are preserved. Generated audit/review agents document the coupling and instruct the model to prefer narrower `path` values over raising `target_tokens` above 64000.
+
 ## [0.11.5] - 2026-06-18
 
 ### Changed

@@ -11,7 +11,7 @@ use crate::audit::input;
 use crate::{audit, config, tools, ui};
 
 const DEFAULT_MODEL_FOR_COUNTING: &str = "cl100k_base";
-const DEFAULT_TARGET_TOKENS: usize = 64_000;
+pub(crate) const DEFAULT_TARGET_TOKENS: usize = 64_000;
 
 pub(crate) async fn serve_stdio() -> Result<i32> {
     ui::set_output_mode(ui::OutputMode::Quiet);
