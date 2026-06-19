@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::fs;
 use std::io::{BufRead as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -12,6 +13,7 @@ use crate::{audit, config, tools, ui};
 
 const DEFAULT_MODEL_FOR_COUNTING: &str = "cl100k_base";
 pub(crate) const DEFAULT_TARGET_TOKENS: usize = 64_000;
+const MAX_EXISTING_REPORT_BYTES: u64 = 1024 * 1024;
 
 pub(crate) async fn serve_stdio() -> Result<i32> {
     ui::set_output_mode(ui::OutputMode::Quiet);
@@ -95,6 +97,7 @@ async fn handle_tool_call(params: Value) -> Result<Value> {
         "repo_manifest" => repo_manifest(args)?,
         "repo_chunks" => repo_chunks(args)?,
         "git_diff_input" => git_diff_input(args)?,
+        "existing_report" => existing_report(args)?,
         "outline" if tools::has_external_outline_tool() => builtin_tool("outline", args).await?,
         "sloc" if tools::has_external_sloc_counter() => builtin_tool("sloc", args).await?,
         "render_audit_report" => render_audit_report(args)?,
@@ -173,6 +176,18 @@ fn tool_definitions() -> Vec<Value> {
                     "model": { "type": "string" },
                     "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Target maximum tokens per chunk; increase above the largest diff item token count when deterministic input would otherwise fail closed" },
                     "chunk": { "type": "integer", "description": "1-based chunk number to return with full diff text" }
+                }
+            }),
+        ),
+        tool_def(
+            "existing_report",
+            "Read an existing generated ISSUES.md or REVIEW.md report so a new audit/review can carry forward still-current findings and supersede stale ones.",
+            json!({
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                    "kind": { "type": "string", "enum": ["audit", "review"] },
+                    "out": { "type": "string", "description": "Workspace report path to read; defaults to ISSUES.md for audit and REVIEW.md for review" }
                 }
             }),
         ),
@@ -300,6 +315,13 @@ struct DiffArgs {
 }
 
 #[derive(Debug, Deserialize)]
+struct ExistingReportArgs {
+    kind: String,
+    #[serde(default)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RenderReportArgs {
     #[serde(default)]
     report: Option<String>,
@@ -393,6 +415,53 @@ fn git_diff_input(args: Value) -> Result<Value> {
         chunks,
         args.chunk,
     )
+}
+
+fn existing_report(args: Value) -> Result<Value> {
+    let args: ExistingReportArgs = parse_args(args)?;
+    existing_report_at(&workspace_root()?, args)
+}
+
+fn existing_report_at(root: &Path, args: ExistingReportArgs) -> Result<Value> {
+    let (kind, default_out) = match args.kind.as_str() {
+        "audit" => (
+            "audit",
+            audit::default_output_path(audit::AuditOutputFormat::Markdown),
+        ),
+        "review" => ("review", crate::review::default_output_path()),
+        other => bail!("unsupported existing report kind: {other}"),
+    };
+    let out = args.out.unwrap_or(default_out);
+    let output_path = config::resolve_workspace_output_path(root, &out)?;
+    if !output_path.exists() {
+        return Ok(json!({
+            "kind": kind,
+            "path": out,
+            "exists": false,
+            "report": "",
+            "findings": 0,
+        }));
+    }
+    let meta = fs::metadata(&output_path)
+        .with_context(|| format!("failed to stat existing report: {}", output_path.display()))?;
+    if meta.len() > MAX_EXISTING_REPORT_BYTES {
+        bail!(
+            "existing {kind} report is too large to include deterministically ({} bytes > {}): {}",
+            meta.len(),
+            MAX_EXISTING_REPORT_BYTES,
+            output_path.display()
+        );
+    }
+    let report = fs::read_to_string(&output_path)
+        .with_context(|| format!("failed to read existing report: {}", output_path.display()))?;
+    let findings = audit::report::findings_from_report(&report).len();
+    Ok(json!({
+        "kind": kind,
+        "path": out,
+        "exists": true,
+        "report": report,
+        "findings": findings,
+    }))
 }
 
 fn chunks_response(
@@ -547,7 +616,24 @@ fn collect_workspace_input_files(
 ) -> Result<Vec<input::AuditFile>> {
     let resolved = resolve_workspace_path(root, path)?;
     if resolved.is_dir() {
-        return input::collect_files(&resolved, None, model);
+        let prefix = resolved
+            .strip_prefix(
+                root.canonicalize()
+                    .context("failed to resolve workspace root")?,
+            )
+            .context("path escapes workspace")?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let prefix = prefix.trim_matches('/').to_string();
+        let prefix_with_sep = format!("{prefix}/");
+        return Ok(input::collect_files(root, None, model)?
+            .into_iter()
+            .filter(|file| {
+                prefix.is_empty()
+                    || file.path == prefix
+                    || file.path.starts_with(prefix_with_sep.as_str())
+            })
+            .collect());
     }
     if !resolved.is_file() {
         bail!("path is not a file or directory: {path}");
@@ -696,6 +782,13 @@ mod tests {
     }
 
     #[test]
+    fn existing_report_tool_is_listed() {
+        let tools = tool_definitions();
+
+        assert!(tools.iter().any(|tool| tool["name"] == "existing_report"));
+    }
+
+    #[test]
     fn mcp_workspace_path_accepts_absolute_path_inside_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("src");
@@ -727,5 +820,65 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn repo_input_accepts_directory_path_and_preserves_workspace_relative_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("src");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("lib.rs"), "fn lib() {}\n").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        let files = collect_workspace_input_files(dir.path(), "src", "cl100k_base").unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn existing_report_reads_default_audit_report() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ISSUES.md"),
+            "# Audit Issues\n\n### High: stale but structured\n\nEvidence: src/lib.rs:1\n",
+        )
+        .unwrap();
+
+        let report = existing_report_at(
+            dir.path(),
+            ExistingReportArgs {
+                kind: "audit".to_string(),
+                out: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report["exists"], true);
+        assert_eq!(report["findings"], 1);
+        assert!(
+            report["report"]
+                .as_str()
+                .unwrap()
+                .contains("stale but structured")
+        );
+    }
+
+    #[test]
+    fn existing_report_returns_absent_default_review_report() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let report = existing_report_at(
+            dir.path(),
+            ExistingReportArgs {
+                kind: "review".to_string(),
+                out: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report["exists"], false);
+        assert_eq!(report["path"], "REVIEW.md");
+        assert_eq!(report["report"], "");
     }
 }

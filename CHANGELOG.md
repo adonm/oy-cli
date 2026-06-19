@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.7] - 2026-06-19
+
+### Changed
+- Moved generated opencode agent/skill prompt bodies into standalone Markdown files under `src/opencode/` and embedded them with `include_str!`, keeping the installed integration self-contained while making prompt diffs and README links easier to review.
+- Tightened generated audit/review agent prompts around a compact deterministic protocol and reference lenses (ASVS/MASVS, grugbrain, and artifact/dependency size), while preserving no-sampling/no-skipping chunk rules.
+
+### Added
+- Added an `existing_report` MCP tool and updated audit/review agents to read existing `ISSUES.md`/`REVIEW.md` once, carry forward still-current findings, and supersede stale report content when rendering the new report.
+
+### Fixed
+- Preserved workspace-relative paths when `repo_manifest`/`repo_chunks` target a directory scope, avoiding path evidence drift for narrowed audit/review inputs.
+
 ## [0.11.6] - 2026-06-18
 
 ### Changed

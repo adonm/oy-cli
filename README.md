@@ -111,6 +111,20 @@ MCP tools are namespaced by server name, so the model sees tools such as `oy_rep
 
 `oy` does not set the global `default_agent`; it passes `--agent` when launched through `oy`. Direct `opencode` usage keeps your normal default.
 
+Generated agent and skill prompt bodies are standalone Markdown files embedded into the binary by `include_str!` in [`src/opencode.rs`](src/opencode.rs):
+
+| Generated file | Prompt source |
+|---|---|
+| `agents/oy.md` | [`src/opencode/agents/oy.md`](src/opencode/agents/oy.md) |
+| `agents/oy-plan.md` | [`src/opencode/agents/oy-plan.md`](src/opencode/agents/oy-plan.md) |
+| `agents/oy-edit.md` | [`src/opencode/agents/oy-edit.md`](src/opencode/agents/oy-edit.md) |
+| `agents/oy-auto.md` | [`src/opencode/agents/oy-auto.md`](src/opencode/agents/oy-auto.md) |
+| `agents/oy-auditor.md` | [`src/opencode/agents/oy-auditor.md`](src/opencode/agents/oy-auditor.md) |
+| `agents/oy-reviewer.md` | [`src/opencode/agents/oy-reviewer.md`](src/opencode/agents/oy-reviewer.md) |
+| `agents/oy-enhancer.md` | [`src/opencode/agents/oy-enhancer.md`](src/opencode/agents/oy-enhancer.md) |
+| `skills/oy-audit/SKILL.md` | [`src/opencode/skills/oy-audit/SKILL.md`](src/opencode/skills/oy-audit/SKILL.md) |
+| `skills/oy-review/SKILL.md` | [`src/opencode/skills/oy-review/SKILL.md`](src/opencode/skills/oy-review/SKILL.md) |
+
 ## oy Modes
 
 The old `--mode` names now map to generated primary agents:
