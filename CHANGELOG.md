@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.11.9] - 2026-07-06
+
+### Security
+- Confirmed GitHub Dependabot has no open alerts for this repository.
+- Updated pinned GitHub Actions with `actions-up` validation.
+
 ## [0.11.8] - 2026-07-06
 
 ### Added
