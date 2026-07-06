@@ -12,6 +12,7 @@ mod enhance_cmd;
 mod model_cmd;
 mod review_cmd;
 mod session_cmd;
+mod upgrade_cmd;
 
 use audit_cmd::AuditFormat;
 use doctor_cmd::DoctorArgs;
@@ -19,6 +20,7 @@ use enhance_cmd::EnhanceArgs;
 use model_cmd::ModelArgs;
 use review_cmd::ReviewArgs;
 use session_cmd::{ChatArgs, RunArgs};
+use upgrade_cmd::UpgradeArgs;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -61,6 +63,8 @@ enum Command {
     Model(ModelArgs),
     /// Check setup, auth, paths, and safety-relevant defaults.
     Doctor(DoctorArgs),
+    /// Explain oy safety modes and their opencode mapping.
+    Modes,
     /// Delegate a security audit.
     Audit {
         #[arg(
@@ -90,6 +94,8 @@ enum Command {
     Review(ReviewArgs),
     /// Delegate finding remediation.
     Enhance(EnhanceArgs),
+    /// Upgrade oy and opencode when both are managed by mise.
+    Upgrade(UpgradeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -100,10 +106,29 @@ struct SetupArgs {
         help = "Install project-local .opencode files instead of global config"
     )]
     workspace: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preview generated integration files without writing"
+    )]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
 struct OpenArgs {
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Print the opencode command that would run"
+    )]
+    dry_run: bool,
+    #[arg(
+        long,
+        alias = "explain",
+        default_value_t = false,
+        help = "Explain selected mode, agent, and opencode arguments without launching"
+    )]
+    explain: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -114,15 +139,17 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
         Err(err) if should_passthrough_to_opencode(&argv, err.kind()) => {
             crate::ui::init_output_mode(None);
             let (args, mode) = opencode_passthrough_args(argv);
-            return crate::opencode::open_command(args, mode);
+            return crate::opencode::open_command(args, mode, false);
         }
         Err(err) => return print_clap_error(err),
     };
     crate::ui::init_output_mode(cli_output_mode(&cli));
     let mode = cli.mode;
     match cli.command {
-        Some(Command::Setup(args)) => crate::opencode::setup_command(args.workspace),
-        Some(Command::Open(args)) => crate::opencode::open_command(args.args, mode),
+        Some(Command::Setup(args)) => crate::opencode::setup_command(args.workspace, args.dry_run),
+        Some(Command::Open(args)) => {
+            crate::opencode::open_command(args.args, mode, args.dry_run || args.explain)
+        }
         Some(Command::Mcp) => crate::mcp::serve_stdio().await,
         Some(Command::Run(args)) => crate::opencode::run_task_command(
             args.task,
@@ -137,6 +164,7 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
         ),
         Some(Command::Model(args)) => crate::opencode::models_command(args.model),
         Some(Command::Doctor(args)) => doctor_cmd::doctor_command(args).await,
+        Some(Command::Modes) => modes_command(),
         Some(Command::Audit {
             format,
             out,
@@ -161,8 +189,22 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             args.review_max_chunks,
             args.mode,
         ),
-        None => crate::opencode::open_command(Vec::new(), mode),
+        Some(Command::Upgrade(args)) => upgrade_cmd::upgrade_command(args),
+        None => crate::opencode::open_command(Vec::new(), mode, false),
     }
+}
+
+fn modes_command() -> Result<i32> {
+    crate::ui::section("oy modes");
+    crate::ui::line("  default / ask       -> opencode --agent oy");
+    crate::ui::line("                         edits ask, bash asks");
+    crate::ui::line("  plan / read         -> opencode --agent oy-plan");
+    crate::ui::line("                         edits denied, bash denied");
+    crate::ui::line("  edit / accept-edits -> opencode --agent oy-edit");
+    crate::ui::line("                         edits allowed, bash asks");
+    crate::ui::line("  auto / yolo         -> opencode --agent oy-auto --auto");
+    crate::ui::line("                         host prompts auto-approved unless explicitly denied");
+    Ok(0)
 }
 
 fn print_clap_error(err: clap::Error) -> Result<i32> {
@@ -180,7 +222,8 @@ fn should_passthrough_to_opencode(argv: &[String], kind: ErrorKind) -> bool {
 
 fn starts_with_oy_command(argv: &[String]) -> bool {
     const OY_COMMANDS: &[&str] = &[
-        "setup", "open", "mcp", "run", "chat", "model", "doctor", "audit", "review", "enhance",
+        "setup", "open", "mcp", "run", "chat", "model", "doctor", "modes", "audit", "review",
+        "enhance", "upgrade",
     ];
     first_action_arg(argv).is_some_and(|arg| OY_COMMANDS.contains(&arg))
 }
@@ -346,6 +389,43 @@ mod audit_tests {
         let help = command_help_for_test("enhance");
         assert!(help.contains("--mode <MODE>"));
         assert!(help.contains("--review-target <TARGET>"));
+    }
+
+    #[test]
+    fn upgrade_is_an_oy_command() {
+        let cli = parse_cli_for_test(&["oy", "upgrade", "--dry-run"]);
+        assert!(matches!(cli.command, Some(Command::Upgrade(_))));
+        assert!(!should_passthrough_to_opencode(
+            &["upgrade".to_string(), "--bogus".to_string()],
+            ErrorKind::UnknownArgument
+        ));
+    }
+
+    #[test]
+    fn setup_and_open_accept_dry_run_flags() {
+        let cli = parse_cli_for_test(&["oy", "setup", "--workspace", "--dry-run"]);
+        let Some(Command::Setup(args)) = cli.command else {
+            panic!("expected setup command");
+        };
+        assert!(args.workspace);
+        assert!(args.dry_run);
+
+        let cli = parse_cli_for_test(&["oy", "open", "--dry-run", "--", "run", "hello"]);
+        let Some(Command::Open(args)) = cli.command else {
+            panic!("expected open command");
+        };
+        assert!(args.dry_run);
+        assert_eq!(args.args, vec!["run", "hello"]);
+    }
+
+    #[test]
+    fn modes_is_an_oy_command() {
+        let cli = parse_cli_for_test(&["oy", "modes"]);
+        assert!(matches!(cli.command, Some(Command::Modes)));
+        assert!(!should_passthrough_to_opencode(
+            &["modes".to_string(), "--bogus".to_string()],
+            ErrorKind::UnknownArgument
+        ));
     }
 
     #[test]

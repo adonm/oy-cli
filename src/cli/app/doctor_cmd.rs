@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use clap::Args;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::Path;
 
 use crate::config;
@@ -18,6 +19,12 @@ pub(super) struct DoctorArgs {
         help = "Safety mode to inspect (default: balanced): plan, ask, edit, or auto"
     )]
     mode: config::SafetyMode,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Install missing opencode/tokei/ctags with mise when mise is available"
+    )]
+    install_missing: bool,
 }
 
 pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
@@ -25,6 +32,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     let mode = args.mode;
     let policy = config::tool_policy(mode);
     let opencode_ok = command_ok("opencode", &["--version"]);
+    let mise_ok = command_ok("mise", &["--version"]);
     let oy_mcp_ok = command_ok("oy", &["mcp"]);
     let tokei_ok = crate::tools::has_external_sloc_counter();
     let ctags_ok = crate::tools::has_external_outline_tool();
@@ -38,6 +46,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             "mode": mode.name(),
             "policy": policy,
             "opencode": opencode_ok,
+            "mise": mise_ok,
             "oy_mcp_command": oy_mcp_ok,
             "optional_tools": {
                 "tokei": {
@@ -54,7 +63,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             "global_opencode_config": global_config,
             "workspace_opencode_config": workspace_config,
             "configured": configured,
-            "next_step": recommended_next_step(opencode_ok, configured),
+            "next_step": recommended_next_step(opencode_ok, configured, mise_ok, missing_mise_tools(opencode_ok, tokei_ok, ctags_ok).is_empty()),
         });
         crate::ui::line(serde_json::to_string_pretty(&payload)?);
         return Ok(0);
@@ -68,6 +77,10 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     crate::ui::kv(
         "opencode",
         crate::ui::status_text(opencode_ok, if opencode_ok { "ok" } else { "missing" }),
+    );
+    crate::ui::kv(
+        "mise",
+        crate::ui::status_text(mise_ok, if mise_ok { "ok" } else { "missing" }),
     );
     crate::ui::kv(
         "optional tokei",
@@ -109,11 +122,24 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     crate::ui::section("Recommended next step");
     crate::ui::line(format_args!(
         "  {}",
-        recommended_next_step(opencode_ok, configured)
+        recommended_next_step(
+            opencode_ok,
+            configured,
+            mise_ok,
+            missing_mise_tools(opencode_ok, tokei_ok, ctags_ok).is_empty(),
+        )
     ));
     crate::ui::line("");
     crate::ui::section("Container hint");
     crate::ui::line(format_args!("  {}", safe_container_command(&root, true)));
+
+    maybe_install_missing_with_mise(
+        args.install_missing,
+        mise_ok,
+        opencode_ok,
+        tokei_ok,
+        ctags_ok,
+    )?;
     Ok(0)
 }
 
@@ -128,12 +154,91 @@ fn command_ok(command: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn recommended_next_step(opencode_ok: bool, configured: bool) -> &'static str {
-    match (opencode_ok, configured) {
-        (false, _) => "Install opencode, then run `oy setup`.",
-        (true, false) => "Run `oy setup`, then restart opencode.",
-        (true, true) => "Run `oy` to launch with the oy integration.",
+fn recommended_next_step(
+    opencode_ok: bool,
+    configured: bool,
+    mise_ok: bool,
+    no_missing_mise_tools: bool,
+) -> &'static str {
+    match (opencode_ok, configured, mise_ok, no_missing_mise_tools) {
+        (false, _, true, _) => {
+            "Run `oy doctor --install-missing` to install opencode with mise, then `oy setup`."
+        }
+        (false, _, false, _) => "Install opencode, then run `oy setup`.",
+        (true, false, _, _) => "Run `oy setup`, then restart opencode.",
+        (true, true, true, false) => {
+            "Run `oy doctor --install-missing` to install optional mise helpers, or `oy` to launch now."
+        }
+        (true, true, _, _) => "Run `oy` to launch with the oy integration.",
     }
+}
+
+fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
+    let mut tools = Vec::new();
+    if !opencode_ok {
+        tools.push("opencode");
+    }
+    if !tokei_ok {
+        tools.push("cargo:tokei");
+    }
+    if !ctags_ok {
+        tools.push("aqua:universal-ctags/ctags");
+    }
+    tools
+}
+
+fn maybe_install_missing_with_mise(
+    requested: bool,
+    mise_ok: bool,
+    opencode_ok: bool,
+    tokei_ok: bool,
+    ctags_ok: bool,
+) -> Result<()> {
+    let tools = missing_mise_tools(opencode_ok, tokei_ok, ctags_ok);
+    if tools.is_empty() {
+        return Ok(());
+    }
+    if !mise_ok {
+        return Ok(());
+    }
+    if !requested && !should_prompt_install(&tools)? {
+        return Ok(());
+    }
+    crate::ui::line(format_args!(
+        "Installing missing tools with mise: {}",
+        tools.join(" ")
+    ));
+    let status = std::process::Command::new("mise")
+        .arg("install")
+        .args(&tools)
+        .status()?;
+    if status.success() {
+        crate::ui::success("mise install completed");
+    } else {
+        crate::ui::err_line(format_args!(
+            "mise install failed with exit code {}",
+            status.code().unwrap_or(1)
+        ));
+    }
+    Ok(())
+}
+
+fn should_prompt_install(tools: &[&str]) -> Result<bool> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() || crate::ui::is_json() {
+        return Ok(false);
+    }
+    crate::ui::line("");
+    crate::ui::out(&format!(
+        "Install missing tools with mise now? [{}] [y/N] ",
+        tools.join(" ")
+    ));
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn safe_container_command(root: &Path, read_only: bool) -> String {
@@ -166,5 +271,14 @@ mod tests {
             "sh",
             &["-c", "if read _; then exit 0; else exit 17; fi"]
         ));
+    }
+
+    #[test]
+    fn mise_tool_list_tracks_missing_tools() {
+        assert_eq!(
+            missing_mise_tools(false, false, true),
+            vec!["opencode", "cargo:tokei"]
+        );
+        assert!(missing_mise_tools(true, true, true).is_empty());
     }
 }

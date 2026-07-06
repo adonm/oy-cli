@@ -137,6 +137,10 @@ pub(super) fn code_ref_from_line(line: &str) -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Finding {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) severity: String,
     pub(crate) title: String,
@@ -149,6 +153,8 @@ pub(crate) struct Finding {
 impl Finding {
     pub(crate) fn from_summary(source: &str, summary: FindingSummary) -> Self {
         let mut finding = Self {
+            id: String::new(),
+            status: String::new(),
             source: source.to_string(),
             severity: summary.severity,
             title: summary.title,
@@ -164,7 +170,10 @@ impl Finding {
     }
 
     fn normalize(&mut self) -> Option<()> {
-        self.source = self.source.trim().to_ascii_lowercase();
+        self.source = normalize_identifier_part(&self.source);
+        if self.source.is_empty() {
+            self.source = "unknown".to_string();
+        }
         self.title = self.title.trim().to_string();
         if self.title.is_empty() {
             return None;
@@ -184,16 +193,21 @@ impl Finding {
         {
             self.locations.push(location);
         }
+        self.id = normalize_finding_id(&self.id).unwrap_or_else(|| stable_finding_id(self));
+        self.status = normalize_status(&self.status).unwrap_or_else(|| "new".to_string());
         Some(())
     }
 
     pub(crate) fn to_summary_markdown(&self) -> String {
         format!(
-            "- **{}** `{}` — {}",
+            "- `{}` **{}** `{}` — {} _(status: {}; fix: `oy enhance --focus {}`)_",
+            self.id,
             self.severity,
             self.primary_code_ref()
                 .unwrap_or_else(|| "unknown".to_string()),
-            self.title
+            self.title,
+            self.status,
+            self.id
         )
     }
 
@@ -288,6 +302,8 @@ fn finding_from_value(value: &Value) -> Option<Finding> {
         body
     };
     let mut finding = Finding {
+        id: value_text(value.get("id")),
+        status: value_text(value.get("status")),
         source: value_text(value.get("source")),
         severity: value_text(value.get("severity")),
         title: value_text(value.get("title")),
@@ -298,6 +314,84 @@ fn finding_from_value(value: &Value) -> Option<Finding> {
     };
     finding.normalize()?;
     Some(finding)
+}
+
+fn normalize_status(status: &str) -> Option<String> {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "new" | "open" => Some("new".to_string()),
+        "carried-forward" | "carried_forward" | "carried forward" | "existing" => {
+            Some("carried-forward".to_string())
+        }
+        "fixed" | "fixed?" | "resolved" => Some("fixed?".to_string()),
+        "stale" | "stale/superseded" | "superseded" => Some("stale".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_finding_id(id: &str) -> Option<String> {
+    let normalized = id
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    non_empty(collapse_dashes(&normalized).trim_matches('-').to_string())
+}
+
+fn normalize_identifier_part(value: &str) -> String {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    collapse_dashes(&normalized).trim_matches('-').to_string()
+}
+
+fn collapse_dashes(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut previous_dash = false;
+    for ch in value.chars() {
+        if ch == '-' {
+            if previous_dash {
+                continue;
+            }
+            previous_dash = true;
+        } else {
+            previous_dash = false;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn stable_finding_id(finding: &Finding) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in format!(
+        "{}\0{}\0{}\0{}",
+        finding.source,
+        finding.severity,
+        finding.title,
+        finding.primary_code_ref().unwrap_or_default()
+    )
+    .as_bytes()
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{}-{hash:016x}", finding.source)
 }
 
 fn locations_from_value(value: &Value) -> Vec<FindingLocation> {
@@ -378,6 +472,28 @@ pub(crate) fn findings_from_report(report: &str) -> Vec<Finding> {
         .into_iter()
         .map(|finding| Finding::from_summary("", finding))
         .collect()
+}
+
+pub(crate) fn normalized_findings_payload(value: &Value, fallback_source: &str) -> Option<String> {
+    let items = value
+        .as_array()
+        .or_else(|| value.get("findings").and_then(Value::as_array))?;
+    let findings = items
+        .iter()
+        .filter_map(|item| {
+            let mut finding = finding_from_value(item)?;
+            if finding.source == "unknown" && !fallback_source.trim().is_empty() {
+                finding.source = normalize_identifier_part(fallback_source);
+                finding.id.clear();
+                let _ = finding.normalize();
+            }
+            Some(finding)
+        })
+        .collect::<Vec<_>>();
+    if findings.is_empty() {
+        return None;
+    }
+    serde_json::to_string_pretty(&findings).ok()
 }
 
 pub(crate) fn structured_findings_from_report(report: &str) -> Vec<Finding> {
@@ -534,5 +650,43 @@ Evidence: src/old.rs:1
             findings[0].primary_code_ref().as_deref(),
             Some("src/lib.rs:3")
         );
+    }
+
+    #[test]
+    fn normalized_findings_adds_stable_id_status_and_source() {
+        let payload = serde_json::json!({
+            "findings": [{
+                "severity": "High",
+                "title": "bad boundary",
+                "locations": [{ "path": "src/lib.rs", "line": 9 }],
+                "evidence": "src/lib.rs:9"
+            }]
+        });
+
+        let normalized = normalized_findings_payload(&payload, "audit").unwrap();
+
+        assert!(normalized.contains("\"id\": \"audit-"));
+        assert!(normalized.contains("\"status\": \"new\""));
+        assert!(normalized.contains("\"source\": \"audit\""));
+    }
+
+    #[test]
+    fn normalized_findings_sanitizes_id_source_and_status() {
+        let payload = serde_json::json!({
+            "findings": [{
+                "id": "Audit Finding #1",
+                "source": "Security Audit",
+                "status": "existing",
+                "severity": "Medium",
+                "title": "bad boundary",
+                "locations": [{ "path": "src/lib.rs", "line": 9 }]
+            }]
+        });
+
+        let normalized = normalized_findings_payload(&payload, "audit").unwrap();
+
+        assert!(normalized.contains("\"id\": \"audit-finding-1\""));
+        assert!(normalized.contains("\"source\": \"security-audit\""));
+        assert!(normalized.contains("\"status\": \"carried-forward\""));
     }
 }

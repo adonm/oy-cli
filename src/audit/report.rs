@@ -7,7 +7,9 @@
 //! callers can keep using `crate::audit::report::...` while each concern
 //! lives in its own file.
 
-pub(crate) use super::findings::{Finding, findings_from_report, with_structured_findings_block};
+pub(crate) use super::findings::{
+    Finding, findings_from_report, normalized_findings_payload, with_structured_findings_block,
+};
 pub(crate) use super::sarif::render_sarif;
 pub(crate) use super::transparency::{
     audit_transparency_snippet, default_output_path, review_transparency_snippet,

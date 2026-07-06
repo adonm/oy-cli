@@ -47,8 +47,8 @@ const _: () = assert!(
     "TOOL_OUTPUT_MAX_BYTES must cover at least one default-sized chunk"
 );
 
-pub(crate) fn setup_command(workspace: bool) -> Result<i32> {
-    setup_opencode(SetupScope::from_workspace_flag(workspace), true)
+pub(crate) fn setup_command(workspace: bool, dry_run: bool) -> Result<i32> {
+    setup_opencode(SetupScope::from_workspace_flag(workspace), true, dry_run)
 }
 
 pub(crate) fn global_config_path() -> Result<PathBuf> {
@@ -99,8 +99,11 @@ impl SetupScope {
     }
 }
 
-fn setup_opencode(scope: SetupScope, report: bool) -> Result<i32> {
+fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32> {
     let dir = scope.dir()?;
+    if dry_run {
+        return preview_setup(scope, &dir);
+    }
     fs::create_dir_all(dir.join("agents"))
         .with_context(|| format!("failed to create {}", dir.join("agents").display()))?;
     fs::create_dir_all(dir.join("skills/oy-audit"))
@@ -130,8 +133,51 @@ fn setup_opencode(scope: SetupScope, report: bool) -> Result<i32> {
     Ok(0)
 }
 
+fn preview_setup(scope: SetupScope, dir: &Path) -> Result<i32> {
+    ui::section(format!("{} oy integration dry run", scope.label()).as_str());
+    for (path, body) in generated_files(dir) {
+        ui::kv(setup_action(&path, body)?, path.display());
+    }
+    let config_path = dir.join("opencode.json");
+    let config_body = config_body(&config_path)?;
+    ui::kv(
+        setup_action(&config_path, &config_body)?,
+        config_path.display(),
+    );
+    Ok(0)
+}
+
+fn generated_files(dir: &Path) -> Vec<(PathBuf, &'static str)> {
+    vec![
+        (dir.join("agents/oy.md"), OY_AGENT),
+        (dir.join("agents/oy-plan.md"), OY_PLAN_AGENT),
+        (dir.join("agents/oy-edit.md"), OY_EDIT_AGENT),
+        (dir.join("agents/oy-auto.md"), OY_AUTO_AGENT),
+        (dir.join("agents/oy-auditor.md"), OY_AUDITOR_AGENT),
+        (dir.join("agents/oy-reviewer.md"), OY_REVIEWER_AGENT),
+        (dir.join("agents/oy-enhancer.md"), OY_ENHANCER_AGENT),
+        (dir.join("skills/oy-audit/SKILL.md"), OY_AUDIT_SKILL),
+        (dir.join("skills/oy-review/SKILL.md"), OY_REVIEW_SKILL),
+    ]
+}
+
+fn setup_action(path: &Path, desired: &str) -> Result<&'static str> {
+    if !path.exists() {
+        return Ok("create");
+    }
+    let current =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if current == desired {
+        Ok("unchanged")
+    } else if desired.contains(GENERATED_MARKER) && !current.contains(GENERATED_MARKER) {
+        Ok("blocked")
+    } else {
+        Ok("update")
+    }
+}
+
 fn refresh_opencode_for_launch() -> Result<()> {
-    setup_opencode(SetupScope::Global, false)?;
+    setup_opencode(SetupScope::Global, false, false)?;
     refresh_workspace_opencode_if_installed()
 }
 
@@ -166,20 +212,32 @@ fn workspace_has_oy_integration(dir: &Path) -> bool {
             .any(|path| generated_file_exists(&dir.join(path)))
 }
 
-pub(crate) fn open_command(args: Vec<String>, mode: config::SafetyMode) -> Result<i32> {
+pub(crate) fn open_command(
+    args: Vec<String>,
+    mode: config::SafetyMode,
+    dry_run: bool,
+) -> Result<i32> {
+    let opencode_args = open_args(args, mode);
+    if dry_run {
+        explain_opencode_launch(mode, &opencode_args);
+        return Ok(0);
+    }
     refresh_opencode_for_launch()?;
-    run_opencode(open_args(args, mode))
+    run_opencode(opencode_args)
 }
 
 fn open_args(mut args: Vec<String>, mode: config::SafetyMode) -> Vec<String> {
     if args.is_empty() {
-        return vec!["--agent".to_string(), agent_for_mode(mode).to_string()];
+        let mut launch_args = Vec::new();
+        push_agent_args(&mut launch_args, mode);
+        return launch_args;
     }
     if mode != config::SafetyMode::Default && !has_agent_arg(&args) {
-        args.splice(
-            0..0,
-            ["--agent".to_string(), agent_for_mode(mode).to_string()],
-        );
+        let mut prefix = Vec::new();
+        push_agent_args(&mut prefix, mode);
+        args.splice(0..0, prefix);
+    } else if mode == config::SafetyMode::AutoAll && !has_auto_arg(&args) {
+        args.splice(0..0, ["--auto".to_string()]);
     }
     args
 }
@@ -187,6 +245,10 @@ fn open_args(mut args: Vec<String>, mode: config::SafetyMode) -> Vec<String> {
 fn has_agent_arg(args: &[String]) -> bool {
     args.iter()
         .any(|arg| arg == "--agent" || arg.starts_with("--agent="))
+}
+
+fn has_auto_arg(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--auto")
 }
 
 pub(crate) fn run_task_command(
@@ -332,6 +394,53 @@ fn run_opencode(args: Vec<String>) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+fn explain_opencode_launch(mode: config::SafetyMode, args: &[String]) {
+    ui::section("opencode launch");
+    ui::kv("mode", mode.name());
+    ui::kv(
+        "agent",
+        selected_agent(args).unwrap_or(agent_for_mode(mode)),
+    );
+    ui::kv("command", shell_command("opencode", args));
+    if args.iter().any(|arg| arg == "--auto") {
+        ui::kv(
+            "auto",
+            "enabled; host prompts auto-approved unless explicitly denied",
+        );
+    }
+}
+
+fn selected_agent(args: &[String]) -> Option<&str> {
+    for (idx, arg) in args.iter().enumerate() {
+        if arg == "--agent" {
+            return args.get(idx + 1).map(String::as_str);
+        }
+        if let Some(agent) = arg.strip_prefix("--agent=") {
+            return Some(agent);
+        }
+    }
+    None
+}
+
+fn shell_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program.to_string())
+        .chain(args.iter().cloned())
+        .map(|part| shell_quote(&part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn collect_prompt(parts: Vec<String>) -> Result<String> {
     if !parts.is_empty() {
         return Ok(parts.join(" "));
@@ -355,6 +464,9 @@ fn push_session_args(args: &mut Vec<String>, continue_session: bool, resume: &st
 
 fn push_agent_args(args: &mut Vec<String>, mode: config::SafetyMode) {
     args.extend(["--agent".to_string(), agent_for_mode(mode).to_string()]);
+    if mode == config::SafetyMode::AutoAll {
+        args.push("--auto".to_string());
+    }
 }
 
 fn agent_for_mode(mode: config::SafetyMode) -> &'static str {
@@ -367,6 +479,10 @@ fn agent_for_mode(mode: config::SafetyMode) -> &'static str {
 }
 
 fn update_config(path: &Path) -> Result<()> {
+    write_config(path, &config_body(path)?)
+}
+
+fn config_body(path: &Path) -> Result<String> {
     let mut root = if path.exists() {
         let text = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -388,7 +504,7 @@ fn update_config(path: &Path) -> Result<()> {
     merge_mcp(object);
     merge_commands(object);
     merge_tool_output(object);
-    write_config(path, &format_json(&root)?)
+    format_json(&root)
 }
 
 fn merge_mcp(object: &mut Map<String, Value>) {
@@ -470,6 +586,9 @@ fn write_config(path: &Path, body: &str) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    if path.exists() && fs::read_to_string(path).is_ok_and(|current| current == body) {
+        return Ok(());
+    }
     fs::write(path, body).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -487,6 +606,9 @@ fn write_file(path: &Path, body: &str) -> Result<()> {
                 path.display()
             );
         }
+    }
+    if path.exists() && fs::read_to_string(path).is_ok_and(|current| current == body) {
+        return Ok(());
     }
     fs::write(path, body).with_context(|| format!("failed to write {}", path.display()))
 }
@@ -673,7 +795,7 @@ mod tests {
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
         let _root = EnvGuard::set("OY_ROOT", workspace.path());
 
-        setup_command(false).unwrap();
+        setup_command(false, false).unwrap();
 
         let global = config_home.path().join("opencode");
         assert!(global.join("opencode.json").exists());
@@ -692,11 +814,25 @@ mod tests {
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
         let _root = EnvGuard::set("OY_ROOT", workspace.path());
 
-        setup_command(true).unwrap();
+        setup_command(true, false).unwrap();
 
         assert!(workspace.path().join(".opencode/opencode.json").exists());
         assert!(workspace.path().join(".opencode/agents/oy.md").exists());
         assert!(!config_home.path().join("opencode/opencode.json").exists());
+    }
+
+    #[test]
+    fn setup_dry_run_does_not_write_files() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let config_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        let _root = EnvGuard::set("OY_ROOT", workspace.path());
+
+        setup_command(false, true).unwrap();
+
+        assert!(!config_home.path().join("opencode/opencode.json").exists());
+        assert!(!config_home.path().join("opencode/agents/oy.md").exists());
     }
 
     #[test]
@@ -793,7 +929,7 @@ mod tests {
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
         let _root = EnvGuard::set("OY_ROOT", workspace.path());
 
-        setup_command(true).unwrap();
+        setup_command(true, false).unwrap();
         let reviewer = workspace.path().join(".opencode/agents/oy-reviewer.md");
         fs::write(
             &reviewer,
@@ -916,11 +1052,41 @@ mod tests {
             vec!["--agent", "oy-plan", "tui"]
         );
         assert_eq!(
+            open_args(Vec::new(), config::SafetyMode::AutoAll),
+            vec!["--agent", "oy-auto", "--auto"]
+        );
+        assert_eq!(
             open_args(
                 vec!["--agent".to_string(), "custom".to_string()],
                 config::SafetyMode::Plan
             ),
             vec!["--agent", "custom"]
+        );
+        assert_eq!(
+            open_args(
+                vec!["--agent".to_string(), "custom".to_string()],
+                config::SafetyMode::AutoAll
+            ),
+            vec!["--auto", "--agent", "custom"]
+        );
+    }
+
+    #[test]
+    fn auto_mode_uses_opencode_yolo_flag() {
+        let mut args = vec!["run".to_string()];
+        push_agent_args(&mut args, config::SafetyMode::AutoAll);
+        assert_eq!(args, vec!["run", "--agent", "oy-auto", "--auto"]);
+    }
+
+    #[test]
+    fn selected_agent_reads_explicit_opencode_agent_args() {
+        assert_eq!(
+            selected_agent(&["--agent".to_string(), "custom".to_string()]),
+            Some("custom")
+        );
+        assert_eq!(
+            selected_agent(&["--agent=build".to_string()]),
+            Some("build")
         );
     }
 }

@@ -12,5 +12,8 @@ Options:
           
           [default: default]
 
+      --install-missing
+          Install missing opencode/tokei/ctags with mise when mise is available
+
   -h, --help
           Print help

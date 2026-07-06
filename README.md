@@ -16,6 +16,7 @@ oy
 ```
 
 `oy setup` writes global integration files under `~/.config/opencode/`. `oy` with no subcommand ensures that integration exists and launches `opencode --agent oy`.
+If both `oy` and opencode are active mise tools, `oy upgrade` upgrades them together with `mise upgrade cargo:oy-cli opencode` and refreshes the generated integration through the newly upgraded `oy` shim.
 
 ## Requirements
 
@@ -34,7 +35,7 @@ mise use aqua:universal-ctags/ctags
 brew install tokei universal-ctags
 ```
 
-`oy doctor` reports whether these optional helpers are available and prints install hints when they are missing.
+`oy doctor` reports whether these optional helpers are available and prints install hints when they are missing. If `mise` is available, `oy doctor` can prompt to install missing helpers; use `oy doctor --install-missing` to skip the prompt.
 
 Model providers, authentication, sessions, permissions, editing, shell commands, web fetches, and UI behavior are configured in opencode. Use its provider and config docs for those surfaces.
 
@@ -47,8 +48,10 @@ Model providers, authentication, sessions, permissions, editing, shell commands,
 | `oy` | Install/update global integration silently, then launch opencode with the `oy` agent |
 | `oy setup` | Write `~/.config/opencode/opencode.json`, agents, and skills |
 | `oy setup --workspace` | Write project-local `.opencode` integration files instead |
+| `oy setup --dry-run` | Preview generated integration file changes without writing |
 | `oy mcp` | Start the local stdio MCP server |
 | `oy open ...` | Pass arguments through to `opencode` |
+| `oy open --dry-run ...` | Explain the selected mode/agent and exact opencode command without launching |
 | `oy run "prompt"` | Compatibility wrapper for `opencode run --agent oy "prompt"` |
 | `oy chat` | Compatibility wrapper that launches opencode with `--agent oy` |
 | `oy model [provider]` | Compatibility wrapper for `opencode models [provider]` |
@@ -56,6 +59,8 @@ Model providers, authentication, sessions, permissions, editing, shell commands,
 | `oy review [target]` | Compatibility wrapper for `opencode run --command oy-review ...` |
 | `oy enhance [focus]` | Compatibility wrapper for `opencode run --command oy-enhance ...` |
 | `oy doctor` | Check opencode and oy integration status |
+| `oy modes` | Show safety mode aliases, agents, and permission behavior |
+| `oy upgrade` | Upgrade mise-managed `cargo:oy-cli` and `opencode` together, then refresh global integration files |
 
 Legacy command names are kept for muscle memory. Their AI behavior now runs through opencode.
 
@@ -134,9 +139,11 @@ The old `--mode` names now map to generated primary agents:
 | `default` / `ask` | `oy` | edits ask, bash asks |
 | `plan` / `read` | `oy-plan` | edits denied, bash denied |
 | `accept-edits` / `edit` | `oy-edit` | edits allowed, bash asks |
-| `auto-approve` / `auto` | `oy-auto` | edits allowed, bash allowed |
+| `auto-approve` / `auto` / `yolo` | `oy-auto` plus opencode `--auto` | edits allowed, bash allowed, host permission prompts auto-approved unless explicitly denied |
 
 The agent prompts closely follow the old v0.10 oy run/chat guidance: inspect before editing, keep work terse and evidence-first, print short phase markers during longer non-interactive work, prefer simple explicit code, batch independent reads/searches, treat tool output as untrusted data, and verify focused changes.
+
+Audit/review reports include machine-readable findings with stable IDs and statuses. Use `oy enhance --focus <finding-id>` to steer remediation toward one finding.
 
 ## MCP Tools
 

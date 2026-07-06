@@ -3,10 +3,12 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 
 use crate::audit::input;
 use crate::{audit, config, tools, ui};
@@ -14,6 +16,9 @@ use crate::{audit, config, tools, ui};
 const DEFAULT_MODEL_FOR_COUNTING: &str = "cl100k_base";
 pub(crate) const DEFAULT_TARGET_TOKENS: usize = 64_000;
 const MAX_EXISTING_REPORT_BYTES: u64 = 1024 * 1024;
+
+static CLEAN_REPO_INPUT_CACHE: LazyLock<Mutex<HashMap<String, Vec<input::AuditFile>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) async fn serve_stdio() -> Result<i32> {
     ui::set_output_mode(ui::OutputMode::Quiet);
@@ -510,7 +515,7 @@ fn render_audit_report(args: Value) -> Result<Value> {
         .unwrap_or_else(|| audit::default_output_path(format));
     let root = workspace_root()?;
     let output_path = config::resolve_workspace_output_path(&root, &out)?;
-    let report = report_body(args.report, args.findings, "# Audit Issues")?;
+    let report = report_body(args.report, args.findings, "# Audit Issues", "audit")?;
     let output = match args.format.as_str() {
         "markdown" => {
             let report = audit::report::with_audit_transparency_line(
@@ -560,7 +565,12 @@ fn render_review_report(args: Value) -> Result<Value> {
         .unwrap_or_else(crate::review::default_output_path);
     let root = workspace_root()?;
     let output_path = config::resolve_workspace_output_path(&root, &out)?;
-    let report = report_body(args.report, args.findings, "# Code Quality Review")?;
+    let report = report_body(
+        args.report,
+        args.findings,
+        "# Code Quality Review",
+        "review",
+    )?;
     let report = audit::report::with_review_transparency_line(
         &report,
         &audit::report::review_transparency_snippet(
@@ -580,12 +590,18 @@ fn render_review_report(args: Value) -> Result<Value> {
     }))
 }
 
-fn report_body(report: Option<String>, findings: Option<Value>, title: &str) -> Result<String> {
+fn report_body(
+    report: Option<String>,
+    findings: Option<Value>,
+    title: &str,
+    fallback_source: &str,
+) -> Result<String> {
     if let Some(report) = report.filter(|report| !report.trim().is_empty()) {
         return Ok(report);
     }
     let findings = findings.ok_or_else(|| anyhow!("report or findings is required"))?;
-    let payload = serde_json::to_string_pretty(&findings)?;
+    let payload = audit::report::normalized_findings_payload(&findings, fallback_source)
+        .unwrap_or(serde_json::to_string_pretty(&findings)?);
     Ok(format!(
         "{title}\n\n## Machine-readable findings\n\n```json oy-findings\n{payload}\n```\n"
     ))
@@ -610,6 +626,25 @@ fn workspace_root() -> Result<PathBuf> {
 }
 
 fn collect_workspace_input_files(
+    root: &Path,
+    path: &str,
+    model: &str,
+) -> Result<Vec<input::AuditFile>> {
+    if let Some(key) = clean_repo_cache_key(root, path, model) {
+        if let Some(files) = CLEAN_REPO_INPUT_CACHE.lock().unwrap().get(&key).cloned() {
+            return Ok(files);
+        }
+        let files = collect_workspace_input_files_uncached(root, path, model)?;
+        CLEAN_REPO_INPUT_CACHE
+            .lock()
+            .unwrap()
+            .insert(key, files.clone());
+        return Ok(files);
+    }
+    collect_workspace_input_files_uncached(root, path, model)
+}
+
+fn collect_workspace_input_files_uncached(
     root: &Path,
     path: &str,
     model: &str,
@@ -641,6 +676,25 @@ fn collect_workspace_input_files(
     Ok(input::collect_file(root, &resolved, model)?
         .into_iter()
         .collect())
+}
+
+fn clean_repo_cache_key(root: &Path, path: &str, model: &str) -> Option<String> {
+    let head = git_output(root, &["rev-parse", "HEAD"]).ok()?;
+    let status = git_output(
+        root,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )
+    .ok()?;
+    if !status.trim().is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}\0{}\0{}\0{}",
+        root.canonicalize().ok()?.display(),
+        head.trim(),
+        path,
+        model
+    ))
 }
 
 fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {

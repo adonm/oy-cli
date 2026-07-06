@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.8] - 2026-07-06
+
+### Added
+- Added `oy upgrade`, which upgrades `cargo:oy-cli` and `opencode` together via `mise upgrade` when both are active mise-managed tools, then refreshes the generated global opencode integration.
+- Added `oy setup --dry-run`, `oy open --dry-run`, `oy modes`, and `oy upgrade --check` for safer preview/explain flows.
+- `oy doctor` now detects `mise` and can prompt, or run with `--install-missing`, to install missing opencode/tokei/ctags tools through mise.
+
+### Changed
+- `--mode auto` / `--mode yolo` now passes opencode's `--auto` flag in addition to selecting the generated `oy-auto` agent, so trusted oy-auto sessions use host-level auto-approval by default.
+- Setup writes are content-aware and skip unchanged generated files/config.
+- Audit/review report rendering now normalizes structured findings with stable IDs and statuses, making `oy enhance --focus <id>` workflows easier to drive.
+- Deterministic repo input collection caches clean git worktrees within an MCP process, avoiding repeated full walks for unchanged large repositories.
+
 ## [0.11.7] - 2026-06-19
 
 ### Changed
