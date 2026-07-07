@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 pub const AUDIT_REPORT_TITLE: &str = "# Audit Issues";
 pub const AUDIT_TRANSPARENCY_PREFIX: &str =
-    "Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli):";
+    "Generated with [oy-cli](https://crates.io/crates/oy-cli):";
 
 pub const AUDIT_SYSTEM_PROMPT: &str = r#"You are oy in audit mode. Audit the repository for security issues, unnecessary complexity, and material usability or performance problems.
 Write terse, evidence-first, repo-specific findings. Take the largest useful design view supported by the input: local evidence can justify critique of trust boundaries, architecture, workflow shape, data ownership, and operational design.

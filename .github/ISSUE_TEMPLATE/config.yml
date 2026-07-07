@@ -4,5 +4,5 @@ contact_links:
     url: https://www.wa.gov.au/government/publications/vulnerability-disclosure-policy
     about: Do not report security vulnerabilities in a public issue. Follow the WA Government disclosure policy.
   - name: Documentation
-    url: https://github.com/wagov-dtt/oy-cli/blob/main/README.md
+    url: https://github.com/adonm/oy-cli/blob/main/README.md
     about: Check the README, CONTRIBUTING.md, and docs/ before filing an issue.

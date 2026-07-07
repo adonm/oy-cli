@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    if: github.repository_owner == 'wagov-dtt'
+    if: github.repository_owner == 'adonm'
     name: Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     permissions:
@@ -66,7 +66,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    if: github.repository_owner == 'wagov-dtt'
+    if: github.repository_owner == 'adonm'
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -144,7 +144,7 @@ jobs:
         run: gh release edit "${REF_NAME}" --repo "${REPOSITORY}" --draft=false
 
   publish-crate:
-    if: github.repository_owner == 'wagov-dtt'
+    if: github.repository_owner == 'adonm'
     needs: release
     runs-on: ubuntu-latest
     environment: crates-io

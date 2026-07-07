@@ -6,8 +6,8 @@ rust-version = "1.96"
 description = "OpenCode launcher and deterministic MCP helpers for repository audit and review workflows"
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/wagov-dtt/oy-cli"
-homepage = "https://github.com/wagov-dtt/oy-cli"
+repository = "https://github.com/adonm/oy-cli"
+homepage = "https://crates.io/crates/oy-cli"
 keywords = ["ai", "cli", "opencode", "mcp", "audit"]
 categories = ["command-line-utilities", "development-tools"]
 

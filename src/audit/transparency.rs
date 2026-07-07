@@ -9,7 +9,7 @@ use super::{AuditOutputFormat, DEFAULT_MAX_REVIEW_CHUNKS};
 pub(crate) const AUDIT_REPORT_TITLE: &str = "# Audit Issues";
 pub(crate) const REVIEW_REPORT_TITLE: &str = "# Code Quality Review";
 pub(crate) const TRANSPARENCY_PREFIX: &str =
-    "Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli):";
+    "Generated with [oy-cli](https://crates.io/crates/oy-cli):";
 
 pub(crate) fn default_output_path(format: AuditOutputFormat) -> PathBuf {
     match format {
@@ -287,8 +287,8 @@ mod tests {
     #[test]
     fn with_transparency_line_inserts_title_and_replaces_existing_line() {
         let out = with_audit_transparency_line(
-            "> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `old` · 2026-01-01\n\n## Details\n",
-            "> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `oy audit` · 2026-06-06",
+            "> Generated with [oy-cli](https://crates.io/crates/oy-cli): `old` · 2026-01-01\n\n## Details\n",
+            "> Generated with [oy-cli](https://crates.io/crates/oy-cli): `oy audit` · 2026-06-06",
         );
         assert!(out.starts_with("# Audit Issues\n\n> Generated with [oy-cli]"));
         assert!(out.contains("`oy audit`"));
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn summary_is_inserted_after_transparency_line() {
         let out = with_succinct_findings_summary(
-            "# Audit Issues\n\n> Generated with [oy-cli](https://github.com/wagov-dtt/oy-cli): `oy audit` · 2026-06-06\n\n## Detailed findings\n\n### High: path traversal reaches file writes\n\n- Evidence: `src/files.rs:42` passes user input into write.\n",
+            "# Audit Issues\n\n> Generated with [oy-cli](https://crates.io/crates/oy-cli): `oy audit` · 2026-06-06\n\n## Detailed findings\n\n### High: path traversal reaches file writes\n\n- Evidence: `src/files.rs:42` passes user input into write.\n",
         );
         assert!(out.find("Generated with").unwrap() < out.find("## Findings summary").unwrap());
         assert!(

@@ -4,7 +4,7 @@ set -eu
 # Install or upgrade oy and its optional local helpers with mise.
 #
 # Intended curl usage:
-#   curl -fsSL https://wagov-dtt.github.io/oy-cli/install.sh | sh
+#   curl -fsSL https://adonm.github.io/oy-cli/install.sh | sh
 #
 # Environment knobs:
 #   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases

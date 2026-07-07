@@ -1,7 +1,7 @@
 # Recommended labels for oy-cli.
 # Apply these via GitHub's issue label UI or with a tool like `github-label-sync`.
 #
-#   npx github-label-sync --access-token $GITHUB_TOKEN --labels .github/labels.yml wagov-dtt/oy-cli
+#   npx github-label-sync --access-token $GITHUB_TOKEN --labels .github/labels.yml adonm/oy-cli
 
 - name: "good-first-issue"
   color: "7057ff"

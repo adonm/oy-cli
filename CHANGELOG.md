@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Moved repository, install, Pages, and release workflow links to `adonm/oy-cli`, and pointed generated `oy-cli` metadata links at crates.io.
+
 ## [0.11.11] - 2026-07-07
 
 ### Added

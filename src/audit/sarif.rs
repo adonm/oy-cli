@@ -52,7 +52,7 @@ pub(crate) fn render_sarif(report: &str) -> Result<String> {
                 "driver": {
                     "name": "oy-cli",
                     "semanticVersion": env!("CARGO_PKG_VERSION"),
-                    "informationUri": "https://github.com/wagov-dtt/oy-cli",
+                    "informationUri": "https://crates.io/crates/oy-cli",
                     "rules": rules.into_values().collect::<Vec<_>>()
                 }
             },
