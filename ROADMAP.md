@@ -29,6 +29,14 @@
 - Remove dependencies when deterministic helpers no longer need them.
 - Prefer host built-ins over new oy MCP tools.
 
+### 5. Track opencode 2.0 Integration
+
+- Wait for a tagged/stable opencode 2.0 release before making it the default path.
+- Prefer v2 HTTP/SSE APIs over CLI flag compatibility: create sessions with `agent: "oy"`, run audit/review/enhance through `session.command`, and subscribe to events.
+- Use `opencode serve --stdio` as an optional sidecar/embed mode; avoid linking opencode into the Rust binary.
+- Emit native v2 config when available (`agents`, `commands`, `permissions`, `mcp.servers`) while keeping v1-compatible setup until v2 stabilizes.
+- Keep oy MCP as the deterministic helper boundary; consider v2 custom tools/plugins only if MCP becomes a blocker.
+
 ## Non-Goals
 
 - Rebuilding host features inside `oy`.
