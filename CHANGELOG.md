@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.11] - 2026-07-07
+
+### Added
+- Added a GitHub Pages deployment workflow and static docs index for the hosted install script.
+
+### Changed
+- Updated install documentation to use normal `mise activate` shell setup instead of a direct shims `PATH` export.
+
 ## [0.11.10] - 2026-07-07
 
 ### Added

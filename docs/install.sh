@@ -86,6 +86,8 @@ case "${OY_SKIP_SETUP:-}" in
 esac
 
 log "Done."
-log "Restart your shell, or add mise shims to this session now:"
-log "  export PATH=\"$mise_shims_dir:\$PATH\""
+log "Restart your shell, or activate mise in this session now:"
+log "  eval \"\$(\"$mise_bin\" activate bash)\""
+log "  # zsh:  eval \"\$(\"$mise_bin\" activate zsh)\""
+log "  # fish: \"$mise_bin\" activate fish | source"
 log "Then run: oy doctor"

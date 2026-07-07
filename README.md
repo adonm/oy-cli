@@ -11,11 +11,11 @@ opencode owns the model, UI, sessions, permissions, editing, shell, web, and gen
 
 ```bash
 curl -fsSL https://wagov-dtt.github.io/oy-cli/install.sh | sh
-export PATH="$HOME/.local/share/mise/shims:$PATH"
+eval "$("$HOME/.local/bin/mise" activate bash)"
 oy
 ```
 
-This uses [`mise`](https://mise.jdx.dev/) to install or upgrade `oy`, opencode, `tokei`, and Universal Ctags with `--minimum-release-age 0`, then runs `oy setup`. If GitHub Pages is not enabled for the docs site, use the raw script URL instead:
+This uses [`mise`](https://mise.jdx.dev/) to install or upgrade `oy`, opencode, `tokei`, and Universal Ctags with `--minimum-release-age 0`, then runs `oy setup`. The activation line is for bash; use `zsh` instead for zsh, or the fish command printed by the installer. The GitHub Pages workflow publishes `docs/install.sh` to that URL; raw GitHub is the fallback:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wagov-dtt/oy-cli/main/docs/install.sh | sh
