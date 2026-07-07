@@ -19,8 +19,8 @@ This document covers only the deterministic tools served by `oy mcp`.
 Install optional local helper CLIs with:
 
 ```bash
-mise use cargo:tokei
-mise use aqua:universal-ctags/ctags
+mise use --global cargo:tokei
+mise use --global github:universal-ctags/ctags
 # or: brew install tokei universal-ctags
 ```
 

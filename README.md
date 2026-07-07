@@ -10,7 +10,21 @@ opencode owns the model, UI, sessions, permissions, editing, shell, web, and gen
 ## Quick Start
 
 ```bash
-mise use cargo-binstall cargo:oy-cli
+curl -fsSL https://wagov-dtt.github.io/oy-cli/install.sh | sh
+export PATH="$HOME/.local/share/mise/shims:$PATH"
+oy
+```
+
+This uses [`mise`](https://mise.jdx.dev/) to install or upgrade `oy`, opencode, `tokei`, and Universal Ctags with `--minimum-release-age 0`, then runs `oy setup`. If GitHub Pages is not enabled for the docs site, use the raw script URL instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wagov-dtt/oy-cli/main/docs/install.sh | sh
+```
+
+Manual install:
+
+```bash
+mise use --global cargo-binstall cargo:oy-cli opencode
 oy setup
 oy
 ```
@@ -29,8 +43,8 @@ If both `oy` and opencode are active mise tools, `oy upgrade` upgrades them toge
 Optional helper installs:
 
 ```bash
-mise use cargo:tokei
-mise use aqua:universal-ctags/ctags
+mise use --global cargo:tokei
+mise use --global github:universal-ctags/ctags
 # or, on macOS/Linux with Homebrew:
 brew install tokei universal-ctags
 ```

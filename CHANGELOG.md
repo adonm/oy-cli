@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.10] - 2026-07-07
+
+### Added
+- Added a mise-based curl setup script for installing or upgrading oy, opencode, tokei, and Universal Ctags with a zero minimum release age.
+
+### Fixed
+- Fixed `oy doctor --install-missing` to activate tools with `mise use --global` and install Universal Ctags through the working GitHub backend.
+
 ## [0.11.9] - 2026-07-06
 
 ### Security

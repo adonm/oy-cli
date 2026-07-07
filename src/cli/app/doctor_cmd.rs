@@ -7,8 +7,12 @@ use std::path::Path;
 
 use crate::config;
 
-const TOKEI_HINT: &str = "mise use cargo:tokei || brew install tokei";
-const CTAGS_HINT: &str = "mise use aqua:universal-ctags/ctags || brew install universal-ctags";
+const OPENCODE_MISE_TOOL: &str = "opencode";
+const TOKEI_MISE_TOOL: &str = "cargo:tokei";
+const CTAGS_MISE_TOOL: &str = "github:universal-ctags/ctags";
+const TOKEI_HINT: &str = "mise use --global cargo:tokei || brew install tokei";
+const CTAGS_HINT: &str =
+    "mise use --global github:universal-ctags/ctags || brew install universal-ctags";
 
 #[derive(Debug, Args, Clone)]
 pub(super) struct DoctorArgs {
@@ -22,7 +26,7 @@ pub(super) struct DoctorArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Install missing opencode/tokei/ctags with mise when mise is available"
+        help = "Install and activate missing opencode/tokei/ctags with global mise config when mise is available"
     )]
     install_missing: bool,
 }
@@ -176,15 +180,23 @@ fn recommended_next_step(
 fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
     let mut tools = Vec::new();
     if !opencode_ok {
-        tools.push("opencode");
+        tools.push(OPENCODE_MISE_TOOL);
     }
     if !tokei_ok {
-        tools.push("cargo:tokei");
+        tools.push(TOKEI_MISE_TOOL);
     }
     if !ctags_ok {
-        tools.push("aqua:universal-ctags/ctags");
+        tools.push(CTAGS_MISE_TOOL);
     }
     tools
+}
+
+fn mise_use_global_args(tools: &[&str]) -> Vec<String> {
+    ["use", "--global"]
+        .into_iter()
+        .chain(tools.iter().copied())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn maybe_install_missing_with_mise(
@@ -205,18 +217,17 @@ fn maybe_install_missing_with_mise(
         return Ok(());
     }
     crate::ui::line(format_args!(
-        "Installing missing tools with mise: {}",
+        "Installing and activating missing tools with mise: {}",
         tools.join(" ")
     ));
     let status = std::process::Command::new("mise")
-        .arg("install")
-        .args(&tools)
+        .args(mise_use_global_args(&tools))
         .status()?;
     if status.success() {
-        crate::ui::success("mise install completed");
+        crate::ui::success("mise use --global completed");
     } else {
         crate::ui::err_line(format_args!(
-            "mise install failed with exit code {}",
+            "mise use --global failed with exit code {}",
             status.code().unwrap_or(1)
         ));
     }
@@ -229,7 +240,7 @@ fn should_prompt_install(tools: &[&str]) -> Result<bool> {
     }
     crate::ui::line("");
     crate::ui::out(&format!(
-        "Install missing tools with mise now? [{}] [y/N] ",
+        "Install and activate missing tools with mise now? [{}] [y/N] ",
         tools.join(" ")
     ));
     std::io::stdout().flush()?;
@@ -279,6 +290,23 @@ mod tests {
             missing_mise_tools(false, false, true),
             vec!["opencode", "cargo:tokei"]
         );
+        assert_eq!(
+            missing_mise_tools(true, true, false),
+            vec!["github:universal-ctags/ctags"]
+        );
         assert!(missing_mise_tools(true, true, true).is_empty());
+    }
+
+    #[test]
+    fn mise_install_uses_global_use_to_activate_shims() {
+        assert_eq!(
+            mise_use_global_args(&["cargo:tokei", "github:universal-ctags/ctags"]),
+            vec![
+                "use",
+                "--global",
+                "cargo:tokei",
+                "github:universal-ctags/ctags"
+            ]
+        );
     }
 }
