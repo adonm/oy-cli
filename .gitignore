@@ -43,5 +43,8 @@ Thumbs.db
 # Local config/session smoke-test artifacts
 .config/oy-rust/
 
-# Local audit artifacts
+# Local audit/review artifacts
+/ISSUES.md
+/REVIEW.md
+/oy.sarif
 .tmp/

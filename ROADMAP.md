@@ -19,9 +19,11 @@
 
 ### 3. Improve Generated Agents
 
-- Tighten `oy-auditor`, `oy-reviewer`, and `oy-enhancer` prompts based on real runs.
+- Use `docs/evaluation.md` to test prompt changes against pinned public OSS projects before merging substantial prompt edits.
+- Build a small corpus with recall canaries, regression diffs, and precision baselines.
+- Track scorecards by behavior: recall, precision, evidence quality, actionability, cost, and protocol compliance.
 - Keep agents explicit about using edit/bash tools for changes and oy MCP only for deterministic inputs/reports.
-- Add examples for `/oy-audit`, `/oy-review`, and `/oy-enhance` workflows.
+- Add examples for `/oy-audit`, `/oy-review`, and `/oy-enhance` workflows after the evaluation corpus stabilizes.
 
 ### 4. Keep The Native Surface Small
 
@@ -42,3 +44,4 @@
 - Rebuilding host features inside `oy`.
 - Adding shell, edit, webfetch, or repo clone to `oy mcp`.
 - Persisting chat/session/model state in `oy`.
+- Running provider-backed LLM evaluations in default CI.

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Added `docs/evaluation.md`, a local prompt/agent evaluation playbook built around pinned public open-source repositories, scorecards, and `.tmp/eval/` artifacts.
+
+### Changed
+- Treat generated `ISSUES.md`, `REVIEW.md`, and SARIF reports in this repository as local artifacts rather than tracked source files.
+
 ## [0.11.12] - 2026-07-07
 
 ### Changed

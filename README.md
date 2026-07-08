@@ -217,5 +217,6 @@ Important files:
 | `src/audit/findings.rs` | Structured findings extraction/render support |
 | `src/tools/workspace/outline.rs` | Optional outline helper via Universal Ctags |
 | `src/tools/workspace/sloc.rs` | SLOC helper |
+| `docs/evaluation.md` | Local LLM-evaluation playbook for prompt/agent changes |
 
-See `docs/architecture.md`, `docs/tool-safety.md`, `SECURITY.md`, and `CONTRIBUTING.md` for more detail.
+See `docs/architecture.md`, `docs/tool-safety.md`, `docs/evaluation.md`, `SECURITY.md`, and `CONTRIBUTING.md` for more detail.

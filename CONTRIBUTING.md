@@ -36,7 +36,16 @@ Keep `Cargo.lock` in sync with `Cargo.toml` after dependency changes.
 2. Make the smallest targeted change.
 3. Add focused tests for behavior changes.
 4. Run `just check`.
-5. Update user-facing docs and `CHANGELOG.md` for behavior changes.
+5. For generated prompt/agent changes, run or update the evaluation plan in `docs/evaluation.md`.
+6. Update user-facing docs and `CHANGELOG.md` for behavior changes.
+
+## Prompt And Agent Changes
+
+Prompt quality is live-model behavior, not a deterministic unit-test problem.
+Before changing generated agents or skills, read `docs/evaluation.md` and use a
+pinned public-repository corpus when possible. Keep raw model outputs under
+`.tmp/eval/`; do not commit generated `ISSUES.md`, `REVIEW.md`, or SARIF files
+from local runs.
 
 ## Design Rules
 
@@ -67,8 +76,9 @@ See also:
 
 - `docs/architecture.md` for runtime flow and ownership boundaries
 - `docs/tool-safety.md` for MCP tool boundaries
+- `docs/evaluation.md` for prompt/agent evaluation on public OSS corpora
 - `SECURITY.md` for user-facing security guidance
-- `ISSUES.md` and `REVIEW.md` for current generated reports
+- `ROADMAP.md` for current project priorities
 
 ## Release Notes
 
