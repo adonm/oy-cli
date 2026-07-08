@@ -302,12 +302,10 @@ pub(crate) fn audit_workflow_command(
     refresh_opencode_for_launch()?;
     let mut message = String::from("Run an oy audit for this workspace.");
     if !focus.is_empty() {
-        message.push_str(" Focus: ");
-        message.push_str(&focus.join(" "));
-        message.push('.');
+        push_labeled_sentence(&mut message, "Focus", &focus.join(" "));
     }
     message.push_str(&format!(
-        " Write output to {}. Use max_chunks {}. Format: {}.",
+        " Write output to {}. Use max_chunks {}. Format: {}. Pass report plus findings[] to the renderer.",
         out.display(),
         max_chunks,
         format.name()
@@ -329,17 +327,13 @@ pub(crate) fn review_workflow_command(
     refresh_opencode_for_launch()?;
     let mut message = String::from("Run an oy review.");
     if let Some(target) = target.filter(|target| !target.trim().is_empty()) {
-        message.push_str(" Target: ");
-        message.push_str(&target);
-        message.push('.');
+        push_labeled_sentence(&mut message, "Target", &target);
     }
     if !focus.is_empty() {
-        message.push_str(" Focus: ");
-        message.push_str(&focus.join(" "));
-        message.push('.');
+        push_labeled_sentence(&mut message, "Focus", &focus.join(" "));
     }
     message.push_str(&format!(
-        " Write output to {}. Use max_chunks {}.",
+        " Write output to {}. Use max_chunks {}. Pass report plus findings[] to the renderer.",
         out.display(),
         max_chunks
     ));
@@ -362,14 +356,10 @@ pub(crate) fn enhance_workflow_command(
     let mut message =
         String::from("Run oy enhance: fix one actionable finding from ISSUES.md or REVIEW.md.");
     if let Some(target) = review_target.filter(|target| !target.trim().is_empty()) {
-        message.push_str(" Review target: ");
-        message.push_str(&target);
-        message.push('.');
+        push_labeled_sentence(&mut message, "Review target", &target);
     }
     if !focus.is_empty() {
-        message.push_str(" Focus: ");
-        message.push_str(&focus.join(" "));
-        message.push('.');
+        push_labeled_sentence(&mut message, "Focus", &focus.join(" "));
     }
     message.push_str(&format!(
         " Audit max chunks: {audit_max_chunks}. Review max chunks: {review_max_chunks}."
@@ -384,6 +374,20 @@ pub(crate) fn enhance_workflow_command(
     }
     args.push(message);
     run_opencode(args)
+}
+
+fn push_labeled_sentence(message: &mut String, label: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    message.push(' ');
+    message.push_str(label);
+    message.push_str(": ");
+    message.push_str(value);
+    if !matches!(value.chars().last(), Some('.' | '?' | '!')) {
+        message.push('.');
+    }
 }
 
 fn run_opencode(args: Vec<String>) -> Result<i32> {
@@ -538,7 +542,7 @@ fn merge_commands(object: &mut Map<String, Value>) {
         json!({
             "description": "Run a deterministic no-generic-tools security audit.",
             "agent": "oy-auditor",
-            "template": "Run an oy audit for this workspace with deterministic oy inputs and write the requested report."
+            "template": "Run an oy audit with deterministic oy inputs. Write the requested report and pass report plus findings[] to the renderer."
         }),
     );
     command.insert(
@@ -546,7 +550,7 @@ fn merge_commands(object: &mut Map<String, Value>) {
         json!({
             "description": "Run a deterministic no-generic-tools code-quality review.",
             "agent": "oy-reviewer",
-            "template": "Run an oy code-quality review for this workspace or target diff with deterministic oy inputs and write the requested report."
+            "template": "Run an oy review for this workspace or target diff with deterministic oy inputs. Write the requested report and pass report plus findings[] to the renderer."
         }),
     );
     command.insert(
@@ -554,7 +558,7 @@ fn merge_commands(object: &mut Map<String, Value>) {
         json!({
             "description": "Fix findings from ISSUES.md or REVIEW.md one at a time.",
             "agent": "oy-enhancer",
-            "template": "Read ISSUES.md and REVIEW.md, select one high-confidence finding, fix it with edit/bash tools, run targeted verification, and summarize the result."
+            "template": "Read ISSUES.md/REVIEW.md, select one high-confidence finding, fix it minimally, verify, and summarize."
         }),
     );
 }

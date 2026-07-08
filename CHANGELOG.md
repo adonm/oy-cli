@@ -2,11 +2,18 @@
 
 ## Unreleased
 
+## [0.11.13] - 2026-07-09
+
 ### Added
 - Added `docs/evaluation.md`, a local prompt/agent evaluation playbook built around pinned public open-source repositories, scorecards, and `.tmp/eval/` artifacts.
+- Added `docs/eval-corpus.toml`, `scripts/eval_runner.py`, and `just eval*` recipes for local-only prompt/agent evaluation runs against pinned public repositories.
 
 ### Changed
 - Treat generated `ISSUES.md`, `REVIEW.md`, and SARIF reports in this repository as local artifacts rather than tracked source files.
+- Tightened generated oy/opencode prompts and report-rendering instructions to always pass structured findings, including `[]` for no findings.
+
+### Fixed
+- Made audit/review report rendering honor supplied structured findings, replace malformed machine-readable blocks, and preserve exact model strings in transparency lines during eval runs.
 
 ## [0.11.12] - 2026-07-07
 

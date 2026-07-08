@@ -9,6 +9,7 @@
 
 pub(crate) use super::findings::{
     Finding, findings_from_report, normalized_findings_payload, with_structured_findings_block,
+    with_structured_findings_payload,
 };
 pub(crate) use super::sarif::render_sarif;
 pub(crate) use super::transparency::{

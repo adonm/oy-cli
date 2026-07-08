@@ -47,6 +47,13 @@ pinned public-repository corpus when possible. Keep raw model outputs under
 `.tmp/eval/`; do not commit generated `ISSUES.md`, `REVIEW.md`, or SARIF files
 from local runs.
 
+Useful commands:
+
+```bash
+just eval
+python3 scripts/eval_runner.py run --dry-run
+```
+
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.

@@ -272,8 +272,8 @@ fn render_report_schema(default_out: &str, sarif: bool) -> Value {
     json!({
         "type": "object",
         "properties": {
-            "report": { "type": "string", "description": "Markdown report body" },
-            "findings": { "description": "Structured findings array or object with findings" },
+            "report": { "type": "string", "description": "Markdown report body; renderer owns transparency and oy-findings block" },
+            "findings": { "description": "Structured findings array, [] for no findings, or object with findings/oy-findings" },
             "out": { "type": "string", "default": default_out },
             "format": format,
             "model": { "type": "string", "description": "Model used for the audit/review, included in the transparency line" },
@@ -515,47 +515,40 @@ fn render_audit_report(args: Value) -> Result<Value> {
         .unwrap_or_else(|| audit::default_output_path(format));
     let root = workspace_root()?;
     let output_path = config::resolve_workspace_output_path(&root, &out)?;
-    let report = report_body(args.report, args.findings, "# Audit Issues", "audit")?;
+    let findings_payload = findings_payload(args.findings.as_ref(), "audit")?;
+    let report = report_body(args.report, "# Audit Issues", findings_payload.as_deref())?;
+    let report = with_machine_readable_findings(report, findings_payload.as_deref(), "audit");
+    let report = audit::report::with_audit_transparency_line(
+        &report,
+        &audit::report::audit_transparency_snippet(
+            args.model.as_deref(),
+            args.focus.as_deref(),
+            &out,
+            args.max_chunks,
+            format,
+        ),
+    );
+    let finding_count = audit::report::findings_from_report(&report).len();
     let output = match args.format.as_str() {
-        "markdown" => {
-            let report = audit::report::with_audit_transparency_line(
-                &report,
-                &audit::report::audit_transparency_snippet(
-                    args.model.as_deref(),
-                    args.focus.as_deref(),
-                    &out,
-                    args.max_chunks,
-                    format,
-                ),
-            );
-            let report = audit::report::with_structured_findings_block(&report, "audit");
-            audit::report::with_succinct_findings_summary(&report)
-        }
-        "sarif" => {
-            let report = audit::report::with_audit_transparency_line(
-                &report,
-                &audit::report::audit_transparency_snippet(
-                    args.model.as_deref(),
-                    args.focus.as_deref(),
-                    &out,
-                    args.max_chunks,
-                    format,
-                ),
-            );
-            audit::report::render_sarif(&report)?
-        }
+        "markdown" => audit::report::with_succinct_findings_summary(&report),
+        "sarif" => audit::report::render_sarif(&report)?,
         other => bail!("unsupported audit report format: {other}"),
     };
     config::write_workspace_file(&output_path, output.as_bytes())?;
     Ok(json!({
         "output": output_path,
         "format": args.format,
-        "findings": audit::report::findings_from_report(&report).len(),
+        "findings": finding_count,
     }))
 }
 
 fn render_review_report(args: Value) -> Result<Value> {
-    let mut args: RenderReportArgs = parse_args(args)?;
+    let args: RenderReportArgs = parse_args(args)?;
+    let root = workspace_root()?;
+    render_review_report_at(&root, args)
+}
+
+fn render_review_report_at(root: &Path, mut args: RenderReportArgs) -> Result<Value> {
     if args.format != "markdown" {
         bail!("review reports support markdown only");
     }
@@ -563,14 +556,14 @@ fn render_review_report(args: Value) -> Result<Value> {
         .out
         .take()
         .unwrap_or_else(crate::review::default_output_path);
-    let root = workspace_root()?;
-    let output_path = config::resolve_workspace_output_path(&root, &out)?;
+    let output_path = config::resolve_workspace_output_path(root, &out)?;
+    let findings_payload = findings_payload(args.findings.as_ref(), "review")?;
     let report = report_body(
         args.report,
-        args.findings,
         "# Code Quality Review",
-        "review",
+        findings_payload.as_deref(),
     )?;
+    let report = with_machine_readable_findings(report, findings_payload.as_deref(), "review");
     let report = audit::report::with_review_transparency_line(
         &report,
         &audit::report::review_transparency_snippet(
@@ -581,7 +574,7 @@ fn render_review_report(args: Value) -> Result<Value> {
             args.max_chunks,
         ),
     );
-    let output = audit::report::with_structured_findings_block(&report, "review");
+    let output = report;
     config::write_workspace_file(&output_path, output.as_bytes())?;
     Ok(json!({
         "output": output_path,
@@ -592,19 +585,40 @@ fn render_review_report(args: Value) -> Result<Value> {
 
 fn report_body(
     report: Option<String>,
-    findings: Option<Value>,
     title: &str,
-    fallback_source: &str,
+    findings_payload: Option<&str>,
 ) -> Result<String> {
     if let Some(report) = report.filter(|report| !report.trim().is_empty()) {
         return Ok(report);
     }
-    let findings = findings.ok_or_else(|| anyhow!("report or findings is required"))?;
-    let payload = audit::report::normalized_findings_payload(&findings, fallback_source)
-        .unwrap_or(serde_json::to_string_pretty(&findings)?);
+    let payload = findings_payload.ok_or_else(|| anyhow!("report or findings is required"))?;
     Ok(format!(
         "{title}\n\n## Machine-readable findings\n\n```json oy-findings\n{payload}\n```\n"
     ))
+}
+
+fn findings_payload(findings: Option<&Value>, fallback_source: &str) -> Result<Option<String>> {
+    findings
+        .map(|findings| {
+            audit::report::normalized_findings_payload(findings, fallback_source).ok_or_else(|| {
+                anyhow!(
+                    "findings must be a JSON array or an object with a findings/oy-findings array"
+                )
+            })
+        })
+        .transpose()
+}
+
+fn with_machine_readable_findings(
+    report: String,
+    findings_payload: Option<&str>,
+    source: &str,
+) -> String {
+    if let Some(payload) = findings_payload {
+        audit::report::with_structured_findings_payload(&report, payload)
+    } else {
+        audit::report::with_structured_findings_block(&report, source)
+    }
 }
 
 fn file_summaries(files: &[input::AuditFile]) -> Vec<Value> {
@@ -934,5 +948,49 @@ mod tests {
         assert_eq!(report["exists"], false);
         assert_eq!(report["path"], "REVIEW.md");
         assert_eq!(report["report"], "");
+    }
+
+    #[test]
+    fn render_review_report_adds_empty_findings_block_for_no_findings() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let args = parse_args(json!({
+            "report": "# Code Quality Review\n\n## Verdict\n\nNo major structural concerns.\n",
+            "out": "REVIEW.md",
+            "model": "openai/gpt-5.5"
+        }))
+        .unwrap();
+        let result = render_review_report_at(dir.path(), args).unwrap();
+
+        let report = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
+        assert_eq!(result["findings"], 0);
+        assert!(report.contains("OY_MODEL=openai/gpt-5.5 oy review"));
+        assert!(report.contains("```json oy-findings\n[]\n```"));
+    }
+
+    #[test]
+    fn render_review_report_uses_supplied_findings_with_markdown_report() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let args = parse_args(json!({
+            "report": "# Code Quality Review\n\n## Verdict\n\nNeeds work.\n\n## Machine-readable findings\n\n```json oy-findings\nnot json\n```\n",
+            "findings": [{
+                "severity": "Medium",
+                "title": "diff keeps duplicate source of truth",
+                "locations": [{ "path": "src/lib.rs", "line": 7 }],
+                "evidence": "src/lib.rs:7 duplicates the option list",
+                "body": "Use one canonical option list."
+            }],
+            "out": "REVIEW.md"
+        }))
+        .unwrap();
+        let result = render_review_report_at(dir.path(), args).unwrap();
+
+        let report = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
+        assert_eq!(result["findings"], 1);
+        assert_eq!(report.matches("```json oy-findings").count(), 1);
+        assert!(!report.contains("not json"));
+        assert!(report.contains("src/lib.rs:7 duplicates the option list"));
+        assert!(report.contains("Use one canonical option list."));
     }
 }

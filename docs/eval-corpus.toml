@@ -1,0 +1,138 @@
+[corpus]
+version = 1
+description = "Local oy prompt-evaluation corpus researched from adonm public GitHub activity."
+notes = [
+  "Recent public activity is concentrated in Rust/DataFusion/geospatial work: quackgis, zuko, Apache Sedona DB, quack-rs, datafusion-ducklake, and datafusion-postgres.",
+  "Initial tasks favor small pinned PR diffs with known intent, plus one focused audit recall canary and one precision baseline.",
+  "The corpus is intentionally local-only: runner artifacts live under .tmp/eval/ and provider-backed runs are not part of default CI.",
+]
+
+[[tasks]]
+id = "sedona-geoparquet-aws-allowlist-audit"
+enabled = true
+lane = "recall-canary"
+workflow = "audit"
+repo = "apache/sedona-db"
+url = "https://github.com/apache/sedona-db.git"
+license = "Apache-2.0"
+checkout = "b23ccd15f649487b043be219b2dfbb6bad7a668d"
+fetch_refs = ["b23ccd15f649487b043be219b2dfbb6bad7a668d"]
+focus = "rust/sedona-geoparquet/src/provider.rs"
+max_chunks = 80
+source = "https://github.com/apache/sedona-db/pull/1013"
+notes = "Pre-fix focused audit should notice AWS table-option allowlist drift around allow_http/session_token and dead accepted options."
+expected_paths = ["rust/sedona-geoparquet/src/provider.rs"]
+quality_keywords = [
+  "aws.allow_http",
+  "aws.session_token",
+  "aws.bucket_name",
+  "aws.force_path_style",
+  "allowlist",
+]
+min_quality_matches = 2
+
+[[tasks]]
+id = "sedona-geoparquet-aws-allowlist-review"
+enabled = true
+lane = "regression-diff"
+workflow = "review"
+repo = "apache/sedona-db"
+url = "https://github.com/apache/sedona-db.git"
+license = "Apache-2.0"
+checkout = "86947d264f8c717a668cb744a35061cda776f1bd"
+target = "b23ccd15f649487b043be219b2dfbb6bad7a668d"
+fetch_refs = [
+  "pull/1013/head:refs/oy-eval/pr-1013",
+  "b23ccd15f649487b043be219b2dfbb6bad7a668d",
+]
+focus = "Review whether the GeoParquet AWS option allowlist now matches its actual consumer and whether rejected options fail clearly."
+max_chunks = 80
+source = "https://github.com/apache/sedona-db/pull/1013"
+notes = "Known merged PR from public activity: fix aws.allow_http/session_token and reject dead AWS options."
+expected_paths = ["rust/sedona-geoparquet/src/provider.rs"]
+quality_keywords = [
+  "aws.allow_http",
+  "aws.session_token",
+  "aws.bucket_name",
+  "AwsOptions",
+  "allowlist",
+]
+min_quality_matches = 3
+
+[[tasks]]
+id = "quack-rs-binary-safe-blob-review"
+enabled = true
+lane = "regression-diff"
+workflow = "review"
+repo = "tomtom215/quack-rs"
+url = "https://github.com/tomtom215/quack-rs.git"
+license = "MIT"
+checkout = "049fed552da12c4af8f5c5486900ac75cb196a50"
+target = "1564bdb9e09f3c01f0b18dfa93a233199939bdc3"
+fetch_refs = [
+  "pull/104/head:refs/oy-eval/pr-104",
+  "1564bdb9e09f3c01f0b18dfa93a233199939bdc3",
+]
+focus = "Review binary-safe BLOB handling across the DuckDB FFI boundary; look for string/bytes confusion and lifetime hazards."
+max_chunks = 80
+source = "https://github.com/tomtom215/quack-rs/pull/104"
+notes = "Opened PR from public activity: make read_blob binary-safe and add Value::as_blob()."
+expected_paths = [
+  "src/value.rs",
+  "src/vector/reader.rs",
+  "src/vector/string.rs",
+]
+quality_keywords = [
+  "read_blob",
+  "Value::as_blob",
+  "binary-safe",
+  "BLOB",
+  "UTF-8",
+]
+min_quality_matches = 3
+
+[[tasks]]
+id = "ducklake-multicatalog-object-path-review"
+enabled = true
+lane = "regression-diff"
+workflow = "review"
+repo = "datafusion-contrib/datafusion-ducklake"
+url = "https://github.com/datafusion-contrib/datafusion-ducklake.git"
+license = "Apache-2.0"
+checkout = "e60794e8a00f6c76cc227e5c7c739eb5431f4915"
+target = "e6412b8259246840b3d0185c060a45b3db69384f"
+fetch_refs = [
+  "pull/158/head:refs/oy-eval/pr-158",
+  "e6412b8259246840b3d0185c060a45b3db69384f",
+]
+focus = "Review multi-catalog object path scoping; look for cross-catalog writes, path collisions, and state/transaction boundary issues."
+max_chunks = 80
+source = "https://github.com/datafusion-contrib/datafusion-ducklake/pull/158"
+notes = "Opened PR from public activity: register scoped object paths for multicatalog writes."
+expected_paths = ["src/table_writer.rs"]
+quality_keywords = [
+  "catalog",
+  "object path",
+  "table_writer",
+  "scoped",
+  "collision",
+]
+min_quality_matches = 3
+
+[[tasks]]
+id = "zuko-remote-pty-precision-audit"
+enabled = true
+lane = "precision-baseline"
+workflow = "audit"
+repo = "adonm/zuko"
+url = "https://github.com/adonm/zuko.git"
+license = "Apache-2.0"
+checkout = "dbf1987dab5ad2c41a96f39aa92733798079875a"
+fetch_refs = ["dbf1987dab5ad2c41a96f39aa92733798079875a"]
+focus = "Audit remote PTY host/client trust boundaries. Be strict: report only concrete auth, authorization, filesystem, process, or network issues with evidence."
+max_chunks = 80
+source = "https://github.com/adonm/zuko"
+notes = "Active public Rust project from recent activity; used as a precision baseline, not a known-vulnerability canary."
+quality_keywords = ["pty", "Iroh", "auth", "permission", "trust boundary"]
+min_quality_matches = 1
+max_findings = 6

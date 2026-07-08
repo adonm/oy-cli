@@ -33,6 +33,18 @@ fix: _fmt _clippy-fix
     cargo update --workspace
     @just check
 
+# Validate the local LLM evaluation corpus without provider/model calls.
+eval:
+    python3 scripts/eval_runner.py validate
+
+# Run local prompt evaluations. Example: just eval-run --dry-run --task zuko-remote-pty-precision-audit
+eval-run *args:
+    python3 scripts/eval_runner.py run {{args}}
+
+# Compare two completed eval runs. Example: just eval-compare .tmp/eval/runs/base .tmp/eval/runs/new
+eval-compare baseline candidate:
+    python3 scripts/eval_runner.py compare {{baseline}} {{candidate}}
+
 # === Individual checks (available as standalone targets) ===
 
 # Check formatting (no changes).

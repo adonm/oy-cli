@@ -295,12 +295,6 @@ impl FindingLocation {
 }
 
 fn finding_from_value(value: &Value) -> Option<Finding> {
-    let body = value_text(value.get("body"));
-    let body = if body.trim().is_empty() {
-        value_text(value.get("details"))
-    } else {
-        body
-    };
     let mut finding = Finding {
         id: value_text(value.get("id")),
         status: value_text(value.get("status")),
@@ -309,11 +303,36 @@ fn finding_from_value(value: &Value) -> Option<Finding> {
         title: value_text(value.get("title")),
         locations: locations_from_value(value),
         evidence: value_text(value.get("evidence")),
-        body,
+        body: body_from_value(value),
         category: non_empty(value_text(value.get("category"))),
     };
     finding.normalize()?;
     Some(finding)
+}
+
+fn body_from_value(value: &Value) -> String {
+    let mut parts = Vec::new();
+    let primary = value_text(value.get("body"));
+    let primary = if primary.trim().is_empty() {
+        let details = value_text(value.get("details"));
+        if details.trim().is_empty() {
+            value_text(value.get("description"))
+        } else {
+            details
+        }
+    } else {
+        primary
+    };
+    if !primary.trim().is_empty() {
+        parts.push(primary);
+    }
+    for (label, key) in [("Impact", "impact"), ("Fix", "fix")] {
+        let text = value_text(value.get(key));
+        if !text.trim().is_empty() {
+            parts.push(format!("{label}: {text}"));
+        }
+    }
+    parts.join("\n\n")
 }
 
 fn normalize_status(status: &str) -> Option<String> {
@@ -402,7 +421,41 @@ fn locations_from_value(value: &Value) -> Vec<FindingLocation> {
     if let Some(location) = value.get("location").and_then(FindingLocation::from_value) {
         locations.push(location);
     }
+    if locations.is_empty()
+        && let Some(location) = top_level_location_from_value(value)
+    {
+        locations.push(location);
+    }
     locations
+}
+
+fn top_level_location_from_value(value: &Value) -> Option<FindingLocation> {
+    let path = value
+        .get("path")
+        .or_else(|| value.get("file"))
+        .or_else(|| value.get("uri"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let line = value
+        .get("line")
+        .and_then(|line| match line {
+            Value::Number(number) => number.as_u64(),
+            Value::String(text) => text.trim().parse::<u64>().ok(),
+            _ => None,
+        })
+        .and_then(|line| u32::try_from(line).ok());
+    let symbol = value
+        .get("symbol")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .map(str::to_string);
+    Some(FindingLocation { path, line, symbol })
 }
 
 fn value_text(value: Option<&Value>) -> String {
@@ -424,17 +477,19 @@ pub(super) fn non_empty(value: String) -> Option<String> {
     (!value.trim().is_empty()).then_some(value)
 }
 
-fn parse_structured_findings_payload(payload: &str) -> Vec<Finding> {
-    let Ok(value) = serde_json::from_str::<Value>(payload) else {
-        return Vec::new();
-    };
-    let items = value
-        .as_array()
-        .or_else(|| value.get("findings").and_then(Value::as_array));
-    let Some(items) = items else {
-        return Vec::new();
-    };
-    items.iter().filter_map(finding_from_value).collect()
+fn findings_array(value: &Value) -> Option<&Vec<Value>> {
+    value.as_array().or_else(|| {
+        value
+            .get("findings")
+            .or_else(|| value.get("oy-findings"))
+            .and_then(Value::as_array)
+    })
+}
+
+fn parse_structured_findings_payload(payload: &str) -> Option<Vec<Finding>> {
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let items = findings_array(&value)?;
+    Some(items.iter().filter_map(finding_from_value).collect())
 }
 
 fn structured_findings_payload(report: &str) -> Option<String> {
@@ -464,8 +519,9 @@ fn structured_findings_payload(report: &str) -> Option<String> {
 }
 
 pub(crate) fn findings_from_report(report: &str) -> Vec<Finding> {
-    let structured = structured_findings_from_report(report);
-    if !structured.is_empty() {
+    if let Some(payload) = structured_findings_payload(report)
+        && let Some(structured) = parse_structured_findings_payload(&payload)
+    {
         return structured;
     }
     extract_findings(&report.lines().collect::<Vec<_>>())
@@ -475,9 +531,7 @@ pub(crate) fn findings_from_report(report: &str) -> Vec<Finding> {
 }
 
 pub(crate) fn normalized_findings_payload(value: &Value, fallback_source: &str) -> Option<String> {
-    let items = value
-        .as_array()
-        .or_else(|| value.get("findings").and_then(Value::as_array))?;
+    let items = findings_array(value)?;
     let findings = items
         .iter()
         .filter_map(|item| {
@@ -490,21 +544,14 @@ pub(crate) fn normalized_findings_payload(value: &Value, fallback_source: &str) 
             Some(finding)
         })
         .collect::<Vec<_>>();
-    if findings.is_empty() {
-        return None;
-    }
     serde_json::to_string_pretty(&findings).ok()
-}
-
-pub(crate) fn structured_findings_from_report(report: &str) -> Vec<Finding> {
-    structured_findings_payload(report)
-        .map(|payload| parse_structured_findings_payload(&payload))
-        .unwrap_or_default()
 }
 
 pub(crate) fn with_structured_findings_block(report: &str, source: &str) -> String {
     let lines = report.lines().collect::<Vec<_>>();
-    if !structured_findings_from_report(report).is_empty() {
+    if let Some(payload) = structured_findings_payload(report)
+        && parse_structured_findings_payload(&payload).is_some()
+    {
         return finish_markdown(lines);
     }
 
@@ -512,17 +559,14 @@ pub(crate) fn with_structured_findings_block(report: &str, source: &str) -> Stri
         .into_iter()
         .map(|finding| Finding::from_summary(source, finding))
         .collect::<Vec<_>>();
-    if findings.is_empty() {
-        return finish_markdown(lines);
-    }
-
     let Some(payload) = serde_json::to_string_pretty(&findings).ok() else {
         return finish_markdown(lines);
     };
-    let mut rebuilt = lines
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<String>>();
+    with_structured_findings_payload(report, &payload)
+}
+
+pub(crate) fn with_structured_findings_payload(report: &str, payload: &str) -> String {
+    let mut rebuilt = without_structured_findings_block(report);
     if rebuilt.last().is_some_and(|line| !line.trim().is_empty()) {
         rebuilt.push(String::new());
     }
@@ -532,6 +576,69 @@ pub(crate) fn with_structured_findings_block(report: &str, source: &str) -> Stri
     rebuilt.extend(payload.lines().map(str::to_string));
     rebuilt.push("```".to_string());
     finish_markdown_owned(rebuilt)
+}
+
+fn without_structured_findings_block(report: &str) -> Vec<String> {
+    let lines = report.lines().collect::<Vec<_>>();
+    let mut rebuilt = Vec::with_capacity(lines.len());
+    let mut idx = 0;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if is_machine_readable_heading(trimmed) {
+            idx += 1;
+            while idx < lines.len() {
+                let current = lines[idx].trim();
+                if is_oy_findings_fence_start(current) {
+                    idx = skip_fenced_block(&lines, idx);
+                    while idx < lines.len() && lines[idx].trim().is_empty() {
+                        idx += 1;
+                    }
+                    break;
+                }
+                if current.starts_with('#') && !current.is_empty() {
+                    break;
+                }
+                idx += 1;
+            }
+            continue;
+        }
+        if is_oy_findings_fence_start(trimmed) {
+            idx = skip_fenced_block(&lines, idx);
+            while idx < lines.len() && lines[idx].trim().is_empty() {
+                idx += 1;
+            }
+            continue;
+        }
+        rebuilt.push(lines[idx].to_string());
+        idx += 1;
+    }
+    rebuilt
+}
+
+fn is_machine_readable_heading(trimmed: &str) -> bool {
+    trimmed.starts_with('#')
+        && trimmed
+            .trim_start_matches('#')
+            .trim()
+            .eq_ignore_ascii_case("Machine-readable findings")
+}
+
+fn is_oy_findings_fence_start(trimmed: &str) -> bool {
+    trimmed.strip_prefix("```").is_some_and(|info| {
+        info.split_whitespace()
+            .any(|part| part.eq_ignore_ascii_case("oy-findings"))
+    })
+}
+
+fn skip_fenced_block(lines: &[&str], start: usize) -> usize {
+    let mut idx = start + 1;
+    while idx < lines.len() {
+        if lines[idx].trim().starts_with("```") {
+            return idx + 1;
+        }
+        idx += 1;
+    }
+    idx
 }
 
 #[cfg(test)]
@@ -643,13 +750,55 @@ Evidence: src/old.rs:1
 
         assert!(report.contains("## Machine-readable findings"));
         assert!(report.contains("```json oy-findings"));
-        let findings = structured_findings_from_report(&report);
+        let findings = findings_from_report(&report);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source, "audit");
         assert_eq!(
             findings[0].primary_code_ref().as_deref(),
             Some("src/lib.rs:3")
         );
+    }
+
+    #[test]
+    fn structured_findings_block_is_added_for_no_findings() {
+        let report = with_structured_findings_block(
+            "# Code Quality Review\n\n## Verdict\n\nNo major structural concerns.\n",
+            "review",
+        );
+
+        assert!(report.contains("## Machine-readable findings"));
+        assert!(report.contains("```json oy-findings\n[]\n```"));
+        assert!(findings_from_report(&report).is_empty());
+    }
+
+    #[test]
+    fn empty_structured_findings_block_is_authoritative() {
+        let report = r#"# Code Quality Review
+
+## Detailed findings
+
+### Low: stale markdown fallback
+Evidence: src/stale.rs:1
+
+## Machine-readable findings
+
+```json oy-findings
+[]
+```
+"#;
+
+        assert!(findings_from_report(report).is_empty());
+    }
+
+    #[test]
+    fn structured_findings_payload_replaces_existing_block() {
+        let report = with_structured_findings_payload(
+            "# Audit Issues\n\n## Machine-readable findings\n\n```json oy-findings\nnot json\n```\n",
+            "[]",
+        );
+
+        assert_eq!(report.matches("```json oy-findings").count(), 1);
+        assert!(report.contains("```json oy-findings\n[]\n```"));
     }
 
     #[test]
@@ -668,6 +817,48 @@ Evidence: src/old.rs:1
         assert!(normalized.contains("\"id\": \"audit-"));
         assert!(normalized.contains("\"status\": \"new\""));
         assert!(normalized.contains("\"source\": \"audit\""));
+    }
+
+    #[test]
+    fn normalized_findings_accepts_oy_findings_and_file_fields() {
+        let payload = serde_json::json!({
+            "oy-findings": [{
+                "severity": "Medium",
+                "title": "fixed salt enables pairing-code precomputation",
+                "file": "src/code.rs",
+                "line": 24,
+                "evidence": "const KDF_SALT",
+                "description": "A fixed salt lets attackers reuse a precomputed table.",
+                "impact": "ticket interception race",
+                "fix": "use a per-session salt"
+            }]
+        });
+
+        let normalized = normalized_findings_payload(&payload, "audit").unwrap();
+        let findings = parse_structured_findings_payload(&normalized).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].primary_code_ref().as_deref(),
+            Some("src/code.rs:24")
+        );
+        assert!(findings[0].body.contains("A fixed salt"));
+        assert!(
+            findings[0]
+                .body
+                .contains("Impact: ticket interception race")
+        );
+        assert!(findings[0].body.contains("Fix: use a per-session salt"));
+    }
+
+    #[test]
+    fn normalized_empty_findings_still_yields_valid_payload() {
+        let payload = serde_json::json!({ "findings": [] });
+
+        assert_eq!(
+            normalized_findings_payload(&payload, "review").as_deref(),
+            Some("[]")
+        );
     }
 
     #[test]

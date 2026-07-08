@@ -218,5 +218,7 @@ Important files:
 | `src/tools/workspace/outline.rs` | Optional outline helper via Universal Ctags |
 | `src/tools/workspace/sloc.rs` | SLOC helper |
 | `docs/evaluation.md` | Local LLM-evaluation playbook for prompt/agent changes |
+| `docs/eval-corpus.toml` | Seed corpus for local prompt/agent evaluations |
+| `scripts/eval_runner.py` | Local-only runner for pinned public-repo eval tasks |
 
 See `docs/architecture.md`, `docs/tool-safety.md`, `docs/evaluation.md`, `SECURITY.md`, and `CONTRIBUTING.md` for more detail.

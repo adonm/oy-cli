@@ -20,7 +20,7 @@
 ### 3. Improve Generated Agents
 
 - Use `docs/evaluation.md` to test prompt changes against pinned public OSS projects before merging substantial prompt edits.
-- Build a small corpus with recall canaries, regression diffs, and precision baselines.
+- Expand the seed corpus with more recall canaries, regression diffs, and precision baselines.
 - Track scorecards by behavior: recall, precision, evidence quality, actionability, cost, and protocol compliance.
 - Keep agents explicit about using edit/bash tools for changes and oy MCP only for deterministic inputs/reports.
 - Add examples for `/oy-audit`, `/oy-review`, and `/oy-enhance` workflows after the evaluation corpus stabilizes.

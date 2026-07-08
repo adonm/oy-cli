@@ -37,6 +37,11 @@ Use small, pinned, public open-source projects rather than only self-reviewing
 this repo. Keep clones and model outputs under `.tmp/eval/` so they never enter
 the release artifact or git history.
 
+The tracked seed corpus is [`docs/eval-corpus.toml`](eval-corpus.toml). It was
+seeded from recent public GitHub activity for `adonm`: Rust/DataFusion/geospatial
+work in `apache/sedona-db`, `tomtom215/quack-rs`,
+`datafusion-contrib/datafusion-ducklake`, and `adonm/zuko`.
+
 Start with three lanes:
 
 | Lane | Purpose | Good candidates |
@@ -59,7 +64,41 @@ For each task, record a rubric, not an exact output snapshot:
   evidence where available, and a clear no-findings verdict when appropriate
 - model/provider, opencode version, oy commit, date, elapsed time, and chunk count
 
-## Local Run Protocol
+## Local Runner
+
+Use the local runner for repeatability. `just eval` validates the corpus only; it
+does not clone repos or call a model.
+
+```bash
+just eval
+python3 scripts/eval_runner.py list
+python3 scripts/eval_runner.py run --dry-run
+python3 scripts/eval_runner.py run --opencode-model openai/gpt-5.5 \
+  --model-slug openai-gpt-5.5 \
+  --task sedona-geoparquet-aws-allowlist-review
+python3 scripts/eval_runner.py compare \
+  .tmp/eval/runs/<baseline>/summary.json \
+  .tmp/eval/runs/<candidate>/summary.json
+```
+
+The runner:
+
+- reads `docs/eval-corpus.toml`
+- clones/fetches pinned public refs under `.tmp/eval/repos/`
+- builds the local `oy` binary unless `--skip-build` is passed
+- prepends `target/debug` to `PATH` so opencode's MCP command uses the candidate
+  binary
+- runs `oy setup --workspace`, then the configured `oy audit` or `oy review`
+  (or `opencode run --model ... --command oy-audit/oy-review` when
+  `--opencode-model` is supplied)
+- copies reports and writes `summary.json`/`summary.md` under `.tmp/eval/runs/`
+- checks report shape, `oy-findings` JSON, keyword/path scorecard hints, and
+  unexpected source mutations outside `.opencode/` and `.oy-eval/`
+
+Full runs require opencode and a configured model provider. They are deliberately
+not part of default CI.
+
+## Manual Run Protocol
 
 Evaluate the candidate `oy` binary that contains the prompt changes. The MCP
 server launched by opencode resolves `oy` from `PATH`, so put the local build
@@ -131,7 +170,7 @@ material regression in the others.
 
 - Add deterministic fixtures for `repo_manifest`, `repo_chunks`,
   `git_diff_input`, markdown rendering, and SARIF rendering.
-- Add a tracked `docs/eval-corpus.toml` only after the manual corpus stabilizes.
-- Add a local-only eval runner if manual commands become repetitive. It should
-  orchestrate clones and reports, not add new MCP capabilities or provider logic
-  to `oy`.
+- Expand the corpus with more known security/design canaries from public issues
+  and merged bug-fix PRs.
+- Add report-shape fixture tests for `scripts/eval_runner.py` if runner behavior
+  becomes more complex.
