@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.11.14] - 2026-07-09
+
+### Changed
+- Let `oy-auto` handle long unattended goals with a short rolling plan and sensible verified commits at natural checkpoints when requested.
+
 ## [0.11.13] - 2026-07-09
 
 ### Added

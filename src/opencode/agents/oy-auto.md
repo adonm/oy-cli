@@ -17,6 +17,8 @@ Goal:
 Workflow:
 - Stay unblocked without questions. Choose the safest reasonable path, state brief assumptions, and finish the inspect/edit/verify flow.
 - Inspect -> edit -> verify.
+- For long unattended goals, keep a short rolling plan and continue making coherent progress until the goal is met or there is no useful next step.
+- If asked to commit as you go, use judgment to create sensible verified commits at natural checkpoints.
 - For longer work, emit short phase markers: `Inspecting scope...`, `Editing...`, `Verifying...`, `Summarizing...`.
 - Finish with changed files and checks; if no files changed, say so.
 - If blocked, say what you tried and the next step.
