@@ -1,0 +1,21 @@
+[book]
+authors = ["oy contributors"]
+description = "Repeatable repository audits and reviews for opencode"
+language = "en"
+src = "docs"
+title = "oy documentation"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+edit-url-template = "https://github.com/adonm/oy-cli/edit/main/{path}"
+git-repository-url = "https://github.com/adonm/oy-cli"
+preferred-dark-theme = "navy"
+site-url = "/oy-cli/"
+
+[output.html.search]
+enable = true
+limit-results = 20

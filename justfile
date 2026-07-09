@@ -4,12 +4,13 @@
 #
 # Quick start:
 #   just dev            # fast checks (fmt + cargo check)
-#   just check          # standard local checks using only stable Cargo
+#   just check          # standard local checks plus the mdBook site
+#   just docs           # build the mdBook site into book/
 #   just fix            # auto-fix formatting and clippy lints, then check
 #   just run -- --help
 #
-# Requires: cargo, rustc >= 1.96, and just. Optional CI-parity recipes below
-# require cargo-nextest and/or nightly Miri.
+# Requires: cargo, rustc >= 1.96, just, and mdbook. `mise install` provides
+# them. Optional CI-parity recipes below require cargo-nextest and/or nightly Miri.
 
 _default:
     @just --list
@@ -21,11 +22,11 @@ dev: _fmt-check
     cargo check --locked
 
 # Standard local check suite. Uses stable Cargo only so it works after `mise install`.
-check: _fmt-check _clippy _test _rustdoc _help-smoke
+check: _fmt-check _clippy _test _rustdoc _book _help-smoke
     @echo "✓ local checks passed"
 
 # Optional CI-parity suite. Requires cargo-nextest and nightly Miri.
-ci: _fmt-check _clippy _nextest _miri _rustdoc _help-smoke
+ci: _fmt-check _clippy _nextest _miri _rustdoc _book _help-smoke
     @echo "✓ CI-parity checks passed"
 
 # Auto-format, apply clippy suggestions, update lockfile, then run the local suite.
@@ -36,6 +37,9 @@ fix: _fmt _clippy-fix
 # Validate the local LLM evaluation corpus without provider/model calls.
 eval:
     python3 scripts/eval_runner.py validate
+
+# Build user/contributor documentation into book/.
+docs: _book
 
 # Run local prompt evaluations. Example: just eval-run --dry-run --task zuko-remote-pty-precision-audit
 eval-run *args:
@@ -80,15 +84,25 @@ _miri:
 _rustdoc:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 
+# Build the mdBook user/contributor site.
+_book:
+    mdbook build
+
 # Smoke-test the CLI help output.
 _help-smoke:
     cargo run --locked -- --help
+    cargo run --locked -- setup --help
+    cargo run --locked -- open --help
+    cargo run --locked -- mcp --help
     cargo run --locked -- run --help
     cargo run --locked -- chat --help
     cargo run --locked -- audit --help
     cargo run --locked -- review --help
+    cargo run --locked -- enhance --help
     cargo run --locked -- model --help
     cargo run --locked -- doctor --help
+    cargo run --locked -- modes --help
+    cargo run --locked -- upgrade --help
 
 # === Release preparation ===
 

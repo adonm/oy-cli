@@ -200,7 +200,7 @@ impl Finding {
 
     pub(crate) fn to_summary_markdown(&self) -> String {
         format!(
-            "- `{}` **{}** `{}` — {} _(status: {}; fix: `oy enhance --focus {}`)_",
+            "- `{}` **{}** `{}` — {} _(status: {}; fix: `oy enhance {}`)_",
             self.id,
             self.severity,
             self.primary_code_ref()
@@ -817,6 +817,10 @@ Evidence: src/stale.rs:1
         assert!(normalized.contains("\"id\": \"audit-"));
         assert!(normalized.contains("\"status\": \"new\""));
         assert!(normalized.contains("\"source\": \"audit\""));
+        let findings = parse_structured_findings_payload(&normalized).unwrap();
+        let summary = findings[0].to_summary_markdown();
+        assert!(summary.contains("fix: `oy enhance audit-"));
+        assert!(!summary.contains("oy enhance --focus"));
     }
 
     #[test]

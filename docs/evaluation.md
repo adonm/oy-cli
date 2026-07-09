@@ -27,7 +27,7 @@ Current generated capabilities:
 
 Useful deterministic evidence already exposed by MCP: `repo_manifest`,
 `repo_chunks`, `git_diff_input`, `existing_report`, optional `sloc`, optional
-`outline`, `render_audit_report`, and `render_review_report`. These tools do
+`outline`, optional `sighthound`, `render_audit_report`, and `render_review_report`. These tools do
 not clone repositories, fetch the web, edit source, run arbitrary shell commands,
 or call a model.
 
@@ -166,11 +166,9 @@ material regression in the others.
 6. Do not exact-match model prose. Match behavior: evidence, report schema,
    finding quality, and false-positive rate.
 
-## Next Automation Steps
+## Planned work
 
-- Add deterministic fixtures for `repo_manifest`, `repo_chunks`,
-  `git_diff_input`, markdown rendering, and SARIF rendering.
-- Expand the corpus with more known security/design canaries from public issues
-  and merged bug-fix PRs.
-- Add report-shape fixture tests for `scripts/eval_runner.py` if runner behavior
-  becomes more complex.
+[`ROADMAP.md`](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) is the canonical backlog for deterministic fixtures,
+corpus expansion, report examples, and workflow automation. Keep future work there
+so evaluation guidance describes the current method rather than maintaining a
+second roadmap.

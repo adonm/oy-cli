@@ -41,3 +41,40 @@ pub(super) struct SlocArgs {
     #[serde(default)]
     pub(super) exclude: Option<ExcludeArg>,
 }
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum SighthoundAnalysis {
+    #[default]
+    All,
+    Simple,
+    Taint,
+}
+
+impl SighthoundAnalysis {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Simple => "simple",
+            Self::Taint => "taint",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct SighthoundArgs {
+    #[serde(default = "default_dot", alias = "root")]
+    pub(super) path: String,
+    #[serde(default)]
+    pub(super) analysis: SighthoundAnalysis,
+    #[serde(default)]
+    pub(super) language: Option<String>,
+    #[serde(default)]
+    pub(super) include_test_fixtures: bool,
+    #[serde(default = "default_sighthound_findings")]
+    pub(super) max_findings: usize,
+}
+
+fn default_sighthound_findings() -> usize {
+    100
+}

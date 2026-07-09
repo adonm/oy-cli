@@ -11,8 +11,10 @@ This document covers only the deterministic tools served by `oy mcp`.
 | `repo_manifest` | Build gitignore-aware file/directory inventory, token estimates, language summary, optional security index | No | Skips dependencies, build outputs, lockfiles, hidden/likely-secret files |
 | `repo_chunks` | Build deterministic file/directory chunks and optionally return one chunk's text | No | Used by audit/review agents |
 | `git_diff_input` | Build deterministic chunks from `git diff <target>` | No workspace mutation | Runs read-only `git` commands in the workspace |
+| `existing_report` | Read a generated audit/review report for carry-forward comparison | No | Defaults to `ISSUES.md` or `REVIEW.md`; path stays inside the workspace |
 | `sloc` | Count source lines with external `tokei` | No | Exposed only when `tokei` is on `PATH`; reads paths inside workspace |
 | `outline` | Extract source definitions with external Universal Ctags | No | Exposed only when Universal Ctags is on `PATH`; reads one exact source file inside workspace |
+| `sighthound` | Scan source with Sighthound embedded SAST rules | No workspace mutation | Explicit-focus audit use only; independent gitignore-aware discovery; fixed JSON output, timeout, finding-count limit, and byte budget |
 | `render_audit_report` | Render markdown or SARIF audit report | Yes | Writes only to a validated workspace output path |
 | `render_review_report` | Render markdown review report | Yes | Writes only to a validated workspace output path |
 
@@ -21,8 +23,13 @@ Install optional local helper CLIs with:
 ```bash
 mise use --global cargo:tokei
 mise use --global github:universal-ctags/ctags
+mise use --global cargo:https://github.com/Corgea/Sighthound@tag:1.0
 # or: brew install tokei universal-ctags
 ```
+
+The pinned Sighthound tag has no release binary; mise builds it from source and therefore requires Rust 1.85+.
+
+Optional helpers are resolved once per `oy mcp` process to canonical absolute paths. Relative `PATH` entries are ignored; `OY_TOKEI`, `OY_CTAGS`, and `OY_SIGHTHOUND` can override discovery with an explicit absolute executable path. Probes verify successful version/capability output; calls close stdin and enforce tool-specific time and per-stream output limits. On Unix, helpers run in a dedicated process group that is terminated after direct-child exit or timeout so descendants cannot hold captured pipes open. Ctags option-file loading is disabled with `--options=NONE`. Sighthound is restricted to embedded rules and one worker; returned findings are stably sorted, string/array bounded, and capped below the generated host tool-output budget. Unsupported-language scopes return an empty status, and all-mode scans fall back to simple analysis when a language pack has no taint rules.
 
 Run `oy doctor` to check whether the optional MCP tools are currently exposed.
 
@@ -30,7 +37,7 @@ Run `oy doctor` to check whether the optional MCP tools are currently exposed.
 
 `oy mcp` intentionally does not provide:
 
-- shell execution
+- arbitrary shell execution (it does run fixed, bounded `git` and optional helper commands)
 - source edits
 - arbitrary file reads beyond deterministic inputs
 - web fetches
@@ -59,7 +66,9 @@ When changing this boundary:
 
 The host decides what to send to the selected model. `oy mcp` can return repository text chunks, so returned chunk content may become model input.
 
-The collector skips common dependency/build directories and likely-secret file names by default. Keep this conservative.
+The collector skips gitignored and hidden paths, common dependency/build directories, lockfiles, generated reports, likely-secret file names, binary/non-UTF-8/empty files, unreadable files, and files larger than 512 KiB. “Every chunk” therefore means every collected chunk, not every repository byte. Keep this conservative and make exclusions visible when completeness matters.
+
+Sighthound does not use that collected file list. It has independent gitignore-aware discovery, common directory exclusions, supported-language filtering, and a larger file limit (currently 10 MiB). It can therefore inspect supported hidden source or source files omitted by oy's size limit. Generated auditors invoke it only when focus explicitly asks for Sighthound/SAST. Treat returned snippets as an additional disclosure boundary.
 
 ## Permission Boundary
 
@@ -74,6 +83,7 @@ Checklist:
 - no hidden LLM calls,
 - no shell/process side effects unless read-only and documented,
 - no network access,
+- bounded external-process runtime and output,
 - workspace path validation near entry,
 - clear JSON schema in `src/mcp.rs`,
 - generated agents/skills updated if the tool should be used by workflows,

@@ -1,6 +1,6 @@
 //! `oy doctor` checks the integration and local deterministic helpers.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Args;
 use std::io::{IsTerminal as _, Write as _};
 use std::path::Path;
@@ -10,9 +10,12 @@ use crate::config;
 const OPENCODE_MISE_TOOL: &str = "opencode";
 const TOKEI_MISE_TOOL: &str = "cargo:tokei";
 const CTAGS_MISE_TOOL: &str = "github:universal-ctags/ctags";
+const SIGHTHOUND_MISE_TOOL: &str = "cargo:https://github.com/Corgea/Sighthound@tag:1.0";
 const TOKEI_HINT: &str = "mise use --global cargo:tokei || brew install tokei";
 const CTAGS_HINT: &str =
     "mise use --global github:universal-ctags/ctags || brew install universal-ctags";
+const SIGHTHOUND_HINT: &str =
+    "mise use --global cargo:https://github.com/Corgea/Sighthound@tag:1.0";
 
 #[derive(Debug, Args, Clone)]
 pub(super) struct DoctorArgs {
@@ -26,7 +29,7 @@ pub(super) struct DoctorArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Install and activate missing opencode/tokei/ctags with global mise config when mise is available"
+        help = "Install missing opencode/tokei/ctags/source-built Sighthound with global mise config"
     )]
     install_missing: bool,
 }
@@ -40,6 +43,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     let oy_mcp_ok = command_ok("oy", &["mcp"]);
     let tokei_ok = crate::tools::has_external_sloc_counter();
     let ctags_ok = crate::tools::has_external_outline_tool();
+    let sighthound_ok = crate::tools::has_external_security_scanner();
     let global_config = crate::opencode::global_config_path()?;
     let workspace_config = crate::opencode::workspace_config_path()?;
     let configured = global_config.exists() || workspace_config.exists();
@@ -62,12 +66,17 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
                     "available": ctags_ok,
                     "enables": "outline MCP tool",
                     "install": CTAGS_HINT,
+                },
+                "sighthound": {
+                    "available": sighthound_ok,
+                    "enables": "sighthound MCP security scan tool",
+                    "install": SIGHTHOUND_HINT,
                 }
             },
             "global_opencode_config": global_config,
             "workspace_opencode_config": workspace_config,
             "configured": configured,
-            "next_step": recommended_next_step(opencode_ok, configured, mise_ok, missing_mise_tools(opencode_ok, tokei_ok, ctags_ok).is_empty()),
+            "next_step": recommended_next_step(opencode_ok, configured, mise_ok, missing_mise_tools(opencode_ok, tokei_ok, ctags_ok, sighthound_ok).is_empty()),
         });
         crate::ui::line(serde_json::to_string_pretty(&payload)?);
         return Ok(0);
@@ -109,6 +118,17 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         ),
     );
     crate::ui::kv(
+        "optional Sighthound",
+        crate::ui::status_text(
+            sighthound_ok,
+            if sighthound_ok {
+                "ok; enables sighthound MCP security scan tool".to_string()
+            } else {
+                format!("missing; install from pinned source with `{SIGHTHOUND_HINT}`")
+            },
+        ),
+    );
+    crate::ui::kv(
         "global config",
         crate::ui::status_text(
             global_config.exists(),
@@ -130,7 +150,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             opencode_ok,
             configured,
             mise_ok,
-            missing_mise_tools(opencode_ok, tokei_ok, ctags_ok).is_empty(),
+            missing_mise_tools(opencode_ok, tokei_ok, ctags_ok, sighthound_ok).is_empty(),
         )
     ));
     crate::ui::line("");
@@ -143,6 +163,7 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         opencode_ok,
         tokei_ok,
         ctags_ok,
+        sighthound_ok,
     )?;
     Ok(0)
 }
@@ -177,7 +198,12 @@ fn recommended_next_step(
     }
 }
 
-fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
+fn missing_mise_tools(
+    opencode_ok: bool,
+    tokei_ok: bool,
+    ctags_ok: bool,
+    sighthound_ok: bool,
+) -> Vec<&'static str> {
     let mut tools = Vec::new();
     if !opencode_ok {
         tools.push(OPENCODE_MISE_TOOL);
@@ -187,6 +213,9 @@ fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<
     }
     if !ctags_ok {
         tools.push(CTAGS_MISE_TOOL);
+    }
+    if !sighthound_ok {
+        tools.push(SIGHTHOUND_MISE_TOOL);
     }
     tools
 }
@@ -205,8 +234,9 @@ fn maybe_install_missing_with_mise(
     opencode_ok: bool,
     tokei_ok: bool,
     ctags_ok: bool,
+    sighthound_ok: bool,
 ) -> Result<()> {
-    let tools = missing_mise_tools(opencode_ok, tokei_ok, ctags_ok);
+    let tools = missing_mise_tools(opencode_ok, tokei_ok, ctags_ok, sighthound_ok);
     if tools.is_empty() {
         return Ok(());
     }
@@ -223,14 +253,13 @@ fn maybe_install_missing_with_mise(
     let status = std::process::Command::new("mise")
         .args(mise_use_global_args(&tools))
         .status()?;
-    if status.success() {
-        crate::ui::success("mise use --global completed");
-    } else {
-        crate::ui::err_line(format_args!(
+    if !status.success() {
+        bail!(
             "mise use --global failed with exit code {}",
             status.code().unwrap_or(1)
-        ));
+        );
     }
+    crate::ui::success("mise use --global completed");
     Ok(())
 }
 
@@ -287,14 +316,18 @@ mod tests {
     #[test]
     fn mise_tool_list_tracks_missing_tools() {
         assert_eq!(
-            missing_mise_tools(false, false, true),
+            missing_mise_tools(false, false, true, true),
             vec!["opencode", "cargo:tokei"]
         );
         assert_eq!(
-            missing_mise_tools(true, true, false),
+            missing_mise_tools(true, true, false, true),
             vec!["github:universal-ctags/ctags"]
         );
-        assert!(missing_mise_tools(true, true, true).is_empty());
+        assert_eq!(
+            missing_mise_tools(true, true, true, false),
+            vec!["cargo:https://github.com/Corgea/Sighthound@tag:1.0"]
+        );
+        assert!(missing_mise_tools(true, true, true, true).is_empty());
     }
 
     #[test]

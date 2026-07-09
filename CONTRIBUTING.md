@@ -1,6 +1,6 @@
 # Contributing
 
-Keep `oy` small. opencode owns AI behavior; `oy` should remain a setup wrapper plus deterministic MCP helpers.
+Keep `oy` focused. Its product is the audit → review → remediate loop for opencode; setup and launcher compatibility support that loop. opencode owns AI behavior, while `oy` owns deterministic collection/report boundaries.
 
 ## Quick Start
 
@@ -23,10 +23,11 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
 cargo test --doc --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+mdbook build
 cargo run --locked -- --help
 ```
 
-`just check` runs the standard local suite. `just ci` adds nextest and Miri parity checks when those tools are installed.
+`just check` runs the standard local suite, including the mdBook site build. `just ci` adds nextest and Miri parity checks when those tools are installed.
 
 Keep `Cargo.lock` in sync with `Cargo.toml` after dependency changes.
 
@@ -59,6 +60,7 @@ python3 scripts/eval_runner.py run --dry-run
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
 - Prefer host config, agents, skills, commands, and permissions for orchestration.
 - Keep MCP tools deterministic and narrow.
+- Describe model-backed outcomes as nondeterministic even when their inputs and report rendering are deterministic.
 - Do not duplicate built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
 - Validate workspace paths near every read/write boundary.
 - Keep generated global and workspace config files schema-valid against `https://opencode.ai/config.json`.
@@ -75,6 +77,8 @@ python3 scripts/eval_runner.py run --dry-run
 | `src/audit/sarif.rs` | SARIF rendering |
 | `src/tools/workspace/outline.rs` | Optional outline helper via Universal Ctags |
 | `src/tools/workspace/sloc.rs` | SLOC helper |
+| `src/tools/workspace/sighthound.rs` | Optional SAST helper via Sighthound |
+| `src/tools/external.rs` | Shared optional-executable boundary |
 | `src/cli/config/paths.rs` | Workspace output path safety |
 | `.github/workflows/ci.yml` | CI checks |
 | `justfile` | Local dev task runner |

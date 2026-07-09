@@ -9,6 +9,6 @@ description: oy review, code quality review, REVIEW.md. Use when the user asks f
 
 Use the oy-reviewer agent.
 
-- Deterministic oy MCP input/report tools only.
+- Deterministic oy MCP collection/report tools only; model findings are not deterministic.
 - Write REVIEW.md by default; carry forward only still-current findings.
 - Renderer owns transparency and `oy-findings`; pass report, findings array (`[]` when none), output/target/focus/max-chunks, and exact model when known.

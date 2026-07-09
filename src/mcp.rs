@@ -103,8 +103,9 @@ async fn handle_tool_call(params: Value) -> Result<Value> {
         "repo_chunks" => repo_chunks(args)?,
         "git_diff_input" => git_diff_input(args)?,
         "existing_report" => existing_report(args)?,
-        "outline" if tools::has_external_outline_tool() => builtin_tool("outline", args).await?,
-        "sloc" if tools::has_external_sloc_counter() => builtin_tool("sloc", args).await?,
+        "outline" => builtin_tool("outline", args).await?,
+        "sloc" => builtin_tool("sloc", args).await?,
+        "sighthound" => builtin_tool("sighthound", args).await?,
         "render_audit_report" => render_audit_report(args)?,
         "render_review_report" => render_review_report(args)?,
         other => bail!("unknown oy MCP tool: {other}"),
@@ -151,7 +152,7 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Workspace-relative file or directory to inspect", "default": "." },
-                    "model": { "type": "string", "description": "Tokenizer/model name used for token estimates" },
+                    "model": { "type": "string", "description": "Model label retained for workflow metadata; token estimates use oy's approximate byte heuristic" },
                     "security_index": { "type": "boolean", "default": true },
                     "security_index_limit": { "type": "integer", "default": 120 }
                 }
@@ -164,7 +165,7 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "default": "." },
-                    "model": { "type": "string" },
+                    "model": { "type": "string", "description": "Model label retained for workflow metadata; token estimates use oy's approximate byte heuristic" },
                     "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Target maximum tokens per chunk; increase above the largest in-scope file token count when deterministic input would otherwise fail closed" },
                     "chunk": { "type": "integer", "description": "1-based chunk number to return with full text" }
                 }
@@ -178,7 +179,7 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["target"],
                 "properties": {
                     "target": { "type": "string" },
-                    "model": { "type": "string" },
+                    "model": { "type": "string", "description": "Model label retained for workflow metadata; token estimates use oy's approximate byte heuristic" },
                     "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Target maximum tokens per chunk; increase above the largest diff item token count when deterministic input would otherwise fail closed" },
                     "chunk": { "type": "integer", "description": "1-based chunk number to return with full diff text" }
                 }
@@ -202,6 +203,9 @@ fn tool_definitions() -> Vec<Value> {
         tools.push(definition);
     }
     if let Some(definition) = outline_tool_definition() {
+        tools.push(definition);
+    }
+    if let Some(definition) = sighthound_tool_definition() {
         tools.push(definition);
     }
 
@@ -253,6 +257,29 @@ fn sloc_tool_definition() -> Option<Value> {
                             { "type": "array", "items": { "type": "string" } }
                         ]
                     }
+                }
+            }),
+        )
+    })
+}
+
+fn sighthound_tool_definition() -> Option<Value> {
+    tools::has_external_security_scanner().then(|| {
+        tool_def(
+            "sighthound",
+            "Scan a workspace directory for source vulnerabilities with Sighthound's embedded rules. Uses independent gitignore-aware discovery that may include supported source excluded by oy's collector. Runs single-threaded with fixed arguments and bounded output.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "default": ".", "description": "Workspace-relative directory to scan" },
+                    "analysis": { "type": "string", "enum": ["all", "simple", "taint"], "default": "all" },
+                    "language": {
+                        "type": "string",
+                        "enum": ["python", "javascript", "typescript", "tsx", "java", "php", "csharp", "go", "ruby", "html", "django"],
+                        "description": "Optional explicit scan language; omit to auto-detect supported languages"
+                    },
+                    "include_test_fixtures": { "type": "boolean", "default": false },
+                    "max_findings": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100, "description": "Maximum findings returned after stable sorting; output also has a byte budget" }
                 }
             }),
         )
@@ -814,6 +841,73 @@ fn default_markdown() -> String {
 mod tests {
     use super::*;
 
+    const DOCUMENTED_TOOL_NAMES: &[&str] = &[
+        "repo_manifest",
+        "repo_chunks",
+        "git_diff_input",
+        "existing_report",
+        "sloc",
+        "outline",
+        "sighthound",
+        "render_audit_report",
+        "render_review_report",
+    ];
+
+    #[tokio::test]
+    async fn initialize_advertises_protocol_and_server_version() {
+        let response = handle_request("initialize", Value::Null)
+            .await
+            .unwrap()
+            .into_json(json!(1));
+
+        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(response["result"]["serverInfo"]["name"], "oy");
+        assert_eq!(
+            response["result"]["serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(response["result"]["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn tools_list_matches_inventory_and_reference() {
+        let response = handle_request("tools/list", Value::Null)
+            .await
+            .unwrap()
+            .into_json(json!(2));
+        let names = response["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mut expected = vec![
+            "repo_manifest",
+            "repo_chunks",
+            "git_diff_input",
+            "existing_report",
+        ];
+        if crate::tools::has_external_sloc_counter() {
+            expected.push("sloc");
+        }
+        if crate::tools::has_external_outline_tool() {
+            expected.push("outline");
+        }
+        if crate::tools::has_external_security_scanner() {
+            expected.push("sighthound");
+        }
+        expected.extend(["render_audit_report", "render_review_report"]);
+
+        assert_eq!(names, expected);
+        let reference = include_str!("../docs/reference.md");
+        for name in DOCUMENTED_TOOL_NAMES {
+            assert!(
+                reference.contains(&format!("`{name}`")),
+                "docs/reference.md is missing the `{name}` MCP tool"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn unknown_method_returns_top_level_jsonrpc_error() {
         let response = handle_request("missing/method", Value::Null)
@@ -847,6 +941,17 @@ mod tests {
         let has_outline = tools.iter().any(|tool| tool["name"] == "outline");
 
         assert_eq!(has_outline, crate::tools::has_external_outline_tool());
+    }
+
+    #[test]
+    fn sighthound_tool_is_listed_only_when_scanner_is_available() {
+        let tools = tool_definitions();
+        let has_sighthound = tools.iter().any(|tool| tool["name"] == "sighthound");
+
+        assert_eq!(
+            has_sighthound,
+            crate::tools::has_external_security_scanner()
+        );
     }
 
     #[test]

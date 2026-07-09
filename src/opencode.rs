@@ -540,7 +540,7 @@ fn merge_commands(object: &mut Map<String, Value>) {
     command.insert(
         "oy-audit".to_string(),
         json!({
-            "description": "Run a deterministic no-generic-tools security audit.",
+            "description": "Run a deterministic-input, no-generic-tools security audit.",
             "agent": "oy-auditor",
             "template": "Run an oy audit with deterministic oy inputs. Write the requested report and pass report plus findings[] to the renderer."
         }),
@@ -548,7 +548,7 @@ fn merge_commands(object: &mut Map<String, Value>) {
     command.insert(
         "oy-review".to_string(),
         json!({
-            "description": "Run a deterministic no-generic-tools code-quality review.",
+            "description": "Run a deterministic-input, no-generic-tools code-quality review.",
             "agent": "oy-reviewer",
             "template": "Run an oy review for this workspace or target diff with deterministic oy inputs. Write the requested report and pass report plus findings[] to the renderer."
         }),
@@ -869,6 +869,73 @@ mod tests {
     }
 
     #[test]
+    fn setup_is_idempotent_for_owned_config_and_generated_files() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let config_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        let _root = EnvGuard::set("OY_ROOT", workspace.path());
+        let dir = config_home.path().join("opencode");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("opencode.json"),
+            r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "test/model",
+  "command": { "keep": { "template": "keep me" } },
+  "mcp": { "other": { "type": "local", "command": ["other"] } },
+  "tool_output": { "extra_user_key": true }
+}
+"#,
+        )
+        .unwrap();
+
+        setup_command(false, false).unwrap();
+        let mut owned_paths = generated_files(&dir)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
+        owned_paths.push(dir.join("opencode.json"));
+        let first = owned_paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+
+        setup_command(false, false).unwrap();
+        let second = owned_paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(second, first);
+        let updated: Value = serde_json::from_slice(second.last().expect("config bytes")).unwrap();
+        assert_eq!(updated["model"], "test/model");
+        assert_eq!(updated["command"]["keep"]["template"], "keep me");
+        assert_eq!(updated["mcp"]["other"]["command"][0], "other");
+        assert_eq!(updated["tool_output"]["extra_user_key"], true);
+    }
+
+    #[test]
+    fn setup_refuses_to_replace_non_generated_agent_file() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let config_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        let _root = EnvGuard::set("OY_ROOT", workspace.path());
+        let agent = config_home.path().join("opencode/agents/oy.md");
+        fs::create_dir_all(agent.parent().unwrap()).unwrap();
+        fs::write(&agent, "user-owned agent\n").unwrap();
+
+        let err = setup_command(false, false).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("refusing to overwrite non-oy file")
+        );
+        assert_eq!(fs::read_to_string(agent).unwrap(), "user-owned agent\n");
+    }
+
+    #[test]
     fn setup_overwrites_tool_output_budget_to_match_default_chunk() {
         // The byte/token coupling itself is enforced at compile time by the
         // `const _: () = assert!(...)` near TOOL_OUTPUT_MAX_BYTES; this test
@@ -983,6 +1050,16 @@ mod tests {
         assert!(OY_AUDITOR_AGENT.contains("carry forward still-current findings"));
         assert!(OY_AUDITOR_AGENT.contains("drop stale/superseded ones"));
         assert!(OY_AUDITOR_AGENT.contains("The new report supersedes the old one"));
+    }
+
+    #[test]
+    fn generated_auditor_agent_uses_optional_sighthound_candidates() {
+        assert!(OY_AUDITOR_AGENT.contains("oy_sighthound: allow"));
+        assert!(OY_AUDITOR_AGENT.contains("focus explicitly requests Sighthound or SAST"));
+        assert!(OY_AUDITOR_AGENT.contains("call it once"));
+        assert!(OY_AUDITOR_AGENT.contains("its own file discovery"));
+        assert!(OY_AUDITOR_AGENT.contains("requiring source confirmation"));
+        assert!(OY_AUDITOR_AGENT.contains("optional call fails"));
     }
 
     #[test]

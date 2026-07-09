@@ -26,13 +26,13 @@ use upgrade_cmd::UpgradeArgs;
 #[command(
     name = "oy",
     version,
-    about = "opencode launcher plus deterministic oy MCP helpers.",
-    after_help = "Examples:\n  oy                              (setup integration and launch opencode with --agent oy)\n  oy setup\n  oy setup --workspace\n  oy doctor\n  oy model\n  oy run \"inspect this repo and summarize risks\"\n  oy audit auth paths\n  oy review main --focus tests\n\nDefault: running `oy` with no subcommand installs/updates the global oy integration and launches opencode with the matching oy agent. Convenience commands delegate to opencode; unknown top-level commands/flags pass through to opencode.\n\nSafety: model execution, UI, sessions, and permissions stay in opencode. oy MCP tools are deterministic repo-analysis/report helpers."
+    about = "Repeatable repository audits and reviews for opencode.",
+    after_help = "Examples:\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor\n  oy                              (launch opencode with --agent oy)\n\nPrimary direction: deterministic-input audit/review/report workflows. Model conclusions are not deterministic. Running `oy` without a subcommand and compatibility wrappers refresh the generated integration before delegating to opencode; unknown top-level commands/flags pass through."
 )]
 struct Cli {
-    #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Suppress normal progress output")]
+    #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Select quiet output where supported")]
     quiet: bool,
-    #[arg(long, global = true, conflicts_with_all = ["quiet", "json"], help = "Show fuller tool previews")]
+    #[arg(long, global = true, conflicts_with_all = ["quiet", "json"], help = "Select verbose output where supported")]
     verbose: bool,
     #[arg(long, global = true, conflicts_with_all = ["quiet", "verbose"], help = "Print machine-readable JSON where supported")]
     json: bool,
@@ -61,11 +61,11 @@ enum Command {
     Chat(ChatArgs),
     /// Delegate to `opencode models`.
     Model(ModelArgs),
-    /// Check setup, auth, paths, and safety-relevant defaults.
+    /// Show config paths, executable/helper availability, and safety mode.
     Doctor(DoctorArgs),
     /// Explain oy safety modes and their opencode mapping.
     Modes,
-    /// Delegate a security audit.
+    /// Run a deterministic-input security audit and write Markdown or SARIF.
     Audit {
         #[arg(
             long,
@@ -90,9 +90,9 @@ enum Command {
         #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
         focus: Vec<String>,
     },
-    /// Delegate a code-quality review.
+    /// Run a deterministic-input code-quality review and write REVIEW.md.
     Review(ReviewArgs),
-    /// Delegate finding remediation.
+    /// Fix one finding from ISSUES.md or REVIEW.md.
     Enhance(EnhanceArgs),
     /// Upgrade oy and opencode when both are managed by mise.
     Upgrade(UpgradeArgs),
@@ -334,6 +334,23 @@ mod audit_tests {
     #[test]
     fn doctor_help_snapshot() {
         insta::assert_snapshot!(command_help_for_test("doctor"));
+    }
+
+    #[test]
+    fn command_reference_lists_every_cli_subcommand() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let reference = include_str!("../../docs/reference.md");
+
+        for subcommand in command.get_subcommands() {
+            let name = subcommand.get_name();
+            if name == "help" {
+                continue;
+            }
+            assert!(
+                reference.contains(&format!("`oy {name}")),
+                "docs/reference.md is missing the `{name}` command"
+            );
+        }
     }
 
     #[test]

@@ -9,6 +9,6 @@ description: oy audit, security audit, ISSUES.md, SARIF. Use when the user asks 
 
 Use the oy-auditor agent.
 
-- Deterministic oy MCP input/report tools only.
+- Deterministic oy MCP collection/report tools plus explicitly requested Sighthound SAST candidates; model findings are not deterministic.
 - Write ISSUES.md by default; carry forward only still-current findings.
 - Renderer owns transparency and `oy-findings`; pass report, findings array (`[]` when none), output/format/focus/max-chunks, and exact model when known.

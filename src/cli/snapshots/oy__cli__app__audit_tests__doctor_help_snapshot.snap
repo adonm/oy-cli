@@ -2,7 +2,7 @@
 source: src/cli/app.rs
 expression: "command_help_for_test(\"doctor\")"
 ---
-Check setup, auth, paths, and safety-relevant defaults
+Show config paths, executable/helper availability, and safety mode
 
 Usage: doctor [OPTIONS]
 
@@ -13,7 +13,7 @@ Options:
           [default: default]
 
       --install-missing
-          Install and activate missing opencode/tokei/ctags with global mise config when mise is available
+          Install missing opencode/tokei/ctags/source-built Sighthound with global mise config
 
   -h, --help
           Print help

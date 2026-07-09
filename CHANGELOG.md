@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## [0.11.15] - 2026-07-10
+
+### Added
+- Added an optional `sighthound` MCP tool for bounded, read-only SAST scans using Sighthound's embedded rules, including doctor/installer support, stable size-limited findings, unsupported-scope handling, no-taint fallback, and audit-agent integration.
+- Added a pinned mdBook documentation site with search/navigation, compatibility guidance, representative workflow reports, SARIF upload examples, and Pages/CI build verification.
+- Added setup idempotency/generated-file ownership coverage plus request-level MCP initialization, exact tool-inventory, and CLI/MCP documentation-drift tests.
+
+### Changed
+- Hardened optional external helpers with canonical absolute-path resolution, relative-`PATH` rejection, explicit `OY_*` overrides, capability probes, process timeouts, output limits, closed stdin, Unix process-group termination, and stable failure messages.
+- Disabled Universal Ctags option-file loading, verified JSON support before advertising `outline`, and now validate its JSON-lines output.
+- Refocused product and CLI documentation on the audit → review → remediate loop, clarified the deterministic-input boundary and collection exclusions, expanded Pages/docs.rs guidance, and reorganized the roadmap around measurable outcomes.
+- Made source-built Sighthound installer/auditor use explicit opt-ins, documented its independent disclosure scope, and closed inherited helper pipes when a direct child exits on Unix.
+- Made tagged release builds use the committed, CI-tested lockfile instead of updating dependencies immediately before a locked build.
+
+### Fixed
+- Corrected generated remediation hints to use the supported positional `oy enhance <finding-id>` syntax.
+
 ## [0.11.14] - 2026-07-09
 
 ### Changed
@@ -57,7 +74,7 @@
 ### Changed
 - `--mode auto` / `--mode yolo` now passes opencode's `--auto` flag in addition to selecting the generated `oy-auto` agent, so trusted oy-auto sessions use host-level auto-approval by default.
 - Setup writes are content-aware and skip unchanged generated files/config.
-- Audit/review report rendering now normalizes structured findings with stable IDs and statuses, making `oy enhance --focus <id>` workflows easier to drive.
+- Audit/review report rendering now normalizes structured findings with stable IDs and statuses, making `oy enhance <id>` workflows easier to drive.
 - Deterministic repo input collection caches clean git worktrees within an MCP process, avoiding repeated full walks for unchanged large repositories.
 
 ## [0.11.7] - 2026-06-19

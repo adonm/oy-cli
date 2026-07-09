@@ -8,6 +8,7 @@ set -eu
 #
 # Environment knobs:
 #   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases
+#   OY_INSTALL_SIGHTHOUND        set to 1/true to source-build optional Sighthound (Rust 1.85+ required)
 #   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
@@ -72,6 +73,20 @@ log "Installing/upgrading oy toolchain with mise (minimum release age: $minimum_
   opencode \
   cargo:tokei \
   github:universal-ctags/ctags
+
+case "${OY_INSTALL_SIGHTHOUND:-}" in
+1 | true | TRUE | yes | YES)
+  if ! "$mise_bin" exec -- cargo --version >/dev/null 2>&1; then
+    die "OY_INSTALL_SIGHTHOUND requires an installed Rust 1.85+ toolchain"
+  fi
+  log "Building optional Sighthound 1.0 from source..."
+  "$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" \
+    cargo:https://github.com/Corgea/Sighthound@tag:1.0
+  ;;
+*)
+  log "Skipping source-built Sighthound; set OY_INSTALL_SIGHTHOUND=1 with Rust 1.85+ to install it."
+  ;;
+esac
 
 "$mise_bin" reshim
 

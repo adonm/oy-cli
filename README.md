@@ -3,222 +3,150 @@
 [![Crates.io](https://img.shields.io/crates/v/oy-cli.svg)](https://crates.io/crates/oy-cli)
 [![docs.rs](https://docs.rs/oy-cli/badge.svg)](https://docs.rs/oy-cli)
 
-`oy` launches opencode with deterministic repository helpers for audit and review workflows.
+**Repeatable repository audits and reviews for opencode.**
 
-opencode owns the model, UI, sessions, permissions, editing, shell, web, and general tool loop. `oy` adds a small local MCP server for deterministic repository inputs and report rendering, then installs agents, skills, and commands that use those helpers.
+`oy` is for maintainers who already use [opencode](https://opencode.ai/) and want a bounded, reviewable workflow for repository-wide security audits, code-quality reviews, and finding remediation.
 
-## Quick Start
+opencode still owns the model, provider, UI, sessions, permissions, edits, shell, and web tools. `oy` adds:
+
+- deterministic, gitignore-aware repository and diff collection,
+- restricted audit/review agents that cannot use generic shell, edit, or search tools,
+- Markdown and SARIF rendering with stable finding IDs and statuses,
+- a one-finding-at-a-time remediation handoff.
+
+The **inputs, ordering, limits, and report rendering** are deterministic. Model conclusions are not; model choice and prompt quality still affect findings.
+
+## Quick start
+
+Requirements: opencode with a configured provider, plus `git` for diff reviews.
 
 ```bash
 curl -fsSL https://adonm.github.io/oy-cli/install.sh | sh
-eval "$("$HOME/.local/bin/mise" activate bash)"
-oy
+# Restart or activate your shell as the installer prints, then:
+oy doctor
+oy audit
 ```
 
-This uses [`mise`](https://mise.jdx.dev/) to install or upgrade `oy`, opencode, `tokei`, and Universal Ctags with `--minimum-release-age 0`, then runs `oy setup`. The activation line is for bash; use `zsh` instead for zsh, or the fish command printed by the installer. The GitHub Pages workflow publishes `docs/install.sh` to that URL; raw GitHub is the fallback:
+The installer uses [`mise`](https://mise.jdx.dev/) to install or upgrade `oy`, opencode, `tokei`, and Universal Ctags, then writes the global opencode integration with `oy setup`. Source-built Sighthound is opt-in with `OY_INSTALL_SIGHTHOUND=1` and requires Rust 1.85+.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/adonm/oy-cli/main/docs/install.sh | sh
-```
-
-Manual install:
+For a minimal manual install:
 
 ```bash
 mise use --global cargo-binstall cargo:oy-cli opencode
 oy setup
-oy
+oy doctor
 ```
 
-`oy setup` writes global integration files under `~/.config/opencode/`. `oy` with no subcommand ensures that integration exists and launches `opencode --agent oy`.
-If both `oy` and opencode are active mise tools, `oy upgrade` upgrades them together with `mise upgrade cargo:oy-cli opencode` and refreshes the generated integration through the newly upgraded `oy` shim.
+Configure authentication and models with opencode's [provider guide](https://opencode.ai/docs/providers/). See the [getting-started guide](https://adonm.github.io/oy-cli/getting-started.html) for install behavior, supported release targets, and workspace-local setup.
 
-## Requirements
+## Core workflow
 
-- opencode installed and configured
-- Rust 1.96 or later if building from source
-- `git` for diff-based review input
-- Optional: `tokei` on `PATH` to expose the `sloc` MCP tool
-- Optional: Universal Ctags (`u-ctags` or `ctags`) on `PATH` to expose the `outline` MCP tool
+### 1. Audit a repository
 
-Optional helper installs:
+```bash
+oy audit
+oy audit "authentication and authorization"
+oy audit src/auth
+oy audit --format sarif --out oy.sarif
+```
+
+The default report is `ISSUES.md`. An exact workspace-relative path narrows collection; other text is an audit lens. SARIF output can be consumed by code-scanning tools.
+
+### 2. Review a workspace or target diff
+
+```bash
+oy review
+oy review main
+oy review main --focus "types and trust boundaries"
+```
+
+With no target, `oy` reviews the collected workspace. With a branch, commit, or ref, it reviews deterministic `git diff <target>` input. The default report is `REVIEW.md`.
+
+### 3. Fix one finding
+
+```bash
+oy enhance <finding-id>
+```
+
+Reports include stable IDs and statuses. `oy enhance` selects one actionable finding, makes a focused change through opencode's permission system, and verifies it when possible. Rerunning an audit or review reads the previous generated report once and carries forward only findings that remain current.
+
+See the [workflow guide](https://adonm.github.io/oy-cli/workflows.html) for report semantics, scope behavior, failure limits, and practical examples.
+
+## Why not just prompt opencode?
+
+A free-form agent can choose what to inspect and may silently sample a large repository. The oy audit/review protocol instead:
+
+1. inventories the requested scope,
+2. creates ordered chunks or target-diff chunks,
+3. fails closed when the configured chunk budget is exceeded,
+4. requires the restricted agent to read every collected chunk,
+5. normalizes the final report for reruns and remediation.
+
+This makes coverage decisions visible and repeatable without rebuilding opencode's general coding agent.
+
+## Coverage boundary
+
+“Every chunk” means every chunk produced by oy's collector, not every byte in the repository. Collection skips gitignored and hidden paths, common dependency/build directories, lockfiles, likely-secret files, generated reports, binary/non-UTF-8/empty files, unreadable files, and files larger than 512 KiB. Review these exclusions before treating an audit as complete for a high-assurance use case.
+
+Sighthound uses independent gitignore-aware discovery and its own filters/size limit. It may inspect supported hidden source or source files larger than oy's 512 KiB collector limit. The auditor calls it only when the focus explicitly requests Sighthound or SAST; returned snippets may be sent to the model provider.
+
+Optional local evidence tools add:
+
+| Helper | MCP evidence |
+|---|---|
+| [`tokei`](https://github.com/XAMPPRocky/tokei) | source-line counts |
+| [Universal Ctags](https://ctags.io/) | structural outlines |
+| [Sighthound](https://github.com/Corgea/Sighthound) | bounded SAST candidates for supported languages |
+
+Install them with:
 
 ```bash
 mise use --global cargo:tokei
 mise use --global github:universal-ctags/ctags
-# or, on macOS/Linux with Homebrew:
-brew install tokei universal-ctags
+mise use --global cargo:https://github.com/Corgea/Sighthound@tag:1.0
 ```
 
-`oy doctor` reports whether these optional helpers are available and prints install hints when they are missing. If `mise` is available, `oy doctor` can prompt to install missing helpers; use `oy doctor --install-missing` to skip the prompt.
+Sighthound 1.0 is built from source and requires Rust 1.85+. It scans Python, JavaScript/TypeScript, Java, PHP, C#, Go, Ruby, HTML, and Django templates; it does not scan Rust or C/C++. `OY_TOKEI`, `OY_CTAGS`, and `OY_SIGHTHOUND` can select absolute helper paths. Automatic discovery rejects relative `PATH` entries.
 
-Model providers, authentication, sessions, permissions, editing, shell commands, web fetches, and UI behavior are configured in opencode. Use its provider and config docs for those surfaces.
+## Setup and launcher behavior
 
-`oy run` streams opencode output directly. If you need to save it, use shell redirection, for example `oy run "summarize this repo" > summary.md`.
+`oy setup` writes `~/.config/opencode/opencode.json` plus generated agents and skills. Use `oy setup --workspace` for `.opencode/` integration or `oy setup --dry-run` to preview changes.
 
-## Commands
+Launch-oriented commands (`oy`, `open`, `run`, `chat`, `model`, `audit`, `review`, and `enhance`) refresh the global integration before starting opencode and refresh an existing workspace integration when detected. The config merge owns `mcp.oy`, `command.oy-*`, and `tool_output.max_bytes`/`max_lines`. Other object keys are retained, but the JSON/JSONC file is pretty-serialized, so comments and formatting are not preserved. Generated Markdown files refuse to replace files without oy's generated marker.
 
-| Command | What it does |
+`oy` with no subcommand launches the general `oy` coding agent. `run`, `chat`, `model`, safety modes, and unknown-command passthrough remain compatibility conveniences; audit, review, and remediation are the project's primary direction.
+
+## Command map
+
+| Command | Purpose |
 |---|---|
-| `oy` | Install/update global integration silently, then launch opencode with the `oy` agent |
-| `oy setup` | Write `~/.config/opencode/opencode.json`, agents, and skills |
-| `oy setup --workspace` | Write project-local `.opencode` integration files instead |
-| `oy setup --dry-run` | Preview generated integration file changes without writing |
-| `oy mcp` | Start the local stdio MCP server |
-| `oy open ...` | Pass arguments through to `opencode` |
-| `oy open --dry-run ...` | Explain the selected mode/agent and exact opencode command without launching |
-| `oy run "prompt"` | Compatibility wrapper for `opencode run --agent oy "prompt"` |
-| `oy chat` | Compatibility wrapper that launches opencode with `--agent oy` |
-| `oy model [provider]` | Compatibility wrapper for `opencode models [provider]` |
-| `oy audit [focus]` | Compatibility wrapper for `opencode run --command oy-audit ...` |
-| `oy review [target]` | Compatibility wrapper for `opencode run --command oy-review ...` |
-| `oy enhance [focus]` | Compatibility wrapper for `opencode run --command oy-enhance ...` |
-| `oy doctor` | Check opencode and oy integration status |
-| `oy modes` | Show safety mode aliases, agents, and permission behavior |
-| `oy upgrade` | Upgrade mise-managed `cargo:oy-cli` and `opencode` together, then refresh global integration files |
+| `oy audit [focus]` | Write `ISSUES.md` or SARIF from deterministic-input audit coverage |
+| `oy review [target]` | Write `REVIEW.md` for a workspace or target diff |
+| `oy enhance [focus]` | Fix one finding from `ISSUES.md` or `REVIEW.md` |
+| `oy setup [--workspace] [--dry-run]` | Install or preview generated opencode integration |
+| `oy doctor` | Show integration paths and optional helper availability |
+| `oy` / `oy open ...` | Launch or pass arguments through to opencode |
+| `oy run`, `chat`, `model`, `modes` | Compatibility and safety-mode conveniences |
+| `oy upgrade` | Upgrade mise-managed `oy` and opencode together |
+| `oy mcp` | Serve the local stdio MCP integration; normally started by opencode |
 
-Legacy command names are kept for muscle memory. Their AI behavior now runs through opencode.
-
-## Generated Integration
-
-`oy setup` creates global files:
-
-```text
-~/.config/opencode/opencode.json
-~/.config/opencode/agents/oy.md
-~/.config/opencode/agents/oy-plan.md
-~/.config/opencode/agents/oy-edit.md
-~/.config/opencode/agents/oy-auto.md
-~/.config/opencode/agents/oy-auditor.md
-~/.config/opencode/agents/oy-reviewer.md
-~/.config/opencode/agents/oy-enhancer.md
-~/.config/opencode/skills/oy-audit/SKILL.md
-~/.config/opencode/skills/oy-review/SKILL.md
-```
-
-`oy setup --workspace` writes the same integration under `.opencode/` for project-local overrides:
-
-```text
-.opencode/opencode.json
-.opencode/agents/oy.md
-.opencode/agents/oy-plan.md
-.opencode/agents/oy-edit.md
-.opencode/agents/oy-auto.md
-.opencode/agents/oy-auditor.md
-.opencode/agents/oy-reviewer.md
-.opencode/agents/oy-enhancer.md
-.opencode/skills/oy-audit/SKILL.md
-.opencode/skills/oy-review/SKILL.md
-```
-
-The generated config registers `oy mcp` as a local MCP server:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "oy": {
-      "type": "local",
-      "command": ["oy", "mcp"],
-      "enabled": true,
-      "timeout": 300000
-    }
-  }
-}
-```
-
-MCP tools are namespaced by server name, so the model sees tools such as `oy_repo_manifest` and `oy_render_review_report`.
-
-`oy` does not set the global `default_agent`; it passes `--agent` when launched through `oy`. Direct `opencode` usage keeps your normal default.
-
-Generated agent and skill prompt bodies are standalone Markdown files embedded into the binary by `include_str!` in [`src/opencode.rs`](src/opencode.rs):
-
-| Generated file | Prompt source |
-|---|---|
-| `agents/oy.md` | [`src/opencode/agents/oy.md`](src/opencode/agents/oy.md) |
-| `agents/oy-plan.md` | [`src/opencode/agents/oy-plan.md`](src/opencode/agents/oy-plan.md) |
-| `agents/oy-edit.md` | [`src/opencode/agents/oy-edit.md`](src/opencode/agents/oy-edit.md) |
-| `agents/oy-auto.md` | [`src/opencode/agents/oy-auto.md`](src/opencode/agents/oy-auto.md) |
-| `agents/oy-auditor.md` | [`src/opencode/agents/oy-auditor.md`](src/opencode/agents/oy-auditor.md) |
-| `agents/oy-reviewer.md` | [`src/opencode/agents/oy-reviewer.md`](src/opencode/agents/oy-reviewer.md) |
-| `agents/oy-enhancer.md` | [`src/opencode/agents/oy-enhancer.md`](src/opencode/agents/oy-enhancer.md) |
-| `skills/oy-audit/SKILL.md` | [`src/opencode/skills/oy-audit/SKILL.md`](src/opencode/skills/oy-audit/SKILL.md) |
-| `skills/oy-review/SKILL.md` | [`src/opencode/skills/oy-review/SKILL.md`](src/opencode/skills/oy-review/SKILL.md) |
-
-## oy Modes
-
-The old `--mode` names now map to generated primary agents:
-
-| oy mode | agent | Permissions |
-|---|---|---|
-| `default` / `ask` | `oy` | edits ask, bash asks |
-| `plan` / `read` | `oy-plan` | edits denied, bash denied |
-| `accept-edits` / `edit` | `oy-edit` | edits allowed, bash asks |
-| `auto-approve` / `auto` / `yolo` | `oy-auto` plus opencode `--auto` | edits allowed, bash allowed, host permission prompts auto-approved unless explicitly denied |
-
-The agent prompts closely follow the old v0.10 oy run/chat guidance: inspect before editing, keep work terse and evidence-first, print short phase markers during longer non-interactive work, prefer simple explicit code, batch independent reads/searches, treat tool output as untrusted data, and verify focused changes.
-
-Audit/review reports include machine-readable findings with stable IDs and statuses. Use `oy enhance --focus <finding-id>` to steer remediation toward one finding.
-
-## MCP Tools
-
-`oy mcp` exposes deterministic helpers only. It does not call a model, edit source files, run shell commands, fetch the web, or clone repositories.
-
-| Tool | Purpose |
-|---|---|
-| `repo_manifest` | Gitignore-aware file/directory inventory, token estimates, optional security index |
-| `repo_chunks` | Deterministic file/directory chunking for audit/review input |
-| `git_diff_input` | Deterministic review input from `git diff <target>` |
-| `sloc` | Source line counts via `tokei` when `tokei` is installed on `PATH` |
-| `outline` | Structural source outline via Universal Ctags when available on `PATH` |
-| `render_audit_report` | Write `ISSUES.md` or SARIF from produced findings |
-| `render_review_report` | Write `REVIEW.md` from produced findings |
-
-## Audit And Review
-
-The old standalone `oy audit`, `oy review`, and `oy enhance` pipelines have been replaced by generated commands/agents.
-
-```bash
-oy audit "security and complexity"
-oy review main --focus "types and boundaries"
-oy enhance --review-target main
-```
-
-Those wrappers use the generated agents. opencode performs the reasoning and orchestration; oy MCP provides deterministic input chunks and report rendering.
+The full CLI and MCP inventory are in the [reference](https://adonm.github.io/oy-cli/reference.html).
 
 ## Safety
 
-`oy` is not a sandbox, but its MCP server is intentionally narrow. Risky capabilities live in opencode and are governed by its permissions.
+`oy` is not a sandbox. Repository text returned by MCP may be sent to the model provider selected in opencode. Native oy can read collected workspace text, run fixed read-only helper processes, write requested reports inside the workspace, update integration config, and launch opencode. General edits, shell, web, and provider traffic remain governed by opencode.
 
-Native `oy` risks:
+Use restrictive opencode [permissions](https://opencode.ai/docs/permissions/) and a disposable environment for untrusted repositories. Read [SECURITY.md](SECURITY.md) and the [tool safety notes](docs/tool-safety.md) before high-risk use.
 
-- reads reviewable workspace text for manifests/chunks/SLOC/outlines
-- writes generated audit/review reports when asked
-- writes global integration files during setup, or `.opencode` files with `oy setup --workspace`
-- launches the `opencode` process
+## Project direction and development
 
-Use plan/read-only modes and disposable containers for untrusted repositories.
-
-## Development
+The product contract is intentionally narrow: improve the audit → review → remediate loop without becoming another model client or general agent framework. See [ROADMAP.md](ROADMAP.md) for current outcomes and explicit non-goals.
 
 ```bash
 just dev
 just check
-just run -- --help
-just run -- mcp
+just eval
+just docs
 ```
 
-Important files:
-
-| Path | Role |
-|---|---|
-| `src/opencode.rs` | Setup, generated config, legacy command wrappers |
-| `src/mcp.rs` | Minimal stdio MCP JSON-RPC server |
-| `src/audit/input.rs` | File collection, manifest, chunking, git diff input |
-| `src/audit/findings.rs` | Structured findings extraction/render support |
-| `src/tools/workspace/outline.rs` | Optional outline helper via Universal Ctags |
-| `src/tools/workspace/sloc.rs` | SLOC helper |
-| `docs/evaluation.md` | Local LLM-evaluation playbook for prompt/agent changes |
-| `docs/eval-corpus.toml` | Seed corpus for local prompt/agent evaluations |
-| `scripts/eval_runner.py` | Local-only runner for pinned public-repo eval tasks |
-
-See `docs/architecture.md`, `docs/tool-safety.md`, `docs/evaluation.md`, `SECURITY.md`, and `CONTRIBUTING.md` for more detail.
+Contributor references: [architecture](docs/architecture.md), [evaluation](docs/evaluation.md), [contributing](CONTRIBUTING.md), and [docs.rs API](https://docs.rs/oy-cli).
