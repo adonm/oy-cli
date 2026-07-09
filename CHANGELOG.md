@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Made the Pages build start from clean mdBook output, include every local chapter, and explicitly publish the stable `install.sh` URL.
+
 ## [0.11.15] - 2026-07-10
 
 ### Added

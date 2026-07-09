@@ -86,7 +86,13 @@ _rustdoc:
 
 # Build the mdBook user/contributor site.
 _book:
+    rm -rf book
     mdbook build
+    cp docs/install.sh book/install.sh
+    sh -n book/install.sh
+    test -f book/index.html
+    test -f book/getting-started.html
+    test -f book/reference.html
 
 # Smoke-test the CLI help output.
 _help-smoke:
