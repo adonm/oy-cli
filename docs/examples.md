@@ -63,7 +63,7 @@ Needs work.
 
 ## Findings summary
 
-- `review-7bd1...` **Medium** `src/config.rs:41` — Two structs represent the same persisted state _(status: new; fix: `oy enhance review-7bd1...`)_
+- `review-7bd1...` **Medium** `src/cli/config.rs:41` — Two structs represent the same persisted state _(status: new; fix: `oy enhance review-7bd1...`)_
 
 ## Detailed findings
 
@@ -72,7 +72,7 @@ Needs work.
 The diff introduces a second source of truth. Keep one persisted type and convert at the boundary.
 
 ```json oy-findings
-[{"id":"review-7bd1...","status":"new","source":"review","severity":"Medium","title":"Two structs represent the same persisted state","locations":[{"path":"src/config.rs","line":41}],"evidence":"Both structs are serialized independently.","body":"Keep one persisted representation.","category":"state-ownership"}]
+[{"id":"review-7bd1...","status":"new","source":"review","severity":"Medium","title":"Two structs represent the same persisted state","locations":[{"path":"src/cli/config.rs","line":41}],"evidence":"Both structs are serialized independently.","body":"Keep one persisted representation.","category":"state-ownership"}]
 ```
 ````
 
