@@ -18,9 +18,9 @@
 //! oy enhance <finding-id>  # remediate one reported finding
 //! ```
 //!
-//! See the [getting-started guide](https://adonm.github.io/oy-cli/getting-started.html),
-//! [workflow guide](https://adonm.github.io/oy-cli/workflows.html), and
-//! [CLI/MCP reference](https://adonm.github.io/oy-cli/reference.html) for the user-facing
+//! See the [getting-started guide](https://oy.adonm.dev/getting-started.html),
+//! [workflow guide](https://oy.adonm.dev/workflows.html), and
+//! [CLI/MCP reference](https://oy.adonm.dev/reference.html) for the user-facing
 //! contract.
 //!
 //! ## Determinism boundary

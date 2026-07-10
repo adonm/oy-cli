@@ -15,7 +15,7 @@ oy does not store provider credentials or select a provider. Follow opencode's [
 ### Full mise installer
 
 ```bash
-curl -fsSL https://adonm.github.io/oy-cli/install.sh | sh
+curl -fsSL https://oy.adonm.dev/install.sh | sh
 ```
 
 The POSIX shell installer installs or updates mise, oy, opencode, `tokei`, and Universal Ctags, then runs `oy setup`. Restart your shell or use the activation command it prints.

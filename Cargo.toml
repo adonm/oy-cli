@@ -1,13 +1,13 @@
 [package]
 name = "oy-cli"
-version = "0.11.15"
+version = "0.11.16"
 edition = "2024"
 rust-version = "1.96"
 description = "OpenCode launcher and deterministic MCP helpers for repository audit and review workflows"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/adonm/oy-cli"
-homepage = "https://adonm.github.io/oy-cli/"
+homepage = "https://oy.adonm.dev/"
 documentation = "https://docs.rs/oy-cli"
 keywords = ["ai", "cli", "opencode", "mcp", "audit"]
 categories = ["command-line-utilities", "development-tools"]

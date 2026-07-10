@@ -21,7 +21,7 @@ The **inputs, ordering, limits, and report rendering** are deterministic. Model 
 Requirements: opencode with a configured provider, plus `git` for diff reviews.
 
 ```bash
-curl -fsSL https://adonm.github.io/oy-cli/install.sh | sh
+curl -fsSL https://oy.adonm.dev/install.sh | sh
 # Restart or activate your shell as the installer prints, then:
 oy doctor
 oy audit
@@ -37,7 +37,7 @@ oy setup
 oy doctor
 ```
 
-Configure authentication and models with opencode's [provider guide](https://opencode.ai/docs/providers/). See the [getting-started guide](https://adonm.github.io/oy-cli/getting-started.html) for install behavior, supported release targets, and workspace-local setup.
+Configure authentication and models with opencode's [provider guide](https://opencode.ai/docs/providers/). See the [getting-started guide](https://oy.adonm.dev/getting-started.html) for install behavior, supported release targets, and workspace-local setup.
 
 ## Core workflow
 
@@ -70,7 +70,7 @@ oy enhance <finding-id>
 
 Reports include stable IDs and statuses. `oy enhance` selects one actionable finding, makes a focused change through opencode's permission system, and verifies it when possible. Rerunning an audit or review reads the previous generated report once and carries forward only findings that remain current.
 
-See the [workflow guide](https://adonm.github.io/oy-cli/workflows.html) for report semantics, scope behavior, failure limits, and practical examples.
+See the [workflow guide](https://oy.adonm.dev/workflows.html) for report semantics, scope behavior, failure limits, and practical examples.
 
 ## Why not just prompt opencode?
 
@@ -130,7 +130,7 @@ Launch-oriented commands (`oy`, `open`, `run`, `chat`, `model`, `audit`, `review
 | `oy upgrade` | Upgrade mise-managed `oy` and opencode together |
 | `oy mcp` | Serve the local stdio MCP integration; normally started by opencode |
 
-The full CLI and MCP inventory are in the [reference](https://adonm.github.io/oy-cli/reference.html).
+The full CLI and MCP inventory are in the [reference](https://oy.adonm.dev/reference.html).
 
 ## Safety
 

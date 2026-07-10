@@ -19,7 +19,7 @@ Markdown and SARIF reports carry stable finding IDs and statuses into reruns and
 ## Quick start
 
 ```bash
-curl -fsSL https://adonm.github.io/oy-cli/install.sh | sh
+curl -fsSL https://oy.adonm.dev/install.sh | sh
 # Restart or activate your shell as instructed, then:
 oy doctor
 oy audit

@@ -14,7 +14,7 @@ default-theme = "light"
 edit-url-template = "https://github.com/adonm/oy-cli/edit/main/{path}"
 git-repository-url = "https://github.com/adonm/oy-cli"
 preferred-dark-theme = "navy"
-site-url = "/oy-cli/"
+site-url = "/"
 
 [output.html.search]
 enable = true

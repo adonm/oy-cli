@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.11.16] - 2026-07-10
+
+### Changed
+- Updated README, mdBook, crate metadata, and rustdoc links for the `https://oy.adonm.dev/` Pages domain.
+- Changed the mdBook site base URL from `/oy-cli/` to `/` for the custom domain.
+
 ### Fixed
 - Made the Pages build start from clean mdBook output, include every local chapter, and explicitly publish the stable `install.sh` URL.
 
