@@ -39,6 +39,7 @@ run_install() {
   : >"$log"
   PATH="$tmp/bin:/usr/bin:/bin" \
     HOME="$tmp/home" \
+    SHELL=/bin/bash \
     OY_INSTALL_TEST_LOG="$log" \
     OY_INSTALL_SIGHTHOUND="$install_sighthound" \
     OY_SKIP_SETUP=1 \
@@ -50,6 +51,8 @@ run_install "$default_log" 0
 default=$(cat "$default_log")
 assert_contains "$default" "use --global --yes node@24 rust@1.96"
 assert_contains "$default" "npm:@opencode-ai/cli@0.0.0-next-15323"
+assert_contains "$default" "config set --cd $tmp/home --file $tmp/home/.config/mise/config.toml --type bool bootstrap.mise_shell_activate.bash true"
+assert_contains "$default" "bootstrap mise-shell-activate apply --cd $tmp/home --yes"
 assert_not_contains "$default" "Corgea/Sighthound"
 
 sighthound_log="$tmp/sighthound.log"

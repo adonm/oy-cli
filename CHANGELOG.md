@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.12.0-beta.2] - 2026-07-11
+
+### Fixed
+- Made the curl installer configure bash, zsh, or fish activation through mise's managed bootstrap support instead of manually prepending mise shims to `PATH` and printing DIY activation commands.
+
 ## [0.12.0-beta.1] - 2026-07-11
 
 ### Added

@@ -52,11 +52,6 @@ if [ -z "$mise_bin" ]; then
 fi
 [ -n "$mise_bin" ] || die "mise installed, but no mise executable was found on PATH or at ~/.local/bin/mise"
 
-mise_bin_dir="$(dirname "$mise_bin")"
-mise_shims_dir="${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims"
-PATH="$mise_bin_dir:$mise_shims_dir:$PATH"
-export PATH
-
 log "Updating mise itself when supported..."
 if "$mise_bin" self-update --yes; then
   mise_bin="$(find_mise || true)"
@@ -90,6 +85,33 @@ case "${OY_INSTALL_SIGHTHOUND:-}" in
   ;;
 esac
 
+case "${SHELL:-}" in
+*/bash | bash) shell_target=bash ;;
+*/zsh | zsh) shell_target=zsh ;;
+*/fish | fish) shell_target=fish ;;
+*) shell_target= ;;
+esac
+
+if [ -n "$shell_target" ]; then
+  if [ -n "${MISE_GLOBAL_CONFIG_FILE:-}" ]; then
+    mise_global_config_file=$MISE_GLOBAL_CONFIG_FILE
+  elif [ -n "${MISE_CONFIG_DIR:-}" ]; then
+    mise_global_config_file=$MISE_CONFIG_DIR/config.toml
+  elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    mise_global_config_file=$XDG_CONFIG_HOME/mise/config.toml
+  else
+    mise_global_config_file=$HOME/.config/mise/config.toml
+  fi
+
+  log "Configuring $shell_target activation with mise bootstrap..."
+  "$mise_bin" config set --cd "$HOME" --file "$mise_global_config_file" --type bool \
+    "bootstrap.mise_shell_activate.$shell_target" true
+  MISE_GLOBAL_CONFIG_FILE="$mise_global_config_file" \
+    "$mise_bin" bootstrap mise-shell-activate apply --cd "$HOME" --yes
+else
+  log "Skipping shell activation: mise bootstrap supports bash, zsh, and fish; SHELL=${SHELL:-unset}."
+fi
+
 "$mise_bin" reshim
 
 "$mise_bin" exec -- opencode2 --version >/dev/null 2>&1 \
@@ -113,8 +135,5 @@ case "${OY_SKIP_SETUP:-}" in
 esac
 
 log "Done."
-log "Restart your shell, or activate mise in this session now:"
-log "  eval \"\$(\"$mise_bin\" activate bash)\""
-log "  # zsh:  eval \"\$(\"$mise_bin\" activate zsh)\""
-log "  # fish: \"$mise_bin\" activate fish | source"
+log "Restart your shell to load the mise activation configured by mise bootstrap."
 log "Then run: oy doctor"

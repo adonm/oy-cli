@@ -18,7 +18,7 @@ oy does not store provider credentials. Follow OpenCode's [provider setup](https
 curl -fsSL https://oy.adonm.dev/install.sh | sh
 ```
 
-The POSIX shell installer installs or updates mise, oy, `@opencode-ai/cli@0.0.0-next-15323` through mise's npm backend, `tokei`, and Universal Ctags, then runs `oy setup`. Restart your shell or use the activation command it prints.
+The POSIX shell installer installs or updates mise, oy, `@opencode-ai/cli@0.0.0-next-15323` through mise's npm backend, `tokei`, and Universal Ctags, then runs `oy setup`. It configures bash, zsh, or fish activation through mise's bootstrap support; restart your shell when it finishes.
 
 Review [`install.sh`](install.sh) before piping it to a shell. Set `OY_SKIP_SETUP=1` to skip integration writes or `OY_MISE_MINIMUM_RELEASE_AGE` to change mise's release-age filter. Set `OY_INSTALL_SIGHTHOUND=1` for the optional pinned source build; the installer provisions Rust 1.96, uses `--locked`, and builds only `bin=sighthound`.
 
