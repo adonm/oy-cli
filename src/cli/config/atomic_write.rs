@@ -28,12 +28,27 @@ pub(crate) enum FileMutation<'a> {
     Delete { path: &'a Path },
 }
 
-pub(crate) fn apply_file_batch(mutations: &[FileMutation<'_>]) -> Result<()> {
+fn apply_file_batch(mutations: &[FileMutation<'_>]) -> Result<()> {
+    apply_file_batch_with_root(mutations, None)
+}
+
+/// Apply setup mutations beneath an explicitly selected configuration root.
+///
+/// Symlinks at or above `root` are part of the caller-selected location (for
+/// example, Bazzite's `/home -> /var/home`). Symlinks below it remain rejected.
+pub(crate) fn apply_file_batch_in(root: &Path, mutations: &[FileMutation<'_>]) -> Result<()> {
+    apply_file_batch_with_root(mutations, Some(root))
+}
+
+fn apply_file_batch_with_root(
+    mutations: &[FileMutation<'_>],
+    trusted_root: Option<&Path>,
+) -> Result<()> {
     if mutations.is_empty() {
         return Ok(());
     }
     for mutation in mutations {
-        prevalidate_mutation(mutation)?;
+        prevalidate_mutation(mutation, trusted_root)?;
     }
     let created_dirs = create_missing_parent_dirs(mutations)?;
 
@@ -178,13 +193,28 @@ fn restore_workspace_backups(committed: Vec<CommittedWorkspaceWrite>) -> Result<
     Ok(())
 }
 
-fn prevalidate_mutation(mutation: &FileMutation<'_>) -> Result<()> {
+fn prevalidate_mutation(mutation: &FileMutation<'_>, trusted_root: Option<&Path>) -> Result<()> {
     let path = match mutation {
         FileMutation::Write { path, .. } | FileMutation::Delete { path } => *path,
     };
+    if let Some(root) = trusted_root
+        && (path == root || !path.starts_with(root))
+    {
+        anyhow::bail!(
+            "refusing to mutate path outside setup root {}: {}",
+            root.display(),
+            path.display()
+        );
+    }
     reject_symlink_destination(path)?;
     if let Some(parent) = path.parent() {
-        for ancestor in parent.ancestors().filter(|ancestor| ancestor.exists()) {
+        for ancestor in parent.ancestors() {
+            if trusted_root.is_some_and(|root| ancestor == root) {
+                break;
+            }
+            if !ancestor.exists() {
+                continue;
+            }
             if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
                 anyhow::bail!(
                     "refusing to write through symlink ancestor: {}",
@@ -360,5 +390,46 @@ mod tests {
         fs::write(&path, "generated").unwrap();
         apply_file_batch(&[FileMutation::Delete { path: &path }]).unwrap();
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_batch_allows_symlink_above_root_but_rejects_one_below_it() {
+        use std::os::unix::fs::symlink;
+
+        let physical = tempfile::tempdir().unwrap();
+        let aliases = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let alias = aliases.path().join("home");
+        symlink(physical.path(), &alias).unwrap();
+
+        let root = alias.join(".config/opencode");
+        fs::create_dir_all(&root).unwrap();
+        let config = root.join("opencode.json");
+        apply_file_batch_in(
+            &root,
+            &[FileMutation::Write {
+                path: &config,
+                bytes: b"{}\n",
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(physical.path().join(".config/opencode/opencode.json")).unwrap(),
+            b"{}\n"
+        );
+
+        symlink(outside.path(), root.join("agents")).unwrap();
+        let agent = root.join("agents/oy.md");
+        let error = apply_file_batch_in(
+            &root,
+            &[FileMutation::Write {
+                path: &agent,
+                bytes: b"generated\n",
+            }],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("symlink ancestor"));
+        assert!(!outside.path().join("oy.md").exists());
     }
 }

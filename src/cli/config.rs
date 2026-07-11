@@ -6,7 +6,7 @@ mod atomic_write;
 mod mode;
 mod paths;
 
-pub(crate) use atomic_write::{FileMutation, apply_file_batch};
+pub(crate) use atomic_write::{FileMutation, apply_file_batch_in};
 pub use mode::{SafetyMode, tool_policy};
 pub use paths::{oy_root, resolve_workspace_output_path, write_workspace_file};
 

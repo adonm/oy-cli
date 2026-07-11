@@ -139,7 +139,7 @@ fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32>
         path: &config_path,
         bytes: config.as_bytes(),
     });
-    crate::config::apply_file_batch(&mutations)?;
+    crate::config::apply_file_batch_in(&dir, &mutations)?;
     if let Ok(root) = config::oy_root() {
         let host = OpenCodeHost::selected_in(&root);
         if host.supported() {
@@ -199,7 +199,7 @@ fn remove_opencode(scope: SetupScope, dry_run: bool) -> Result<i32> {
             bytes: config.as_bytes(),
         });
     }
-    crate::config::apply_file_batch(&mutations)?;
+    crate::config::apply_file_batch_in(&dir, &mutations)?;
     ui::success(format_args!("removed {} oy integration", scope.label()));
     Ok(0)
 }

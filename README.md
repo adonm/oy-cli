@@ -19,7 +19,7 @@ The **inputs, ordering, limits, and report rendering** are deterministic. Model 
 
 ## Quick start
 
-Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.12.0-beta.1 no longer supports OpenCode 1.
+Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.12.0 no longer supports OpenCode 1.
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh

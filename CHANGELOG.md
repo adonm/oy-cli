@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## [0.12.0] - 2026-07-11
+
+### Added
+- Added OpenCode 2 execution for `oy run`, `audit`, `review`, and `enhance` through the restored noninteractive runner, plus managed-API model listing, run session continuation/resume, mode-selected agents, and `OY_OPENCODE_MODEL=provider/model#variant`.
+- Added `oy doctor --install-sighthound` for an explicit source build pinned to commit `c4608eb2b6ca256daf4dbd1e74aadc3570343685`, Rust 1.96, Cargo `--locked`, and only the `sighthound` binary.
+- Added `oy doctor --check`, rollback-capable atomic `oy setup --remove`, `OPENCODE_CONFIG_DIR`/JSONC setup selection, root-bound host execution, bound workflow run/session metadata, structured MCP results/errors, transport-safe oversized-file slicing, and native interactive enhancement through `opencode2 mini`.
+
+### Changed
+- **Breaking:** Dropped OpenCode 1 support. oy now defaults to `opencode2`, pins beta `@opencode-ai/cli@0.0.0-next-15323`, accepts tagged OpenCode 2.x, and fails closed on other prereleases/majors until tested. `OY_OPENCODE` remains an executable override.
+- **Breaking:** Migrated noninteractive workflows to OpenCode 2's `run` contract and removed the obsolete slash-command flag. TUI launches no longer select an agent or mode per launch; select the agent in the TUI or use `oy run` for mode selection.
+- Converted generated JSON, commands, MCP registration, and agent permissions to native OpenCode 2. Setup migrates legacy command/MCP entries and fails closed on ambiguous legacy fields that require manual conversion.
+- Made the default noninteractive enhancer allow focused edits while denying shell; explicit `edit`/`auto` modes remain available for trusted verification workflows.
+- Made skills the canonical audit/review/enhance orchestration source; commands and agents are now thin adapters, and bound CLI workflows enforce scope, model, output, chunk ordering, and chunk limits in Rust/MCP.
+- Launch/model/workflow commands now validate setup instead of rewriting integration files on every invocation.
+- Updated MCP negotiation to `2025-06-18`, added `structuredContent`/`isError`, and bound input stability, complete ordered chunk reads, resolved diff OIDs, and render metadata to the inherited workflow context.
+- JSONC remains pretty-reserialized, and setup removal deletes current oy-owned values rather than restoring historical pre-setup values; batch rollback is in-process and is not crash recovery.
+- Made the installer provision Rust 1.96 and install the pinned OpenCode beta through mise's npm backend. Optional Sighthound remains source-built and opt-in through `OY_INSTALL_SIGHTHOUND`; routine `oy doctor --install-missing` no longer builds it.
+- Made the curl installer configure bash, zsh, or fish activation through mise's managed bootstrap support instead of manually prepending mise shims to `PATH` and printing DIY activation commands.
+
+### Fixed
+- Allowed `oy setup` to use explicitly selected configuration directories beneath system-managed symlink ancestors, including Bazzite and Fedora Atomic's `/home -> /var/home`, while continuing to reject symlinks inside the setup directory.
+
 ## [0.12.0-beta.2] - 2026-07-11
 
 ### Fixed
