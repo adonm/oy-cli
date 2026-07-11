@@ -172,6 +172,8 @@ def run_tasks(tasks: list[Task], args: argparse.Namespace) -> int:
     env = os.environ.copy()
     env["PATH"] = f"{REPO_ROOT / 'target' / 'debug'}{os.pathsep}{env.get('PATH', '')}"
     env["OY_EVAL_OPENCODE_MODEL"] = args.opencode_model
+    if args.opencode_model:
+        env["OY_OPENCODE_MODEL"] = args.opencode_model
 
     if args.dry_run:
         print(f"dry run id: {run_id}")
@@ -214,7 +216,7 @@ def run_one_task(task: Task, repos_dir: Path, run_dir: Path, env: dict[str, str]
         ensure_repo(task, repo_dir, env)
         out_rel = Path(".oy-eval") / run_dir.name / task.id / report_filename(task)
         checked_run(["oy", "setup", "--workspace"], cwd=repo_dir, env=task_env(env, repo_dir))
-        command = eval_command(task, out_rel, env.get("OY_EVAL_OPENCODE_MODEL", ""))
+        command = eval_command(task, out_rel)
         checked_run(command, cwd=repo_dir, env=task_env(env, repo_dir))
         report_path = repo_dir / out_rel
         copied_report = task_run_dir / report_path.name
@@ -274,9 +276,7 @@ def ensure_repo(task: Task, repo_dir: Path, env: dict[str, str]) -> None:
         checked_run(["git", "fetch", "--no-tags", "--depth", "1", "origin", task.target], cwd=repo_dir, env=env)
 
 
-def eval_command(task: Task, out_rel: Path, opencode_model: str = "") -> list[str]:
-    if opencode_model:
-        return opencode_command(task, out_rel, opencode_model)
+def eval_command(task: Task, out_rel: Path) -> list[str]:
     return oy_command(task, out_rel)
 
 
@@ -292,46 +292,6 @@ def oy_command(task: Task, out_rel: Path) -> list[str]:
     if task.target:
         command.append(task.target)
     return command
-
-
-def opencode_command(task: Task, out_rel: Path, model: str) -> list[str]:
-    command_name = "oy-audit" if task.workflow == "audit" else "oy-review"
-    return [
-        "opencode",
-        "run",
-        "--model",
-        model,
-        "--command",
-        command_name,
-        workflow_message(task, out_rel, model=model),
-    ]
-
-
-def workflow_message(task: Task, out_rel: Path, *, model: str = "") -> str:
-    if task.workflow == "audit":
-        message = "Run an oy audit for this workspace."
-        if task.focus:
-            message += f" Focus: {sentence(task.focus)}"
-        message += f" Write output to {out_rel}. Use max_chunks {task.max_chunks}. Format: markdown."
-        if model:
-            message += f" Model: {model}. Pass this exact model string to the report renderer."
-        return message
-    message = "Run an oy review."
-    if task.target:
-        message += f" Target: {task.target}."
-    if task.focus:
-        message += f" Focus: {sentence(task.focus)}"
-    message += f" Write output to {out_rel}. Use max_chunks {task.max_chunks}."
-    if model:
-        message += f" Model: {model}. Pass this exact model string to the report renderer."
-    return message
-
-
-def sentence(text: str) -> str:
-    text = text.strip()
-    if text.endswith((".", "?", "!")):
-        return text
-    return f"{text}."
 
 
 def validate_report(task: Task, report_path: Path) -> dict[str, Any]:
@@ -493,7 +453,9 @@ def print_plan(task: Task, run_dir: Path, opencode_model: str = "") -> None:
     for ref in task.fetch_refs or (task.checkout,):
         print(f"  fetch: {ref}")
     print(f"  checkout: {task.checkout}")
-    print(f"  command: {shell_join(eval_command(task, out_rel, opencode_model))}")
+    if opencode_model:
+        print(f"  env: OY_OPENCODE_MODEL={opencode_model}")
+    print(f"  command: {shell_join(eval_command(task, out_rel))}")
 
 
 def report_filename(task: Task) -> str:

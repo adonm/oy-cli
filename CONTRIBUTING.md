@@ -58,7 +58,8 @@ python3 scripts/eval_runner.py run --dry-run
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
-- Prefer host config, agents, skills, commands, and permissions for orchestration.
+- Keep the three generated skills canonical for audit, review, and enhance protocols; commands and agents should remain thin adapters.
+- Put immutable workflow-input, ordering, limit, and render enforcement in typed Rust/MCP boundaries rather than relying on prompt text.
 - Keep MCP tools deterministic and narrow.
 - Describe model-backed outcomes as nondeterministic even when their inputs and report rendering are deterministic.
 - Do not duplicate built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
@@ -71,6 +72,8 @@ python3 scripts/eval_runner.py run --dry-run
 | Path | Role |
 |---|---|
 | `src/opencode.rs` | Setup, generated config/agents/skills, launch wrappers |
+| `src/opencode/host.rs`, `src/opencode/api.rs` | Root-bound OpenCode contract and managed-API adapters |
+| `src/workflow.rs` | Typed inherited workflow context and resolved scope |
 | `src/mcp.rs` | Minimal stdio MCP JSON-RPC server |
 | `src/audit/input.rs` | Repo file collection, manifest, security index, chunking, git diff input |
 | `src/audit/findings.rs` | Finding extraction and structured findings blocks |
@@ -80,6 +83,7 @@ python3 scripts/eval_runner.py run --dry-run
 | `src/tools/workspace/sighthound.rs` | Optional SAST helper via Sighthound |
 | `src/tools/external.rs` | Shared optional-executable boundary |
 | `src/cli/config/paths.rs` | Workspace output path safety |
+| `src/cli/config/atomic_write.rs` | Staged file batches and live rollback |
 | `.github/workflows/ci.yml` | CI checks |
 | `justfile` | Local dev task runner |
 

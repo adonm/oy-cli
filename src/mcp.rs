@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash as _, Hasher as _};
 use std::io::{BufRead as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -16,9 +17,25 @@ use crate::{audit, config, tools, ui};
 const DEFAULT_MODEL_FOR_COUNTING: &str = "cl100k_base";
 pub(crate) const DEFAULT_TARGET_TOKENS: usize = 64_000;
 const MAX_EXISTING_REPORT_BYTES: u64 = 1024 * 1024;
+const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
+const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
+const HOST_TOOL_OUTPUT_MAX_BYTES: usize = 256 * 1024;
+const HOST_TOOL_OUTPUT_MAX_LINES: usize = 20_000;
+const EXISTING_REPORT_OUTPUT_BUDGET: usize = HOST_TOOL_OUTPUT_MAX_BYTES - 8 * 1024;
+const MAX_TOOL_ERROR_CHARS: usize = 300;
 
 static CLEAN_REPO_INPUT_CACHE: LazyLock<Mutex<HashMap<String, Vec<input::AuditFile>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static BOUND_WORKFLOW_STATE: LazyLock<Mutex<Option<BoundWorkflowState>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[derive(Debug, Clone)]
+struct BoundWorkflowState {
+    run_id: String,
+    input_digest: u64,
+    chunk_count: usize,
+    next_chunk: usize,
+}
 
 pub(crate) async fn serve_stdio() -> Result<i32> {
     ui::set_output_mode(ui::OutputMode::Quiet);
@@ -59,7 +76,7 @@ pub(crate) async fn serve_stdio() -> Result<i32> {
 async fn handle_request(method: &str, params: Value) -> Result<JsonRpcResponse> {
     match method {
         "initialize" => Ok(JsonRpcResponse::Result(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": negotiated_protocol_version(&params),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "oy", "version": env!("CARGO_PKG_VERSION") }
         }))),
@@ -67,11 +84,23 @@ async fn handle_request(method: &str, params: Value) -> Result<JsonRpcResponse> 
         "tools/list" => Ok(JsonRpcResponse::Result(
             json!({ "tools": tool_definitions() }),
         )),
-        "tools/call" => handle_tool_call(params).await.map(JsonRpcResponse::Result),
+        "tools/call" => Ok(JsonRpcResponse::Result(
+            handle_tool_call(params)
+                .await
+                .unwrap_or_else(|err| tool_error_result(&err)),
+        )),
         other => Ok(JsonRpcResponse::Error {
             code: -32601,
             message: format!("unknown MCP method: {other}"),
         }),
+    }
+}
+
+fn negotiated_protocol_version(params: &Value) -> &'static str {
+    if params.get("protocolVersion").and_then(Value::as_str) == Some(LATEST_PROTOCOL_VERSION) {
+        LATEST_PROTOCOL_VERSION
+    } else {
+        FALLBACK_PROTOCOL_VERSION
     }
 }
 
@@ -98,7 +127,13 @@ async fn handle_tool_call(params: Value) -> Result<Value> {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let _context = authorize_bound_call(&args)?;
+    let requested_chunk = args
+        .get("chunk")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
     let result = match name {
+        "workflow_status" => workflow_status()?,
         "repo_manifest" => repo_manifest(args)?,
         "repo_chunks" => repo_chunks(args)?,
         "git_diff_input" => git_diff_input(args)?,
@@ -110,21 +145,92 @@ async fn handle_tool_call(params: Value) -> Result<Value> {
         "render_review_report" => render_review_report(args)?,
         other => bail!("unknown oy MCP tool: {other}"),
     };
-    Ok(json!({
-        "content": [{ "type": "text", "text": result_text(result)? }],
-        "isError": false
-    }))
+    let response = tool_success_result(result)?;
+    if matches!(name, "repo_chunks" | "git_diff_input") {
+        acknowledge_bound_chunk(requested_chunk)?;
+    }
+    Ok(response)
+}
+
+fn authorize_bound_call(args: &Value) -> Result<Option<crate::workflow::ActiveContextGuard>> {
+    if let Some(run_id) = args.get("run_id").and_then(Value::as_str) {
+        let context = crate::workflow::find_by_run_id(run_id)?
+            .ok_or_else(|| anyhow!("workflow_context_missing: unknown or completed run_id"))?;
+        return crate::workflow::activate(context).map(Some);
+    }
+    let root = config::oy_root()?;
+    if crate::workflow::retained(&root)?.is_some() {
+        bail!("workflow_auth_required: pass the bound run_id to every oy tool call");
+    }
+    Ok(None)
 }
 
 async fn builtin_tool(name: &str, args: Value) -> Result<Value> {
     tools::invoke_read_only_deterministic(workspace_root()?, name, args).await
 }
 
-fn result_text(value: Value) -> Result<String> {
-    match value {
-        Value::String(value) => Ok(value),
-        other => serde_json::to_string_pretty(&other).context("failed encoding tool result"),
+fn tool_success_result(result: Value) -> Result<Value> {
+    let text = primary_result_text(&result)?;
+    let value = if result.get("text").is_some() {
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": false
+        })
+    } else {
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": result,
+            "isError": false
+        })
+    };
+    let encoded = serde_json::to_vec(&value)?;
+    if encoded.len() > HOST_TOOL_OUTPUT_MAX_BYTES {
+        bail!(
+            "tool_output_too_large: encoded result {} bytes exceeds {}",
+            encoded.len(),
+            HOST_TOOL_OUTPUT_MAX_BYTES
+        );
     }
+    Ok(value)
+}
+
+fn primary_result_text(value: &Value) -> Result<String> {
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return Ok(text.to_string());
+    }
+    if value.get("exists").and_then(Value::as_bool) == Some(true)
+        && let Some(report) = value.get("report").and_then(Value::as_str)
+    {
+        return Ok(report.to_string());
+    }
+    result_text(value)
+}
+
+fn result_text(value: &Value) -> Result<String> {
+    match value {
+        Value::String(value) => Ok(value.clone()),
+        other => serde_json::to_string_pretty(other).context("failed encoding tool result"),
+    }
+}
+
+fn tool_error_result(err: &anyhow::Error) -> Value {
+    let message = err
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = message.chars();
+    let mut message = chars
+        .by_ref()
+        .take(MAX_TOOL_ERROR_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        message.push_str("...");
+    }
+    json!({
+        "content": [{ "type": "text", "text": message }],
+        "isError": true
+    })
 }
 
 fn write_response(stdout: &mut std::io::Stdout, response: Value) -> Result<()> {
@@ -144,7 +250,12 @@ fn jsonrpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
 }
 
 fn tool_definitions() -> Vec<Value> {
-    let mut tools = vec![
+    let mut tools = vec![tool_def(
+        "workflow_status",
+        "Return the immutable oy workflow scope, output, model, chunk limit, and recovery run ID bound by the launcher.",
+        json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+    )];
+    tools.extend([
         tool_def(
             "repo_manifest",
             "Build a deterministic, gitignore-aware repository manifest for audit/review planning.",
@@ -166,7 +277,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "path": { "type": "string", "default": "." },
                     "model": { "type": "string", "description": "Model label retained for workflow metadata; token estimates use oy's approximate byte heuristic" },
-                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Target maximum tokens per chunk; increase above the largest in-scope file token count when deterministic input would otherwise fail closed" },
+                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Best-effort token target for unbound interactive calls; bound oy workflows enforce a fixed transport-safe target" },
                     "chunk": { "type": "integer", "description": "1-based chunk number to return with full text" }
                 }
             }),
@@ -180,7 +291,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "target": { "type": "string" },
                     "model": { "type": "string", "description": "Model label retained for workflow metadata; token estimates use oy's approximate byte heuristic" },
-                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Target maximum tokens per chunk; increase above the largest diff item token count when deterministic input would otherwise fail closed" },
+                    "target_tokens": { "type": "integer", "default": DEFAULT_TARGET_TOKENS, "description": "Best-effort token target for unbound interactive calls; bound oy workflows enforce a fixed transport-safe target" },
                     "chunk": { "type": "integer", "description": "1-based chunk number to return with full diff text" }
                 }
             }),
@@ -197,7 +308,7 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }),
         ),
-    ];
+    ]);
 
     if let Some(definition) = sloc_tool_definition() {
         tools.push(definition);
@@ -223,6 +334,32 @@ fn tool_definitions() -> Vec<Value> {
     ]);
 
     tools
+}
+
+fn workflow_status() -> Result<Value> {
+    let root = workspace_root()?;
+    let context = crate::workflow::current(&root)?.ok_or_else(|| {
+        anyhow!("workflow_context_missing: launch through oy audit/review/enhance")
+    })?;
+    let state = BOUND_WORKFLOW_STATE
+        .lock()
+        .map_err(|_| anyhow!("workflow state lock poisoned"))?
+        .clone()
+        .filter(|state| state.run_id == context.run_id);
+    Ok(json!({
+        "run_id": context.run_id,
+        "kind": context.kind,
+        "scope": context.scope,
+        "focus": context.focus,
+        "output": context.output,
+        "format": context.format,
+        "max_chunks": context.max_chunks,
+        "model": context.model,
+        "session_id": context.session_id,
+        "prepared": state.is_some(),
+        "chunk_count": state.as_ref().map(|state| state.chunk_count),
+        "next_chunk": state.as_ref().map(|state| state.next_chunk),
+    }))
 }
 
 fn outline_tool_definition() -> Option<Value> {
@@ -287,7 +424,21 @@ fn sighthound_tool_definition() -> Option<Value> {
 }
 
 fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({ "name": name, "description": description, "inputSchema": input_schema })
+    let mut input_schema = input_schema;
+    if let Some(properties) = input_schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
+        properties.insert(
+            "run_id".to_string(),
+            json!({ "type": "string", "description": "Required correlation token during a bound oy CLI workflow" }),
+        );
+    }
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema
+    })
 }
 
 fn render_report_schema(default_out: &str, sarif: bool) -> Value {
@@ -374,8 +525,19 @@ struct RenderReportArgs {
 }
 
 fn repo_manifest(args: Value) -> Result<Value> {
-    let args: RepoInputArgs = parse_args(args)?;
+    let mut args: RepoInputArgs = parse_args(args)?;
     let root = workspace_root()?;
+    if let Some(context) = crate::workflow::current(&root)? {
+        match context.scope {
+            crate::workflow::WorkflowScope::Workspace { path } => args.path = path,
+            crate::workflow::WorkflowScope::GitDiff { .. } => {
+                bail!("bound review workflow requires git_diff_input")
+            }
+        }
+        if let Some(model) = context.model {
+            args.model = model;
+        }
+    }
     let files = collect_workspace_input_files(&root, &args.path, &args.model)?;
     if files.is_empty() {
         bail!("no reviewable text files found");
@@ -393,8 +555,21 @@ fn repo_manifest(args: Value) -> Result<Value> {
 }
 
 fn repo_chunks(args: Value) -> Result<Value> {
-    let args: ChunkArgs = parse_args(args)?;
+    let mut args: ChunkArgs = parse_args(args)?;
     let root = workspace_root()?;
+    let context = crate::workflow::current(&root)?;
+    if let Some(context) = &context {
+        match &context.scope {
+            crate::workflow::WorkflowScope::Workspace { path } => args.path = path.clone(),
+            crate::workflow::WorkflowScope::GitDiff { .. } => {
+                bail!("bound review workflow requires git_diff_input")
+            }
+        }
+        if let Some(model) = &context.model {
+            args.model = model.clone();
+        }
+        args.target_tokens = DEFAULT_TARGET_TOKENS;
+    }
     let files = collect_workspace_input_files(&root, &args.path, &args.model)?;
     if files.is_empty() {
         bail!("no reviewable text files found");
@@ -402,13 +577,36 @@ fn repo_chunks(args: Value) -> Result<Value> {
     let manifest = input::build_manifest(&files);
     let chunks = input::chunk_files(files, args.target_tokens.max(1));
     input::ensure_chunks_fit_prompt(&chunks, args.target_tokens.max(1))?;
+    if let Some(context) = &context
+        && chunks.len() > context.max_chunks
+    {
+        bail!(
+            "chunk_limit_exceeded: {} chunks exceeds bound max_chunks {}",
+            chunks.len(),
+            context.max_chunks
+        );
+    }
+    enforce_bound_chunk_sequence(context.as_ref(), &chunks, args.chunk)?;
     chunks_response("workspace", manifest, chunks, args.chunk)
 }
 
 fn git_diff_input(args: Value) -> Result<Value> {
-    let args: DiffArgs = parse_args(args)?;
-    validate_target_ref(&args.target)?;
+    let mut args: DiffArgs = parse_args(args)?;
     let root = workspace_root()?;
+    let context = crate::workflow::current(&root)?;
+    if let Some(context) = &context {
+        match &context.scope {
+            crate::workflow::WorkflowScope::GitDiff { oid, .. } => args.target = oid.clone(),
+            crate::workflow::WorkflowScope::Workspace { .. } => {
+                bail!("bound workspace workflow requires repo_chunks")
+            }
+        }
+        if let Some(model) = &context.model {
+            args.model = model.clone();
+        }
+        args.target_tokens = DEFAULT_TARGET_TOKENS;
+    }
+    validate_target_ref(&args.target)?;
     let _ = git_output(&root, &["rev-parse", "--show-toplevel"])
         .context("git_diff_input requires a git workspace")?;
     let diff = git_output(
@@ -441,6 +639,16 @@ fn git_diff_input(args: Value) -> Result<Value> {
     let manifest = input::build_diff_manifest(&args.target, &files, &stats);
     let chunks = input::chunk_files(files, args.target_tokens.max(1));
     input::ensure_chunks_fit_prompt(&chunks, args.target_tokens.max(1))?;
+    if let Some(context) = &context
+        && chunks.len() > context.max_chunks
+    {
+        bail!(
+            "chunk_limit_exceeded: {} chunks exceeds bound max_chunks {}",
+            chunks.len(),
+            context.max_chunks
+        );
+    }
+    enforce_bound_chunk_sequence(context.as_ref(), &chunks, args.chunk)?;
     chunks_response(
         &format!("git diff against {}", args.target),
         manifest,
@@ -449,9 +657,104 @@ fn git_diff_input(args: Value) -> Result<Value> {
     )
 }
 
+fn enforce_bound_chunk_sequence(
+    context: Option<&crate::workflow::WorkflowContext>,
+    chunks: &[input::AuditChunk],
+    requested: Option<usize>,
+) -> Result<()> {
+    let Some(context) = context else {
+        return Ok(());
+    };
+    let digest = input_digest(chunks);
+    let mut state = BOUND_WORKFLOW_STATE
+        .lock()
+        .map_err(|_| anyhow!("workflow state lock poisoned"))?;
+    match requested {
+        None => {
+            if let Some(current) = state.as_ref()
+                && current.run_id == context.run_id
+            {
+                if current.input_digest != digest {
+                    bail!("input_changed: workflow evidence changed after preparation");
+                }
+            } else {
+                *state = Some(BoundWorkflowState {
+                    run_id: context.run_id.clone(),
+                    input_digest: digest,
+                    chunk_count: chunks.len(),
+                    next_chunk: 1,
+                });
+            }
+        }
+        Some(number) => {
+            let current = state
+                .as_mut()
+                .ok_or_else(|| anyhow!("workflow_not_prepared: request the chunk summary first"))?;
+            if current.run_id != context.run_id || current.input_digest != digest {
+                bail!("input_changed: workflow evidence changed after preparation");
+            }
+            if number > current.chunk_count {
+                bail!(
+                    "chunk_not_found: requested {number}, available chunks {}",
+                    current.chunk_count
+                );
+            }
+            if number != current.next_chunk && number + 1 != current.next_chunk {
+                bail!(
+                    "chunk_out_of_order: expected chunk {}, received {number}",
+                    current.next_chunk
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn acknowledge_bound_chunk(number: Option<usize>) -> Result<()> {
+    let Some(number) = number else {
+        return Ok(());
+    };
+    let root = workspace_root()?;
+    let Some(context) = crate::workflow::current(&root)? else {
+        return Ok(());
+    };
+    let mut state = BOUND_WORKFLOW_STATE
+        .lock()
+        .map_err(|_| anyhow!("workflow state lock poisoned"))?;
+    let current = state
+        .as_mut()
+        .ok_or_else(|| anyhow!("workflow_not_prepared: request the chunk summary first"))?;
+    if current.run_id == context.run_id && number == current.next_chunk {
+        current.next_chunk += 1;
+    }
+    Ok(())
+}
+
+fn input_digest(chunks: &[input::AuditChunk]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for chunk in chunks {
+        for file in &chunk.files {
+            file.path.hash(&mut hasher);
+            file.text.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 fn existing_report(args: Value) -> Result<Value> {
-    let args: ExistingReportArgs = parse_args(args)?;
-    existing_report_at(&workspace_root()?, args)
+    let mut args: ExistingReportArgs = parse_args(args)?;
+    let root = workspace_root()?;
+    if let Some(context) = crate::workflow::current(&root)? {
+        args.kind = match context.kind {
+            crate::workflow::WorkflowKind::Audit => "audit",
+            crate::workflow::WorkflowKind::Review | crate::workflow::WorkflowKind::Enhance => {
+                "review"
+            }
+        }
+        .to_string();
+        args.out = Some(context.output);
+    }
+    existing_report_at(&root, args)
 }
 
 fn existing_report_at(root: &Path, args: ExistingReportArgs) -> Result<Value> {
@@ -486,14 +789,31 @@ fn existing_report_at(root: &Path, args: ExistingReportArgs) -> Result<Value> {
     }
     let report = fs::read_to_string(&output_path)
         .with_context(|| format!("failed to read existing report: {}", output_path.display()))?;
+    let report_lines = report.lines().count();
+    if report_lines > HOST_TOOL_OUTPUT_MAX_LINES {
+        bail!(
+            "existing {kind} report has too many lines to include deterministically ({report_lines} > {HOST_TOOL_OUTPUT_MAX_LINES}): {}",
+            output_path.display()
+        );
+    }
     let findings = audit::report::findings_from_report(&report).len();
-    Ok(json!({
+    let result = json!({
         "kind": kind,
         "path": out,
         "exists": true,
         "report": report,
         "findings": findings,
-    }))
+    });
+    let encoded_bytes = serde_json::to_vec(&tool_success_result(result.clone())?)
+        .context("failed measuring existing report MCP output")?
+        .len();
+    if encoded_bytes > EXISTING_REPORT_OUTPUT_BUDGET {
+        bail!(
+            "existing {kind} report exceeds the host tool-output budget ({encoded_bytes} > {EXISTING_REPORT_OUTPUT_BUDGET} encoded bytes): {}",
+            output_path.display()
+        );
+    }
+    Ok(result)
 }
 
 fn chunks_response(
@@ -514,11 +834,9 @@ fn chunks_response(
         })?;
         return Ok(json!({
             "source": source,
-            "manifest": manifest,
             "chunk": number,
             "chunk_count": chunks.len(),
             "tokens": chunk.tokens,
-            "files": file_summaries(&chunk.files),
             "text": input::chunk_text(chunk),
         }));
     }
@@ -529,18 +847,19 @@ fn chunks_response(
         "chunks": chunks.iter().enumerate().map(|(idx, chunk)| json!({
             "chunk": idx + 1,
             "tokens": chunk.tokens,
-            "files": file_summaries(&chunk.files),
+            "file_count": chunk.files.len(),
         })).collect::<Vec<_>>()
     }))
 }
 
 fn render_audit_report(args: Value) -> Result<Value> {
-    let args: RenderReportArgs = parse_args(args)?;
+    let mut args: RenderReportArgs = parse_args(args)?;
+    let root = workspace_root()?;
+    bind_render_args(&root, &mut args, crate::workflow::WorkflowKind::Audit)?;
     let format = format_arg(&args.format)?;
     let out = args
         .out
         .unwrap_or_else(|| audit::default_output_path(format));
-    let root = workspace_root()?;
     let output_path = config::resolve_workspace_output_path(&root, &out)?;
     let findings_payload = findings_payload(args.findings.as_ref(), "audit")?;
     let report = report_body(args.report, "# Audit Issues", findings_payload.as_deref())?;
@@ -555,6 +874,7 @@ fn render_audit_report(args: Value) -> Result<Value> {
             format,
         ),
     );
+    let report = with_workflow_provenance(&root, report)?;
     let finding_count = audit::report::findings_from_report(&report).len();
     let output = match args.format.as_str() {
         "markdown" => audit::report::with_succinct_findings_summary(&report),
@@ -570,9 +890,47 @@ fn render_audit_report(args: Value) -> Result<Value> {
 }
 
 fn render_review_report(args: Value) -> Result<Value> {
-    let args: RenderReportArgs = parse_args(args)?;
+    let mut args: RenderReportArgs = parse_args(args)?;
     let root = workspace_root()?;
+    bind_render_args(&root, &mut args, crate::workflow::WorkflowKind::Review)?;
     render_review_report_at(&root, args)
+}
+
+fn bind_render_args(
+    root: &Path,
+    args: &mut RenderReportArgs,
+    expected: crate::workflow::WorkflowKind,
+) -> Result<()> {
+    let Some(context) = crate::workflow::current(root)? else {
+        return Ok(());
+    };
+    if context.kind != expected && context.kind != crate::workflow::WorkflowKind::Enhance {
+        bail!("workflow context kind does not match renderer");
+    }
+    if expected != crate::workflow::WorkflowKind::Enhance {
+        let state = BOUND_WORKFLOW_STATE
+            .lock()
+            .map_err(|_| anyhow!("workflow state lock poisoned"))?;
+        let state = state
+            .as_ref()
+            .ok_or_else(|| anyhow!("workflow_not_prepared: collect chunks before rendering"))?;
+        if state.run_id != context.run_id || state.next_chunk <= state.chunk_count {
+            bail!(
+                "chunks_incomplete: read all {} chunks before rendering",
+                state.chunk_count
+            );
+        }
+    }
+    args.out = Some(context.output);
+    args.format = context.format;
+    args.model = context.model;
+    args.focus = (!context.focus.is_empty()).then(|| context.focus.join(" "));
+    args.max_chunks = Some(context.max_chunks);
+    args.target = match context.scope {
+        crate::workflow::WorkflowScope::GitDiff { target, .. } => Some(target),
+        crate::workflow::WorkflowScope::Workspace { .. } => None,
+    };
+    Ok(())
 }
 
 fn render_review_report_at(root: &Path, mut args: RenderReportArgs) -> Result<Value> {
@@ -601,13 +959,33 @@ fn render_review_report_at(root: &Path, mut args: RenderReportArgs) -> Result<Va
             args.max_chunks,
         ),
     );
-    let output = report;
+    let output = with_workflow_provenance(root, report)?;
     config::write_workspace_file(&output_path, output.as_bytes())?;
     Ok(json!({
         "output": output_path,
         "format": "markdown",
         "findings": audit::report::findings_from_report(&output).len(),
     }))
+}
+
+fn with_workflow_provenance(root: &Path, report: String) -> Result<String> {
+    let Some(context) = crate::workflow::current(root)? else {
+        return Ok(report);
+    };
+    let session = context.session_id.as_deref().unwrap_or("unknown");
+    let line = format!(
+        "> oy workflow: run `{}` · session `{session}` · bound max_chunks `{}`",
+        context.run_id, context.max_chunks
+    );
+    let mut lines = report.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let index = lines
+        .iter()
+        .position(|existing| existing.starts_with("> Generated with"))
+        .map_or(1.min(lines.len()), |index| index + 1);
+    lines.insert(index, line);
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
 }
 
 fn report_body(
@@ -651,18 +1029,33 @@ fn with_machine_readable_findings(
 fn file_summaries(files: &[input::AuditFile]) -> Vec<Value> {
     files
         .iter()
+        .take(200)
         .map(|file| {
-            json!({
+            let mut value = json!({
                 "path": file.path,
                 "language": file.language,
                 "bytes": file.bytes,
                 "tokens": file.tokens,
-            })
+            });
+            if let Some(slice) = &file.slice {
+                value["slice"] = json!({
+                    "index": slice.index,
+                    "count": slice.count,
+                    "start_byte": slice.start_byte,
+                    "end_byte": slice.end_byte,
+                    "start_line": slice.start_line,
+                    "end_line": slice.end_line,
+                });
+            }
+            value
         })
         .collect()
 }
 
 fn workspace_root() -> Result<PathBuf> {
+    if let Some(root) = crate::workflow::active_workspace() {
+        return Ok(root);
+    }
     config::oy_root()
 }
 
@@ -842,6 +1235,7 @@ mod tests {
     use super::*;
 
     const DOCUMENTED_TOOL_NAMES: &[&str] = &[
+        "workflow_status",
         "repo_manifest",
         "repo_chunks",
         "git_diff_input",
@@ -854,19 +1248,95 @@ mod tests {
     ];
 
     #[tokio::test]
-    async fn initialize_advertises_protocol_and_server_version() {
-        let response = handle_request("initialize", Value::Null)
-            .await
-            .unwrap()
-            .into_json(json!(1));
+    async fn initialize_negotiates_latest_protocol_and_retains_fallback() {
+        let response = handle_request(
+            "initialize",
+            json!({ "protocolVersion": LATEST_PROTOCOL_VERSION }),
+        )
+        .await
+        .unwrap()
+        .into_json(json!(1));
 
-        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            LATEST_PROTOCOL_VERSION
+        );
         assert_eq!(response["result"]["serverInfo"]["name"], "oy");
         assert_eq!(
             response["result"]["serverInfo"]["version"],
             env!("CARGO_PKG_VERSION")
         );
         assert!(response["result"]["capabilities"]["tools"].is_object());
+
+        let fallback = handle_request("initialize", Value::Null)
+            .await
+            .unwrap()
+            .into_json(json!(2));
+        assert_eq!(
+            fallback["result"]["protocolVersion"],
+            FALLBACK_PROTOCOL_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_failure_returns_normal_is_error_result() {
+        let response = handle_request(
+            "tools/call",
+            json!({ "name": "missing_tool", "arguments": {} }),
+        )
+        .await
+        .unwrap()
+        .into_json(json!(3));
+
+        assert!(response.get("error").is_none());
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(response["result"]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(response["result"]["content"][0]["type"], "text");
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("unknown oy MCP tool: missing_tool")
+        );
+    }
+
+    #[test]
+    fn successful_json_result_includes_matching_structured_content() {
+        let value = json!({ "answer": 42 });
+        let result = tool_success_result(value.clone()).unwrap();
+
+        assert_eq!(result["structuredContent"], value);
+        assert_eq!(result["isError"], false);
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("42")
+        );
+    }
+
+    #[test]
+    fn requested_chunk_uses_full_chunk_as_primary_text() {
+        let chunk = input::AuditChunk {
+            files: vec![input::AuditFile {
+                path: "src/lib.rs".to_string(),
+                language: "Rust",
+                bytes: 13,
+                tokens: 4,
+                text: "fn lib() {}\n".to_string(),
+                slice: None,
+            }],
+            tokens: 4,
+        };
+        let value =
+            chunks_response("workspace", "manifest".to_string(), vec![chunk], Some(1)).unwrap();
+        let expected_text = value["text"].as_str().unwrap().to_string();
+        let result = tool_success_result(value.clone()).unwrap();
+
+        assert_eq!(result["content"][0]["text"], expected_text);
+        assert!(result.get("structuredContent").is_none());
+        assert!(expected_text.contains("## src/lib.rs"));
+        assert!(expected_text.contains("fn lib() {}"));
     }
 
     #[tokio::test]
@@ -882,6 +1352,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect::<Vec<_>>();
         let mut expected = vec![
+            "workflow_status",
             "repo_manifest",
             "repo_chunks",
             "git_diff_input",
@@ -1069,7 +1540,7 @@ mod tests {
 
         let report = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
         assert_eq!(result["findings"], 0);
-        assert!(report.contains("OY_MODEL=openai/gpt-5.5 oy review"));
+        assert!(report.contains("OY_OPENCODE_MODEL=openai/gpt-5.5 oy review"));
         assert!(report.contains("```json oy-findings\n[]\n```"));
     }
 

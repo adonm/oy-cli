@@ -19,9 +19,10 @@ Current generated capabilities:
 | Surface | Owner | Evaluation posture |
 |---|---|---|
 | Primary agents: `oy`, `oy-plan`, `oy-edit`, `oy-auto` | opencode host plus generated prompts | Smoke-test launch/setup; use manual tasks for style regressions |
-| `oy-auditor` | Generated prompt with only deterministic oy MCP tools allowed | Live audit corpus; no generic read/search/bash/edit tools |
-| `oy-reviewer` | Generated prompt with only deterministic oy MCP tools allowed | Live diff and whole-workspace review corpus |
-| `oy-enhancer` | Generated prompt with edit/bash ask permissions | Disposable repos only; verify tests after one finding |
+| `oy-audit`, `oy-review`, `oy-enhance` skills | Canonical generated workflow protocols | Live corpus plus adapter/source-drift tests |
+| `oy-auditor` | Thin permission adapter loading `oy-audit` | Live audit corpus; no generic read/search/bash/edit tools |
+| `oy-reviewer` | Thin permission adapter loading `oy-review` | Live diff and whole-workspace review corpus |
+| `oy-enhancer` | Thin permission adapter loading `oy-enhance`; edits allowed and shell denied | Disposable repos only; verify tests separately after one finding |
 | MCP input tools | `oy mcp` | Rust fixture/unit tests and protocol tests |
 | MCP report renderers | `oy mcp` | Rust fixture/unit tests plus report-shape checks in live runs |
 
@@ -50,7 +51,7 @@ Start with three lanes:
 | Regression diffs | Check that reviews understand a real change | Security/bug-fix commits from small projects; review `base..fix` and `fix..base` where useful |
 | Precision baselines | Check that reports stay sparse on mature code | `BurntSushi/ripgrep`, `sharkdp/bat`, `pallets/flask`, `expressjs/express` |
 
-Prefer tasks that fit within `--max-chunks 80` at the default `target_tokens`.
+Prefer tasks that fit within `--max-chunks 80` at the fixed bound-workflow chunk target.
 For larger projects, evaluate a documented path focus instead of raising chunk
 budgets until the task becomes impossible to compare.
 
@@ -89,8 +90,9 @@ The runner:
 - prepends `target/debug` to `PATH` so opencode's MCP command uses the candidate
   binary
 - runs `oy setup --workspace`, then the configured `oy audit` or `oy review`
-  (or `opencode run --model ... --command oy-audit/oy-review` when
-  `--opencode-model` is supplied)
+  through OpenCode 2's noninteractive runner
+- maps `--opencode-model provider/model#variant` to `OY_OPENCODE_MODEL` for
+  the oy workflow instead of bypassing oy with a host command
 - copies reports and writes `summary.json`/`summary.md` under `.tmp/eval/runs/`
 - checks report shape, `oy-findings` JSON, keyword/path scorecard hints, and
   unexpected source mutations outside `.opencode/` and `.oy-eval/`
@@ -107,6 +109,7 @@ first or install the candidate binary before running evals.
 ```bash
 cargo build --locked
 export PATH="$PWD/target/debug:$PATH"
+export OY_OPENCODE_MODEL="provider/model#variant" # optional; omit #variant if unused
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-<model-slug>"
 mkdir -p .tmp/eval/repos .tmp/eval/runs/"$RUN_ID"
 
@@ -144,7 +147,7 @@ commands, focus, and refs.
 
 | Metric | Pass signal | Fail signal |
 |---|---|---|
-| Protocol | Exactly one generated report, valid structure, deterministic chunks read in order | Missing report, malformed `oy-findings`, skipped chunks, stale carry-forward |
+| Protocol | Exactly one generated report, valid structure, MCP-enforced stable/ordered/complete chunks | Missing report, malformed `oy-findings`, rejected changed/skipped chunks, stale carry-forward |
 | Recall | Expected bug class or design issue is found with concrete evidence | Known issue missed or described without an affected path/symbol |
 | Precision | Findings are few, specific, and defensible | Generic advice, speculative vulnerabilities, duplicate findings |
 | Actionability | Fix is local, testable, and removes the bug class | Vague remediation or framework churn without evidence |
@@ -160,7 +163,7 @@ material regression in the others.
 1. Make one prompt change at a time.
 2. Run the old and new prompts on the same pinned corpus.
 3. Prefer shorter prompts unless longer text measurably improves the scorecard.
-4. Preserve hard safety/protocol constraints in generated agent tests.
+4. Preserve skill/adaptor structure and Rust/MCP safety/protocol constraints in tests.
 5. Put the scorecard summary in the PR or release notes; keep raw eval artifacts
    under `.tmp/eval/`.
 6. Do not exact-match model prose. Match behavior: evidence, report schema,

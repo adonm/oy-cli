@@ -8,10 +8,12 @@ set -eu
 #
 # Environment knobs:
 #   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases
-#   OY_INSTALL_SIGHTHOUND        set to 1/true to source-build optional Sighthound (Rust 1.85+ required)
+#   OY_INSTALL_SIGHTHOUND        set to 1/true to source-build optional pinned Sighthound
 #   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
+opencode_tool="npm:@opencode-ai/cli@0.0.0-next-15323"
+sighthound_tool="cargo:https://github.com/Corgea/Sighthound[bin=sighthound,locked=true]@rev:c4608eb2b6ca256daf4dbd1e74aadc3570343685"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -65,30 +67,40 @@ fi
 
 log "Installing/upgrading oy toolchain with mise (minimum release age: $minimum_release_age)..."
 
+# OpenCode's beta package uses npm; oy and optional source helpers use Cargo.
+"$mise_bin" use --global --yes node@24 rust@1.96
+
 # Install cargo-binstall first so cargo-backed tools can use prebuilt binaries when available.
 "$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" cargo-binstall
 
 "$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" \
   cargo:oy-cli \
-  opencode \
+  "$opencode_tool" \
   cargo:tokei \
   github:universal-ctags/ctags
 
 case "${OY_INSTALL_SIGHTHOUND:-}" in
 1 | true | TRUE | yes | YES)
-  if ! "$mise_bin" exec -- cargo --version >/dev/null 2>&1; then
-    die "OY_INSTALL_SIGHTHOUND requires an installed Rust 1.85+ toolchain"
-  fi
-  log "Building optional Sighthound 1.0 from source..."
+  log "Building the pinned Sighthound release commit from source (sighthound binary only)..."
   "$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" \
-    cargo:https://github.com/Corgea/Sighthound@tag:1.0
+    "$sighthound_tool"
   ;;
 *)
-  log "Skipping source-built Sighthound; set OY_INSTALL_SIGHTHOUND=1 with Rust 1.85+ to install it."
+  log "Skipping source-built Sighthound; set OY_INSTALL_SIGHTHOUND=1 to build it with pinned Rust 1.96."
   ;;
 esac
 
 "$mise_bin" reshim
+
+"$mise_bin" exec -- opencode2 --version >/dev/null 2>&1 \
+  || die "OpenCode 2 installed, but opencode2 --version failed"
+
+case "${OY_INSTALL_SIGHTHOUND:-}" in
+1 | true | TRUE | yes | YES)
+  "$mise_bin" exec -- sighthound --version >/dev/null 2>&1 \
+    || die "Sighthound installed, but sighthound --version failed"
+  ;;
+esac
 
 case "${OY_SKIP_SETUP:-}" in
 1 | true | TRUE | yes | YES)

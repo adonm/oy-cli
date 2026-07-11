@@ -49,12 +49,37 @@ jobs:
           grep -F -- "--max-chunks <N>" /tmp/oy-audit-help.txt
           cargo run --locked -- review --help
           cargo run --locked -- enhance --help
+          cargo run --locked -- recover --help
           cargo run --locked -- model --help
           cargo run --locked -- doctor --help
           cargo run --locked -- modes --help
           cargo run --locked -- upgrade --help
+      - name: OpenCode 2 integration smoke
+        run: |
+          npm install --global @opencode-ai/cli@0.0.0-next-15323
+          opencode2 --version | grep -F '0.0.0-next-15323'
+          opencode2 run --help | grep -F -- '--agent string'
+          cargo build --locked
+          export PATH="$PWD/target/debug:$PATH"
+          oy setup
+          grep -F '"commands"' "$HOME/.config/opencode/opencode.json"
+          grep -F '"servers"' "$HOME/.config/opencode/opencode.json"
+          python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy" not in config["mcp"]'
+          opencode2 service start
+          # The first location-scoped query boots and caches project services.
+          opencode2 api v2.agent.list --param "location[directory]=$PWD" > /dev/null
+          opencode2 api v2.agent.list --param "location[directory]=$PWD" > /tmp/opencode-agents.json
+          opencode2 api v2.command.list --param "location[directory]=$PWD" > /tmp/opencode-commands.json
+          grep -F '"id":"oy-auditor"' /tmp/opencode-agents.json
+          grep -F '"name":"oy-audit"' /tmp/opencode-commands.json
+          opencode2 mcp list | grep -F 'connected'
+          oy doctor --check --json | tee /tmp/oy-doctor.json
+          python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True; assert data["runtime"]["mcp_connected"] is True'
+          opencode2 service stop
       - name: Documentation drift checks
         run: |
           ! grep -R -n -E 'src/(app|chat|config|model|session|ui)\.rs' README.md CONTRIBUTING.md docs
+      - name: Installer smoke
+        run: sh scripts/test_install.sh
       - name: Package crate
         run: cargo package --locked

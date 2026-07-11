@@ -6,13 +6,7 @@ use clap::Args;
 pub(super) struct ModelArgs {
     #[arg(
         value_name = "MODEL",
-        help = "Optional model/provider filter passed to `opencode models`"
+        help = "Optional model/provider substring filter for the OpenCode 2 model API"
     )]
     pub(super) model: Option<String>,
-}
-
-#[cfg(test)]
-pub(super) fn is_exact_model_spec(value: &str) -> bool {
-    let value = value.trim();
-    value.contains("::") || value.contains('/') || value.contains(':') || value.contains('.')
 }

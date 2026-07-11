@@ -15,12 +15,14 @@ pub(super) struct SharedModeArgs {
     pub(super) mode: config::SafetyMode,
     #[arg(
         long = "continue-session",
+        conflicts_with = "resume",
         default_value_t = false,
         help = "Resume the most recent session"
     )]
     pub(super) continue_session: bool,
     #[arg(
         long,
+        conflicts_with = "continue_session",
         default_value = "",
         value_name = "SESSION_ID",
         help = "Resume a session id"

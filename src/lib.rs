@@ -1,10 +1,11 @@
 //! # oy
 //!
 //! `oy` adds repeatable repository audit and review workflows to
-//! [opencode](https://opencode.ai/). Its local MCP server provides deterministic repository
+//! [OpenCode 2](https://opencode.ai/). Its local MCP server provides deterministic repository
 //! collection, ordered chunks, target-diff input, and normalized Markdown/SARIF reports.
-//! opencode remains responsible for model execution, providers, sessions, permissions, and
-//! general coding tools.
+//! OpenCode remains responsible for model execution, providers, authenticated sessions,
+//! permissions, and general coding tools. oy invokes OpenCode's noninteractive runner and its
+//! model-list API through the OpenCode CLI, and does not store provider credentials.
 //!
 //! ## Start with the CLI
 //!
@@ -53,6 +54,7 @@ mod mcp;
 mod opencode;
 mod review;
 mod tools;
+mod workflow;
 
 pub(crate) use cli::{config, ui};
 

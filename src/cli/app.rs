@@ -27,7 +27,7 @@ use upgrade_cmd::UpgradeArgs;
     name = "oy",
     version,
     about = "Repeatable repository audits and reviews for opencode.",
-    after_help = "Examples:\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor\n  oy                              (launch opencode with --agent oy)\n\nPrimary direction: deterministic-input audit/review/report workflows. Model conclusions are not deterministic. Running `oy` without a subcommand and compatibility wrappers refresh the generated integration before delegating to opencode; unknown top-level commands/flags pass through."
+    after_help = "Examples:\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor --check\n  oy                              (launch the OpenCode 2 TUI)\n\nPrimary direction: deterministic-input audit/review/report workflows. Non-interactive workflows use OpenCode 2's runner; model conclusions are not deterministic. Launches validate the existing integration without rewriting it; unknown top-level commands/flags pass through."
 )]
 struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Select quiet output where supported")]
@@ -55,11 +55,11 @@ enum Command {
     Open(OpenArgs),
     /// Start the oy MCP server over stdio.
     Mcp,
-    /// Delegate one task to `opencode run`; prompt can be args or stdin.
+    /// Run one task through OpenCode 2; prompt can be args or stdin.
     Run(RunArgs),
     /// Launch opencode with oy session/mode conveniences.
     Chat(ChatArgs),
-    /// Delegate to `opencode models`.
+    /// List OpenCode 2 models through the API.
     Model(ModelArgs),
     /// Show config paths, executable/helper availability, and safety mode.
     Doctor(DoctorArgs),
@@ -94,6 +94,8 @@ enum Command {
     Review(ReviewArgs),
     /// Fix one finding from ISSUES.md or REVIEW.md.
     Enhance(EnhanceArgs),
+    /// Resume the retained OpenCode session for an interrupted bound workflow.
+    Recover,
     /// Upgrade oy and opencode when both are managed by mise.
     Upgrade(UpgradeArgs),
 }
@@ -112,6 +114,12 @@ struct SetupArgs {
         help = "Preview generated integration files without writing"
     )]
     dry_run: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Remove generated oy integration files and owned config entries"
+    )]
+    remove: bool,
 }
 
 #[derive(Debug, Args)]
@@ -146,7 +154,9 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
     crate::ui::init_output_mode(cli_output_mode(&cli));
     let mode = cli.mode;
     match cli.command {
-        Some(Command::Setup(args)) => crate::opencode::setup_command(args.workspace, args.dry_run),
+        Some(Command::Setup(args)) => {
+            crate::opencode::setup_command(args.workspace, args.dry_run, args.remove)
+        }
         Some(Command::Open(args)) => {
             crate::opencode::open_command(args.args, mode, args.dry_run || args.explain)
         }
@@ -188,7 +198,9 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             args.audit_max_chunks,
             args.review_max_chunks,
             args.mode,
+            args.interactive,
         ),
+        Some(Command::Recover) => crate::opencode::recover_workflow_command(),
         Some(Command::Upgrade(args)) => upgrade_cmd::upgrade_command(args),
         None => crate::opencode::open_command(Vec::new(), mode, false),
     }
@@ -196,14 +208,16 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
 
 fn modes_command() -> Result<i32> {
     crate::ui::section("oy modes");
-    crate::ui::line("  default / ask       -> opencode --agent oy");
+    crate::ui::line("  Noninteractive `oy run` and remediation sessions:");
+    crate::ui::line("  default / ask       -> agent oy");
     crate::ui::line("                         edits ask, bash asks");
-    crate::ui::line("  plan / read         -> opencode --agent oy-plan");
+    crate::ui::line("  plan / read         -> agent oy-plan");
     crate::ui::line("                         edits denied, bash denied");
-    crate::ui::line("  edit / accept-edits -> opencode --agent oy-edit");
+    crate::ui::line("  edit / accept-edits -> agent oy-edit");
     crate::ui::line("                         edits allowed, bash asks");
-    crate::ui::line("  auto / yolo         -> opencode --agent oy-auto --auto");
-    crate::ui::line("                         host prompts auto-approved unless explicitly denied");
+    crate::ui::line("  auto / yolo         -> agent oy-auto");
+    crate::ui::line("                         edits and shell allowed in trusted workspaces");
+    crate::ui::line("  TUI launches        -> select the desired agent inside OpenCode 2");
     Ok(0)
 }
 
@@ -223,7 +237,7 @@ fn should_passthrough_to_opencode(argv: &[String], kind: ErrorKind) -> bool {
 fn starts_with_oy_command(argv: &[String]) -> bool {
     const OY_COMMANDS: &[&str] = &[
         "setup", "open", "mcp", "run", "chat", "model", "doctor", "modes", "audit", "review",
-        "enhance", "upgrade",
+        "enhance", "recover", "upgrade",
     ];
     first_action_arg(argv).is_some_and(|arg| OY_COMMANDS.contains(&arg))
 }
@@ -443,12 +457,6 @@ mod audit_tests {
             &["modes".to_string(), "--bogus".to_string()],
             ErrorKind::UnknownArgument
         ));
-    }
-
-    #[test]
-    fn exact_model_specs_are_endpoint_qualified_or_provider_ids() {
-        assert!(model_cmd::is_exact_model_spec("openai/gpt-4.1-mini"));
-        assert!(!model_cmd::is_exact_model_spec("gpt"));
     }
 
     #[test]

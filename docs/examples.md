@@ -130,8 +130,9 @@ steps:
   - name: Install oy and opencode
     run: |
       # Pin versions in production CI rather than installing mutable latest releases.
-      cargo install oy-cli --locked --version 0.11.15
-      # Install/configure a compatible opencode release separately.
+      cargo install oy-cli --locked --version 0.12.0-beta.1
+      mise use --global node@24 npm:@opencode-ai/cli@0.0.0-next-15323
+      # Configure OpenCode authentication separately.
   - name: Run oy audit
     env:
       PROVIDER_API_KEY: ${{ secrets.PROVIDER_API_KEY }}

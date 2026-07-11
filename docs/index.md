@@ -10,7 +10,7 @@ Gitignore-aware manifests and ordered chunks replace silent, model-selected samp
 
 ### Restricted review
 
-Audit and review agents receive oy evidence tools, not generic shell, edit, search, or web tools.
+Three canonical skills define audit, review, and remediation. Thin restricted agents load those protocols, while MCP enforces bound scope, limits, evidence order/stability, and report metadata.
 
 ### Reports that survive chat
 
@@ -25,12 +25,12 @@ oy doctor
 oy audit
 ```
 
-The full installer uses [mise](https://mise.jdx.dev/) to install oy, opencode, and optional local evidence helpers, then runs global setup. [Review the installer](install.sh) before piping it to a shell.
+The full installer uses [mise](https://mise.jdx.dev/) to install oy, pinned OpenCode 2 beta `0.0.0-next-15323`, and local evidence helpers, then runs global setup. [Review the installer](install.sh) before piping it to a shell.
 
 For a minimal manual install:
 
 ```bash
-mise use --global cargo-binstall cargo:oy-cli opencode
+mise use --global node@24 cargo-binstall cargo:oy-cli npm:@opencode-ai/cli@0.0.0-next-15323
 oy setup
 oy audit
 ```

@@ -44,6 +44,10 @@ pub(crate) fn render_sarif(report: &str) -> Result<String> {
         results.push(result);
     }
 
+    let provenance = report
+        .lines()
+        .filter(|line| line.starts_with("> Generated with") || line.starts_with("> oy workflow:"))
+        .collect::<Vec<_>>();
     let sarif = json!({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -57,7 +61,8 @@ pub(crate) fn render_sarif(report: &str) -> Result<String> {
                 }
             },
             "results": results,
-            "columnKind": "utf16CodeUnits"
+            "columnKind": "utf16CodeUnits",
+            "properties": { "oy.provenance": provenance }
         }]
     });
     let mut out = serde_json::to_string_pretty(&sarif)?;

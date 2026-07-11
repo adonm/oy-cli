@@ -16,14 +16,14 @@ oy exists to improve the audit → review → remediate loop in opencode, not to
 |---|---|
 | Core | Audit, target-diff review, deterministic evidence tools, report rendering, stable IDs, and remediation handoff. |
 | Supporting | Safe setup, doctor diagnostics, optional local evidence helpers, and opencode launch integration. |
-| Compatibility | General oy agent, safety-mode aliases, run/chat/model wrappers, upgrade, and opencode passthrough. |
+| Compatibility | General oy agent, API task/model wrappers, TUI launch, safety-mode aliases, upgrade, and OpenCode passthrough. |
 
 ## Decision principles
 
 1. **Own the evidence boundary, not the model.** Deterministic collection and rendering are oy's value.
 2. **Fail closed instead of sampling silently.** Scope, limits, and exclusions should be inspectable.
 3. **Optimize for handoff artifacts.** Reports and finding lifecycle matter more than chat features.
-4. **Make setup reversible and unsurprising.** Owned writes and refresh behavior must be explicit.
+4. **Make setup reversible and unsurprising.** Owned writes and setup/removal behavior must be explicit.
 5. **Add native code only for deterministic value.** Prefer host capabilities when they already solve the job.
 
 ## Roadmap summary
@@ -33,7 +33,7 @@ oy exists to improve the audit → review → remediate loop in opencode, not to
 - Preserve unrelated user config and validate setup ownership/idempotency.
 - Add MCP transport, collection, diff, Markdown, and SARIF fixtures.
 - Report included scope and skipped categories; resolve lockfile coverage.
-- Publish tested opencode/platform compatibility and stronger doctor checks.
+- Expand the pinned OpenCode 2 compatibility smoke and strengthen doctor checks.
 - Expand evaluated audit/review/remediation examples and quality canaries.
 
 ### Next: lower friction
@@ -43,9 +43,9 @@ oy exists to improve the audit → review → remediate loop in opencode, not to
 - Improve explicit monorepo scoping without hidden sampling.
 - Retain optional helpers only when evaluation shows measurable value.
 
-### Later: stable host integration
+### Later: broader migration coverage
 
-Adopt stable opencode APIs/config changes when they reduce CLI coupling, while keeping the deterministic helper boundary small and migration straightforward.
+Expand safe legacy-config migration only when behavior can be preserved exactly; keep ambiguous permission/provider/plugin conversions fail-closed.
 
 Read the [canonical roadmap and success criteria](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md).
 

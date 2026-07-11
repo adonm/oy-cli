@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 const OY_MISE_TOOL: &str = "cargo:oy-cli";
-const OPENCODE_MISE_TOOL: &str = "opencode";
+const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli";
 
 #[derive(Debug, Args, Clone)]
 pub(super) struct UpgradeArgs {
@@ -31,7 +31,7 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
     let tools = mise_managed_upgrade_tools()?;
     if tools.is_empty() {
         bail!(
-            "oy upgrade only manages the mise install path. Install both with mise (`mise use cargo-binstall cargo:oy-cli opencode`) or use your package manager's upgrade command."
+            "oy upgrade only manages the mise install path. Install both with mise (`mise use cargo-binstall cargo:oy-cli npm:@opencode-ai/cli`) or use your package manager's upgrade command."
         );
     }
 
@@ -39,6 +39,14 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
 
     if args.dry_run {
         crate::ui::line(format_args!("{}", shell_command("mise", &command_args)));
+        crate::ui::line(format_args!(
+            "{}",
+            shell_command("mise", &post_upgrade_doctor_args())
+        ));
+        crate::ui::line(format_args!(
+            "{}",
+            shell_command("mise", &post_upgrade_setup_args())
+        ));
         return Ok(0);
     }
 
@@ -51,6 +59,16 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
     }
     if args.check {
         return Ok(0);
+    }
+
+    // Run the newly upgraded oy so its release-specific OpenCode pin is applied,
+    // rather than the pin embedded in this still-running old process.
+    let doctor_status = Command::new("mise")
+        .args(post_upgrade_doctor_args())
+        .status()
+        .context("upgraded oy, but failed to apply the pinned OpenCode 2 beta")?;
+    if !doctor_status.success() {
+        return Ok(doctor_status.code().unwrap_or(1));
     }
 
     // Refresh generated integration files through the active mise shim, not this
@@ -73,6 +91,23 @@ fn mise_upgrade_args(check: bool, dry_run: bool, tools: Vec<String>) -> Vec<Stri
     }
     args.extend(tools);
     args
+}
+
+fn post_upgrade_doctor_args() -> Vec<String> {
+    vec![
+        "exec".to_string(),
+        "--".to_string(),
+        "oy".to_string(),
+        "doctor".to_string(),
+        "--install-missing".to_string(),
+    ]
+}
+
+fn post_upgrade_setup_args() -> Vec<String> {
+    ["exec", "--", "oy", "setup"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn mise_managed_upgrade_tools() -> Result<Vec<String>> {
@@ -176,7 +211,7 @@ mod tests {
 
         assert_eq!(
             mise_managed_upgrade_tools_from_listing(&listing),
-            vec!["cargo:oy-cli", "opencode"]
+            vec!["cargo:oy-cli", "npm:@opencode-ai/cli"]
         );
     }
 
@@ -201,10 +236,17 @@ mod tests {
                 &mise_upgrade_args(
                     false,
                     true,
-                    vec!["cargo:oy-cli".to_string(), "opencode".to_string()]
+                    vec![
+                        "cargo:oy-cli".to_string(),
+                        "npm:@opencode-ai/cli".to_string()
+                    ]
                 )
             ),
-            "mise upgrade --dry-run cargo:oy-cli opencode"
+            "mise upgrade --dry-run cargo:oy-cli 'npm:@opencode-ai/cli'"
+        );
+        assert_eq!(
+            shell_command("mise", &post_upgrade_doctor_args()),
+            "mise exec -- oy doctor --install-missing"
         );
     }
 
@@ -214,9 +256,17 @@ mod tests {
             mise_upgrade_args(
                 true,
                 false,
-                vec!["cargo:oy-cli".to_string(), "opencode".to_string()]
+                vec![
+                    "cargo:oy-cli".to_string(),
+                    "npm:@opencode-ai/cli".to_string()
+                ]
             ),
-            vec!["upgrade", "--dry-run-code", "cargo:oy-cli", "opencode"]
+            vec![
+                "upgrade",
+                "--dry-run-code",
+                "cargo:oy-cli",
+                "npm:@opencode-ai/cli"
+            ]
         );
     }
 }

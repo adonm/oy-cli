@@ -13,7 +13,13 @@ Options:
           [default: default]
 
       --install-missing
-          Install missing opencode/tokei/ctags/source-built Sighthound with global mise config
+          Install missing OpenCode 2, tokei, and ctags with global mise config
+
+      --install-sighthound
+          Source-build pinned Sighthound with Rust 1.96 and global mise config
+
+      --check
+          Validate effective OpenCode agents, commands, MCP, and models; exit nonzero on failure
 
   -h, --help
           Print help

@@ -67,7 +67,7 @@ pub(crate) fn review_transparency_snippet(
 fn base_command(model: Option<&str>, workflow: &str) -> Vec<String> {
     let mut command = Vec::new();
     if let Some(model) = non_empty(model) {
-        command.push(format!("OY_MODEL={}", shell_quote(model)));
+        command.push(format!("OY_OPENCODE_MODEL={}", shell_quote(model)));
     }
     command.push("oy".to_string());
     command.push(workflow.to_string());
@@ -266,7 +266,7 @@ mod tests {
             AuditOutputFormat::Markdown,
         );
         assert!(snippet.contains(
-            "OY_MODEL='my model' oy audit --out 'audit output.md' --max-chunks 120 'auth paths'"
+            "OY_OPENCODE_MODEL='my model' oy audit --out 'audit output.md' --max-chunks 120 'auth paths'"
         ));
     }
 
@@ -280,7 +280,7 @@ mod tests {
             Some(120),
         );
         assert!(snippet.contains(
-            "OY_MODEL='my model' oy review --out 'review output.md' --max-chunks 120 'feature branch' --focus 'types and boundaries'"
+            "OY_OPENCODE_MODEL='my model' oy review --out 'review output.md' --max-chunks 120 'feature branch' --focus 'types and boundaries'"
         ));
     }
 

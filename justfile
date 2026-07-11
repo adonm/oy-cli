@@ -22,7 +22,7 @@ dev: _fmt-check
     cargo check --locked
 
 # Standard local check suite. Uses stable Cargo only so it works after `mise install`.
-check: _fmt-check _clippy _test _rustdoc _book _help-smoke
+check: _fmt-check _clippy _test _rustdoc _book _help-smoke _installer-smoke
     @echo "✓ local checks passed"
 
 # Optional CI-parity suite. Requires cargo-nextest and nightly Miri.
@@ -105,10 +105,15 @@ _help-smoke:
     cargo run --locked -- audit --help
     cargo run --locked -- review --help
     cargo run --locked -- enhance --help
+    cargo run --locked -- recover --help
     cargo run --locked -- model --help
     cargo run --locked -- doctor --help
     cargo run --locked -- modes --help
     cargo run --locked -- upgrade --help
+
+# Exercise installer sequencing and pins with a fake mise executable.
+_installer-smoke:
+    sh scripts/test_install.sh
 
 # === Release preparation ===
 

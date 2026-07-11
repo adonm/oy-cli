@@ -118,10 +118,15 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
+          prerelease_args=()
+          if [[ "${REF_NAME}" == *-* ]]; then
+            prerelease_args+=(--prerelease)
+          fi
           if gh release view "${REF_NAME}" --repo "${REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${REF_NAME}" \
               --repo "${REPOSITORY}" \
               --draft=true \
+              "${prerelease_args[@]}" \
               --target "${SHA}" \
               --title "${REF_NAME}" \
               --notes-file release-notes.md
@@ -130,6 +135,7 @@ jobs:
             gh release create "${REF_NAME}" dist/* \
               --repo "${REPOSITORY}" \
               --draft \
+              "${prerelease_args[@]}" \
               --target "${SHA}" \
               --title "${REF_NAME}" \
               --notes-file release-notes.md

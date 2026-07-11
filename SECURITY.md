@@ -8,8 +8,8 @@ opencode owns model traffic, chat UI, sessions, permissions, edits, shell comman
 
 Native `oy` can:
 
-- write global integration files during setup and launch-oriented commands, or `.opencode` files with `oy setup --workspace` and when an existing workspace integration is refreshed,
-- launch the `opencode` process,
+- write global integration files during explicit setup/upgrade, or `.opencode` files with `oy setup --workspace`,
+- launch OpenCode runner, TUI, `mini`, and managed-API processes with `OY_ROOT` as their working directory,
 - read workspace files for MCP manifests/chunks/SLOC/outlines and optional Sighthound scans,
 - run read-only `git` commands for diff input,
 - write generated audit/review reports inside the workspace.
@@ -42,9 +42,11 @@ Avoid mounting the host Docker socket into AI-assisted containers. Docker socket
 
 ## Local Files
 
-`oy setup` writes generated files under `~/.config/opencode/` by default. `oy setup --workspace` writes generated files under `.opencode/`. Launch-oriented wrappers refresh the global integration before starting opencode and refresh a detected workspace integration. Use `oy setup --dry-run` before first setup to inspect intended changes.
+`oy setup` writes generated files under `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; `oy setup --workspace` writes under `.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Launch/model/workflow commands validate setup but never rewrite it. Use `oy setup --dry-run` before first setup and `oy setup --remove` to remove the current oy integration.
 
-Generated agent and skill files refuse to overwrite non-generated files at generated paths. The `opencode.json` merge owns and replaces `mcp.oy`, `command.oy-audit`, `command.oy-review`, `command.oy-enhance`, and `tool_output.max_bytes`/`max_lines`; unknown sibling object keys are retained. Non-object values at `mcp`, `command`, or `tool_output` are replaced with objects. Config is parsed and pretty-serialized, so JSONC comments and original formatting are not preserved. Back up a hand-edited config before setup.
+Generated agent and skill files refuse to overwrite non-generated files at generated paths. The config merge owns and replaces `mcp.servers.oy`, `commands.oy-audit`, `commands.oy-review`, `commands.oy-enhance`, and `tool_output.max_bytes`/`max_lines`; unknown sibling object keys are retained. Legacy command/MCP entries are migrated where behavior is exact; ambiguous legacy fields fail closed.
+
+Setup/removal is a staged multi-file batch that restores already-mutated files if a later commit fails. It has no persistent journal and cannot promise recovery across a process or machine crash. JSONC comments and formatting are still lost during reserialization. Removal deletes oy's generated files and currently owned config values; it does not remember or restore historical pre-setup values. Back up hand-edited config before setup.
 
 opencode owns its own local state. Treat sessions, logs, and config as sensitive because they may contain prompts, source snippets, command output, or provider metadata.
 

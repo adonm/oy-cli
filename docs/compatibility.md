@@ -14,17 +14,24 @@ This matrix distinguishes what CI exercises from what release automation merely 
 
 The curl installer requires a Unix-like POSIX shell. Rust 1.96 is the minimum source-build toolchain.
 
-## opencode host compatibility
+## OpenCode host compatibility
 
-oy currently integrates through opencode CLI flags, generated Markdown agents/skills, JSON config, and local stdio MCP. The installer selects the current opencode release through mise with a configurable minimum-release-age filter.
+oy 0.12.0-beta.1 integrates with OpenCode 2 through its noninteractive runner, managed model API, native JSON/Markdown configuration, and local stdio MCP. It defaults to the `opencode2` executable; `OY_OPENCODE` can override the executable but not the required contract.
 
 | Host line | Status |
 |---|---|
-| Current stable opencode | Intended integration target; run `oy setup --dry-run`, `oy setup`, and `oy doctor` after upgrades. |
-| Older opencode releases | Best effort; generated config and CLI flags may differ. |
-| opencode prereleases/major transitions | Not supported until their integration contract is tagged and stable. |
+| OpenCode beta `0.0.0-next-15323` | Supported pinned beta; installed as `@opencode-ai/cli@0.0.0-next-15323` and exposed as `opencode2`. |
+| Other OpenCode beta builds | Unsupported until pinned and exercised by the compatibility smoke. |
+| Tagged OpenCode 2.x | Accepted by the tagged-major contract; test coverage will be added when a tagged release exists. |
+| OpenCode major >2 | Unsupported until its contract is reviewed. |
+| OpenCode 1 | Unsupported; removed in oy 0.12.0-beta.1. |
+| Unknown contract | Unsupported. |
 
-There is not yet an automated cross-version opencode matrix. The [roadmap](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) keeps that limitation explicit rather than claiming a minimum host version without evidence.
+The installer uses mise's npm backend for the exact pinned beta package. There is not yet an automated pinned cross-version API smoke matrix or provider-backed integration suite; the [roadmap](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) keeps those limits explicit.
+
+Setup writes native `commands`, `mcp.servers`, timeout objects, ordered agent permissions, and three canonical workflow skills. Existing legacy command and MCP entries are migrated automatically. Ambiguous legacy permissions, providers, plugins, skills objects, and related fields fail closed with manual-migration guidance. Global setup honors `OPENCODE_CONFIG_DIR` and selects an existing `opencode.jsonc` before `opencode.json`.
+
+`oy doctor --check` validates the effective selected service version, required agents/commands, connected MCP entry, and model/provider/plugin availability. It does not start or claim an isolated validation server.
 
 ## Optional evidence helpers
 
@@ -32,7 +39,7 @@ There is not yet an automated cross-version opencode matrix. The [roadmap](https
 |---|---|---|
 | `tokei` | Successful capability probe at a canonical absolute path | `sloc` is omitted from MCP tools. |
 | Universal Ctags | Successful JSON-capability probe at a canonical absolute path | `outline` is omitted from MCP tools. |
-| Sighthound 1.0 | Successful capability probe at a canonical absolute path; source install requires Rust 1.85+ | `sighthound` is omitted; complete chunk audit still runs. |
+| Sighthound at commit `c4608eb2b6ca256daf4dbd1e74aadc3570343685` | Successful capability probe at a canonical absolute path; source-built with Rust 1.96, `--locked`, and only `bin=sighthound` | `sighthound` is omitted; complete chunk audit still runs. |
 
 Relative `PATH` entries are ignored. Use `OY_TOKEI`, `OY_CTAGS`, or `OY_SIGHTHOUND` with an absolute path to override discovery.
 
@@ -41,7 +48,7 @@ Relative `PATH` entries are ignored. Use `OY_TOKEI`, `OY_CTAGS`, or `OY_SIGHTHOU
 Include:
 
 - `oy --version`;
-- `opencode --version`;
+- the selected OpenCode executable and `--version` output;
 - operating system and architecture;
 - install method;
 - `oy doctor --json` output with sensitive paths reviewed;

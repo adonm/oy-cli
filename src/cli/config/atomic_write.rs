@@ -13,31 +13,97 @@ use super::paths::{WorkspaceWrite, reject_symlink_destination};
 
 /// Write a batch of workspace files atomically with backup-and-rollback.
 pub(super) fn write_workspace_batch(writes: &[WorkspaceWrite<'_>]) -> Result<()> {
-    if writes.is_empty() {
+    let mutations = writes
+        .iter()
+        .map(|write| FileMutation::Write {
+            path: write.path,
+            bytes: write.bytes,
+        })
+        .collect::<Vec<_>>();
+    apply_file_batch(&mutations)
+}
+
+pub(crate) enum FileMutation<'a> {
+    Write { path: &'a Path, bytes: &'a [u8] },
+    Delete { path: &'a Path },
+}
+
+pub(crate) fn apply_file_batch(mutations: &[FileMutation<'_>]) -> Result<()> {
+    if mutations.is_empty() {
         return Ok(());
     }
-    for write in writes {
-        prevalidate_workspace_write(write.path)?;
+    for mutation in mutations {
+        prevalidate_mutation(mutation)?;
     }
+    let created_dirs = create_missing_parent_dirs(mutations)?;
 
-    let mut prepared = Vec::with_capacity(writes.len());
-    for write in writes {
-        match prepare_workspace_write(write.path, write.bytes) {
+    let mut prepared = Vec::with_capacity(mutations.len());
+    for mutation in mutations {
+        let result = match mutation {
+            FileMutation::Write { path, bytes } => {
+                prepare_workspace_write(path, bytes).map(PreparedMutation::Write)
+            }
+            FileMutation::Delete { path } => Ok(PreparedMutation::Delete((*path).to_path_buf())),
+        };
+        match result {
             Ok(temp) => prepared.push(temp),
             Err(err) => {
                 drop(prepared);
+                cleanup_created_dirs(&created_dirs);
                 return Err(err);
             }
         }
     }
 
-    commit_workspace_writes(prepared)
+    match commit_mutations(prepared) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            cleanup_created_dirs(&created_dirs);
+            Err(error)
+        }
+    }
 }
 
-fn commit_workspace_writes(prepared: Vec<PreparedWorkspaceWrite>) -> Result<()> {
+fn create_missing_parent_dirs(mutations: &[FileMutation<'_>]) -> Result<Vec<PathBuf>> {
+    let mut missing = Vec::new();
+    for mutation in mutations {
+        let FileMutation::Write { path, .. } = mutation else {
+            continue;
+        };
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let mut parents = parent
+            .ancestors()
+            .take_while(|candidate| !candidate.exists())
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        parents.reverse();
+        for parent in parents {
+            if !missing.contains(&parent) {
+                if let Err(error) = fs::create_dir(&parent) {
+                    cleanup_created_dirs(&missing);
+                    return Err(error)
+                        .with_context(|| format!("failed creating {}", parent.display()));
+                }
+                missing.push(parent);
+            }
+        }
+    }
+    Ok(missing)
+}
+
+fn cleanup_created_dirs(dirs: &[PathBuf]) {
+    for dir in dirs.iter().rev() {
+        let _ = fs::remove_dir(dir);
+    }
+}
+
+fn commit_mutations(prepared: Vec<PreparedMutation>) -> Result<()> {
     let mut committed = Vec::with_capacity(prepared.len());
-    for prepared_write in prepared {
-        let backup = match backup_existing_workspace_file(&prepared_write.path) {
+    for mutation in prepared {
+        let path = mutation.path().to_path_buf();
+        let backup = match backup_existing_workspace_file(&path) {
             Ok(backup) => backup,
             Err(err) => {
                 if let Err(rollback_err) = restore_workspace_backups(committed) {
@@ -46,8 +112,7 @@ fn commit_workspace_writes(prepared: Vec<PreparedWorkspaceWrite>) -> Result<()> 
                 return Err(err);
             }
         };
-        let path = prepared_write.path.clone();
-        match prepared_write.commit() {
+        match mutation.commit() {
             Ok(()) => committed.push(CommittedWorkspaceWrite { path, backup }),
             Err(err) => {
                 if let Err(rollback_err) = restore_workspace_backups(committed) {
@@ -61,6 +126,27 @@ fn commit_workspace_writes(prepared: Vec<PreparedWorkspaceWrite>) -> Result<()> 
         committed_write.cleanup_backup();
     }
     Ok(())
+}
+
+enum PreparedMutation {
+    Write(PreparedWorkspaceWrite),
+    Delete(PathBuf),
+}
+
+impl PreparedMutation {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Write(write) => &write.path,
+            Self::Delete(path) => path,
+        }
+    }
+
+    fn commit(self) -> Result<()> {
+        match self {
+            Self::Write(write) => write.commit(),
+            Self::Delete(path) => remove_file_if_exists(&path),
+        }
+    }
 }
 
 fn backup_existing_workspace_file(path: &Path) -> Result<Option<PathBuf>> {
@@ -92,11 +178,20 @@ fn restore_workspace_backups(committed: Vec<CommittedWorkspaceWrite>) -> Result<
     Ok(())
 }
 
-fn prevalidate_workspace_write(path: &Path) -> Result<()> {
+fn prevalidate_mutation(mutation: &FileMutation<'_>) -> Result<()> {
+    let path = match mutation {
+        FileMutation::Write { path, .. } | FileMutation::Delete { path } => *path,
+    };
     reject_symlink_destination(path)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed creating {}", parent.display()))?;
+        for ancestor in parent.ancestors().filter(|ancestor| ancestor.exists()) {
+            if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
+                anyhow::bail!(
+                    "refusing to write through symlink ancestor: {}",
+                    ancestor.display()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -256,5 +351,14 @@ mod tests {
 
         assert!(err.to_string().contains("failed restoring backup"));
         assert!(backup.exists());
+    }
+
+    #[test]
+    fn batch_delete_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generated.md");
+        fs::write(&path, "generated").unwrap();
+        apply_file_batch(&[FileMutation::Delete { path: &path }]).unwrap();
+        assert!(!path.exists());
     }
 }

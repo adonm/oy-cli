@@ -15,6 +15,12 @@ pub(super) struct EnhanceArgs {
     pub(super) mode: SafetyMode,
     #[arg(
         long,
+        default_value_t = false,
+        help = "Open the native OpenCode mini UI for permissions, questions, and forms"
+    )]
+    pub(super) interactive: bool,
+    #[arg(
+        long,
         value_name = "TARGET",
         help = "Optional branch/commit/ref for the review step; omitted reviews the whole workspace"
     )]

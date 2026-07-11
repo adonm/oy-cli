@@ -17,10 +17,18 @@ Setup, launch, and legacy command aliases support that loop. They are compatibil
 1. **Own the evidence boundary, not the model.** oy owns collection, ordering, limits, and report normalization; opencode owns inference and general tools.
 2. **Fail closed rather than sample silently.** Coverage limits and exclusions must be visible.
 3. **Reports are handoff artifacts.** Stable IDs, statuses, SARIF, and one-finding remediation matter more than chat features.
-4. **Keep setup reversible and unsurprising.** Generated ownership and automatic refresh behavior must be inspectable.
+4. **Keep setup reversible and unsurprising.** Generated ownership and explicit setup/removal behavior must be inspectable.
 5. **Add native code only for deterministic value.** Prefer opencode built-ins unless an oy helper materially improves repeatability or safety.
 
 ## Recently completed
+
+### v0.12.0-beta.1
+
+- Dropped OpenCode 1 and moved noninteractive workflows to OpenCode 2's restored runner through the selected CLI executable.
+- Added pinned beta host detection, session continuation/resume, mode-selected run agents, model overrides, and managed-API model listing.
+- Migrated generated JSON, commands, MCP registration, and agent permissions to native OpenCode 2 with fail-closed legacy handling.
+- Separated the optional pinned Sighthound source build from routine missing-tool installation.
+- Consolidated workflow orchestration into three canonical skills with thin adapters; added rollback-capable setup/removal batches, effective runtime doctor checks, root-bound execution, typed workflow contexts, structured MCP errors/results, and transport-safe file slicing.
 
 ### v0.11.15
 
@@ -34,10 +42,11 @@ Setup, launch, and legacy command aliases support that loop. They are compatibil
 
 ### Setup safety and compatibility
 
-- Preserve user-authored JSONC comments/formatting, or move oy-owned config to a mechanism that does not rewrite unrelated content.
+- Expand safe legacy-config migration only where behavior can be preserved exactly; keep ambiguous permission/provider/plugin conversions fail-closed.
+- Preserve user-authored JSONC comments/formatting while retaining atomic multi-file setup/remove.
 - Validate generated global and workspace config against the current opencode schema.
-- Make `oy doctor` validate actual oy entries and report tested opencode compatibility, not just file/executable presence.
-- Add an automated cross-version opencode compatibility smoke matrix; keep the published evidence matrix current.
+- Expand `oy doctor --check` with sanitized plugin/provider failure detail and stronger service validation.
+- Add a pinned cross-version OpenCode API smoke matrix; keep the published evidence matrix current without claiming provider-backed integration coverage.
 
 ### Coverage and protocol confidence
 
@@ -60,8 +69,7 @@ Setup, launch, and legacy command aliases support that loop. They are compatibil
 
 ## Later — adopt stable host capabilities
 
-- Track tagged, stable opencode API/config changes rather than unreleased interfaces.
-- Prefer a stable HTTP/SSE or stdio host API over fragile CLI-flag coupling when it improves reliability.
+- Track tagged OpenCode API/config changes beyond the pinned beta contract.
 - Keep MCP as the deterministic helper boundary unless an opencode-native tool/plugin interface provides the same isolation with less maintenance.
 - Preserve a straightforward migration path for generated config and reports across major opencode versions.
 

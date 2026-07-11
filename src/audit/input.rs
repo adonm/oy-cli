@@ -17,6 +17,17 @@ pub(crate) struct AuditFile {
     pub(crate) bytes: u64,
     pub(crate) tokens: usize,
     pub(crate) text: String,
+    pub(crate) slice: Option<InputSlice>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InputSlice {
+    pub(crate) index: usize,
+    pub(crate) count: usize,
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +91,7 @@ pub(crate) fn collect_files(
             bytes: meta.len(),
             tokens,
             text,
+            slice: None,
         });
     }
     files.sort_by_key(audit_priority);
@@ -111,6 +123,7 @@ pub(crate) fn collect_file(
         bytes: meta.len(),
         tokens,
         text,
+        slice: None,
     }))
 }
 
@@ -239,19 +252,37 @@ fn security_path_score(path: &str) -> bool {
 }
 
 pub(crate) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<AuditChunk> {
+    const MAX_CHUNK_TEXT_BYTES: usize = 40 * 1024;
+    const MAX_CHUNK_LINES: usize = 3_000;
+    let files = files
+        .into_iter()
+        .flat_map(|file| split_file(file, 36 * 1024, 2_800))
+        .collect::<Vec<_>>();
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut total = 0usize;
+    let mut bytes = 0usize;
+    let mut lines = 0usize;
     for file in files {
-        if !current.is_empty() && total + file.tokens > target_tokens {
+        let file_bytes = file.text.len() + file.path.len() + 64;
+        let file_lines = file.text.lines().count().max(1) + 2;
+        if !current.is_empty()
+            && (total + file.tokens > target_tokens
+                || bytes + file_bytes > MAX_CHUNK_TEXT_BYTES
+                || lines + file_lines > MAX_CHUNK_LINES)
+        {
             chunks.push(AuditChunk {
                 files: current,
                 tokens: total,
             });
             current = Vec::new();
             total = 0;
+            bytes = 0;
+            lines = 0;
         }
         total += file.tokens;
+        bytes += file_bytes;
+        lines += file_lines;
         current.push(file);
     }
     if !current.is_empty() {
@@ -261,6 +292,70 @@ pub(crate) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<Au
         });
     }
     chunks
+}
+
+fn split_file(file: AuditFile, max_bytes: usize, max_lines: usize) -> Vec<AuditFile> {
+    if file.text.len() <= max_bytes && file.text.lines().count() <= max_lines {
+        return vec![file];
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut start_line = 1usize;
+    while start < file.text.len() {
+        let mut end = (start + max_bytes).min(file.text.len());
+        while end > start && !file.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = file.text[start..]
+                .char_indices()
+                .nth(1)
+                .map_or(file.text.len(), |(offset, _)| start + offset);
+        }
+        let candidate = &file.text[start..end];
+        if candidate.lines().count() > max_lines {
+            let mut newlines = 0usize;
+            for (offset, ch) in candidate.char_indices() {
+                if ch == '\n' {
+                    newlines += 1;
+                    if newlines == max_lines {
+                        end = start + offset + 1;
+                        break;
+                    }
+                }
+            }
+        }
+        let text = &file.text[start..end];
+        let newline_count = text.bytes().filter(|byte| *byte == b'\n').count();
+        let ends_newline = text.ends_with('\n');
+        let end_line = start_line + newline_count - usize::from(ends_newline && newline_count > 0);
+        ranges.push((start, end, start_line, end_line));
+        start = end;
+        start_line = if ends_newline { end_line + 1 } else { end_line };
+    }
+    let count = ranges.len();
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(index, (start, end, start_line, end_line))| {
+            let text = file.text[start..end].to_string();
+            AuditFile {
+                path: file.path.clone(),
+                language: file.language,
+                bytes: text.len() as u64,
+                tokens: count_tokens("", &text).max(1),
+                text,
+                slice: Some(InputSlice {
+                    index: index + 1,
+                    count,
+                    start_byte: start,
+                    end_byte: end,
+                    start_line,
+                    end_line,
+                }),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn ensure_chunks_fit_prompt(chunks: &[AuditChunk], target_tokens: usize) -> Result<()> {
@@ -378,7 +473,21 @@ pub(crate) fn build_security_index(files: &[AuditFile], limit: usize) -> String 
 pub(crate) fn chunk_text(chunk: &AuditChunk) -> String {
     let mut out = String::new();
     for file in &chunk.files {
-        let _ = writeln!(out, "\n## {}\n", file.path);
+        if let Some(slice) = &file.slice {
+            let _ = writeln!(
+                out,
+                "\n## {} (slice {}/{}; bytes {}-{}; lines {}-{})\n",
+                file.path,
+                slice.index,
+                slice.count,
+                slice.start_byte,
+                slice.end_byte,
+                slice.start_line,
+                slice.end_line
+            );
+        } else {
+            let _ = writeln!(out, "\n## {}\n", file.path);
+        }
         out.push_str(&file.text);
         if !file.text.ends_with('\n') {
             out.push('\n');
@@ -425,6 +534,7 @@ fn push_diff_file(files: &mut Vec<AuditFile>, text: &str, model: &str) {
         bytes: text.len() as u64,
         tokens,
         text: text.to_string(),
+        slice: None,
     });
 }
 
@@ -530,5 +640,36 @@ fn language_for_path(path: &str) -> &'static str {
         "md" => "Markdown",
         "sh" | "bash" => "Shell",
         _ => "Text",
+    }
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_utf8_file_is_reconstructable_and_bounded() {
+        let text = "λ line\n".repeat(40_000);
+        let file = AuditFile {
+            path: "large.txt".to_string(),
+            language: "Text",
+            bytes: text.len() as u64,
+            tokens: count_tokens("", &text),
+            text: text.clone(),
+            slice: None,
+        };
+        let chunks = chunk_files(vec![file], 64_000);
+        assert!(chunks.len() > 1);
+        let reconstructed = chunks
+            .iter()
+            .flat_map(|chunk| chunk.files.iter())
+            .map(|file| file.text.as_str())
+            .collect::<String>();
+        assert_eq!(reconstructed, text);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk_text(chunk).len() <= 40 * 1024)
+        );
     }
 }

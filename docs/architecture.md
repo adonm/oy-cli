@@ -1,12 +1,12 @@
 # Architecture
 
-`oy` is a focused audit/review integration layer for opencode. It does not own model execution, chat UI, sessions, provider routing, shell execution, file editing, web fetching, or a native LLM tool loop. The host owns those surfaces.
+`oy` is a focused audit/review integration layer for OpenCode 2. It does not own model execution, chat UI, provider routing, shell execution, file editing, web fetching, or a native LLM tool loop. The host owns those surfaces; oy delegates noninteractive sessions and model listing through the host CLI.
 
 `oy` owns three things in support of the audit → review → remediate loop:
 
-- setup and launch convenience
+- explicit setup/removal and launch convenience
 - a local stdio MCP server with deterministic repository helpers
-- focused convenience wrappers plus passthrough to opencode for unknown top-level actions/flags
+- three canonical workflow skills with thin command/agent adapters
 
 ## Runtime Flow
 
@@ -17,7 +17,9 @@ user argv/stdin
   -> cli::app in src/cli/app.rs
   -> opencode wrappers in src/opencode.rs
        -> oy setup writes ~/.config/opencode/* by default
-       -> opencode --agent oy...
+       -> selected OpenCode 2 host (`opencode2` or `OY_OPENCODE`), cwd=`OY_ROOT`
+            -> TUI, runner, or `mini`, and
+            -> authenticated `api v2.*` model/session/health operations
 
 opencode
   -> starts local MCP command: oy mcp
@@ -32,7 +34,10 @@ opencode
 | `src/main.rs` | Tokio process entrypoint and exit code handling |
 | `src/lib.rs` | Small public facade exposing `run` and diagnostics |
 | `src/cli/app.rs` | CLI parsing and dispatch |
-| `src/opencode.rs` | `oy setup`, launch, generated agents/skills/commands, opencode convenience wrappers |
+| `src/opencode.rs` | `oy setup`, launch, generated agents/skills/commands, and OpenCode workflow orchestration |
+| `src/opencode/host.rs` | OpenCode executable selection, version probing, and v2 contract gate |
+| `src/opencode/api.rs` | Bounded adapter for OpenCode 2 model, session, and runtime-health API calls |
+| `src/workflow.rs` | Typed inherited run/session/model/scope/output/format/chunk context |
 | `src/mcp.rs` | Minimal MCP server over newline-delimited stdio JSON-RPC |
 | `src/audit/input.rs` | Gitignore-aware repo collection, manifest/security index, chunking, git diff input |
 | `src/audit/findings.rs` | Markdown/structured finding extraction and machine-readable findings block |
@@ -42,6 +47,7 @@ opencode
 | `src/tools/workspace/sighthound.rs` | Optional source vulnerability scanning via external Sighthound |
 | `src/tools/external.rs` | Shared absolute-path resolution, capability probes, relative-PATH rejection, and bounded process execution |
 | `src/cli/config/paths.rs` | Workspace root and safe output-path handling |
+| `src/cli/config/atomic_write.rs` | Staged file batches with rollback of committed mutations |
 | `src/cli/config/mode.rs` | Safety-mode parsing for launcher convenience modes |
 
 Deleted legacy modules include `src/agent/`, `src/llm/`, native chat/session handling, native provider routing, and the old model-callable tool registry.
@@ -61,6 +67,7 @@ Deleted legacy modules include `src/agent/`, `src/llm/`, native chat/session han
 ~/.config/opencode/agents/oy-enhancer.md
 ~/.config/opencode/skills/oy-audit/SKILL.md
 ~/.config/opencode/skills/oy-review/SKILL.md
+~/.config/opencode/skills/oy-enhance/SKILL.md
 ```
 
 `oy setup --workspace` writes the same generated files under `.opencode/` for project-local overrides:
@@ -76,11 +83,22 @@ Deleted legacy modules include `src/agent/`, `src/llm/`, native chat/session han
 .opencode/agents/oy-enhancer.md
 .opencode/skills/oy-audit/SKILL.md
 .opencode/skills/oy-review/SKILL.md
+.opencode/skills/oy-enhance/SKILL.md
 ```
 
-The config registers `oy mcp` as a local MCP server and adds commands for audit, review, and enhance workflows. Generated primary agents (`oy`, `oy-plan`, `oy-edit`, `oy-auto`) support launcher compatibility, but restricted audit/review agents are the product's primary direction. `oy` passes `--agent` when launching instead of setting `default_agent`, so direct `opencode` usage keeps the user's normal default. Running sessions need to be restarted after setup changes because config loads at startup.
+Global setup honors `OPENCODE_CONFIG_DIR`; workspace setup remains rooted at `OY_ROOT/.opencode`. In either directory, setup updates an existing `opencode.jsonc` in preference to `opencode.json`. The config registers `oy mcp` and adds audit, review, and enhance commands. Their templates and dedicated agents only load the corresponding canonical skill. Generated primary agents (`oy`, `oy-plan`, `oy-edit`, `oy-auto`) support noninteractive task modes. OpenCode 2's TUI has no per-launch agent or mode flag, so select the agent inside the TUI.
 
-Launch-oriented commands refresh the global integration before starting opencode and refresh workspace integration files when an existing oy workspace integration is detected. The config merge replaces oy-owned `mcp.oy`, `command.oy-*`, and `tool_output.max_bytes`/`max_lines` values. Unknown sibling object keys survive, but parsing and pretty-serialization remove JSONC comments and original formatting. Generated Markdown files refuse to replace files without the generated marker.
+Setup writes native OpenCode 2 `commands`, `mcp.servers`, timeout objects, and ordered agent permissions. It migrates legacy command/MCP entries when the conversion is exact, and fails closed on ambiguous legacy permission/provider/plugin and related fields that need whole-file migration.
+
+Setup and `--remove` stage all writes/deletes before committing them and restore mutations already committed if a later operation fails. This rollback exists only in the running operation; there is no crash journal or persisted recovery transaction. The config merge replaces oy-owned `mcp.servers.oy`, `commands.oy-*`, and `tool_output.max_bytes`/`max_lines`. JSONC comments/formatting are lost on reserialization, and removal deletes current owned values rather than restoring historical before-values.
+
+Launch, model, and workflow commands only validate that a complete global or workspace integration exists. They never auto-refresh generated files. Running sessions must be restarted after an explicit setup change because OpenCode loads config at startup.
+
+## Workflow Binding
+
+For CLI audit/review/enhance runs, oy creates a host session and an inherited typed context containing the run ID, session ID, model, resolved scope, output, format, focus, and `max_chunks`. Diff refs are resolved to commit OIDs before host launch. Noninteractive runner sessions receive the title `oy:<run-id>`.
+
+The MCP process consumes that context and overrides model-supplied scope/model/chunk sizing/render metadata. It rejects an excessive chunk count, changed evidence after the summary, out-of-order or skipped chunk requests, and rendering before all chunks are read. This is runtime enforcement in the MCP process, not prompt-only compliance or durable cross-process workflow recovery.
 
 ## MCP Boundary
 
@@ -91,12 +109,15 @@ Launch-oriented commands refresh the global integration before starting opencode
 - `tools/list`
 - `tools/call`
 
-The server is intentionally deterministic at the collection/rendering boundary. It returns manifests, chunks, diffs, existing reports, SLOC, outlines, optional Sighthound findings, and report-rendering results. It does not call an LLM. Audit/review conclusions remain model-dependent.
+The server negotiates MCP `2025-06-18` when requested and retains `2024-11-05` fallback compatibility. Successful tool calls include text `content`, matching `structuredContent`, and `isError: false`; tool failures return normal MCP tool results with `isError: true`. Protocol/method failures remain JSON-RPC errors.
+
+The server is deterministic at the collection/rendering boundary. It returns manifests, chunks, diffs, existing reports, SLOC, outlines, optional Sighthound findings, and report-rendering results. It does not call an LLM. Audit/review conclusions remain model-dependent.
 
 Tools exposed by `oy mcp`:
 
 | Tool | Side effects |
 |---|---|
+| `workflow_status` | Reads inherited context; advertised only for a bound CLI workflow |
 | `repo_manifest` | Reads workspace files |
 | `repo_chunks` | Reads workspace files |
 | `git_diff_input` | Runs `git diff`/`git rev-parse` read-only commands |
@@ -113,17 +134,18 @@ Sighthound uses its own gitignore-aware discovery and file-size limit rather tha
 
 | Boundary | Owner | Posture |
 |---|---|---|
-| Model prompts/provider traffic | host | Configure providers and credentials there |
-| UI/sessions/history | host | Host owns storage and session lifecycle |
+| Model/provider traffic | OpenCode host | oy launches the runner or queries the authenticated model API through the selected CLI; OpenCode stores credentials and oy does not |
+| UI/sessions/history | OpenCode host | Host owns storage and session lifecycle; oy passes transient session IDs for API continuation/resume |
 | File edits/shell/web/repo clone | host | Use host permissions and agents |
 | Workspace reads for chunks/SLOC/outlines/SAST | oy MCP | Stay inside `OY_ROOT`/cwd; use fixed helper arguments and bounded processes |
 | Report writes | oy MCP | Resolve output path inside workspace and reject symlink destinations |
-| Setup/launch refresh writes | oy CLI | Replace documented oy-owned config values; generated agent/skill files refuse to overwrite non-generated files |
+| Setup/removal writes | oy CLI | Explicit rollback-capable batch; no launch-time writes, crash journal, or historical-value restoration |
 
 ## Design Rules
 
 - Do not reintroduce an LLM client or model tool loop in `oy`.
-- Prefer host agents, commands, skills, and permissions for orchestration.
+- Keep skills canonical and commands/agents thin.
+- Enforce bound workflow invariants in Rust/MCP rather than prompt prose alone.
 - Keep MCP tools deterministic and narrow.
 - Keep workspace path validation close to reads/writes.
 - If the host already has a tool, do not duplicate it in `oy mcp`.
