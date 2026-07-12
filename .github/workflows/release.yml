@@ -65,7 +65,7 @@ jobs:
 
   publish-release:
     if: github.repository_owner == 'adonm'
-    needs: [release, publish-npm]
+    needs: [release, publish-crate, publish-npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write

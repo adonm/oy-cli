@@ -13,7 +13,7 @@
 - Made file-backed workflow state use the platform local-data directory when no dedicated state directory exists, enabling audit/review preparation on macOS.
 - Updated the evaluation runner to accept canonical `.oy/runs/` artifacts.
 - Removed the stale tool call from `oy recover`.
-- Bounded optional helper probes, rejected relative `PATH` entries, and removed the stale unpublished container-image hint from `oy doctor`.
+- Bounded optional helper probes, rejected relative `PATH` entries for probing and installation, and removed the stale unpublished container-image hint from `oy doctor`.
 
 ### Removed
 - Removed the `oy mcp` command, stdio protocol server, deterministic MCP tool registry, and MCP-only tests and state plumbing.

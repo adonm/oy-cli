@@ -3,6 +3,7 @@
 use anyhow::{Result, bail};
 use clap::Args;
 use std::io::{IsTerminal as _, Write as _};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::config;
@@ -322,14 +323,16 @@ fn maybe_install_missing_with_mise(
     if !requested && !should_prompt_install(&tools)? {
         return Ok(());
     }
+    let mise = crate::tools::external::resolve_executable(&["mise"])
+        .ok_or_else(|| anyhow::anyhow!("mise executable disappeared from the absolute PATH"))?;
     crate::ui::line(format_args!(
         "Installing and activating missing tools with mise: {}",
         tools.join(" ")
     ));
     for batch in mise_install_batches(&tools) {
-        run_mise_use(&batch)?;
+        run_mise_use(&mise, &batch)?;
     }
-    let status = std::process::Command::new("mise").arg("reshim").status()?;
+    let status = std::process::Command::new(&mise).arg("reshim").status()?;
     if !status.success() {
         bail!("tools installed, but `mise reshim` failed");
     }
@@ -363,11 +366,11 @@ fn mise_install_batches<'a>(tools: &[&'a str]) -> Vec<Vec<&'a str>> {
     vec![vec![OPENCODE_NODE_TOOL], remaining]
 }
 
-fn run_mise_use(tools: &[&str]) -> Result<()> {
+fn run_mise_use(mise: &Path, tools: &[&str]) -> Result<()> {
     if tools.is_empty() {
         return Ok(());
     }
-    let status = std::process::Command::new("mise")
+    let status = std::process::Command::new(mise)
         .args(mise_use_global_args(tools))
         .status()?;
     if status.success() {

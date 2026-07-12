@@ -22,9 +22,9 @@ Cargo and npm package versions must match before tagging. On a tagged release, `
 1. builds the platform binaries;
 2. publishes the crate and npm package in separate jobs after the binaries succeed;
 3. tests the locked npm package before publishing it through OIDC, or skips an already-published version only when its `gitHead` matches the tagged commit;
-4. publishes the GitHub release after the binaries and npm publication succeed.
+4. publishes the GitHub release only after the binaries and both package publications succeed.
 
-The crate job runs independently of npm and the GitHub release job. CI, rather than the release job, checks Cargo/npm version alignment.
+The crate and npm jobs run independently after the binaries, while the GitHub release waits for both. CI, rather than the release job, checks Cargo/npm version alignment.
 
 The curl installer and `oy setup` pin the npm plugin version matching the binary, so never publish only one half of a release.
 
