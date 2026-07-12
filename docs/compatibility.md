@@ -15,18 +15,20 @@ The installer requires a POSIX shell. Building from source requires Rust 1.96+. 
 
 ## OpenCode
 
-oy 0.13.5 accepts:
+oy 0.13.6 accepts:
 
 | OpenCode host | Status |
 |---|---|
-| `0.0.0-next-15353` | Tested beta and installer default |
+| Current `0.0.0-next-*` channel | Installer default during the V2 beta |
 | Tagged OpenCode 2.x | Accepted |
-| Other prerelease builds | Rejected until explicitly tested |
+| Other prerelease channels | Rejected |
 | OpenCode 1, major versions above 2, or unknown versions | Rejected |
 
 The default executable is `opencode2`. `OY_OPENCODE` can select another executable, but it must report a supported version.
 
-The OpenCode V2 plugin API is beta, so each oy release pins a matching `@oy-cli/opencode` package and tested OpenCode beta. Restart OpenCode after changing either version.
+During the V2 beta, installation resolves `@opencode-ai/cli@next` and the plugin SDK from the same moving `next` channel. This keeps new installs current but means an upstream beta change can break compatibility between oy releases. The package lock records the build tested at release time. Restart OpenCode after either package changes.
+
+Once OpenCode 2 is stable, oy will switch these references to the stable `latest` channel and remove the beta-specific compatibility path in a follow-up release.
 
 ## What `doctor --check` covers
 

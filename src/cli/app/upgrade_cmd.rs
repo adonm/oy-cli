@@ -86,7 +86,7 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
         UPGRADE_TIMEOUT,
         OUTPUT_LIMIT,
     )
-    .context("upgraded oy, but failed to apply the pinned OpenCode 2 beta")?;
+    .context("upgraded oy, but failed to apply the current OpenCode 2 beta")?;
     if !doctor.status.success() {
         return Ok(report_command_failure("post-upgrade doctor", &doctor));
     }

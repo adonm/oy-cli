@@ -77,7 +77,6 @@ Before changing existing owned entries, setup creates a mode-`0700` backup under
 | `OY_COLOR` | Set `auto`, `always`, or `never`. |
 | `NO_COLOR` | Disable color output. |
 | `OY_SKIP_SETUP` | Skip setup in `install.sh`. |
-| `OY_MISE_MINIMUM_RELEASE_AGE` | Override the installer's mise release-age filter. |
 
 ## Files written by oy
 

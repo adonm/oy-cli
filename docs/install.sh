@@ -7,14 +7,11 @@ set -eu
 #   curl -fsSL https://oy.adonm.dev/install.sh | sh
 #
 # Environment knobs:
-#   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases
-#   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
+#   OY_SKIP_SETUP  set to 1/true to skip `oy setup`
 
-minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
-oy_version="0.13.5"
+oy_version="0.13.6"
 oy_tool="cargo:oy-cli@$oy_version"
-opencode_version="0.0.0-next-15353"
-opencode_tool="npm:@opencode-ai/cli@$opencode_version"
+opencode_tool="npm:@opencode-ai/cli@next"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -66,17 +63,19 @@ else
   log "Skipping mise self-update; this is normal for package-manager installs."
 fi
 
-log "Installing/upgrading oy toolchain with mise (minimum release age: $minimum_release_age)..."
+log "Installing/upgrading oy toolchain with mise..."
 
 # OpenCode's beta package uses npm; oy and tokei use Cargo.
 "$mise_bin" use --global --yes node@24 rust@1.96
 
 # Install cargo-binstall first so cargo-backed tools can use prebuilt binaries when available.
-"$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" cargo-binstall
+"$mise_bin" use --global --yes --minimum-release-age 0 cargo-binstall
 
-"$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" \
+"$mise_bin" use --global --yes --minimum-release-age 0 \
   "$oy_tool" \
-  "$opencode_tool" \
+  "$opencode_tool"
+
+"$mise_bin" use --global --yes \
   cargo:tokei \
   github:universal-ctags/ctags
 
@@ -119,8 +118,8 @@ esac
 installed_opencode_version=$("$mise_bin" exec -- opencode2 --version 2>/dev/null) \
   || die "OpenCode 2 installed, but opencode2 --version failed"
 case "$installed_opencode_version" in
-*"$opencode_version"*) ;;
-*) die "expected OpenCode $opencode_version after install, got: $installed_opencode_version" ;;
+*"0.0.0-next-"[0-9]*) ;;
+*) die "expected an OpenCode 2 next-channel build after install, got: $installed_opencode_version" ;;
 esac
 
 log "Stopping any older OpenCode background service..."

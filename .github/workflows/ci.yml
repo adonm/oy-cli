@@ -55,13 +55,13 @@ jobs:
           cargo run --locked -- upgrade --help
       - name: OpenCode 2 integration smoke
         run: |
-          npm install --global @opencode-ai/cli@0.0.0-next-15353
-          opencode2 --version | grep -F '0.0.0-next-15353'
+          npm install --global @opencode-ai/cli@next
+          opencode2 --version | grep -E '0\.0\.0-next-[0-9]+'
           opencode2 run --help | grep -F -- '--agent string'
           cargo build --locked
           export PATH="$PWD/target/debug:$PATH"
           oy setup
-          grep -F '"@oy-cli/opencode@0.13.5"' "$HOME/.config/opencode/opencode.json"
+          grep -F '"@oy-cli/opencode@0.13.6"' "$HOME/.config/opencode/opencode.json"
           python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy-audit" not in config.get("commands", {}); assert "tool_output" not in config'
           # The release version does not exist in npm until the tag publishes it.
           # Load this checkout directly for the pre-publish runtime smoke instead.

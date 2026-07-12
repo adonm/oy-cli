@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-07-13
+
+### Changed
+- Made beta installations follow the current OpenCode `next` channel, accept numeric `0.0.0-next-*` hosts, and resolve the plugin SDK from `next` instead of pinning one beta build.
+- Fixed mise's minimum release age at `0` when resolving oy and OpenCode so the installer and doctor do not hold back the current release/channel build.
+- Documented a follow-up switch to the stable `latest` channel once OpenCode 2 leaves beta.
+
 ## [0.13.5] - 2026-07-13
 
 ### Changed

@@ -8,8 +8,7 @@ use std::time::Duration;
 use wait_timeout::ChildExt as _;
 
 pub(crate) const OPENCODE_ENV: &str = "OY_OPENCODE";
-pub(crate) const PINNED_BETA_BUILD: u64 = 15_353;
-pub(crate) const PINNED_BETA_VERSION: &str = "0.0.0-next-15353";
+const OPENCODE_NEXT_PACKAGE: &str = "@opencode-ai/cli@next";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_OUTPUT_LIMIT: u64 = 16 * 1024;
 
@@ -86,7 +85,7 @@ impl OpenCodeHost {
         }
         match self.contract {
             OpenCodeContract::V2 => true,
-            OpenCodeContract::V2Beta => self.version.as_deref().is_some_and(is_pinned_beta),
+            OpenCodeContract::V2Beta => self.version.as_deref().is_some_and(is_next_beta),
             OpenCodeContract::V1 | OpenCodeContract::Unknown => false,
         }
     }
@@ -97,16 +96,16 @@ impl OpenCodeHost {
         }
         if !self.available {
             return Err(format!(
-                "OpenCode 2 host `{}` is unavailable; install @opencode-ai/cli@{PINNED_BETA_VERSION} or set {OPENCODE_ENV}",
+                "OpenCode 2 host `{}` is unavailable; install {OPENCODE_NEXT_PACKAGE} or set {OPENCODE_ENV}",
                 self.executable.display()
             ));
         }
         match self.contract {
             OpenCodeContract::V1 => Err(format!(
-                "OpenCode 1 is no longer supported; install @opencode-ai/cli@{PINNED_BETA_VERSION}"
+                "OpenCode 1 is no longer supported; install {OPENCODE_NEXT_PACKAGE}"
             )),
             OpenCodeContract::V2Beta => Err(format!(
-                "OpenCode beta {} is unsupported; this oy release requires build {PINNED_BETA_BUILD}",
+                "OpenCode beta {} is unsupported; install the current {OPENCODE_NEXT_PACKAGE} build",
                 self.version.as_deref().unwrap_or("unknown")
             )),
             OpenCodeContract::V2 | OpenCodeContract::Unknown => {
@@ -195,7 +194,7 @@ fn read_first_line(mut reader: impl Read) -> Option<String> {
 }
 
 fn detect_contract(executable: &Path, version: Option<&str>) -> OpenCodeContract {
-    if version.is_some_and(|value| value.contains("0.0.0-next-")) {
+    if version.is_some_and(is_next_beta) {
         return OpenCodeContract::V2Beta;
     }
     if let Some(major) = version.and_then(version_major) {
@@ -230,19 +229,11 @@ fn version_major(version: &str) -> Option<u64> {
         .ok()
 }
 
-fn beta_build(version: &str) -> Option<u64> {
-    version
-        .split("-next-")
-        .nth(1)?
-        .split(|ch: char| !ch.is_ascii_digit())
-        .find(|part| !part.is_empty())?
-        .parse()
-        .ok()
-}
-
-fn is_pinned_beta(version: &str) -> bool {
+fn is_next_beta(version: &str) -> bool {
     let token = version_token(version).unwrap_or(version);
-    token == PINNED_BETA_VERSION && beta_build(token) == Some(PINNED_BETA_BUILD)
+    token
+        .strip_prefix("0.0.0-next-")
+        .is_some_and(|build| !build.is_empty() && build.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn version_token(version: &str) -> Option<&str> {
@@ -271,26 +262,25 @@ mod tests {
     }
 
     #[test]
-    fn extracts_beta_build() {
-        assert_eq!(beta_build("0.0.0-next-15353"), Some(15_353));
-        assert_eq!(beta_build("opencode 0.0.0-next-15324"), Some(15_324));
-        assert_eq!(beta_build("2.0.0"), None);
+    fn recognizes_numeric_next_builds() {
+        assert!(is_next_beta("0.0.0-next-15353"));
+        assert!(is_next_beta("opencode 0.0.0-next-15363"));
+        assert!(!is_next_beta("0.0.0-next-"));
+        assert!(!is_next_beta("0.0.0-next-dev"));
+        assert!(!is_next_beta("2.0.0"));
     }
 
     #[test]
-    fn support_requires_current_beta_or_tagged_v2() {
+    fn support_accepts_next_channel_builds_or_tagged_v2() {
         let host = |version: &str, contract| OpenCodeHost {
             executable: PathBuf::from("opencode2"),
             version: Some(version.to_string()),
             available: true,
             contract,
         };
-        assert!(
-            host(PINNED_BETA_VERSION, OpenCodeContract::V2Beta).supported(),
-            "pinned beta must be supported"
-        );
-        assert!(!host("0.0.0-next-15322", OpenCodeContract::V2Beta).supported());
-        assert!(!host("0.0.0-next-15324", OpenCodeContract::V2Beta).supported());
+        assert!(host("0.0.0-next-15322", OpenCodeContract::V2Beta).supported());
+        assert!(host("0.0.0-next-15363", OpenCodeContract::V2Beta).supported());
+        assert!(!host("0.0.0-next-dev", OpenCodeContract::V2Beta).supported());
         assert!(!host("1.0.0-next-15353", OpenCodeContract::V2Beta).supported());
         assert!(host("2.0.0", OpenCodeContract::V2).supported());
         assert!(!host("3.0.0", OpenCodeContract::Unknown).supported());

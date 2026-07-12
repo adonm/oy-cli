@@ -18,7 +18,7 @@ To configure the package manually, add it to an OpenCode JSON/JSONC file:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@oy-cli/opencode@0.13.5"]
+  "plugins": ["@oy-cli/opencode@0.13.6"]
 }
 ```
 

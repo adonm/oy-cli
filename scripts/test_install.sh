@@ -10,7 +10,7 @@ cat >"$tmp/bin/mise" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$OY_INSTALL_TEST_LOG"
 case "$*" in
-"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.5' ;;
+"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.6' ;;
 *"exec -- opencode2 api v2.plugin.list"*)
   count=$(cat "$OY_INSTALL_TEST_PLUGIN_COUNT")
   count=$((count + 1))
@@ -74,8 +74,7 @@ default_log="$tmp/default.log"
 run_install "$default_log" 1
 default=$(cat "$default_log")
 assert_contains "$default" "use --global --yes node@24 rust@1.96"
-assert_contains "$default" "cargo:oy-cli@0.13.5"
-assert_contains "$default" "npm:@opencode-ai/cli@0.0.0-next-15353"
+assert_contains "$default" "use --global --yes --minimum-release-age 0 cargo:oy-cli@0.13.6 npm:@opencode-ai/cli@next"
 assert_contains "$default" "exec -- oy --version"
 assert_contains "$default" "exec -- opencode2 --version"
 assert_contains "$default" "prune --yes --tools cargo:oy-cli npm:@opencode-ai/cli"

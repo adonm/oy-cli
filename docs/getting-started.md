@@ -35,7 +35,7 @@ Review [`install.sh`](install.sh) before running it. Set `OY_SKIP_SETUP=1` to in
 With mise:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.5 npm:@opencode-ai/cli@0.0.0-next-15353
+mise use --global --yes --minimum-release-age 0 node@24 cargo-binstall cargo:oy-cli@0.13.6 npm:@opencode-ai/cli@next
 oy setup
 ```
 

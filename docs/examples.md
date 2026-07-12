@@ -133,8 +133,8 @@ steps:
 
   - name: Install oy and OpenCode
     run: |
-      cargo install oy-cli --locked --version 0.13.5
-      mise use --global node@24 npm:@opencode-ai/cli@0.0.0-next-15353
+      cargo install oy-cli --locked --version 0.13.6
+      mise use --global --yes --minimum-release-age 0 node@24 npm:@opencode-ai/cli@next
       oy setup
 
   - name: Run audit

@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use crate::config;
 
-const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli@0.0.0-next-15353";
+const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli@next";
 const OPENCODE_NODE_TOOL: &str = "node@24";
 const TOKEI_MISE_TOOL: &str = "cargo:tokei";
 const CTAGS_MISE_TOOL: &str = "github:universal-ctags/ctags";
+const MISE_MINIMUM_RELEASE_AGE: &str = "0";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_OUTPUT_LIMIT: usize = 256 * 1024;
 
@@ -270,7 +271,7 @@ fn recommended_next_step(
         no_missing_mise_tools,
     ) {
         (false, _, true, _) => {
-            "Run `oy doctor --install-missing` to install the pinned OpenCode 2 beta, then `oy setup`."
+            "Run `oy doctor --install-missing` to install the current OpenCode 2 beta, then `oy setup`."
         }
         (false, _, false, _) => "Install OpenCode 2, then run `oy setup`.",
         (true, false, _, _) => "Run `oy setup`, then restart OpenCode 2.",
@@ -296,11 +297,17 @@ fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<
 }
 
 fn mise_use_global_args(tools: &[&str]) -> Vec<String> {
-    ["use", "--global", "--yes"]
-        .into_iter()
-        .chain(tools.iter().copied())
-        .map(ToOwned::to_owned)
-        .collect()
+    [
+        "use",
+        "--global",
+        "--yes",
+        "--minimum-release-age",
+        MISE_MINIMUM_RELEASE_AGE,
+    ]
+    .into_iter()
+    .chain(tools.iter().copied())
+    .map(ToOwned::to_owned)
+    .collect()
 }
 
 fn maybe_install_missing_with_mise(
@@ -434,7 +441,15 @@ mod tests {
     fn mise_install_uses_global_use_to_activate_shims() {
         assert_eq!(
             mise_use_global_args(&[TOKEI_MISE_TOOL, CTAGS_MISE_TOOL]),
-            vec!["use", "--global", "--yes", TOKEI_MISE_TOOL, CTAGS_MISE_TOOL]
+            vec![
+                "use",
+                "--global",
+                "--yes",
+                "--minimum-release-age",
+                "0",
+                TOKEI_MISE_TOOL,
+                CTAGS_MISE_TOOL
+            ]
         );
         assert_eq!(
             mise_install_batches(&[OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL, TOKEI_MISE_TOOL]),
@@ -455,7 +470,7 @@ mod tests {
     fn supported_v2_guidance_launches_oy_integration() {
         assert_eq!(
             recommended_next_step(false, false, true, false, false),
-            "Run `oy doctor --install-missing` to install the pinned OpenCode 2 beta, then `oy setup`."
+            "Run `oy doctor --install-missing` to install the current OpenCode 2 beta, then `oy setup`."
         );
         assert_eq!(
             recommended_next_step(true, true, true, true, false),
