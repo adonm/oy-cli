@@ -21,7 +21,7 @@ The **inputs, ordering, limits, and report rendering** are deterministic. Model 
 
 ## Quick start
 
-Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.13.1 no longer supports OpenCode 1.
+Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.13.2 no longer supports OpenCode 1.
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
@@ -30,12 +30,12 @@ oy doctor
 oy audit
 ```
 
-The installer uses [`mise`](https://mise.jdx.dev/) to install pinned oy 0.13.1, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies both primary versions, stops stale OpenCode services, prunes unreferenced old mise versions, and resets the integration before `oy setup` registers `@oy-cli/opencode@0.13.1`. OpenCode installs the package into its isolated cache and the installer verifies that plugin ID `oy` loaded. Set `OY_RESET_SETUP=0` to preserve the generated setup in place or `OY_SKIP_SETUP=1` to skip setup. Source-built Sighthound is opt-in with `OY_INSTALL_SIGHTHOUND=1`.
+The installer uses [`mise`](https://mise.jdx.dev/) to install pinned oy 0.13.2, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies both primary versions, stops stale OpenCode services, prunes unreferenced old mise versions, and resets the integration before `oy setup` registers `@oy-cli/opencode@0.13.2`. OpenCode installs the package into its isolated cache and the installer waits up to 120 seconds to verify that plugin ID `oy` loaded. Set `OY_RESET_SETUP=0` to preserve the generated setup in place or `OY_SKIP_SETUP=1` to skip setup. Source-built Sighthound is opt-in with `OY_INSTALL_SIGHTHOUND=1`.
 
 For a minimal manual install:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.1 npm:@opencode-ai/cli@0.0.0-next-15353
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.2 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy doctor
 ```

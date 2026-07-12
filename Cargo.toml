@@ -1,6 +1,6 @@
 [package]
 name = "oy-cli"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2024"
 rust-version = "1.96"
 description = "Autonomous OpenCode agent and deterministic repository audit and review workflows"

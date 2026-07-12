@@ -10,14 +10,29 @@ cat >"$tmp/bin/mise" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$OY_INSTALL_TEST_LOG"
 case "$*" in
-"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.1' ;;
-*"exec -- opencode2 api v2.plugin.list"*) printf '%s\n' '{"data":[{"id":"oy"}]}' ;;
+"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.2' ;;
+*"exec -- opencode2 api v2.plugin.list"*)
+  count=$(cat "$OY_INSTALL_TEST_PLUGIN_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$OY_INSTALL_TEST_PLUGIN_COUNT"
+  if [ "$count" -ge 4 ]; then
+    printf '%s\n' '{"data":[{"id":"oy"}]}'
+  else
+    printf '%s\n' '{"data":[]}'
+  fi
+  ;;
 "exec -- opencode2 --version") printf '%s\n' 'opencode2 v0.0.0-next-15353' ;;
 "exec -- sighthound --version") printf '%s\n' 'sighthound 1.0' ;;
 esac
 exit 0
 EOF
 chmod +x "$tmp/bin/mise"
+
+cat >"$tmp/bin/sleep" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$tmp/bin/sleep"
 
 assert_contains() {
   case "$1" in
@@ -44,6 +59,7 @@ run_install() {
   install_sighthound=$2
   skip_setup=$3
   : >"$log"
+  printf '%s\n' 0 >"$tmp/plugin-count"
   PATH="$tmp/bin:/usr/bin:/bin" \
     HOME="$tmp/home" \
     XDG_CONFIG_HOME="$tmp/home/.config" \
@@ -51,6 +67,7 @@ run_install() {
     MISE_GLOBAL_CONFIG_FILE= \
     SHELL=/bin/bash \
     OY_INSTALL_TEST_LOG="$log" \
+    OY_INSTALL_TEST_PLUGIN_COUNT="$tmp/plugin-count" \
     OY_INSTALL_SIGHTHOUND="$install_sighthound" \
     OY_SKIP_SETUP="$skip_setup" \
     sh "$repo_root/docs/install.sh" >/dev/null
@@ -60,7 +77,7 @@ default_log="$tmp/default.log"
 run_install "$default_log" 0 1
 default=$(cat "$default_log")
 assert_contains "$default" "use --global --yes node@24 rust@1.96"
-assert_contains "$default" "cargo:oy-cli@0.13.1"
+assert_contains "$default" "cargo:oy-cli@0.13.2"
 assert_contains "$default" "npm:@opencode-ai/cli@0.0.0-next-15353"
 assert_contains "$default" "exec -- oy --version"
 assert_contains "$default" "exec -- opencode2 --version"

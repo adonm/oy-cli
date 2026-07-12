@@ -13,7 +13,7 @@ set -eu
 #   OY_RESET_SETUP               set to 0/false to update setup without first removing owned entries
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
-oy_version="0.13.1"
+oy_version="0.13.2"
 oy_tool="cargo:oy-cli@$oy_version"
 opencode_version="0.0.0-next-15353"
 opencode_tool="npm:@opencode-ai/cli@$opencode_version"
@@ -171,20 +171,24 @@ case "${OY_SKIP_SETUP:-}" in
   "$mise_bin" exec -- opencode2 service start >/dev/null \
     || die "OpenCode could not start after oy setup"
   workspace=$(pwd)
-  "$mise_bin" exec -- opencode2 api v2.plugin.list \
-    --param "location[directory]=$workspace" >/dev/null \
-    || die "OpenCode could not initialize the current workspace"
-  loaded_plugins=$("$mise_bin" exec -- opencode2 api v2.plugin.list \
-    --param "location[directory]=$workspace") \
-    || die "OpenCode could not list loaded plugins"
-  case "$loaded_plugins" in
-  *'"id":"oy"'* | *'"id": "oy"'*)
-    log "Verified OpenCode loaded the oy plugin."
-    ;;
-  *)
-    die "OpenCode started, but the oy plugin did not load; run 'oy doctor --check' for details"
-    ;;
-  esac
+  log "Waiting for OpenCode to resolve and load the oy plugin..."
+  plugin_loaded=0
+  attempts=0
+  while [ "$attempts" -lt 60 ]; do
+    loaded_plugins=$("$mise_bin" exec -- opencode2 api v2.plugin.list \
+      --param "location[directory]=$workspace" 2>/dev/null || true)
+    case "$loaded_plugins" in
+    *'"id":"oy"'* | *'"id": "oy"'*)
+      plugin_loaded=1
+      break
+      ;;
+    esac
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  [ "$plugin_loaded" -eq 1 ] \
+    || die "OpenCode started, but the oy plugin did not load within 120 seconds; run 'oy doctor --check' for details"
+  log "Verified OpenCode loaded the oy plugin."
   ;;
 esac
 

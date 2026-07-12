@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.13.2] - 2026-07-12
+
+### Fixed
+- Wait up to 120 seconds for OpenCode's asynchronous first-time npm dependency resolution before deciding that the version-matched oy plugin failed to load.
+
 ## [0.13.1] - 2026-07-12
 
 ### Changed

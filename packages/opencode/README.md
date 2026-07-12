@@ -7,7 +7,7 @@ Install the `oy` binary, then add the package to OpenCode:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-    "plugins": ["@oy-cli/opencode@0.13.1"]
+    "plugins": ["@oy-cli/opencode@0.13.2"]
 }
 ```
 
