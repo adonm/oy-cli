@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
-use super::transparency::{finish_markdown, finish_markdown_owned};
+use super::transparency::finish_markdown_owned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FindingSummary {
@@ -532,23 +532,6 @@ pub(crate) fn findings_from_report(report: &str) -> Vec<Finding> {
         .collect()
 }
 
-pub(crate) fn normalized_findings_payload(value: &Value, fallback_source: &str) -> Option<String> {
-    let items = findings_array(value)?;
-    let findings = items
-        .iter()
-        .filter_map(|item| {
-            let mut finding = finding_from_value(item)?;
-            if finding.source == "unknown" && !fallback_source.trim().is_empty() {
-                finding.source = normalize_identifier_part(fallback_source);
-                finding.id.clear();
-                let _ = finding.normalize();
-            }
-            Some(finding)
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&findings).ok()
-}
-
 pub(crate) fn normalized_findings_payload_strict(
     value: &Value,
     fallback_source: &str,
@@ -585,24 +568,6 @@ pub(crate) fn normalized_findings_payload_strict(
         findings.push(finding);
     }
     serde_json::to_string_pretty(&findings).map_err(Into::into)
-}
-
-pub(crate) fn with_structured_findings_block(report: &str, source: &str) -> String {
-    let lines = report.lines().collect::<Vec<_>>();
-    if let Some(payload) = structured_findings_payload(report)
-        && parse_structured_findings_payload(&payload).is_some()
-    {
-        return finish_markdown(lines);
-    }
-
-    let findings = extract_findings(&lines)
-        .into_iter()
-        .map(|finding| Finding::from_summary(source, finding))
-        .collect::<Vec<_>>();
-    let Some(payload) = serde_json::to_string_pretty(&findings).ok() else {
-        return finish_markdown(lines);
-    };
-    with_structured_findings_payload(report, &payload)
 }
 
 pub(crate) fn with_structured_findings_payload(report: &str, payload: &str) -> String {
@@ -782,36 +747,6 @@ Evidence: src/old.rs:1
     }
 
     #[test]
-    fn structured_findings_block_can_be_added_from_legacy_markdown() {
-        let report = with_structured_findings_block(
-            "# Audit Issues\n\n## Detailed findings\n\n### Medium: legacy finding\nEvidence: src/lib.rs:3\n",
-            "audit",
-        );
-
-        assert!(report.contains("## Machine-readable findings"));
-        assert!(report.contains("```json oy-findings"));
-        let findings = findings_from_report(&report);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].source, "audit");
-        assert_eq!(
-            findings[0].primary_code_ref().as_deref(),
-            Some("src/lib.rs:3")
-        );
-    }
-
-    #[test]
-    fn structured_findings_block_is_added_for_no_findings() {
-        let report = with_structured_findings_block(
-            "# Code Quality Review\n\n## Verdict\n\nNo major structural concerns.\n",
-            "review",
-        );
-
-        assert!(report.contains("## Machine-readable findings"));
-        assert!(report.contains("```json oy-findings\n[]\n```"));
-        assert!(findings_from_report(&report).is_empty());
-    }
-
-    #[test]
     fn empty_structured_findings_block_is_authoritative() {
         let report = r#"# Code Quality Review
 
@@ -852,7 +787,7 @@ Evidence: src/stale.rs:1
             }]
         });
 
-        let normalized = normalized_findings_payload(&payload, "audit").unwrap();
+        let normalized = normalized_findings_payload_strict(&payload, "audit").unwrap();
 
         assert!(normalized.contains("\"id\": \"audit-"));
         assert!(normalized.contains("\"status\": \"new\""));
@@ -878,7 +813,7 @@ Evidence: src/stale.rs:1
             }]
         });
 
-        let normalized = normalized_findings_payload(&payload, "audit").unwrap();
+        let normalized = normalized_findings_payload_strict(&payload, "audit").unwrap();
         let findings = parse_structured_findings_payload(&normalized).unwrap();
 
         assert_eq!(findings.len(), 1);
@@ -900,8 +835,8 @@ Evidence: src/stale.rs:1
         let payload = serde_json::json!({ "findings": [] });
 
         assert_eq!(
-            normalized_findings_payload(&payload, "review").as_deref(),
-            Some("[]")
+            normalized_findings_payload_strict(&payload, "review").unwrap(),
+            "[]"
         );
     }
 
@@ -918,7 +853,7 @@ Evidence: src/stale.rs:1
             }]
         });
 
-        let normalized = normalized_findings_payload(&payload, "audit").unwrap();
+        let normalized = normalized_findings_payload_strict(&payload, "audit").unwrap();
 
         assert!(normalized.contains("\"id\": \"audit-finding-1\""));
         assert!(normalized.contains("\"source\": \"security-audit\""));

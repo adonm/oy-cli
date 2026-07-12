@@ -20,7 +20,7 @@ prepare deterministic evidence
 | Core | Gitignore-aware evidence, ordered chunks, diff preparation, stable findings, Markdown/SARIF normalization, safe report writes |
 | OpenCode integration | One concise `oy` agent and three canonical skills: audit, review, enhance |
 | User/OpenCode | Models, providers, permissions, approvals, edits, shell, web, sessions, UI, project instructions |
-| Transitional compatibility | MCP transport and launcher/API wrappers |
+| OpenCode adapters | Setup plus narrow launch/session/API wrappers |
 
 ## Principles
 
@@ -43,7 +43,7 @@ It aligns with OpenCode 2 Build on:
 - making the smallest correct change;
 - completing implementation and verification rather than stopping at a proposal;
 - preserving unrelated dirty-worktree changes;
-- avoiding destructive Git operations and unrequested commits;
+- allowing focused verified checkpoint commits for long unattended work while protecting unrelated changes, history, pushes, and tags;
 - parallelizing independent inspection;
 - concise progress and completion reporting.
 
@@ -53,7 +53,7 @@ Prompt changes require comparison against a tagged OpenCode 2 default and live e
 
 ## Current state
 
-The current release exposes deterministic collection and report finalization through file-backed CLI commands. The local MCP server remains callable as a compatibility adapter but is not registered by default.
+The current release exposes deterministic collection and report finalization through file-backed CLI commands.
 
 Current setup pins `@oy-cli/opencode` to the matching binary version. The package installs:
 
@@ -74,9 +74,9 @@ oy review prepare [target] --json
 oy review finalize --run <id> --json
 ```
 
-Preparation writes an index, manifest, prior report, and bounded evidence chunks under a workspace-local run directory. OpenCode reads those artifacts and writes separate candidate Markdown and findings JSON with native tools. Finalization verifies the bound evidence and canonicalizes the report. Authoritative state remains private in the platform user state directory.
+Preparation writes an index, manifest, prior report, and bounded evidence chunks under a workspace-local run directory. OpenCode reads the index, prior report when present, and every indexed chunk, then writes separate candidate Markdown and findings JSON with native tools. Finalization verifies the bound evidence and canonicalizes the report. Authoritative state uses the platform state location, falling back to the local-data directory when needed.
 
-Default setup no longer registers MCP, rewrites the global tool-output budget, or installs direct command/agent/skill files.
+Default setup does not rewrite the global tool-output budget or install direct command/agent/skill files.
 
 ## Keep
 
@@ -87,7 +87,7 @@ Default setup no longer registers MCP, rewrites the global tool-output budget, o
 - Stable finding IDs and statuses.
 - Markdown and SARIF rendering.
 - Safe workspace output handling.
-- Optional bounded tokei, Universal Ctags, and Sighthound evidence.
+- Optional direct `tokei` and Universal Ctags orientation for large scopes.
 - One-finding remediation and rerun confirmation.
 - The concise autonomous `oy` agent.
 
@@ -95,11 +95,10 @@ Default setup no longer registers MCP, rewrites the global tool-output budget, o
 
 - Oy-owned plan/edit/auto permission modes.
 - Dedicated auditor/reviewer/enhancer permission agents.
-- General chat/TUI/model wrappers; bare `oy` remains the one integration-aware launch path.
+- `oy model`, `oy open`, `oy chat`, and unknown-argument passthrough; bare `oy` remains the integration-aware TUI launcher and native host operations use `opencode2`.
 - Coupled oy/OpenCode installation and upgrades.
 - Exact host API/version coupling not needed by skills.
 - Global output-budget mutation after evidence moves to files.
-- MCP after the CLI adapter has proven parity and compatibility demand is low.
 
 ## Non-goals
 

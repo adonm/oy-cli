@@ -1,4 +1,4 @@
-//! Deterministic audit input/report helpers used by oy MCP tools.
+//! Deterministic audit input and report helpers used by file-backed workflows.
 
 use std::path::PathBuf;
 

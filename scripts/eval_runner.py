@@ -100,7 +100,7 @@ def main() -> int:
     run_parser.add_argument(
         "--opencode-model",
         default="",
-        help="Run eval tasks through opencode -m provider/model instead of the oy wrapper",
+        help="Select the oy workflow model as provider/model#variant",
     )
     run_parser.add_argument("--dry-run", action="store_true", help="Print planned commands without cloning or running opencode")
     run_parser.add_argument("--skip-build", action="store_true", help="Do not run cargo build before eval")
@@ -353,7 +353,7 @@ def unexpected_mutations(repo_dir: Path, env: dict[str, str]) -> list[str]:
     unexpected = []
     for line in output.splitlines():
         path = line[3:] if len(line) > 3 else line
-        if path.startswith(".opencode/") or path.startswith(".oy-eval/"):
+        if path.startswith((".opencode/", ".oy-eval/", ".oy/runs/")):
             continue
         unexpected.append(line)
     return unexpected

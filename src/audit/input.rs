@@ -448,72 +448,6 @@ pub(crate) fn build_manifest(files: &[AuditFile]) -> String {
     out
 }
 
-pub(crate) fn build_security_index(files: &[AuditFile], limit: usize) -> String {
-    let keywords = [
-        "auth",
-        "authorize",
-        "permission",
-        "role",
-        "session",
-        "token",
-        "secret",
-        "password",
-        "key",
-        "credential",
-        "crypto",
-        "encrypt",
-        "decrypt",
-        "sign",
-        "verify",
-        "path",
-        "file",
-        "canonical",
-        "symlink",
-        "upload",
-        "download",
-        "shell",
-        "command",
-        "process",
-        "env",
-        "http",
-        "url",
-        "fetch",
-        "request",
-        "deserialize",
-        "unsafe",
-        "eval",
-        "admin",
-    ];
-    let mut out = String::new();
-    let mut count = 0usize;
-    'files: for file in files {
-        for (line_no, line) in file.text.lines().enumerate() {
-            let lower = line.to_ascii_lowercase();
-            if keywords.iter().any(|keyword| lower.contains(keyword)) {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    let _ = writeln!(
-                        out,
-                        "- {}:{}: {}",
-                        file.path,
-                        line_no + 1,
-                        crate::ui::truncate_chars(trimmed, 180)
-                    );
-                    count += 1;
-                    if count >= limit {
-                        break 'files;
-                    }
-                }
-            }
-        }
-    }
-    if out.is_empty() {
-        "- no keyword hits found".to_string()
-    } else {
-        out
-    }
-}
-
 pub(crate) fn chunk_text(chunk: &AuditChunk) -> String {
     let mut out = String::new();
     for file in &chunk.files {
@@ -589,8 +523,8 @@ fn push_diff_file(files: &mut Vec<AuditFile>, text: &str, model: &str) {
 }
 
 fn count_tokens(_model: &str, text: &str) -> usize {
-    // A deterministic approximation is enough for MCP chunk planning now that
-    // the host owns model execution and context management.
+    // A deterministic approximation is enough for bounded evidence planning;
+    // OpenCode owns model execution and context management.
     text.split_whitespace().count().max(text.len() / 4)
 }
 

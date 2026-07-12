@@ -9,7 +9,7 @@ Install the `oy` binary, then add the package to OpenCode:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-    "plugins": ["@oy-cli/opencode@0.13.3"]
+  "plugins": ["@oy-cli/opencode@0.13.4"]
 }
 ```
 
@@ -18,6 +18,8 @@ The package registers:
 - one concise `oy` primary agent without permission overrides;
 - `oy-audit`, `oy-review`, and `oy-enhance` skills;
 - `/oy-audit`, `/oy-review`, and `/oy-enhance` commands.
+
+The package does not change OpenCode permissions. The slash commands are OpenCode prompt commands, not `oy` shell subcommands. The agent may use optional `tokei` and Universal Ctags commands for compact orientation; `oy doctor --install-missing` installs them.
 
 Audit and review use `oy audit|review prepare` to write bounded workspace-local evidence files, OpenCode's native `read` and edit tools, and `oy audit|review finalize` to recheck evidence and normalize the final report. OpenCode and the user own permissions.
 

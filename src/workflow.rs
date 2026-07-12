@@ -1,4 +1,4 @@
-//! Typed workflow context shared with the separately launched oy MCP process.
+//! Typed workflow context shared across OpenCode workflow orchestration.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -8,12 +8,7 @@ use std::{
     fs,
     hash::{Hash as _, Hasher as _},
     io::Write as _,
-    sync::{LazyLock, Mutex},
 };
-
-pub(crate) const WORKFLOW_CONTEXT_ENV: &str = "OY_WORKFLOW_CONTEXT";
-static ACTIVE_CONTEXT: LazyLock<Mutex<Option<WorkflowContext>>> =
-    LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -67,91 +62,6 @@ impl WorkflowContext {
         }
         Ok(())
     }
-}
-
-pub(crate) fn current(root: &Path) -> Result<Option<WorkflowContext>> {
-    if let Some(context) = ACTIVE_CONTEXT
-        .lock()
-        .map_err(|_| anyhow::anyhow!("active workflow context lock poisoned"))?
-        .clone()
-    {
-        context.validate(root)?;
-        return Ok(Some(context));
-    }
-    let raw = match std::env::var_os(WORKFLOW_CONTEXT_ENV) {
-        Some(raw) => raw.to_string_lossy().into_owned(),
-        None => match fs::read_to_string(context_path(root)) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).context("failed reading workflow context lease"),
-        },
-    };
-    let context: WorkflowContext =
-        serde_json::from_str(&raw).context("invalid workflow context")?;
-    context.validate(root)?;
-    Ok(Some(context))
-}
-
-pub(crate) fn active_workspace() -> Option<PathBuf> {
-    ACTIVE_CONTEXT
-        .lock()
-        .ok()
-        .and_then(|active| active.as_ref().map(|context| context.workspace.clone()))
-}
-
-pub(crate) struct ActiveContextGuard;
-
-pub(crate) fn activate(context: WorkflowContext) -> Result<ActiveContextGuard> {
-    *ACTIVE_CONTEXT
-        .lock()
-        .map_err(|_| anyhow::anyhow!("active workflow context lock poisoned"))? = Some(context);
-    Ok(ActiveContextGuard)
-}
-
-impl Drop for ActiveContextGuard {
-    fn drop(&mut self) {
-        if let Ok(mut active) = ACTIVE_CONTEXT.lock() {
-            *active = None;
-        }
-    }
-}
-
-pub(crate) fn find_by_run_id(run_id: &str) -> Result<Option<WorkflowContext>> {
-    if run_id.len() != 48 || !run_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("invalid workflow run_id");
-    }
-    let dir = runtime_workflow_dir();
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_symlink() || !file_type.is_file() {
-            continue;
-        }
-        let Ok(raw) = fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        let Ok(context) = serde_json::from_str::<WorkflowContext>(&raw) else {
-            continue;
-        };
-        if context.run_id == run_id {
-            let Ok(root) = context.workspace.canonicalize() else {
-                continue;
-            };
-            if context.validate(&root).is_ok() {
-                return Ok(Some(context));
-            }
-        }
-    }
-    Ok(None)
 }
 
 pub(crate) fn retained(root: &Path) -> Result<Option<WorkflowContext>> {
@@ -247,13 +157,6 @@ fn context_path(root: &Path) -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     base.join("oy/workflows")
         .join(format!("{:016x}.json", hasher.finish()))
-}
-
-fn runtime_workflow_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("oy/workflows")
 }
 
 pub(crate) fn new_run_id() -> Result<String> {

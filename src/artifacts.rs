@@ -398,10 +398,6 @@ pub(crate) fn collect(root: &Path, request: &PrepareRequest) -> Result<Evidence>
     }
 }
 
-pub(crate) fn repository(root: &Path, path: &str, model: &str) -> Result<Evidence> {
-    repository_excluding(root, path, model, None)
-}
-
 fn repository_excluding(
     root: &Path,
     path: &str,
@@ -440,10 +436,6 @@ fn repository_excluding(
         bail!("path is not a file or directory: {path}");
     };
     evidence_from_files(format!("workspace path {path}"), files, None, None)
-}
-
-pub(crate) fn diff(root: &Path, target: &str, model: &str) -> Result<Evidence> {
-    diff_excluding(root, target, model, None)
 }
 
 fn diff_excluding(
@@ -616,7 +608,9 @@ fn read_state(run_id: &str) -> Result<RunState> {
 
 fn state_path(run_id: &str) -> Result<PathBuf> {
     validate_run_id(run_id)?;
-    let base = dirs::state_dir().ok_or_else(|| anyhow!("user state directory is unavailable"))?;
+    let base = dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .ok_or_else(|| anyhow!("user state directory is unavailable"))?;
     Ok(base.join("oy/prepared-runs").join(format!("{run_id}.json")))
 }
 

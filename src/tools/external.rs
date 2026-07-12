@@ -1,61 +1,46 @@
-//! Shared resolution and bounded execution for optional external helpers.
+//! Shared bounded subprocess execution.
 
 use anyhow::{Context, Result, anyhow, bail};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 use wait_timeout::ChildExt as _;
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const PROBE_OUTPUT_LIMIT: usize = 256 * 1024;
-
-#[derive(Debug, Clone)]
-pub(super) struct ExternalCommand {
-    name: String,
-    path: PathBuf,
+pub(crate) fn resolve_executable(candidates: &[&str]) -> Option<std::path::PathBuf> {
+    resolve_executable_in(candidates, std::env::var_os("PATH").as_deref())
 }
 
-impl ExternalCommand {
-    pub(super) fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub(super) fn run<I, S>(
-        &self,
-        root: &Path,
-        args: I,
-        timeout: Duration,
-        output_limit: usize,
-    ) -> Result<ExternalOutput>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let mut process = std::process::Command::new(&self.path);
-        process.current_dir(root).args(args);
-        let output = run_bounded_process(&mut process, &self.name, timeout, output_limit)?;
-        if output.truncated {
-            bail!(
-                "{} output exceeded the {} byte per-stream limit",
-                self.name,
-                output_limit
-            );
+fn resolve_executable_in(
+    candidates: &[&str],
+    search_path: Option<&OsStr>,
+) -> Option<std::path::PathBuf> {
+    let search_path = search_path?;
+    for directory in std::env::split_paths(search_path) {
+        if !directory.is_absolute() {
+            continue;
         }
-        Ok(output)
+        for candidate in candidates {
+            let path = directory.join(candidate);
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.is_file()
+                && is_executable(&metadata)
+                && let Ok(path) = path.canonicalize()
+            {
+                return Some(path);
+            }
+        }
     }
+    None
+}
 
-    pub(super) fn probe(&self, args: &[&str]) -> Result<ExternalOutput> {
-        self.run(
-            &std::env::current_dir().context("failed to resolve current directory")?,
-            args,
-            PROBE_TIMEOUT,
-            PROBE_OUTPUT_LIMIT,
-        )
-    }
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o111 != 0
 }
 
 pub(crate) fn run_bounded_process(
@@ -77,11 +62,11 @@ pub(crate) fn run_bounded_process(
     let stdout = child
         .stdout
         .take()
-        .context("failed to capture helper stdout")?;
+        .context("failed to capture process stdout")?;
     let stderr = child
         .stderr
         .take()
-        .context("failed to capture helper stderr")?;
+        .context("failed to capture process stderr")?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
     let stderr_reader = thread::spawn(move || read_bounded(stderr, output_limit));
 
@@ -118,8 +103,6 @@ fn terminate(child: &mut std::process::Child) {
 }
 
 fn terminate_process_group(process_id: u32) {
-    // The child was launched as its own process group. Kill the group so descendants cannot
-    // keep captured pipes open after the direct child is gone.
     let process_group = -(process_id as i32);
     // SAFETY: `kill` receives a process-group id created for this child and a fixed signal.
     let _ = unsafe { libc::kill(process_group, libc::SIGKILL) };
@@ -131,136 +114,6 @@ pub(crate) struct ExternalOutput {
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
     pub(crate) truncated: bool,
-}
-
-impl ExternalOutput {
-    pub(super) fn require_success(&self, command: &ExternalCommand) -> Result<()> {
-        if self.status.success() {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&self.stderr).trim().to_string();
-        if stderr.is_empty() {
-            bail!("{} failed with status {}", command.name(), self.status);
-        }
-        bail!(
-            "{} failed with status {}: {stderr}",
-            command.name(),
-            self.status
-        )
-    }
-}
-
-pub(super) fn discover<F>(
-    display_name: &str,
-    override_env: &str,
-    candidates: &[&str],
-    probe: F,
-) -> Result<ExternalCommand>
-where
-    F: Fn(&ExternalCommand) -> Result<()>,
-{
-    discover_in(
-        display_name,
-        override_env,
-        std::env::var_os(override_env),
-        std::env::var_os("PATH"),
-        candidates,
-        probe,
-    )
-}
-
-fn discover_in<F>(
-    display_name: &str,
-    override_env: &str,
-    override_path: Option<OsString>,
-    search_path: Option<OsString>,
-    candidates: &[&str],
-    probe: F,
-) -> Result<ExternalCommand>
-where
-    F: Fn(&ExternalCommand) -> Result<()>,
-{
-    if let Some(path) = override_path.filter(|value| !value.is_empty()) {
-        let path = PathBuf::from(path);
-        if !path.is_absolute() {
-            bail!("{override_env} must be an absolute executable path");
-        }
-        let command = command_from_path(&path)?;
-        probe(&command).with_context(|| {
-            format!(
-                "{display_name} configured by {override_env} is not usable: {}",
-                path.display()
-            )
-        })?;
-        return Ok(command);
-    }
-
-    let mut probe_errors = Vec::new();
-    for candidate in candidates {
-        for path in candidate_paths(candidate, search_path.as_deref()) {
-            let Ok(command) = command_from_path(&path) else {
-                continue;
-            };
-            match probe(&command) {
-                Ok(()) => return Ok(command),
-                Err(err) => probe_errors.push(format!("{}: {err}", path.display())),
-            }
-        }
-    }
-
-    if probe_errors.is_empty() {
-        bail!("{display_name} was not found on PATH; set {override_env} to an absolute path");
-    }
-    bail!(
-        "no usable {display_name} executable was found; set {override_env} to an absolute path ({})",
-        probe_errors.join("; ")
-    )
-}
-
-fn candidate_paths(candidate: &str, search_path: Option<&OsStr>) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let Some(search_path) = search_path else {
-        return paths;
-    };
-    for directory in std::env::split_paths(search_path) {
-        // Do not let empty or relative PATH entries select an executable from an untrusted
-        // workspace. Explicit overrides remain available for intentional local helpers.
-        if !directory.is_absolute() {
-            continue;
-        }
-        paths.push(directory.join(candidate));
-    }
-    paths
-}
-
-fn command_from_path(path: &Path) -> Result<ExternalCommand> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("external helper does not exist: {}", path.display()))?;
-    if !metadata.is_file() {
-        bail!("external helper is not a regular file: {}", path.display());
-    }
-    if !is_executable(&metadata) {
-        bail!("external helper is not executable: {}", path.display());
-    }
-    let path = path
-        .canonicalize()
-        .with_context(|| format!("failed to resolve external helper: {}", path.display()))?;
-    let name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("external helper")
-        .to_string();
-    Ok(ExternalCommand { name, path })
-}
-
-#[cfg(test)]
-pub(super) fn test_command(path: &Path) -> ExternalCommand {
-    command_from_path(path).expect("test external command should be executable")
-}
-
-fn is_executable(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    metadata.permissions().mode() & 0o111 != 0
 }
 
 fn read_bounded(mut reader: impl io::Read, limit: usize) -> io::Result<(Vec<u8>, bool)> {
@@ -286,14 +139,16 @@ fn join_reader(
 ) -> Result<(Vec<u8>, bool)> {
     reader
         .join()
-        .map_err(|_| anyhow!("external helper {stream} reader panicked"))?
-        .with_context(|| format!("failed reading external helper {stream}"))
+        .map_err(|_| anyhow!("process {stream} reader panicked"))?
+        .with_context(|| format!("failed reading process {stream}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
 
     fn executable(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
@@ -305,93 +160,43 @@ mod tests {
     }
 
     #[test]
-    fn discovery_returns_a_probed_absolute_path() {
+    fn executable_resolution_ignores_relative_path_entries() {
+        let relative = std::env::join_paths([Path::new("."), Path::new("bin")]).unwrap();
+        assert!(resolve_executable_in(&["helper"], Some(&relative)).is_none());
+    }
+
+    #[test]
+    fn executable_resolution_returns_a_canonical_absolute_path() {
         let dir = tempfile::tempdir().unwrap();
-        let path = executable(dir.path(), "helper", "printf 'helper 1.0\\n'");
-        let search_path = std::env::join_paths([dir.path()]).unwrap();
+        let executable = executable(dir.path(), "helper", "exit 0");
+        let search = std::env::join_paths([dir.path()]).unwrap();
 
-        let command = discover_in(
-            "Helper",
-            "OY_HELPER",
-            None,
-            Some(search_path),
-            &["helper"],
-            |command| {
-                let output = command.probe(&[])?;
-                output.require_success(command)
-            },
-        )
-        .unwrap();
-
-        assert_eq!(command.path, path.canonicalize().unwrap());
-    }
-
-    #[test]
-    fn override_must_be_absolute() {
-        let err = discover_in(
-            "Helper",
-            "OY_HELPER",
-            Some(OsString::from("helper")),
-            None,
-            &["helper"],
-            |_| Ok(()),
-        )
-        .unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("must be an absolute executable path")
+        assert_eq!(
+            resolve_executable_in(&["helper"], Some(&search)),
+            Some(executable.canonicalize().unwrap())
         );
-    }
-
-    #[test]
-    fn discovery_ignores_relative_path_entries() {
-        let relative_path = std::env::join_paths([Path::new("."), Path::new("bin")]).unwrap();
-
-        let err = discover_in(
-            "Helper",
-            "OY_HELPER",
-            None,
-            Some(relative_path),
-            &["helper"],
-            |_| Ok(()),
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("was not found on PATH"));
     }
 
     #[test]
     fn runner_enforces_output_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = executable(dir.path(), "helper", "printf '123456789'");
-        let command = command_from_path(&path).unwrap();
+        let mut command = std::process::Command::new(path);
 
-        let err = command
-            .run(
-                dir.path(),
-                std::iter::empty::<&str>(),
-                Duration::from_secs(1),
-                4,
-            )
-            .unwrap_err();
+        let output =
+            run_bounded_process(&mut command, "helper", Duration::from_secs(1), 4).unwrap();
 
-        assert!(err.to_string().contains("output exceeded"));
+        assert_eq!(output.stdout, b"1234");
+        assert!(output.truncated);
     }
 
     #[test]
     fn runner_enforces_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let path = executable(dir.path(), "helper", "sleep 10 &\nwait");
-        let command = command_from_path(&path).unwrap();
+        let mut command = std::process::Command::new(path);
 
-        let err = command
-            .run(
-                dir.path(),
-                std::iter::empty::<&str>(),
-                Duration::from_millis(100),
-                1024,
-            )
+        let err = run_bounded_process(&mut command, "helper", Duration::from_millis(100), 1024)
             .unwrap_err();
 
         assert!(err.to_string().contains("timed out"));
@@ -401,17 +206,11 @@ mod tests {
     fn runner_closes_pipes_held_by_descendants_after_parent_exit() {
         let dir = tempfile::tempdir().unwrap();
         let path = executable(dir.path(), "helper", "sleep 10 &\nexit 0");
-        let command = command_from_path(&path).unwrap();
+        let mut command = std::process::Command::new(path);
         let started = std::time::Instant::now();
 
-        let output = command
-            .run(
-                dir.path(),
-                std::iter::empty::<&str>(),
-                Duration::from_secs(1),
-                1024,
-            )
-            .unwrap();
+        let output =
+            run_bounded_process(&mut command, "helper", Duration::from_secs(1), 1024).unwrap();
 
         assert!(output.status.success());
         assert!(started.elapsed() < Duration::from_secs(2));

@@ -1,11 +1,11 @@
 //! # oy
 //!
 //! `oy` adds one concise autonomous agent and repeatable repository audit/review workflows to
-//! [OpenCode 2](https://opencode.ai/). Its current local MCP adapter provides deterministic
-//! repository collection, ordered chunks, target-diff input, and normalized Markdown/SARIF
-//! reports while the project moves toward file-backed CLI evidence. OpenCode remains responsible
-//! for model execution, providers, authenticated sessions, permissions, and general coding tools.
-//! oy does not store provider credentials.
+//! [OpenCode 2](https://v2.opencode.ai/). File-backed CLI preparation and finalization provide
+//! deterministic repository collection, ordered chunks, target-diff input, and normalized
+//! Markdown/SARIF reports. OpenCode remains responsible for model execution, providers,
+//! authenticated sessions, permissions, and general coding tools. oy does not store provider
+//! credentials.
 //! The native CLI supports Linux and macOS; Windows users should run it in WSL2.
 //!
 //! ## Start with the CLI
@@ -22,7 +22,7 @@
 //!
 //! See the [getting-started guide](https://oy.adonm.dev/getting-started.html),
 //! [workflow guide](https://oy.adonm.dev/workflows.html), and
-//! [CLI/MCP reference](https://oy.adonm.dev/reference.html) for the user-facing
+//! [CLI and OpenCode reference](https://oy.adonm.dev/reference.html) for the user-facing
 //! contract.
 //!
 //! ## Determinism boundary
@@ -39,9 +39,9 @@
 //! private and may change without a semver-stable library API commitment.
 //!
 //! ```no_run
-//! # async fn example() -> anyhow::Result<()> {
+//! # fn example() -> anyhow::Result<()> {
 //! // Arguments exclude the executable name, just like std::env::args().skip(1).
-//! let exit_code = oy::run(vec!["doctor".into(), "--json".into()]).await?;
+//! let exit_code = oy::run(vec!["doctor".into(), "--json".into()])?;
 //! assert_eq!(exit_code, 0);
 //! # Ok(())
 //! # }
@@ -52,7 +52,6 @@
 mod artifacts;
 mod audit;
 mod cli;
-mod mcp;
 mod opencode;
 mod review;
 mod tools;
@@ -81,8 +80,8 @@ pub(crate) fn decode_utf8(raw: Vec<u8>) -> Result<String, TextDecodeError> {
 ///
 /// Prefer invoking the `oy` executable when process isolation or concurrent invocations matter;
 /// CLI output configuration is process-global.
-pub async fn run(argv: Vec<String>) -> anyhow::Result<i32> {
-    cli::app::run(argv).await
+pub fn run(argv: Vec<String>) -> anyhow::Result<i32> {
+    cli::app::run(argv)
 }
 
 /// Writes a formatted diagnostic line to standard error.

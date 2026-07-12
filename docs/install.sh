@@ -1,22 +1,20 @@
 #!/bin/sh
 set -eu
 
-# Install or upgrade oy and its optional local helpers with mise.
+# Install or upgrade oy, OpenCode, and compact context helpers with mise.
 #
 # Intended curl usage:
 #   curl -fsSL https://oy.adonm.dev/install.sh | sh
 #
 # Environment knobs:
 #   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases
-#   OY_INSTALL_SIGHTHOUND        set to 1/true to source-build optional pinned Sighthound
 #   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
-oy_version="0.13.3"
+oy_version="0.13.4"
 oy_tool="cargo:oy-cli@$oy_version"
 opencode_version="0.0.0-next-15353"
 opencode_tool="npm:@opencode-ai/cli@$opencode_version"
-sighthound_tool="cargo:https://github.com/Corgea/Sighthound[bin=sighthound,locked=true]@rev:c4608eb2b6ca256daf4dbd1e74aadc3570343685"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -70,7 +68,7 @@ fi
 
 log "Installing/upgrading oy toolchain with mise (minimum release age: $minimum_release_age)..."
 
-# OpenCode's beta package uses npm; oy and optional source helpers use Cargo.
+# OpenCode's beta package uses npm; oy and tokei use Cargo.
 "$mise_bin" use --global --yes node@24 rust@1.96
 
 # Install cargo-binstall first so cargo-backed tools can use prebuilt binaries when available.
@@ -81,17 +79,6 @@ log "Installing/upgrading oy toolchain with mise (minimum release age: $minimum_
   "$opencode_tool" \
   cargo:tokei \
   github:universal-ctags/ctags
-
-case "${OY_INSTALL_SIGHTHOUND:-}" in
-1 | true | TRUE | yes | YES)
-  log "Building the pinned Sighthound release commit from source (sighthound binary only)..."
-  "$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" \
-    "$sighthound_tool"
-  ;;
-*)
-  log "Skipping source-built Sighthound; set OY_INSTALL_SIGHTHOUND=1 to build it with pinned Rust 1.96."
-  ;;
-esac
 
 case "${SHELL:-}" in
 */bash | bash) shell_target=bash ;;
@@ -134,13 +121,6 @@ installed_opencode_version=$("$mise_bin" exec -- opencode2 --version 2>/dev/null
 case "$installed_opencode_version" in
 *"$opencode_version"*) ;;
 *) die "expected OpenCode $opencode_version after install, got: $installed_opencode_version" ;;
-esac
-
-case "${OY_INSTALL_SIGHTHOUND:-}" in
-1 | true | TRUE | yes | YES)
-  "$mise_bin" exec -- sighthound --version >/dev/null 2>&1 \
-    || die "Sighthound installed, but sighthound --version failed"
-  ;;
 esac
 
 log "Stopping any older OpenCode background service..."

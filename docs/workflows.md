@@ -4,7 +4,7 @@ Use the same bounded evidence protocol for whole-repository audits, target-diff 
 
 ## The workflow contract
 
-1. `oy audit|review prepare` binds the workspace, model, scope, output, format, chunk limit, and resolved review target OID.
+1. The outer workflow selects the OpenCode session and model; `oy audit|review prepare` binds the workspace, scope, output, format, chunk limit, and resolved review target OID. Preparation records a model only when `OY_OPENCODE_MODEL` is explicitly set.
 2. It creates stable ordered chunks, checks the maximum chunk budget, writes `.oy/runs/<run-id>/index.json`, and stores authoritative hashes outside the workspace.
 3. The `oy` agent follows the canonical skill under the user's OpenCode permissions, reads every page of every indexed chunk with native tools, and writes separate candidate Markdown and findings JSON.
 4. `oy audit|review finalize` rejects changed evidence, artifacts, output, or malformed findings before normalizing the final report.
@@ -22,9 +22,9 @@ oy audit --out reports/security.md --max-chunks 60
 oy audit --format sarif --out oy.sarif
 ```
 
-Free-form text is a lens. A focus that exactly names a workspace-relative file or directory becomes the collection scope. Markdown defaults to `ISSUES.md`; SARIF defaults to `oy.sarif`.
+Free-form text is a lens. A single focus argument that exactly names a workspace-relative file or directory becomes the collection scope. Markdown defaults to `ISSUES.md`; SARIF defaults to `oy.sarif`.
 
-The auditor executes under the user's normal OpenCode permissions. The deterministic collector and finalizer do not grant shell, edit, web, or network capability; OpenCode remains authoritative for those tools. Optional Sighthound output is candidate evidence and still requires source confirmation.
+The auditor executes under the user's normal OpenCode permissions. The deterministic collector and finalizer do not grant shell, edit, web, or network capability; OpenCode remains authoritative for those tools.
 
 ## Code-quality review
 
@@ -83,15 +83,13 @@ The repository collector omits:
 
 Eligible large files and diff evidence are split deterministically before chunking. Each artifact stays bounded for practical native `read` paging; preparation uses fixed sizing instead of a model-requested `target_tokens` increase.
 
-Sighthound does not consume oy's collected file list. It uses independent gitignore-aware discovery, common directory filters, and its own file-size limit (currently 10 MiB), so an explicitly requested scan may inspect supported hidden source or source files omitted by oy's 512 KiB limit. Treat returned snippets as additional model-provider disclosure.
-
 ## Practical guidance
 
 - Use a model with strong tool use and enough context for a 64,000-token chunk plus prompt/report overhead.
 - Pin noninteractive workflow comparisons with `OY_OPENCODE_MODEL=provider/model#variant` when model variants matter.
 - Start with default limits; narrow by path before raising limits on very large repositories.
 - Do not put secrets under the workspace root solely because likely-secret names are skipped.
-- Treat SAST and model findings as candidates until a human verifies the evidence and impact.
+- Treat model findings as candidates until a human verifies the evidence and impact.
 - Capture opencode version, model, oy version, target, and scope when comparing reports.
 
 See [Examples and CI](examples.md) for representative output and SARIF upload configuration.

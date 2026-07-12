@@ -59,6 +59,9 @@ mod tests {
         assert!(OY_AGENT.contains("focused, verified commits at natural checkpoints"));
         assert!(OY_AGENT.contains("Never discard or commit unrelated changes"));
         assert!(OY_AGENT.contains("push, force-push, or create tags unless explicitly asked"));
+        assert!(OY_AGENT.contains("tokei --compact --sort code"));
+        assert!(OY_AGENT.contains("ctags --options=NONE --output-format=json"));
+        assert!(OY_AGENT.contains("oy doctor --install-missing"));
         assert!(OY_AGENT.contains("OpenCode and the user own permissions"));
     }
 }

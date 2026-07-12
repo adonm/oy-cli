@@ -1,9 +1,9 @@
-//! `oy doctor` checks the integration and local deterministic helpers.
+//! `oy doctor` checks the OpenCode integration.
 
 use anyhow::{Result, bail};
 use clap::Args;
 use std::io::{IsTerminal as _, Write as _};
-use std::path::Path;
+use std::time::Duration;
 
 use crate::config;
 
@@ -11,38 +11,28 @@ const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli@0.0.0-next-15353";
 const OPENCODE_NODE_TOOL: &str = "node@24";
 const TOKEI_MISE_TOOL: &str = "cargo:tokei";
 const CTAGS_MISE_TOOL: &str = "github:universal-ctags/ctags";
-const SIGHTHOUND_MISE_TOOL: &str = "cargo:https://github.com/Corgea/Sighthound[bin=sighthound,locked=true]@rev:c4608eb2b6ca256daf4dbd1e74aadc3570343685";
-const SIGHTHOUND_RUST_TOOL: &str = "rust@1.96";
-const TOKEI_HINT: &str = "mise use --global cargo:tokei || brew install tokei";
-const CTAGS_HINT: &str =
-    "mise use --global github:universal-ctags/ctags || brew install universal-ctags";
-const SIGHTHOUND_HINT: &str = "oy doctor --install-sighthound";
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_OUTPUT_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, Args, Clone)]
 pub(super) struct DoctorArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Install missing OpenCode 2, tokei, and ctags with global mise config"
+        help = "Install missing OpenCode 2, tokei, and Universal Ctags with global mise config"
     )]
     install_missing: bool,
     #[arg(
         long,
-        default_value_t = false,
-        help = "Source-build pinned Sighthound with Rust 1.96 and global mise config"
-    )]
-    install_sighthound: bool,
-    #[arg(
-        long,
-        conflicts_with_all = ["install_missing", "install_sighthound"],
+        conflicts_with = "install_missing",
         default_value_t = false,
         help = "Validate the effective oy agent, commands, skills, and models; exit nonzero on failure"
     )]
     check: bool,
 }
 
-pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
-    if crate::ui::is_json() && (args.install_missing || args.install_sighthound) {
+pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
+    if crate::ui::is_json() && args.install_missing {
         bail!("--json cannot be combined with doctor install flags");
     }
     let root = config::oy_root()?;
@@ -50,16 +40,15 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     let opencode_ok = opencode_host.available();
     let opencode_supported = opencode_host.supported();
     let mise_ok = command_ok("mise", &["--version"]);
-    let tokei_ok = crate::tools::has_external_sloc_counter();
-    let ctags_ok = crate::tools::has_external_outline_tool();
-    let sighthound_ok = crate::tools::has_external_security_scanner();
+    let tokei_ok = command_ok("tokei", &["--version"]);
+    let ctags_ok = universal_ctags_ok();
     let global_config = crate::opencode::global_config_path()?;
     let workspace_config = crate::opencode::workspace_config_path()?;
     let configured = global_config.exists() || workspace_config.exists();
     let custom_host = !opencode_host.is_default_executable();
     let opencode_mise_satisfied = opencode_supported || custom_host;
     let no_missing_mise_tools =
-        missing_mise_tools(opencode_mise_satisfied, tokei_ok, ctags_ok, sighthound_ok).is_empty();
+        missing_mise_tools(opencode_mise_satisfied, tokei_ok, ctags_ok).is_empty();
     let runtime = if args.check && opencode_supported && configured {
         crate::opencode::runtime_health(&opencode_host, &root).ok()
     } else {
@@ -95,18 +84,11 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             "optional_tools": {
                 "tokei": {
                     "available": tokei_ok,
-                    "enables": "sloc MCP tool",
-                    "install": TOKEI_HINT,
+                    "purpose": "compact language and code-size inventory",
                 },
                 "universal_ctags": {
                     "available": ctags_ok,
-                    "enables": "outline MCP tool",
-                    "install": CTAGS_HINT,
-                },
-                "sighthound": {
-                    "available": sighthound_ok,
-                    "enables": "sighthound MCP security scan tool",
-                    "install": SIGHTHOUND_HINT,
+                    "purpose": "scoped JSON symbol outlines",
                 }
             },
             "global_opencode_config": global_config,
@@ -153,31 +135,20 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         crate::ui::status_text(
             tokei_ok,
             if tokei_ok {
-                "ok; enables sloc MCP tool".to_string()
+                "ok; compact language/code-size inventory"
             } else {
-                format!("missing; install with `{TOKEI_HINT}`")
+                "missing"
             },
         ),
     );
     crate::ui::kv(
-        "optional ctags",
+        "optional Universal Ctags",
         crate::ui::status_text(
             ctags_ok,
             if ctags_ok {
-                "ok; enables outline MCP tool".to_string()
+                "ok; scoped JSON symbol outlines"
             } else {
-                format!("missing; install Universal Ctags with `{CTAGS_HINT}`")
-            },
-        ),
-    );
-    crate::ui::kv(
-        "optional Sighthound",
-        crate::ui::status_text(
-            sighthound_ok,
-            if sighthound_ok {
-                "ok; enables sighthound MCP security scan tool".to_string()
-            } else {
-                format!("missing; install from pinned source with `{SIGHTHOUND_HINT}`")
+                "missing"
             },
         ),
     );
@@ -232,31 +203,53 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             custom_host,
         )
     ));
-    crate::ui::line("");
-    crate::ui::section("Container hint");
-    crate::ui::line(format_args!("  {}", safe_container_command(&root, true)));
-
     maybe_install_missing_with_mise(
         args.install_missing,
         mise_ok,
         opencode_mise_satisfied,
         tokei_ok,
         ctags_ok,
-        sighthound_ok,
     )?;
-    maybe_install_sighthound_with_mise(args.install_sighthound, mise_ok, sighthound_ok)?;
     Ok(if args.check && !check_ok { 1 } else { 0 })
 }
 
 fn command_ok(command: &str, args: &[&str]) -> bool {
-    std::process::Command::new(command)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    command_output(command, args).is_some_and(|output| output.status.success())
+}
+
+fn command_output(command: &str, args: &[&str]) -> Option<crate::tools::external::ExternalOutput> {
+    let executable = crate::tools::external::resolve_executable(&[command])?;
+    let mut process = std::process::Command::new(executable);
+    process.args(args);
+    let output = crate::tools::external::run_bounded_process(
+        &mut process,
+        command,
+        PROBE_TIMEOUT,
+        PROBE_OUTPUT_LIMIT,
+    )
+    .ok()?;
+    (!output.truncated).then_some(output)
+}
+
+fn universal_ctags_ok() -> bool {
+    let Some(version) = command_output("ctags", &["--options=NONE", "--version"]) else {
+        return false;
+    };
+    let Some(features) = command_output("ctags", &["--options=NONE", "--list-features"]) else {
+        return false;
+    };
+    version.status.success()
+        && String::from_utf8_lossy(&version.stdout).contains("Universal Ctags")
+        && features.status.success()
+        && ctags_supports_json(&features.stdout)
+}
+
+fn ctags_supports_json(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|feature| feature.eq_ignore_ascii_case("json"))
+    })
 }
 
 fn recommended_next_step(
@@ -281,22 +274,16 @@ fn recommended_next_step(
         (false, _, false, _) => "Install OpenCode 2, then run `oy setup`.",
         (true, false, _, _) => "Run `oy setup`, then restart OpenCode 2.",
         (true, true, true, false) => {
-            "Run `oy doctor --install-missing` to install optional mise helpers, or `oy` to launch now."
+            "Run `oy doctor --install-missing` for optional context helpers, or `oy` to launch now."
         }
         (true, true, _, _) => "Run `oy` to launch with the oy integration.",
     }
 }
 
-fn missing_mise_tools(
-    opencode_ok: bool,
-    tokei_ok: bool,
-    ctags_ok: bool,
-    _sighthound_ok: bool,
-) -> Vec<&'static str> {
+fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
     let mut tools = Vec::new();
     if !opencode_ok {
-        tools.push(OPENCODE_NODE_TOOL);
-        tools.push(OPENCODE_MISE_TOOL);
+        tools.extend([OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL]);
     }
     if !tokei_ok {
         tools.push(TOKEI_MISE_TOOL);
@@ -321,13 +308,15 @@ fn maybe_install_missing_with_mise(
     opencode_ok: bool,
     tokei_ok: bool,
     ctags_ok: bool,
-    sighthound_ok: bool,
 ) -> Result<()> {
-    let tools = missing_mise_tools(opencode_ok, tokei_ok, ctags_ok, sighthound_ok);
+    let tools = missing_mise_tools(opencode_ok, tokei_ok, ctags_ok);
     if tools.is_empty() {
         return Ok(());
     }
     if !mise_ok {
+        if requested {
+            bail!("--install-missing requires mise");
+        }
         return Ok(());
     }
     if !requested && !should_prompt_install(&tools)? {
@@ -346,6 +335,17 @@ fn maybe_install_missing_with_mise(
     }
     if !opencode_ok && !command_ok("mise", &["exec", "--", "opencode2", "--version"]) {
         bail!("OpenCode 2 installed, but `mise exec -- opencode2 --version` failed");
+    }
+    if !tokei_ok && !command_ok("mise", &["exec", "--", "tokei", "--version"]) {
+        bail!("tokei installed, but `mise exec -- tokei --version` failed");
+    }
+    if !ctags_ok
+        && !command_ok(
+            "mise",
+            &["exec", "--", "ctags", "--options=NONE", "--version"],
+        )
+    {
+        bail!("Universal Ctags installed, but its version probe failed");
     }
     crate::ui::success("mise use --global completed");
     Ok(())
@@ -379,49 +379,6 @@ fn run_mise_use(tools: &[&str]) -> Result<()> {
     )
 }
 
-fn maybe_install_sighthound_with_mise(
-    requested: bool,
-    mise_ok: bool,
-    _sighthound_ok: bool,
-) -> Result<()> {
-    if !requested {
-        return Ok(());
-    }
-    if !mise_ok {
-        bail!("--install-sighthound requires mise");
-    }
-    crate::ui::line(
-        "Building pinned Sighthound from source with Rust 1.96; this may take several minutes.",
-    );
-    let status = std::process::Command::new("mise")
-        .args(mise_use_global_args(&[SIGHTHOUND_RUST_TOOL]))
-        .status()?;
-    if !status.success() {
-        bail!(
-            "mise failed to install Rust for Sighthound with exit code {}",
-            status.code().unwrap_or(1)
-        );
-    }
-    let status = std::process::Command::new("mise")
-        .args(mise_use_global_args(&[SIGHTHOUND_MISE_TOOL]))
-        .status()?;
-    if !status.success() {
-        bail!(
-            "mise failed to install Sighthound with exit code {}",
-            status.code().unwrap_or(1)
-        );
-    }
-    let status = std::process::Command::new("mise").arg("reshim").status()?;
-    if !status.success() {
-        bail!("Sighthound installed, but `mise reshim` failed");
-    }
-    if !command_ok("mise", &["exec", "--", "sighthound", "--version"]) {
-        bail!("Sighthound installed, but `mise exec -- sighthound --version` failed");
-    }
-    crate::ui::success("pinned Sighthound source build installed");
-    Ok(())
-}
-
 fn should_prompt_install(tools: &[&str]) -> Result<bool> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() || crate::ui::is_json() {
         return Ok(false);
@@ -440,26 +397,6 @@ fn should_prompt_install(tools: &[&str]) -> Result<bool> {
     ))
 }
 
-fn safe_container_command(root: &Path, read_only: bool) -> String {
-    let mode = if read_only { "ro" } else { "rw" };
-    let mount = format!("{}:/workspace:{mode}", root.display());
-    format!(
-        "docker run --rm -it -v {} -w /workspace oy-image oy",
-        shell_quote(&mount)
-    )
-}
-
-fn shell_quote(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,33 +410,28 @@ mod tests {
     }
 
     #[test]
+    fn ctags_json_feature_accepts_tabular_output() {
+        assert!(ctags_supports_json(
+            b"#NAME DESCRIPTION\njson supports json format output\n"
+        ));
+        assert!(!ctags_supports_json(b"wildcards supports glob matching\n"));
+    }
+
+    #[test]
     fn mise_tool_list_tracks_missing_tools() {
         assert_eq!(
-            missing_mise_tools(false, false, true, true),
-            vec![OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL, "cargo:tokei"]
+            missing_mise_tools(false, false, true),
+            vec![OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL, TOKEI_MISE_TOOL]
         );
-        assert_eq!(
-            missing_mise_tools(true, true, false, true),
-            vec!["github:universal-ctags/ctags"]
-        );
-        assert_eq!(
-            missing_mise_tools(true, true, true, false),
-            Vec::<&str>::new()
-        );
-        assert!(missing_mise_tools(true, true, true, true).is_empty());
+        assert_eq!(missing_mise_tools(true, true, false), vec![CTAGS_MISE_TOOL]);
+        assert!(missing_mise_tools(true, true, true).is_empty());
     }
 
     #[test]
     fn mise_install_uses_global_use_to_activate_shims() {
         assert_eq!(
-            mise_use_global_args(&["cargo:tokei", "github:universal-ctags/ctags"]),
-            vec![
-                "use",
-                "--global",
-                "--yes",
-                "cargo:tokei",
-                "github:universal-ctags/ctags"
-            ]
+            mise_use_global_args(&[TOKEI_MISE_TOOL, CTAGS_MISE_TOOL]),
+            vec!["use", "--global", "--yes", TOKEI_MISE_TOOL, CTAGS_MISE_TOOL]
         );
         assert_eq!(
             mise_install_batches(&[OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL, TOKEI_MISE_TOOL]),
@@ -511,9 +443,15 @@ mod tests {
     }
 
     #[test]
+    fn explicit_install_requires_mise() {
+        let error = maybe_install_missing_with_mise(true, false, true, false, false).unwrap_err();
+        assert!(error.to_string().contains("requires mise"));
+    }
+
+    #[test]
     fn supported_v2_guidance_launches_oy_integration() {
         assert_eq!(
-            recommended_next_step(false, false, true, true, false),
+            recommended_next_step(false, false, true, false, false),
             "Run `oy doctor --install-missing` to install the pinned OpenCode 2 beta, then `oy setup`."
         );
         assert_eq!(
@@ -525,15 +463,8 @@ mod tests {
     #[test]
     fn custom_host_guidance_does_not_offer_an_ineffective_mise_install() {
         assert_eq!(
-            recommended_next_step(false, false, true, true, true),
+            recommended_next_step(false, false, true, false, true),
             "Fix or unset `OY_OPENCODE`, then rerun `oy doctor`."
         );
-    }
-
-    #[test]
-    fn sighthound_install_is_pinned_to_one_binary_and_commit() {
-        assert!(SIGHTHOUND_MISE_TOOL.contains("bin=sighthound"));
-        assert!(SIGHTHOUND_MISE_TOOL.contains("locked=true"));
-        assert!(SIGHTHOUND_MISE_TOOL.contains("@rev:c4608eb2"));
     }
 }

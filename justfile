@@ -98,7 +98,6 @@ _book:
 _help-smoke:
     cargo run --locked -- --help
     cargo run --locked -- setup --help
-    cargo run --locked -- mcp --help
     cargo run --locked -- run --help
     cargo run --locked -- audit prepare --help
     cargo run --locked -- audit finalize --help
@@ -123,6 +122,6 @@ package:
 
 # === Run the binary ===
 
-# Run oy with arguments. Example: just run -- mcp
+# Run oy with arguments. Example: just run -- doctor
 run *args:
     cargo run --locked -- {{args}}

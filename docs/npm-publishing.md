@@ -17,13 +17,14 @@ The release workflow uses a GitHub-hosted runner, Node 24, an OIDC-capable npm v
 
 ## Release behavior
 
-Cargo and npm package versions must match the `v*` tag. On a tagged release, `.github/workflows/release.yml`:
+Cargo and npm package versions must match before tagging. On a tagged release, `.github/workflows/release.yml`:
 
 1. builds the platform binaries;
-2. installs locked npm dependencies and runs the plugin tests;
-3. publishes `@oy-cli/opencode` through npm OIDC, or skips an already-published version only when its `gitHead` matches the tagged commit;
-4. publishes the GitHub release only after npm succeeds;
-5. publishes the matching crate through crates.io trusted publishing.
+2. publishes the crate and npm package in separate jobs after the binaries succeed;
+3. tests the locked npm package before publishing it through OIDC, or skips an already-published version only when its `gitHead` matches the tagged commit;
+4. publishes the GitHub release after the binaries and npm publication succeed.
+
+The crate job runs independently of npm and the GitHub release job. CI, rather than the release job, checks Cargo/npm version alignment.
 
 The curl installer and `oy setup` pin the npm plugin version matching the binary, so never publish only one half of a release.
 

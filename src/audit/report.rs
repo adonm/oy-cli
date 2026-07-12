@@ -8,12 +8,12 @@
 //! lives in its own file.
 
 pub(crate) use super::findings::{
-    Finding, findings_from_report, normalized_findings_payload, normalized_findings_payload_strict,
-    with_structured_findings_block, with_structured_findings_payload,
+    Finding, findings_from_report, normalized_findings_payload_strict,
+    with_structured_findings_payload,
 };
 pub(crate) use super::sarif::render_sarif;
 pub(crate) use super::transparency::{
-    audit_transparency_snippet, audit_transparency_snippet_at, default_output_path,
-    review_transparency_snippet, review_transparency_snippet_at, utc_date_string,
-    with_audit_transparency_line, with_review_transparency_line, with_succinct_findings_summary,
+    audit_transparency_snippet_at, default_output_path, review_transparency_snippet_at,
+    utc_date_string, with_audit_transparency_line, with_review_transparency_line,
+    with_succinct_findings_summary,
 };

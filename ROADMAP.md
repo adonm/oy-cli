@@ -10,7 +10,7 @@ _Updated July 2026. Ordered by outcome, not promised release date._
 
 **Core loop:** prepare deterministic evidence → let OpenCode reason and edit under the user's permissions → validate a durable report → rerun to confirm.
 
-The intended integration is CLI-first, package-delivered, and skill-led. MCP and host wrappers are transitional compatibility surfaces, not the destination.
+The integration is CLI-first, package-delivered, and skill-led. Host wrappers remain only where the workflow needs them.
 
 ## Product principles
 
@@ -25,7 +25,7 @@ The intended integration is CLI-first, package-delivered, and skill-led. MCP and
 
 ## Current transition
 
-Version 0.12 established deterministic collection, file-backed preparation/finalization, stable report rendering, one agent, and three canonical skills. MCP is now an unregistered compatibility adapter.
+Version 0.13 established deterministic collection, file-backed preparation/finalization, stable report rendering, one agent, and three canonical skills.
 
 Completed in the current development cycle:
 
@@ -37,7 +37,8 @@ Completed in the current development cycle:
 - Rewrote audit/review skills around native OpenCode reads and edits.
 - Added the `@oy-cli/opencode` V2 package for the agent, skills, and commands.
 - Made setup package-first and removed direct agent/skill/command installation.
-- Stopped registering MCP and global tool-output overrides in default setup.
+- Removed the obsolete MCP adapter, MCP-only wrappers, and Sighthound integration after file-backed workflows reached parity.
+- Stopped writing global tool-output overrides in default setup.
 
 ## Completed — make the CLI the deterministic boundary
 
@@ -46,7 +47,7 @@ Completed in the current development cycle:
 - [x] Add `oy audit prepare` and `oy review prepare` commands that write immutable artifacts under a workspace-local run directory and print a small versioned JSON descriptor.
 - [x] Write an index containing scope, resolved target, coverage, exclusions, chunk paths, byte/line counts, and stable digests.
 - [x] Keep authoritative run state outside model-writable artifacts; validate artifact hashes during finalization.
-- [x] Bound artifacts for practical OpenCode `read` paging even though shell/MCP response limits no longer carry source text.
+- [x] Bound artifacts for practical OpenCode `read` paging without carrying source text through tool responses.
 - Add cleanup and stale-run handling without touching tracked `.gitignore` files.
 
 ### Report finalization
@@ -61,19 +62,18 @@ Completed in the current development cycle:
 - [x] Rewrite the three canonical skills around `prepare → native reads/edits → finalize`.
 - [x] Package the skills, agent, and commands through the OpenCode V2 plugin API while retaining local installation.
 - [x] Keep `oy run --auto` as a thin convenience over the single `oy` agent; explicit OpenCode denies remain authoritative.
-- Evaluate protocol compliance from session traces, while documenting that a file-based CLI cannot cryptographically prove the model read every artifact.
+- Evaluate protocol compliance from session traces, while documenting that a file-based CLI cannot cryptographically prove the model read the index, previous report, and every indexed chunk.
 
 ## Next — remove transitional host machinery
 
 After the CLI and skills cover the deterministic contract:
 
-- [x] Stop registering MCP in default setup; retain `oy mcp` temporarily as an adapter over the same typed core.
+- [x] Remove `oy mcp`, MCP-only wrappers, and Sighthound integration.
 - [x] Stop writing global `tool_output` overrides.
 - Reduce setup to installing/removing the `oy` agent and canonical skills, ideally without rewriting OpenCode JSON/JSONC.
-- [x] Remove managed model listing, duplicate open/chat commands, and implicit TUI argument passthrough.
+- [x] Remove `oy model`, `oy open`, `oy chat`, and implicit passthrough of unknown arguments; keep bare `oy` as the integration-aware TUI launcher.
 - Demote or remove exact beta version gates, session recovery wrappers, and coupled oy/OpenCode upgrades.
 - Stop installing OpenCode from the oy installer; treat it as a user-managed prerequisite.
-- Split repository evidence and report operations out of `src/mcp.rs` into typed reusable Rust services.
 
 ## Agent alignment
 
@@ -84,7 +84,7 @@ The `oy` system prompt intentionally remains much shorter than OpenCode's provid
 - implement rather than only propose when the request calls for action;
 - persist through verification and a clear result;
 - preserve dirty-worktree changes not made by the agent;
-- avoid destructive Git operations and unrequested commits;
+- allow focused verified checkpoint commits for long unattended work while protecting unrelated changes, history, pushes, and tags;
 - prefer minimal changes and local reasoning;
 - batch independent inspection and keep communication concise.
 
@@ -97,7 +97,7 @@ Do not copy provider-specific frontend preferences, formatting rules, tool names
 - Evidence preparation returns a small stable JSON descriptor and workspace-local artifacts with explicit coverage.
 - Unchanged evidence and explicit metadata produce byte-stable canonical reports.
 - A finding ID can drive one focused fix and disappear or change status on rerun.
-- MCP and OpenCode API compatibility code shrink without losing collection, report, SARIF, helper, or workflow quality.
+- OpenCode API compatibility code shrinks without losing collection, report, SARIF, or workflow quality.
 - Prompt evaluations show that the shorter `oy` agent matches or improves OpenCode Build on completion, verification, worktree safety, and concise communication.
 
 ## Non-goals

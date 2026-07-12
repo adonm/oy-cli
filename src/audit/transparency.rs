@@ -18,16 +18,6 @@ pub(crate) fn default_output_path(format: AuditOutputFormat) -> PathBuf {
     }
 }
 
-pub(crate) fn audit_transparency_snippet(
-    model: Option<&str>,
-    focus: Option<&str>,
-    out: &std::path::Path,
-    max_chunks: Option<usize>,
-    format: AuditOutputFormat,
-) -> String {
-    audit_transparency_snippet_at(model, focus, out, max_chunks, format, &utc_date_string())
-}
-
 pub(crate) fn audit_transparency_snippet_at(
     model: Option<&str>,
     focus: Option<&str>,
@@ -50,16 +40,6 @@ pub(crate) fn audit_transparency_snippet_at(
         command.push(shell_quote(focus));
     }
     transparency_snippet(command, generated_on)
-}
-
-pub(crate) fn review_transparency_snippet(
-    model: Option<&str>,
-    target: Option<&str>,
-    focus: Option<&str>,
-    out: &std::path::Path,
-    max_chunks: Option<usize>,
-) -> String {
-    review_transparency_snippet_at(model, target, focus, out, max_chunks, &utc_date_string())
 }
 
 pub(crate) fn review_transparency_snippet_at(
@@ -280,12 +260,13 @@ mod tests {
 
     #[test]
     fn transparency_line_quotes_audit_context() {
-        let snippet = audit_transparency_snippet(
+        let snippet = audit_transparency_snippet_at(
             Some("my model"),
             Some("auth paths"),
             &PathBuf::from("audit output.md"),
             Some(120),
             AuditOutputFormat::Markdown,
+            "2026-01-01",
         );
         assert!(snippet.contains(
             "OY_OPENCODE_MODEL='my model' oy audit --out 'audit output.md' --max-chunks 120 'auth paths'"
@@ -294,12 +275,13 @@ mod tests {
 
     #[test]
     fn transparency_line_quotes_review_context() {
-        let snippet = review_transparency_snippet(
+        let snippet = review_transparency_snippet_at(
             Some("my model"),
             Some("feature branch"),
             Some("types and boundaries"),
             &PathBuf::from("review output.md"),
             Some(120),
+            "2026-01-01",
         );
         assert!(snippet.contains(
             "OY_OPENCODE_MODEL='my model' oy review --out 'review output.md' --max-chunks 120 'feature branch' --focus 'types and boundaries'"

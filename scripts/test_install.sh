@@ -10,7 +10,7 @@ cat >"$tmp/bin/mise" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$OY_INSTALL_TEST_LOG"
 case "$*" in
-"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.3' ;;
+"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.4' ;;
 *"exec -- opencode2 api v2.plugin.list"*)
   count=$(cat "$OY_INSTALL_TEST_PLUGIN_COUNT")
   count=$((count + 1))
@@ -22,7 +22,6 @@ case "$*" in
   fi
   ;;
 "exec -- opencode2 --version") printf '%s\n' 'opencode2 v0.0.0-next-15353' ;;
-"exec -- sighthound --version") printf '%s\n' 'sighthound 1.0' ;;
 esac
 exit 0
 EOF
@@ -56,8 +55,7 @@ assert_not_contains() {
 
 run_install() {
   log=$1
-  install_sighthound=$2
-  skip_setup=$3
+  skip_setup=$2
   : >"$log"
   printf '%s\n' 0 >"$tmp/plugin-count"
   PATH="$tmp/bin:/usr/bin:/bin" \
@@ -68,34 +66,26 @@ run_install() {
     SHELL=/bin/bash \
     OY_INSTALL_TEST_LOG="$log" \
     OY_INSTALL_TEST_PLUGIN_COUNT="$tmp/plugin-count" \
-    OY_INSTALL_SIGHTHOUND="$install_sighthound" \
     OY_SKIP_SETUP="$skip_setup" \
     sh "$repo_root/docs/install.sh" >/dev/null
 }
 
 default_log="$tmp/default.log"
-run_install "$default_log" 0 1
+run_install "$default_log" 1
 default=$(cat "$default_log")
 assert_contains "$default" "use --global --yes node@24 rust@1.96"
-assert_contains "$default" "cargo:oy-cli@0.13.3"
+assert_contains "$default" "cargo:oy-cli@0.13.4"
 assert_contains "$default" "npm:@opencode-ai/cli@0.0.0-next-15353"
 assert_contains "$default" "exec -- oy --version"
 assert_contains "$default" "exec -- opencode2 --version"
 assert_contains "$default" "prune --yes --tools cargo:oy-cli npm:@opencode-ai/cli"
 assert_contains "$default" "config set --cd $tmp/home --file $tmp/home/.config/mise/config.toml --type bool bootstrap.mise_shell_activate.bash true"
 assert_contains "$default" "bootstrap mise-shell-activate apply --cd $tmp/home --yes"
-assert_not_contains "$default" "Corgea/Sighthound"
-
-sighthound_log="$tmp/sighthound.log"
-run_install "$sighthound_log" 1 1
-sighthound=$(cat "$sighthound_log")
-assert_contains "$sighthound" "rust@1.96"
-assert_contains "$sighthound" "bin=sighthound,locked=true"
-assert_contains "$sighthound" "rev:c4608eb2b6ca256daf4dbd1e74aadc3570343685"
-assert_contains "$sighthound" "exec -- sighthound --version"
+assert_contains "$default" "cargo:tokei"
+assert_contains "$default" "universal-ctags"
 
 setup_log="$tmp/setup.log"
-run_install "$setup_log" 0 0
+run_install "$setup_log" 0
 setup=$(cat "$setup_log")
 assert_not_contains "$setup" "exec -- oy setup --remove"
 assert_contains "$setup" "exec -- oy setup"

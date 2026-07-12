@@ -8,9 +8,9 @@
 
 Gitignore-aware manifests and ordered chunks replace silent, model-selected sampling. Oversized runs fail closed.
 
-### Restricted review
+### OpenCode-native execution
 
-Three canonical skills define audit, review, and remediation and execute through the single `oy` agent under the user's OpenCode permissions. Audit/review use file-backed CLI preparation and verified finalization; MCP remains only as an unregistered compatibility adapter.
+Three canonical skills define audit, review, and remediation and execute through the single `oy` agent under the user's OpenCode permissions. Audit/review use file-backed CLI preparation, native OpenCode reads/edits, and verified finalization.
 
 ### Reports that survive chat
 
@@ -25,12 +25,12 @@ oy doctor
 oy audit
 ```
 
-The full installer uses [mise](https://mise.jdx.dev/) to install pinned oy 0.13.3, OpenCode 2 beta `0.0.0-next-15353`, and local evidence helpers; it verifies versions, prunes unreferenced old installs, registers the matching npm plugin, and waits for OpenCode to load it. [Review the installer](install.sh) before piping it to a shell.
+The full installer uses [mise](https://mise.jdx.dev/) to install pinned oy 0.13.4, OpenCode 2 beta `0.0.0-next-15353`, plus `tokei` and Universal Ctags for compact context; it verifies versions, prunes unreferenced old installs, registers the matching npm plugin, and waits for OpenCode to load it. [Review the installer](install.sh) before piping it to a shell.
 
 For a minimal manual install:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.3 npm:@opencode-ai/cli@0.0.0-next-15353
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.4 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy audit
 ```
@@ -55,7 +55,7 @@ oy owns collection, ordering, limits, and report rendering. opencode owns model 
 - [Install and configure oy](getting-started.md)
 - [Understand audit, review, and remediation](workflows.md)
 - [See representative reports and CI integration](examples.md)
-- [Look up CLI/package commands, compatibility MCP tools, and environment variables](reference.md)
+- [Look up CLI commands, OpenCode slash commands, setup behavior, and environment variables](reference.md)
 - [Check supported and tested environments](compatibility.md)
 - [Read the project direction](project.md)
 - [Browse the Rust API](https://docs.rs/oy-cli)

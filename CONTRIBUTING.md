@@ -1,6 +1,6 @@
 # Contributing
 
-Keep `oy` focused. Its product is one concise autonomous OpenCode agent plus the audit → review → remediate loop. OpenCode owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Setup, MCP, and launcher/API compatibility are transitional surfaces.
+Keep `oy` focused. Its product is one concise autonomous OpenCode agent plus the audit → review → remediate loop. OpenCode owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Setup and launcher/API wrappers stay narrow.
 
 Native development and builds are supported on Linux and macOS. Use WSL2 rather than native Windows.
 
@@ -10,7 +10,6 @@ Native development and builds are supported on Linux and macOS. Use WSL2 rather 
 mise install
 just check
 just run -- --help
-just run -- mcp
 ```
 
 If you do not use [`mise`](https://mise.jdx.dev/), install Rust 1.96+ and [`just`](https://github.com/casey/just) yourself.
@@ -61,10 +60,9 @@ python3 scripts/eval_runner.py run --dry-run
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
 - Keep the three packaged skills canonical for audit, review, and enhance protocols. They execute under the user's OpenCode permissions through the single `oy` agent.
-- Keep `oy` concise but compare it with tagged OpenCode 2 Build behavior: inspect first, preserve unrelated changes, implement end-to-end, verify, and avoid destructive or unrequested Git operations.
+- Keep `oy` concise but compare it with tagged OpenCode 2 Build behavior: inspect first, preserve unrelated changes, implement end-to-end, verify, and keep checkpoint commits focused without rewriting or publishing history.
 - Do not add oy-owned plan/edit/auto permission modes. OpenCode policy is authoritative.
 - Put immutable workflow-input, ordering, limit, and render enforcement in typed Rust boundaries rather than relying on prompt text.
-- Keep MCP tools deterministic and narrow while they remain; new core behavior should be reusable from the CLI and a future file-artifact workflow.
 - Describe model-backed outcomes as nondeterministic even when their inputs and report rendering are deterministic.
 - Do not duplicate built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
 - Validate workspace paths near every read/write boundary.
@@ -79,15 +77,12 @@ python3 scripts/eval_runner.py run --dry-run
 | `src/opencode/setup.rs` | Setup, namespace migration, backup/rollback, config ownership, and prompting |
 | `src/opencode/runner.rs` | Bare launch, task/workflow execution, and recovery |
 | `src/opencode/host.rs`, `src/opencode/api.rs` | Root-bound OpenCode contract and managed-API adapters |
-| `src/workflow.rs` | Typed inherited workflow context and resolved scope |
-| `src/mcp.rs` | Transitional stdio MCP adapter and current deterministic workflow entrypoint |
+| `src/workflow.rs` | Typed workflow context, resolved scope, and recovery lease |
+| `src/artifacts.rs` | Canonical file-backed prepare/finalize protocol and private run state |
 | `src/audit/input.rs` | Repo file collection, manifest, security index, chunking, git diff input |
 | `src/audit/findings.rs` | Finding extraction and structured findings blocks |
 | `src/audit/sarif.rs` | SARIF rendering |
-| `src/tools/workspace/outline.rs` | Optional outline helper via Universal Ctags |
-| `src/tools/workspace/sloc.rs` | SLOC helper |
-| `src/tools/workspace/sighthound.rs` | Optional SAST helper via Sighthound |
-| `src/tools/external.rs` | Shared optional-executable boundary |
+| `src/tools/external.rs` | Shared bounded-process boundary |
 | `src/cli/config/paths.rs` | Workspace output path safety |
 | `src/cli/config/atomic_write.rs` | Staged file batches and live rollback |
 | `.github/workflows/ci.yml` | CI checks |
@@ -96,11 +91,10 @@ python3 scripts/eval_runner.py run --dry-run
 See also:
 
 - `docs/architecture.md` for runtime flow and ownership boundaries
-- `docs/tool-safety.md` for MCP tool boundaries
 - `docs/evaluation.md` for prompt/agent evaluation on public OSS corpora
 - `SECURITY.md` for user-facing security guidance
 - `ROADMAP.md` for current project priorities
 
 ## Release Notes
 
-Update `CHANGELOG.md` for user-visible behavior changes. Keep historical release notes factual; current docs should distinguish the supported MCP implementation from the CLI-first target architecture.
+Update `CHANGELOG.md` for user-visible behavior changes. Keep historical release notes factual and current docs focused on the file-backed architecture.

@@ -5,10 +5,6 @@ use std::io::IsTerminal as _;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-mod text;
-
-pub use text::truncate_chars;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     Quiet = 0,

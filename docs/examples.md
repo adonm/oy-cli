@@ -126,13 +126,15 @@ permissions:
   security-events: write
 
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+  - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
   - name: Install oy and opencode
     run: |
       # Pin versions in production CI rather than installing mutable latest releases.
-      cargo install oy-cli --locked --version 0.13.3
+      cargo install oy-cli --locked --version 0.13.4
       mise use --global node@24 npm:@opencode-ai/cli@0.0.0-next-15353
       # Configure OpenCode authentication separately.
+      oy setup
   - name: Run oy audit
     env:
       PROVIDER_API_KEY: ${{ secrets.PROVIDER_API_KEY }}

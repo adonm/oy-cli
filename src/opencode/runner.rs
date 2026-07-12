@@ -227,7 +227,7 @@ pub(crate) fn recover_workflow_command() -> Result<i32> {
     context.session_id = Some(session);
     let agent = "oy";
     let message = format!(
-        "Resume the bound oy workflow from its retained context. Call `oy_workflow_status` first. Bound workflow request: {}",
+        "Resume the bound oy workflow from its retained session and context. Bound workflow request: {}",
         context.encode()?
     );
     run_agent_workflow(&host, &root, agent, message, &context)
@@ -332,8 +332,6 @@ fn run_opencode(
         .transpose()?;
     let mut command = Command::new(host.executable());
     command.args(args).current_dir(root);
-    // Shared OpenCode services and cached MCP children must never retain one run's context.
-    command.env_remove(crate::workflow::WORKFLOW_CONTEXT_ENV);
     let status = command.status().with_context(|| {
         format!(
             "failed to launch {}; install it or set {OPENCODE_ENV} to an OpenCode executable",

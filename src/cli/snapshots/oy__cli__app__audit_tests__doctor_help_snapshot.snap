@@ -3,16 +3,13 @@ source: src/cli/app.rs
 assertion_line: 342
 expression: "command_help_for_test(\"doctor\")"
 ---
-Show config paths, executable/helper availability, and integration status
+Show config paths, OpenCode availability, and integration status
 
 Usage: doctor [OPTIONS]
 
 Options:
       --install-missing
-          Install missing OpenCode 2, tokei, and ctags with global mise config
-
-      --install-sighthound
-          Source-build pinned Sighthound with Rust 1.96 and global mise config
+          Install missing OpenCode 2, tokei, and Universal Ctags with global mise config
 
       --check
           Validate the effective oy agent, commands, skills, and models; exit nonzero on failure

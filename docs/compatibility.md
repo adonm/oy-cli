@@ -1,56 +1,57 @@
 # Compatibility
 
-This matrix distinguishes what CI exercises from what release automation merely builds. It avoids implying support that the project does not currently test.
+## Platforms
 
-## oy release targets
-
-| Environment | Status | Evidence |
-|---|---|---|
-| Linux x86_64, glibc | CI-tested and release-built | Full Rust checks run on `ubuntu-latest`; release archive is built. |
-| Linux aarch64, glibc | Release-built | Release archive is built on Ubuntu ARM; full test suite is not run there. |
-| macOS Apple Silicon | Release-built | Release archive is built on macOS 14; full test suite is not run there. |
-| Other Linux/macOS targets | Source-build only | The target OS is accepted, but no CI or release archive is provided. |
-| Windows | Unsupported | Use oy inside WSL2; native Windows builds are rejected. |
-| Other operating systems | Unsupported | Builds are rejected; oy intentionally relies on Linux/macOS process and filesystem semantics. |
-
-The curl installer requires a POSIX shell. Rust 1.96 is the minimum source-build toolchain.
-
-## OpenCode host compatibility
-
-oy 0.13.3 integrates with OpenCode 2 through its noninteractive runner, managed API, version-matched npm plugin, and temporary local stdio MCP adapter. It defaults to the `opencode2` executable; `OY_OPENCODE` can override the executable but not the required contract.
-
-| Host line | Status |
+| Environment | Status |
 |---|---|
-| OpenCode beta `0.0.0-next-15353` | Supported pinned beta; installed as `@opencode-ai/cli@0.0.0-next-15353` and exposed as `opencode2`. |
-| Other OpenCode beta builds | Unsupported until pinned and exercised by the compatibility smoke. |
-| Tagged OpenCode 2.x | Accepted by the tagged-major contract; test coverage will be added when a tagged release exists. |
-| OpenCode major >2 | Unsupported until its contract is reviewed. |
-| OpenCode 1 | Unsupported; removed in oy 0.12.0-beta.1. |
-| Unknown contract | Unsupported. |
+| Linux x86_64 with glibc | Full CI and release archive |
+| Linux aarch64 with glibc | Release archive; full suite is not run on this target |
+| macOS Apple Silicon | Release archive; full suite is not run on this target |
+| Other Linux/macOS targets | Source build only; not release-tested |
+| Windows | Unsupported natively; use WSL2 |
+| Other operating systems | Unsupported; rejected at build time |
 
-The installer uses mise's npm backend for the exact pinned beta package. There is not yet an automated pinned cross-version API smoke matrix or provider-backed integration suite; the [roadmap](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) keeps those limits explicit.
+The curl installer requires a POSIX shell. Rust 1.96 is the minimum source-build toolchain. The npm package declares only Linux and macOS.
 
-Setup pins the version-matched `@oy-cli/opencode` package, which supplies the permission-neutral agent, commands, and three canonical skills. Old direct entries in oy's file namespace are moved to a reported backup regardless of local modifications; oy-namespaced package, command, and MCP config entries are replaced without matching historical contents. Unrelated config is retained. Global setup honors `OPENCODE_CONFIG_DIR` and selects an existing `opencode.jsonc` before `opencode.json`.
+## OpenCode 2
 
-`oy doctor --check` validates the effective selected service version, location, OpenAPI surface, `oy` agent, commands, skills, and model/provider/plugin availability. It deliberately does not require the optional MCP adapter or validate/prescribe the user's permission policy.
+oy 0.13.4 defaults to the `opencode2` executable and accepts:
 
-## Optional evidence helpers
+| Host | Status |
+|---|---|
+| `0.0.0-next-15353` | Supported pinned beta and installer default |
+| Other beta/prerelease builds | Unsupported until pinned and tested |
+| Tagged OpenCode 2.x | Accepted by the major-version contract |
+| OpenCode 1, major >2, or unknown versions | Unsupported |
 
-| Helper | Discovery requirement | Failure behavior |
-|---|---|---|
-| `tokei` | Successful capability probe at a canonical absolute path | `sloc` is omitted from MCP tools. |
-| Universal Ctags | Successful JSON-capability probe at a canonical absolute path | `outline` is omitted from MCP tools. |
-| Sighthound at commit `c4608eb2b6ca256daf4dbd1e74aadc3570343685` | Successful capability probe at a canonical absolute path; source-built with Rust 1.96, `--locked`, and only `bin=sighthound` | `sighthound` is omitted; complete chunk audit still runs. |
+`OY_OPENCODE` can select another executable, but the selected executable must pass the same contract. The installer uses mise's npm backend for the exact beta. CI includes a pinned OpenCode integration smoke, but there is no provider-backed test suite or broad cross-version matrix.
 
-Relative `PATH` entries are ignored. Use `OY_TOKEI`, `OY_CTAGS`, or `OY_SIGHTHOUND` with an absolute path to override discovery.
+The runtime integration uses:
 
-## Reporting compatibility problems
+- the version-matched `@oy-cli/opencode` package for one agent, three skills, and three slash commands;
+- OpenCode's managed API for outer audit/review/enhance sessions;
+- OpenCode `run` for `oy run`, `mini` for interactive enhancement, and the TUI for bare `oy`;
+- native OpenCode file tools plus `oy audit|review prepare/finalize` for reports.
+
+`oy doctor --check` validates the effective service version, API, location, agent, commands, skills, models, providers, and plugin. It does not validate the user's permission choices.
+
+## Setup compatibility
+
+Global setup uses `OPENCODE_CONFIG_DIR` when set, otherwise the platform config directory's `opencode` child. Workspace setup uses `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`.
+
+Setup pins the package version matching the binary. It moves old direct `oy`, `oy-*`, and `oy.*` agent/command/skill entries to a reported backup and removes obsolete oy config entries. Unrelated configuration is retained.
+
+## Optional context helpers
+
+The installer and `oy doctor --install-missing` provide `tokei` and Universal Ctags. They are optional direct shell tools used by the agent for compact repository inventory and scoped symbol outlines. Missing helpers do not block setup, audits, reviews, or remediation.
+
+## Reporting a compatibility problem
 
 Include:
 
 - `oy --version`;
-- the selected OpenCode executable and `--version` output;
+- selected OpenCode executable and `--version` output;
 - operating system and architecture;
 - install method;
-- `oy doctor --json` output with sensitive paths reviewed;
+- reviewed/redacted `oy doctor --json` output;
 - whether setup is global or workspace-local.

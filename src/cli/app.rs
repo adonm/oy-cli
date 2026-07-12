@@ -42,12 +42,9 @@ struct Cli {
 enum Command {
     /// Register the version-matched npm plugin globally, or locally with --workspace.
     Setup(SetupArgs),
-    /// Start the compatibility oy MCP server over stdio.
-    #[command(about = "Start the compatibility oy MCP server over stdio")]
-    Mcp,
     /// Run one task through OpenCode 2; prompt can be args or stdin.
     Run(RunArgs),
-    /// Show config paths, executable/helper availability, and integration status.
+    /// Show config paths, OpenCode availability, and integration status.
     Doctor(DoctorArgs),
     /// Run a deterministic-input security audit and write Markdown or SARIF.
     Audit(AuditArgs),
@@ -83,7 +80,7 @@ struct SetupArgs {
     remove: bool,
 }
 
-pub async fn run(argv: Vec<String>) -> Result<i32> {
+pub fn run(argv: Vec<String>) -> Result<i32> {
     let cli = match Cli::try_parse_from(std::iter::once("oy".to_string()).chain(argv)) {
         Ok(cli) => cli,
         Err(err) => return print_clap_error(err),
@@ -93,14 +90,13 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
         Some(Command::Setup(args)) => {
             crate::opencode::setup_command(args.workspace, args.dry_run, args.remove)
         }
-        Some(Command::Mcp) => crate::mcp::serve_stdio().await,
         Some(Command::Run(args)) => crate::opencode::run_task_command(
             args.task,
             args.shared.continue_session,
             args.shared.resume,
             args.auto,
         ),
-        Some(Command::Doctor(args)) => doctor_cmd::doctor_command(args).await,
+        Some(Command::Doctor(args)) => doctor_cmd::doctor_command(args),
         Some(Command::Audit(args)) => match args.action {
             Some(AuditAction::Prepare(prepare)) => prepare_artifacts(
                 crate::artifacts::Kind::Audit,
@@ -370,8 +366,12 @@ mod audit_tests {
 
     #[test]
     fn removed_and_unknown_commands_are_rejected() {
-        for command in ["open", "chat", "model", "tui"] {
+        for command in ["open", "chat", "model", "mcp", "tui"] {
             assert!(Cli::try_parse_from(["oy", command]).is_err(), "{command}");
         }
+        assert!(
+            Cli::try_parse_from(["oy", "doctor", "--install-sighthound"]).is_err(),
+            "removed Sighthound installer flag"
+        );
     }
 }

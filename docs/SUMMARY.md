@@ -7,9 +7,8 @@
 
 # Reference
 
-- [CLI and MCP reference](reference.md)
+- [CLI and OpenCode reference](reference.md)
 - [Compatibility](compatibility.md)
-- [Tool safety](tool-safety.md)
 
 # Project
 

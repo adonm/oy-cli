@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-07-13
+
+### Changed
+- Reworked the user and contributor guides around the current CLI, OpenCode slash commands, and file-backed workflow.
+- Kept `tokei` and Universal Ctags as optional direct context helpers, documented focused invocations in the `oy` agent, and made `oy doctor --install-missing` install them when absent.
+- Made the lightweight public Rust command dispatcher synchronous after removing the async protocol server.
+
+### Fixed
+- Made file-backed workflow state use the platform local-data directory when no dedicated state directory exists, enabling audit/review preparation on macOS.
+- Updated the evaluation runner to accept canonical `.oy/runs/` artifacts.
+- Removed the stale tool call from `oy recover`.
+- Bounded optional helper probes, rejected relative `PATH` entries, and removed the stale unpublished container-image hint from `oy doctor`.
+
+### Removed
+- Removed the `oy mcp` command, stdio protocol server, deterministic MCP tool registry, and MCP-only tests and state plumbing.
+- Removed the Sighthound integration and its source-build installer path; security analysis now uses normal OpenCode tools and the file-backed audit protocol.
+
 ## [0.13.3] - 2026-07-12
 
 ### Changed

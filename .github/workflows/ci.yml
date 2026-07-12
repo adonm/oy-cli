@@ -41,7 +41,6 @@ jobs:
         run: |
           cargo run --locked -- --help
           cargo run --locked -- setup --help
-          cargo run --locked -- mcp --help
           cargo run --locked -- run --help
           cargo run --locked -- audit --help | tee /tmp/oy-audit-help.txt
           grep -F -- "--max-chunks <N>" /tmp/oy-audit-help.txt
@@ -62,8 +61,8 @@ jobs:
           cargo build --locked
           export PATH="$PWD/target/debug:$PATH"
           oy setup
-          grep -F '"@oy-cli/opencode@0.13.3"' "$HOME/.config/opencode/opencode.json"
-          python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy-audit" not in config.get("commands", {}); assert "oy" not in config.get("mcp", {}).get("servers", {}); assert "tool_output" not in config'
+          grep -F '"@oy-cli/opencode@0.13.4"' "$HOME/.config/opencode/opencode.json"
+          python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy-audit" not in config.get("commands", {}); assert "tool_output" not in config'
           # The release version does not exist in npm until the tag publishes it.
           # Load this checkout directly for the pre-publish runtime smoke instead.
           npm ci --prefix packages/opencode --ignore-scripts
@@ -86,7 +85,7 @@ jobs:
           grep -F '"name":"oy-audit"' /tmp/opencode-commands.json
           grep -F '"agent":"oy"' /tmp/opencode-commands.json
           oy doctor --check --json | tee /tmp/oy-doctor.json
-          python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True; assert "mcp_connected" not in data["runtime"]'
+          python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True'
           opencode2 service stop
       - name: Documentation drift checks
         run: |
