@@ -287,7 +287,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[cfg(unix)]
     fn test_executable(dir: &std::path::Path, body: &str) -> ExternalCommand {
         use std::fs;
         use std::os::unix::fs::PermissionsExt as _;
@@ -315,7 +314,6 @@ mod tests {
         assert_eq!(findings[2]["file"], "b.py");
     }
 
-    #[cfg(unix)]
     #[test]
     fn scanner_call_uses_fixed_json_and_single_threaded_flags() {
         let dir = tempfile::tempdir().unwrap();
@@ -340,7 +338,6 @@ mod tests {
         assert_eq!(scan.status, "ok");
     }
 
-    #[cfg(unix)]
     #[test]
     fn unsupported_scope_returns_an_empty_nonfatal_result() {
         let dir = tempfile::tempdir().unwrap();
@@ -363,7 +360,6 @@ mod tests {
         assert_eq!(scan.status, "no_supported_files");
     }
 
-    #[cfg(unix)]
     #[test]
     fn all_analysis_falls_back_when_language_has_no_taint_rules() {
         let dir = tempfile::tempdir().unwrap();

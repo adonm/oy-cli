@@ -417,7 +417,6 @@ fn repository_excluding(
         let prefix = resolved
             .strip_prefix(&canonical_root)?
             .to_string_lossy()
-            .replace('\\', "/")
             .trim_matches('/')
             .to_string();
         let prefix_with_sep = format!("{prefix}/");
@@ -476,7 +475,7 @@ fn diff_excluding(
         bail!("no git diff found against target {target}");
     }
     let stats = input::parse_numstat(&git_output(root, &["diff", "--numstat", &oid, "--"])?);
-    let excluded = output.map(|path| path.to_string_lossy().replace('\\', "/"));
+    let excluded = output.map(|path| path.to_string_lossy().into_owned());
     let files = input::collect_diff_files(&diff, model)
         .into_iter()
         .filter(|file| excluded.as_ref() != Some(&file.path))
@@ -594,22 +593,15 @@ fn write_state(state: &RunState) -> Result<()> {
     let path = state_path(&state.run_id)?;
     let parent = path.parent().expect("state path has parent");
     fs::create_dir_all(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-    }
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer(&mut temp, state)?;
     temp.as_file().sync_all()?;
     temp.persist(&path)
         .map_err(|error| error.error)
         .with_context(|| format!("failed writing workflow state: {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
@@ -640,7 +632,7 @@ fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
     let raw = Path::new(path);
     if raw
         .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        .any(|component| matches!(component, Component::ParentDir))
     {
         bail!("path must stay inside workspace: {path}");
     }

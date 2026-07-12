@@ -70,7 +70,8 @@ After the CLI and skills cover the deterministic contract:
 - [x] Stop registering MCP in default setup; retain `oy mcp` temporarily as an adapter over the same typed core.
 - [x] Stop writing global `tool_output` overrides.
 - Reduce setup to installing/removing the `oy` agent and canonical skills, ideally without rewriting OpenCode JSON/JSONC.
-- Demote or remove managed model listing, TUI/chat passthrough, exact beta version gates, session recovery wrappers, and coupled oy/OpenCode upgrades.
+- [x] Remove managed model listing, duplicate open/chat commands, and implicit TUI argument passthrough.
+- Demote or remove exact beta version gates, session recovery wrappers, and coupled oy/OpenCode upgrades.
 - Stop installing OpenCode from the oy installer; treat it as a user-managed prerequisite.
 - Split repository evidence and report operations out of `src/mcp.rs` into typed reusable Rust services.
 

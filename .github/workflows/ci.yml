@@ -41,10 +41,8 @@ jobs:
         run: |
           cargo run --locked -- --help
           cargo run --locked -- setup --help
-          cargo run --locked -- open --help
           cargo run --locked -- mcp --help
           cargo run --locked -- run --help
-          cargo run --locked -- chat --help
           cargo run --locked -- audit --help | tee /tmp/oy-audit-help.txt
           grep -F -- "--max-chunks <N>" /tmp/oy-audit-help.txt
           cargo run --locked -- audit prepare --help
@@ -54,7 +52,6 @@ jobs:
           cargo run --locked -- review finalize --help
           cargo run --locked -- enhance --help
           cargo run --locked -- recover --help
-          cargo run --locked -- model --help
           cargo run --locked -- doctor --help
           cargo run --locked -- upgrade --help
       - name: OpenCode 2 integration smoke
@@ -65,7 +62,7 @@ jobs:
           cargo build --locked
           export PATH="$PWD/target/debug:$PATH"
           oy setup
-          grep -F '"@oy-cli/opencode@0.13.2"' "$HOME/.config/opencode/opencode.json"
+          grep -F '"@oy-cli/opencode@0.13.3"' "$HOME/.config/opencode/opencode.json"
           python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy-audit" not in config.get("commands", {}); assert "oy" not in config.get("mcp", {}).get("servers", {}); assert "tool_output" not in config'
           # The release version does not exist in npm until the tag publishes it.
           # Load this checkout directly for the pre-publish runtime smoke instead.

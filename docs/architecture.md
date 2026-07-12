@@ -15,14 +15,15 @@ user argv/stdin
   -> src/main.rs
   -> oy::run in src/lib.rs
   -> cli::app in src/cli/app.rs
-  -> opencode wrappers in src/opencode.rs
-       -> oy setup writes ~/.config/opencode/* by default
+  -> OpenCode integration facade in src/opencode.rs
+       -> setup/backup state machine in src/opencode/setup.rs
+       -> workflow launcher in src/opencode/runner.rs
        -> selected OpenCode 2 host (`opencode2` or `OY_OPENCODE`), cwd=`OY_ROOT`
             -> TUI, runner, or `mini`, and
             -> authenticated `api v2.*` model/session/health operations
 
-opencode
-  -> starts local MCP command: oy mcp
+optional compatibility MCP use
+  -> an explicitly configured host starts: oy mcp
   -> src/mcp.rs JSON-RPC stdio loop
   -> deterministic helpers in audit/tools modules
 ```
@@ -34,7 +35,9 @@ opencode
 | `src/main.rs` | Tokio process entrypoint and exit code handling |
 | `src/lib.rs` | Small public facade exposing `run` and diagnostics |
 | `src/cli/app.rs` | CLI parsing and dispatch |
-| `src/opencode.rs` | Package-first `oy setup`, launch, legacy integration cleanup, and OpenCode workflow orchestration |
+| `src/opencode.rs` | Thin facade for OpenCode setup, host, API, and workflow modules plus package-asset contract tests |
+| `src/opencode/setup.rs` | Package-first setup, namespace migration, persistent backup/rollback, JSONC config ownership, prompting |
+| `src/opencode/runner.rs` | Bare TUI launch, task execution, bound audit/review/enhance orchestration, and recovery |
 | `src/opencode/host.rs` | OpenCode executable selection, version probing, and v2 contract gate |
 | `src/opencode/api.rs` | Bounded adapter for OpenCode 2 model, session, and runtime-health API calls |
 | `src/workflow.rs` | Typed inherited run/session/model/scope/output/format/chunk context |
@@ -67,17 +70,19 @@ Deleted legacy modules include `src/agent/`, `src/llm/`, native chat/session han
 
 Global setup honors `OPENCODE_CONFIG_DIR`; workspace setup remains rooted at `OY_ROOT/.opencode`. In either directory, setup updates an existing `opencode.jsonc` in preference to `opencode.json`. The config pins the `@oy-cli/opencode` npm package to the binary version. OpenCode installs that package into its isolated cache; the package registers the single agent, three skills, and commands without permission overrides.
 
-Setup removes exact direct-file integrations from earlier releases, migrates legacy command/MCP entries when safe, and fails closed on modified owned entries or ambiguous legacy fields.
+Setup discovers old direct-file integration by namespace rather than embedded historical contents: direct `agents`, `commands`, and `skills` entries named `oy`, `oy-*`, or `oy.*` are moved to a unique directory under the platform state path at `oy/backups/`. Changed JSON/JSONC files are copied there before oy-namespaced plugin, command, and MCP entries are replaced. Generic settings are preserved rather than interpreted as historical oy state.
 
-Setup and `--remove` stage all writes/deletes before committing them and restore mutations already committed if a later operation fails. This rollback exists only in the running operation; there is no crash journal or persisted recovery transaction. The config merge replaces string-form oy package entries and removes exact transitional commands, `mcp.servers.oy`, and tool-output budget values. JSONC comments/formatting are lost on reserialization, and removal deletes current owned values rather than restoring historical before-values.
+Config writes remain a staged rollback-capable batch. If that batch fails, already-moved files are restored; after success, the persistent backup is the recovery path. Backups are created outside the OpenCode config directory so the host cannot discover them as agents or skills, and use mode `0700`. JSONC comments/formatting are lost in the active file but retained in its snapshot.
 
-Launch, model, and workflow commands only validate that a complete global or workspace integration exists. They never auto-refresh the package pin. Running sessions must be restarted after an explicit setup change because OpenCode loads package configuration at startup.
+Bare launch and workflow commands validate that a complete global or workspace integration exists. Missing interactive setup prompts the user before launching; automation receives an error instead. Running sessions must be restarted after an explicit setup change because OpenCode loads package configuration at startup.
 
 ## Workflow Binding
 
 For CLI audit/review/enhance runs, oy creates a host session and an inherited typed context containing the run ID, session ID, model, resolved scope, output, format, focus, and `max_chunks`. Diff refs are resolved to commit OIDs before host launch. Noninteractive runner sessions receive the title `oy:<run-id>`.
 
-The MCP process consumes that context and overrides model-supplied scope/model/chunk sizing/render metadata. It rejects an excessive chunk count, changed evidence after the summary, out-of-order or skipped chunk requests, and rendering before all chunks are read. This is runtime enforcement in the MCP process, not prompt-only compliance or durable cross-process workflow recovery.
+Canonical audit/review skills call file-backed `prepare`, read the indexed chunks with native OpenCode tools, write candidate files, and call `finalize`. Private state and artifact hashes let finalization reject changed evidence, candidates, prior output, or workspace bindings. Reading every indexed chunk remains a skill requirement; finalization verifies artifact integrity but cannot attest what the model read.
+
+The optional MCP adapter retains its older bound-context enforcement when explicitly used: it overrides caller-supplied scope/model/chunk sizing/render metadata and tracks ordered chunk requests. It is not registered by default and is not the canonical CLI audit/review path.
 
 ## Transitional MCP Boundary
 
@@ -96,7 +101,7 @@ Tools exposed by `oy mcp`:
 
 | Tool | Side effects |
 |---|---|
-| `workflow_status` | Reads inherited context; advertised only for a bound CLI workflow |
+| `workflow_status` | Reads inherited context; always advertised, but returns an error without a bound CLI workflow |
 | `repo_manifest` | Reads workspace files |
 | `repo_chunks` | Reads workspace files |
 | `git_diff_input` | Runs `git diff`/`git rev-parse` read-only commands |
@@ -118,7 +123,7 @@ Sighthound uses its own gitignore-aware discovery and file-size limit rather tha
 | File edits/shell/web/repo clone | host | Use host permissions and agents |
 | Workspace reads for chunks/SLOC/outlines/SAST | oy MCP | Stay inside `OY_ROOT`/cwd; use fixed helper arguments and bounded processes |
 | Report writes | oy MCP | Resolve output path inside workspace and reject symlink destinations |
-| Setup/removal writes | oy CLI | Explicit rollback-capable batch; no launch-time writes, crash journal, or historical-value restoration |
+| Setup/removal writes | oy CLI | User-confirmed or explicit writes; namespace-bounded moves, config snapshots, and rollback on config failure |
 
 ## Design Rules
 

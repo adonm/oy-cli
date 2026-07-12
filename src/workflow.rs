@@ -192,11 +192,8 @@ impl WorkflowLease {
         let path = context_path(&context.workspace);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-            }
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         }
         if path.exists() {
             let existing: WorkflowContext = serde_json::from_str(&fs::read_to_string(&path)?)?;
@@ -213,11 +210,8 @@ impl WorkflowLease {
         }
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
         let mut file = options.open(&path)?;
         file.write_all(context.encode()?.as_bytes())?;
         file.sync_all()?;
@@ -283,10 +277,7 @@ pub(crate) fn resolve_scope(root: &Path, focus: &[String]) -> Result<(WorkflowSc
                 if !resolved.starts_with(root) {
                     bail!("workflow path escaped workspace");
                 }
-                let relative = resolved
-                    .strip_prefix(root)?
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let relative = resolved.strip_prefix(root)?.to_string_lossy().into_owned();
                 return Ok((WorkflowScope::Workspace { path: relative }, Vec::new()));
             }
         }

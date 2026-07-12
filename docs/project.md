@@ -34,7 +34,7 @@ prepare deterministic evidence
 
 ## The oy agent
 
-A custom OpenCode agent system prompt replaces the provider-specific base prompt, so `oy` must carry the important general coding behaviors itself while staying concise.
+The actual [`oy` system prompt](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/agents/oy.md) replaces the provider-specific base prompt, so `oy` must carry the important general coding behaviors itself while staying concise.
 
 It aligns with OpenCode 2 Build on:
 
@@ -57,8 +57,8 @@ The current release exposes deterministic collection and report finalization thr
 
 Current setup pins `@oy-cli/opencode` to the matching binary version. The package installs:
 
-- one `oy` primary agent without permission overrides;
-- `oy-audit`, `oy-review`, and `oy-enhance` skills;
+- one [`oy` primary agent](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/agents/oy.md) without permission overrides;
+- [`oy-audit`](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/skills/oy-audit/SKILL.md), [`oy-review`](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/skills/oy-review/SKILL.md), and [`oy-enhance`](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/skills/oy-enhance/SKILL.md) skills;
 - three thin commands selecting `oy`.
 
 OpenCode resolves the package into its isolated cache and registers its agent, skills, and commands through the OpenCode V2 plugin API.
@@ -95,7 +95,7 @@ Default setup no longer registers MCP, rewrites the global tool-output budget, o
 
 - Oy-owned plan/edit/auto permission modes.
 - Dedicated auditor/reviewer/enhancer permission agents.
-- General chat/TUI/model wrappers once native OpenCode use is simpler.
+- General chat/TUI/model wrappers; bare `oy` remains the one integration-aware launch path.
 - Coupled oy/OpenCode installation and upgrades.
 - Exact host API/version coupling not needed by skills.
 - Global output-budget mutation after evidence moves to files.

@@ -36,70 +36,16 @@ impl ExternalCommand {
         S: AsRef<OsStr>,
     {
         let mut process = std::process::Command::new(&self.path);
-        process
-            .current_dir(root)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt as _;
-            process.process_group(0);
-        }
-        let mut child = process
-            .spawn()
-            .with_context(|| format!("failed to run {}", self.path.display()))?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .context("failed to capture helper stdout")?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("failed to capture helper stderr")?;
-        let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
-        let stderr_reader = thread::spawn(move || read_bounded(stderr, output_limit));
-
-        let status = match child
-            .wait_timeout(timeout)
-            .with_context(|| format!("failed waiting for {}", self.path.display()))?
-        {
-            Some(status) => {
-                // A successful direct child may still leave descendants holding inherited
-                // stdout/stderr pipes. Close that escape hatch before joining reader threads.
-                terminate_process_group(child.id());
-                status
-            }
-            None => {
-                terminate(&mut child);
-                let _ = child.wait();
-                let _ = join_reader(stdout_reader, "stdout");
-                let _ = join_reader(stderr_reader, "stderr");
-                bail!(
-                    "{} timed out after {} seconds",
-                    self.name,
-                    timeout.as_secs()
-                );
-            }
-        };
-
-        let (stdout, stdout_truncated) = join_reader(stdout_reader, "stdout")?;
-        let (stderr, stderr_truncated) = join_reader(stderr_reader, "stderr")?;
-        if stdout_truncated || stderr_truncated {
+        process.current_dir(root).args(args);
+        let output = run_bounded_process(&mut process, &self.name, timeout, output_limit)?;
+        if output.truncated {
             bail!(
                 "{} output exceeded the {} byte per-stream limit",
                 self.name,
                 output_limit
             );
         }
-
-        Ok(ExternalOutput {
-            status,
-            stdout,
-            stderr,
-        })
+        Ok(output)
     }
 
     pub(super) fn probe(&self, args: &[&str]) -> Result<ExternalOutput> {
@@ -112,29 +58,79 @@ impl ExternalCommand {
     }
 }
 
+pub(crate) fn run_bounded_process(
+    process: &mut std::process::Command,
+    name: &str,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<ExternalOutput> {
+    process
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    use std::os::unix::process::CommandExt as _;
+    process.process_group(0);
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("failed to run {name}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture helper stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture helper stderr")?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, output_limit));
+
+    let status = match child
+        .wait_timeout(timeout)
+        .with_context(|| format!("failed waiting for {name}"))?
+    {
+        Some(status) => {
+            terminate_process_group(child.id());
+            status
+        }
+        None => {
+            terminate(&mut child);
+            let _ = child.wait();
+            let _ = join_reader(stdout_reader, "stdout");
+            let _ = join_reader(stderr_reader, "stderr");
+            bail!("{name} timed out after {} seconds", timeout.as_secs());
+        }
+    };
+
+    let (stdout, stdout_truncated) = join_reader(stdout_reader, "stdout")?;
+    let (stderr, stderr_truncated) = join_reader(stderr_reader, "stderr")?;
+    Ok(ExternalOutput {
+        status,
+        stdout,
+        stderr,
+        truncated: stdout_truncated || stderr_truncated,
+    })
+}
+
 fn terminate(child: &mut std::process::Child) {
     terminate_process_group(child.id());
     let _ = child.kill();
 }
 
 fn terminate_process_group(process_id: u32) {
-    #[cfg(unix)]
-    {
-        // The child was launched as its own process group. Kill the group so descendants cannot
-        // keep captured pipes open after the direct child is gone.
-        let process_group = -(process_id as i32);
-        // SAFETY: `kill` receives a process-group id created for this child and a fixed signal.
-        let _ = unsafe { libc::kill(process_group, libc::SIGKILL) };
-    }
-    #[cfg(not(unix))]
-    let _ = process_id;
+    // The child was launched as its own process group. Kill the group so descendants cannot
+    // keep captured pipes open after the direct child is gone.
+    let process_group = -(process_id as i32);
+    // SAFETY: `kill` receives a process-group id created for this child and a fixed signal.
+    let _ = unsafe { libc::kill(process_group, libc::SIGKILL) };
 }
 
 #[derive(Debug)]
-pub(super) struct ExternalOutput {
-    pub(super) status: ExitStatus,
-    pub(super) stdout: Vec<u8>,
-    pub(super) stderr: Vec<u8>,
+pub(crate) struct ExternalOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) truncated: bool,
 }
 
 impl ExternalOutput {
@@ -232,20 +228,7 @@ fn candidate_paths(candidate: &str, search_path: Option<&OsStr>) -> Vec<PathBuf>
         if !directory.is_absolute() {
             continue;
         }
-        let base = directory.join(candidate);
-        paths.push(base.clone());
-        #[cfg(windows)]
-        if base.extension().is_none() {
-            let extensions = std::env::var_os("PATHEXT")
-                .unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
-            for extension in extensions
-                .to_string_lossy()
-                .split(';')
-                .filter(|item| !item.is_empty())
-            {
-                paths.push(directory.join(format!("{candidate}{extension}")));
-            }
-        }
+        paths.push(directory.join(candidate));
     }
     paths
 }
@@ -275,15 +258,9 @@ pub(super) fn test_command(path: &Path) -> ExternalCommand {
     command_from_path(path).expect("test external command should be executable")
 }
 
-#[cfg(unix)]
 fn is_executable(metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_metadata: &fs::Metadata) -> bool {
-    true
 }
 
 fn read_bounded(mut reader: impl io::Read, limit: usize) -> io::Result<(Vec<u8>, bool)> {
@@ -313,7 +290,7 @@ fn join_reader(
         .with_context(|| format!("failed reading external helper {stream}"))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;

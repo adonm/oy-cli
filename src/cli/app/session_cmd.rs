@@ -1,4 +1,4 @@
-//! `oy run` and `oy chat` convenience argument types.
+//! `oy run` argument types.
 
 use clap::Args;
 
@@ -36,10 +36,4 @@ pub(super) struct RunArgs {
         help = "Task prompt; omitted means read stdin or launch opencode in a TTY"
     )]
     pub(super) task: Vec<String>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(super) struct ChatArgs {
-    #[command(flatten)]
-    pub(super) shared: SharedSessionArgs,
 }

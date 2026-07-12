@@ -147,7 +147,7 @@ commands, focus, and refs.
 
 | Metric | Pass signal | Fail signal |
 |---|---|---|
-| Protocol | Exactly one generated report, valid structure, MCP-enforced stable/ordered/complete chunks | Missing report, malformed `oy-findings`, rejected changed/skipped chunks, stale carry-forward |
+| Protocol | Exactly one generated report, valid structure, verified immutable evidence/candidates, and observed reads of every indexed chunk | Missing report, malformed `oy-findings`, changed evidence, skipped indexed chunks, stale carry-forward |
 | Recall | Expected bug class or design issue is found with concrete evidence | Known issue missed or described without an affected path/symbol |
 | Precision | Findings are few, specific, and defensible | Generic advice, speculative vulnerabilities, duplicate findings |
 | Actionability | Fix is local, testable, and removes the bug class | Vague remediation or framework churn without evidence |

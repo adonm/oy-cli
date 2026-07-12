@@ -6,7 +6,7 @@ Use the same bounded evidence protocol for whole-repository audits, target-diff 
 
 1. `oy audit|review prepare` binds the workspace, model, scope, output, format, chunk limit, and resolved review target OID.
 2. It creates stable ordered chunks, checks the maximum chunk budget, writes `.oy/runs/<run-id>/index.json`, and stores authoritative hashes outside the workspace.
-3. The `oy` agent follows the canonical skill under the user's OpenCode permissions, reads every indexed chunk with native tools, and writes separate candidate Markdown and findings JSON.
+3. The `oy` agent follows the canonical skill under the user's OpenCode permissions, reads every page of every indexed chunk with native tools, and writes separate candidate Markdown and findings JSON.
 4. `oy audit|review finalize` rejects changed evidence, artifacts, output, or malformed findings before normalizing the final report.
 5. A later run reads the prior generated report once to carry forward only current findings.
 

@@ -4,6 +4,7 @@ Set up oy as a focused audit/review extension for OpenCode 2.
 
 ## Requirements
 
+- Linux or macOS; on Windows, use WSL2
 - OpenCode beta `0.0.0-next-15353`, or a tagged OpenCode 2.x release
 - `git` for target-diff reviews
 - Rust 1.96+ only when building from source
@@ -18,14 +19,14 @@ oy does not store provider credentials. Follow OpenCode's [provider setup](https
 curl -fsSL https://oy.adonm.dev/install.sh | sh
 ```
 
-The POSIX shell installer installs pinned oy 0.13.2, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies versions, stops stale OpenCode services, safely prunes unreferenced old mise versions, removes generated integration from older oy releases, and runs a fresh `oy setup`. Setup registers the matching `@oy-cli/opencode@0.13.2` package; OpenCode installs it into its isolated cache, and the installer waits up to 120 seconds to verify plugin ID `oy` loaded. Set `OY_RESET_SETUP=0` to update setup in place or `OY_SKIP_SETUP=1` to skip setup. It configures bash, zsh, or fish activation through mise's bootstrap support; restart your shell when it finishes.
+The POSIX shell installer installs pinned oy 0.13.3, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies versions, stops stale OpenCode services, safely prunes unreferenced old mise versions, and runs `oy setup`. Setup backs up any previous oy-namespaced integration, registers the matching `@oy-cli/opencode@0.13.3` package, and reports the backup path. OpenCode installs the package into its isolated cache, and the installer waits up to 120 seconds to verify plugin ID `oy` loaded. Set `OY_SKIP_SETUP=1` to skip setup. It configures bash, zsh, or fish activation through mise's bootstrap support; restart your shell when it finishes.
 
 Review [`install.sh`](install.sh) before piping it to a shell. Set `OY_SKIP_SETUP=1` to skip integration writes or `OY_MISE_MINIMUM_RELEASE_AGE` to change mise's release-age filter. Set `OY_INSTALL_SIGHTHOUND=1` for the optional pinned source build; the installer provisions Rust 1.96, uses `--locked`, and builds only `bin=sighthound`.
 
 ### Minimal manual install
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.2 npm:@opencode-ai/cli@0.0.0-next-15353
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.3 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy doctor
 ```
@@ -47,13 +48,13 @@ oy setup --workspace      # .opencode/ in this repository
 oy setup --remove         # remove global oy integration
 ```
 
-Global setup is convenient for personal use and honors `OPENCODE_CONFIG_DIR`. Workspace setup is useful when one repository needs local overrides. Existing `opencode.jsonc` wins over `opencode.json`. Setup/removal commits one rollback-capable batch, but does not maintain a persistent crash-recovery journal. Restart running OpenCode sessions after setup changes.
+Global setup is convenient for personal use and honors `OPENCODE_CONFIG_DIR`. Workspace setup is useful when one repository needs local overrides. Existing `opencode.jsonc` wins over `opencode.json`. Setup and removal move old oy-namespaced files and snapshot changed configs under `oy/backups/` in the platform user state directory. Restart running OpenCode sessions after setup changes.
 
-`oy setup` adds `@oy-cli/opencode@0.13.2` to OpenCode's `plugins` array after installing the `oy` binary. The package registers the agent, skills, and commands through the OpenCode V2 plugin API and does not define permissions.
+`oy setup` adds `@oy-cli/opencode@0.13.3` to OpenCode's `plugins` array after installing the `oy` binary. The package registers the agent, skills, and commands through the OpenCode V2 plugin API and does not define permissions.
 
-> **Native v2 setup:** setup writes one permission-neutral `oy` agent, three skills, and thin `commands`. It removes exact old oy MCP/output-budget entries but does not register MCP. JSON/JSONC is still pretty-reserialized, and `--remove` removes owned current values rather than restoring pre-setup values. Back up hand-edited config and preview first.
+> **Package-first setup:** the plugin supplies the permission-neutral `oy` agent, three skills, and commands. Setup replaces oy-namespaced package/command/MCP entries but leaves unrelated and generic settings untouched. JSON/JSONC is pretty-reserialized; its exact previous bytes remain in the reported backup.
 
-Normal launch, model, and workflow commands validate setup and never auto-refresh it. Rerun `oy setup` explicitly after changing versions so the package pin is refreshed.
+Bare launch and workflow commands validate setup. In a terminal they offer to set it up when missing; automation exits with an explicit setup instruction. Rerun `oy setup` after changing versions so the package pin is refreshed.
 
 ## Create a first report
 
@@ -79,11 +80,11 @@ Continue with the [workflow guide](workflows.md) to understand focus text, path 
 
 ## Compatibility
 
-Prebuilt releases cover Linux x86_64/aarch64 with glibc and Apple Silicon macOS. Other Rust targets may build from source but are not release-tested. The curl installer assumes a Unix-like shell.
+Prebuilt releases cover Linux x86_64/aarch64 with glibc and Apple Silicon macOS. Other Linux and macOS architectures may build from source but are not release-tested. Native Windows and other operating systems are rejected at build time; use WSL2 on Windows. The curl installer assumes a POSIX shell.
 
 See the [compatibility matrix](compatibility.md) for the distinction between CI-tested, release-built, and best-effort environments.
 
-oy defaults to `opencode2`. `OY_OPENCODE` can point to another executable that reports a supported OpenCode 2 version. `oy run`, `audit`, `review`, and `enhance` use the single `oy` agent; `oy run --auto` enables OpenCode's one-time automatic approvals while explicit denies remain effective. `oy`, `open`, and `chat` launch the TUI, where you can select `oy` or OpenCode's built-in agents directly.
+oy defaults to `opencode2`. `OY_OPENCODE` can point to another executable that reports a supported OpenCode 2 version. `oy run`, `audit`, `review`, and `enhance` use the single `oy` agent; `oy run --auto` enables OpenCode's one-time automatic approvals while explicit denies remain effective. Bare `oy` launches the TUI, where you can select `oy` or OpenCode's built-in agents directly. Use `opencode2` for native host commands and options.
 
 Optional Sighthound can be added later with `oy doctor --install-sighthound`. Routine `oy doctor --install-missing` installs OpenCode, `tokei`, and Ctags but intentionally does not start the source build.
 

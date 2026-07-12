@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 mod args;
-mod external;
+pub(crate) mod external;
 mod workspace;
 
 pub(crate) fn has_external_sloc_counter() -> bool {

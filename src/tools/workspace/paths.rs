@@ -8,10 +8,6 @@ fn candidate_path(root: &Path, path: &str) -> Result<PathBuf> {
     if raw.components().any(|c| matches!(c, Component::ParentDir)) {
         bail!("path outside workspace is not allowed: {path}");
     }
-    if !raw.is_absolute() && raw.components().any(|c| matches!(c, Component::Prefix(_))) {
-        bail!("path outside workspace is not allowed: {path}");
-    }
-
     Ok(if raw.is_absolute() {
         raw.to_path_buf()
     } else {

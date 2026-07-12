@@ -10,7 +10,7 @@ cat >"$tmp/bin/mise" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$OY_INSTALL_TEST_LOG"
 case "$*" in
-"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.2' ;;
+"exec -- oy --version") printf '%s\n' 'oy-cli 0.13.3' ;;
 *"exec -- opencode2 api v2.plugin.list"*)
   count=$(cat "$OY_INSTALL_TEST_PLUGIN_COUNT")
   count=$((count + 1))
@@ -77,7 +77,7 @@ default_log="$tmp/default.log"
 run_install "$default_log" 0 1
 default=$(cat "$default_log")
 assert_contains "$default" "use --global --yes node@24 rust@1.96"
-assert_contains "$default" "cargo:oy-cli@0.13.2"
+assert_contains "$default" "cargo:oy-cli@0.13.3"
 assert_contains "$default" "npm:@opencode-ai/cli@0.0.0-next-15353"
 assert_contains "$default" "exec -- oy --version"
 assert_contains "$default" "exec -- opencode2 --version"
@@ -94,12 +94,12 @@ assert_contains "$sighthound" "bin=sighthound,locked=true"
 assert_contains "$sighthound" "rev:c4608eb2b6ca256daf4dbd1e74aadc3570343685"
 assert_contains "$sighthound" "exec -- sighthound --version"
 
-reset_log="$tmp/reset.log"
-run_install "$reset_log" 0 0
-reset=$(cat "$reset_log")
-assert_contains "$reset" "exec -- oy setup --remove"
-assert_contains "$reset" "exec -- oy setup"
-assert_contains "$reset" "exec -- opencode2 service start"
-assert_contains "$reset" "exec -- opencode2 api v2.plugin.list"
+setup_log="$tmp/setup.log"
+run_install "$setup_log" 0 0
+setup=$(cat "$setup_log")
+assert_not_contains "$setup" "exec -- oy setup --remove"
+assert_contains "$setup" "exec -- oy setup"
+assert_contains "$setup" "exec -- opencode2 service start"
+assert_contains "$setup" "exec -- opencode2 api v2.plugin.list"
 
 printf 'installer smoke passed\n'

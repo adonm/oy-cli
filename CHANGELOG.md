@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.13.3] - 2026-07-12
+
+### Changed
+- Replaced content-specific legacy setup cleanup with a namespace-based backup: potentially modified `oy`, `oy-*`, and `oy.*` agent, command, and skill entries are moved to a reported platform-state backup, and changed config files are snapshotted before oy entries are replaced.
+- Made successful `oy upgrade` subprocesses quiet; the command now reports only completion and the backup location.
+- Interactive integration-dependent commands now offer to run setup when it is missing; noninteractive and JSON calls retain the explicit setup error.
+- Simplified the curl installer to run setup directly instead of removing and recreating the integration first.
+- Increased prepared evidence chunks to the documented 240 KiB and 19,000-line bounds.
+- Made the audit and review skills page through each larger evidence artifact until no content remains.
+- Restricted oy-cli to Linux and macOS, removed native Windows branches, and documented WSL2 as the Windows path.
+- Split the surviving OpenCode integration into a thin facade, focused setup/backup module, and focused workflow runner.
+- Restored focused, verified checkpoint commits for long unattended work while keeping unrelated changes, history rewrites, pushes, and tags protected.
+
+### Fixed
+- Kept larger evidence slices within the fixed token budget, including token-dense single-line files.
+
+### Removed
+- Removed `oy model`, `oy open`, `oy chat`, and implicit passthrough of unknown oy arguments to OpenCode. Bare `oy` remains the integration-aware TUI launcher; native host commands use `opencode2` directly.
+
 ## [0.13.2] - 2026-07-12
 
 ### Fixed

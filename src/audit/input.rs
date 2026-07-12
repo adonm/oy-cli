@@ -36,6 +36,11 @@ pub(crate) struct AuditChunk {
     pub(crate) tokens: usize,
 }
 
+const MAX_CHUNK_TEXT_BYTES: usize = 240 * 1024;
+const MAX_CHUNK_LINES: usize = 19_000;
+const MAX_FILE_SLICE_BYTES: usize = MAX_CHUNK_TEXT_BYTES - 8 * 1024;
+const MAX_FILE_SLICE_LINES: usize = MAX_CHUNK_LINES - 8;
+
 pub(crate) fn collect_files(
     root: &Path,
     output_path: Option<&Path>,
@@ -259,11 +264,16 @@ fn security_path_score(path: &str) -> bool {
 }
 
 pub(crate) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<AuditChunk> {
-    const MAX_CHUNK_TEXT_BYTES: usize = 40 * 1024;
-    const MAX_CHUNK_LINES: usize = 3_000;
     let files = files
         .into_iter()
-        .flat_map(|file| split_file(file, 36 * 1024, 2_800))
+        .flat_map(|file| {
+            split_file(
+                file,
+                MAX_FILE_SLICE_BYTES,
+                MAX_FILE_SLICE_LINES,
+                target_tokens,
+            )
+        })
         .collect::<Vec<_>>();
     let mut chunks = Vec::new();
     let mut current = Vec::new();
@@ -271,8 +281,11 @@ pub(crate) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<Au
     let mut bytes = 0usize;
     let mut lines = 0usize;
     for file in files {
-        let file_bytes = file.text.len() + file.path.len() + 64;
-        let file_lines = file.text.lines().count().max(1) + 2;
+        let rendered = chunk_file_text(&file);
+        let file_bytes = rendered.len();
+        let file_lines = rendered.lines().count();
+        debug_assert!(file_bytes <= MAX_CHUNK_TEXT_BYTES);
+        debug_assert!(file_lines <= MAX_CHUNK_LINES);
         if !current.is_empty()
             && (total + file.tokens > target_tokens
                 || bytes + file_bytes > MAX_CHUNK_TEXT_BYTES
@@ -301,8 +314,17 @@ pub(crate) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<Au
     chunks
 }
 
-fn split_file(file: AuditFile, max_bytes: usize, max_lines: usize) -> Vec<AuditFile> {
-    if file.text.len() <= max_bytes && file.text.lines().count() <= max_lines {
+fn split_file(
+    file: AuditFile,
+    max_bytes: usize,
+    max_lines: usize,
+    max_tokens: usize,
+) -> Vec<AuditFile> {
+    let max_tokens = max_tokens.max(1);
+    if file.text.len() <= max_bytes
+        && file.text.lines().count() <= max_lines
+        && file.tokens <= max_tokens
+    {
         return vec![file];
     }
     let mut ranges = Vec::new();
@@ -331,6 +353,9 @@ fn split_file(file: AuditFile, max_bytes: usize, max_lines: usize) -> Vec<AuditF
                     }
                 }
             }
+        }
+        if count_tokens("", &file.text[start..end]) > max_tokens {
+            end = token_bounded_end(&file.text, start, end, max_tokens);
         }
         let text = &file.text[start..end];
         let newline_count = text.bytes().filter(|byte| *byte == b'\n').count();
@@ -363,6 +388,18 @@ fn split_file(file: AuditFile, max_bytes: usize, max_lines: usize) -> Vec<AuditF
             }
         })
         .collect()
+}
+
+fn token_bounded_end(text: &str, start: usize, end: usize, max_tokens: usize) -> usize {
+    let boundaries = text[start..end]
+        .char_indices()
+        .skip(1)
+        .map(|(offset, _)| start + offset)
+        .chain(std::iter::once(end))
+        .collect::<Vec<_>>();
+    let fitting = boundaries
+        .partition_point(|candidate| count_tokens("", &text[start..*candidate]) <= max_tokens);
+    boundaries[fitting.saturating_sub(1)]
 }
 
 pub(crate) fn ensure_chunks_fit_prompt(chunks: &[AuditChunk], target_tokens: usize) -> Result<()> {
@@ -480,25 +517,31 @@ pub(crate) fn build_security_index(files: &[AuditFile], limit: usize) -> String 
 pub(crate) fn chunk_text(chunk: &AuditChunk) -> String {
     let mut out = String::new();
     for file in &chunk.files {
-        if let Some(slice) = &file.slice {
-            let _ = writeln!(
-                out,
-                "\n## {} (slice {}/{}; bytes {}-{}; lines {}-{})\n",
-                file.path,
-                slice.index,
-                slice.count,
-                slice.start_byte,
-                slice.end_byte,
-                slice.start_line,
-                slice.end_line
-            );
-        } else {
-            let _ = writeln!(out, "\n## {}\n", file.path);
-        }
-        out.push_str(&file.text);
-        if !file.text.ends_with('\n') {
-            out.push('\n');
-        }
+        out.push_str(&chunk_file_text(file));
+    }
+    out
+}
+
+fn chunk_file_text(file: &AuditFile) -> String {
+    let mut out = String::new();
+    if let Some(slice) = &file.slice {
+        let _ = writeln!(
+            out,
+            "\n## {} (slice {}/{}; bytes {}-{}; lines {}-{})\n",
+            file.path,
+            slice.index,
+            slice.count,
+            slice.start_byte,
+            slice.end_byte,
+            slice.start_line,
+            slice.end_line
+        );
+    } else {
+        let _ = writeln!(out, "\n## {}\n", file.path);
+    }
+    out.push_str(&file.text);
+    if !file.text.ends_with('\n') {
+        out.push('\n');
     }
     out
 }
@@ -614,10 +657,7 @@ fn rel_path(root: &Path, path: &Path) -> Result<String> {
     if !resolved.starts_with(root) {
         bail!("path escaped workspace: {}", path.display());
     }
-    Ok(resolved
-        .strip_prefix(root)?
-        .to_string_lossy()
-        .replace('\\', "/"))
+    Ok(resolved.strip_prefix(root)?.to_string_lossy().into_owned())
 }
 
 fn language_for_path(path: &str) -> &'static str {
@@ -654,17 +694,22 @@ fn language_for_path(path: &str) -> &'static str {
 mod slice_tests {
     use super::*;
 
+    fn file(path: String, text: String) -> AuditFile {
+        AuditFile {
+            path,
+            language: "Text",
+            bytes: text.len() as u64,
+            tokens: 1,
+            text,
+            slice: None,
+        }
+    }
+
     #[test]
     fn oversized_utf8_file_is_reconstructable_and_bounded() {
         let text = "λ line\n".repeat(40_000);
-        let file = AuditFile {
-            path: "large.txt".to_string(),
-            language: "Text",
-            bytes: text.len() as u64,
-            tokens: count_tokens("", &text),
-            text: text.clone(),
-            slice: None,
-        };
+        let mut file = file("large.txt".to_string(), text.clone());
+        file.tokens = count_tokens("", &text);
         let chunks = chunk_files(vec![file], 64_000);
         assert!(chunks.len() > 1);
         let reconstructed = chunks
@@ -676,7 +721,61 @@ mod slice_tests {
         assert!(
             chunks
                 .iter()
-                .all(|chunk| chunk_text(chunk).len() <= 40 * 1024)
+                .all(|chunk| chunk_text(chunk).len() <= MAX_CHUNK_TEXT_BYTES)
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk_text(chunk).lines().count() <= MAX_CHUNK_LINES)
+        );
+    }
+
+    #[test]
+    fn packed_chunks_follow_documented_byte_and_line_bounds() {
+        let byte_chunks = chunk_files(
+            (0..6)
+                .map(|index| file(format!("bytes-{index}.txt"), "x".repeat(80 * 1024)))
+                .collect(),
+            usize::MAX,
+        );
+        assert!(byte_chunks.len() > 1);
+        assert!(
+            byte_chunks
+                .iter()
+                .all(|chunk| chunk_text(chunk).len() <= MAX_CHUNK_TEXT_BYTES)
+        );
+
+        let line_chunks = chunk_files(
+            (0..4)
+                .map(|index| file(format!("lines-{index}.txt"), "x\n".repeat(8_000)))
+                .collect(),
+            usize::MAX,
+        );
+        assert!(line_chunks.len() > 1);
+        assert!(
+            line_chunks
+                .iter()
+                .all(|chunk| chunk_text(chunk).lines().count() <= MAX_CHUNK_LINES)
+        );
+    }
+
+    #[test]
+    fn token_dense_files_are_sliced_to_the_chunk_budget() {
+        let text = "x ".repeat(70_000);
+        let mut input = file("tokens.txt".to_string(), text.clone());
+        input.tokens = count_tokens("", &text);
+
+        let chunks = chunk_files(vec![input], 64_000);
+
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.tokens <= 64_000));
+        assert_eq!(
+            chunks
+                .iter()
+                .flat_map(|chunk| &chunk.files)
+                .map(|file| file.text.as_str())
+                .collect::<String>(),
+            text
         );
     }
 }

@@ -36,12 +36,9 @@ pub fn write_workspace_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn resolve_workspace_output_path(root: &Path, requested: &Path) -> Result<PathBuf> {
     if requested.is_absolute()
-        || requested.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
+        || requested
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         bail!(
             "output path must stay inside workspace: {}",

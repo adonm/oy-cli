@@ -2,12 +2,14 @@
 
 OpenCode 2 package for the [oy](https://github.com/adonm/oy-cli) deterministic evidence CLI.
 
+oy supports Linux and macOS. Windows users should install and run both oy and OpenCode inside WSL2.
+
 Install the `oy` binary, then add the package to OpenCode:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-    "plugins": ["@oy-cli/opencode@0.13.2"]
+    "plugins": ["@oy-cli/opencode@0.13.3"]
 }
 ```
 

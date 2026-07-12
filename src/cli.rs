@@ -1,5 +1,4 @@
-//! Command parsing, dispatch, configuration, terminal UI, and the
-//! interactive chat shell.
+//! Command parsing, dispatch, configuration, and terminal output.
 //!
 //! This module owns the CLI surface — argument parsing, subcommand
 //! handlers, config paths, safety modes, rendering, and the REPL.

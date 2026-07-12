@@ -19,14 +19,6 @@ pub(super) struct OpenCodeApi<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Model {
-    pub(super) id: String,
-    pub(super) provider_id: String,
-    pub(super) name: String,
-    pub(super) raw: Value,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct WorkflowResult {
     pub session_id: String,
     pub admitted: Value,
@@ -51,31 +43,6 @@ pub(crate) struct RuntimeHealth {
 impl<'a> OpenCodeApi<'a> {
     pub(super) fn new(host: &'a OpenCodeHost) -> Self {
         Self { host }
-    }
-
-    pub(super) fn models(&self, directory: &Path) -> Result<Vec<Model>> {
-        let directory_text = directory.to_str().ok_or_else(|| {
-            anyhow!(
-                "workspace directory is not valid UTF-8: {}",
-                directory.display()
-            )
-        })?;
-        let location = format!("location[directory]={directory_text}");
-        let output = self.invoke(
-            &["api", "v2.model.list", "--param", location.as_str()],
-            directory,
-        )?;
-        let response: Value = serde_json::from_slice(&output.stdout)
-            .context("OpenCode model API returned invalid JSON")?;
-        reject_api_error(&response)?;
-        response
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("OpenCode model API response is missing `data`"))?
-            .iter()
-            .cloned()
-            .map(parse_model)
-            .collect()
     }
 
     pub(crate) fn default_model(&self, directory: &Path) -> Result<String> {
@@ -620,21 +587,6 @@ fn read_bounded(file: &mut std::fs::File, stream: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn parse_model(raw: Value) -> Result<Model> {
-    let required = |field: &str| {
-        raw.get(field)
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| anyhow!("OpenCode model is missing string `{field}`"))
-    };
-    Ok(Model {
-        id: required("id")?,
-        provider_id: required("providerID")?,
-        name: required("name")?,
-        raw,
-    })
-}
-
 fn model_spec(raw: &Value) -> Result<String> {
     let provider = raw
         .get("providerID")
@@ -709,14 +661,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_model_and_tagged_error() {
-        let model = parse_model(json!({
-            "id": "gpt-test",
-            "providerID": "openai",
-            "name": "GPT Test"
-        }))
-        .unwrap();
-        assert_eq!(model.provider_id, "openai");
+    fn rejects_tagged_api_error() {
         assert!(
             reject_api_error(&json!({
                 "_tag": "ServiceUnavailableError",

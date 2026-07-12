@@ -2,13 +2,11 @@
 
 use crate::audit;
 use anyhow::Result;
-use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 
 mod audit_cmd;
 mod doctor_cmd;
 mod enhance_cmd;
-mod model_cmd;
 mod review_cmd;
 mod session_cmd;
 mod upgrade_cmd;
@@ -18,9 +16,8 @@ use audit_cmd::AuditFormat;
 use audit_cmd::{AuditAction, AuditArgs};
 use doctor_cmd::DoctorArgs;
 use enhance_cmd::EnhanceArgs;
-use model_cmd::ModelArgs;
 use review_cmd::{ReviewAction, ReviewArgs};
-use session_cmd::{ChatArgs, RunArgs};
+use session_cmd::RunArgs;
 use upgrade_cmd::UpgradeArgs;
 
 #[derive(Debug, Parser)]
@@ -45,17 +42,11 @@ struct Cli {
 enum Command {
     /// Register the version-matched npm plugin globally, or locally with --workspace.
     Setup(SetupArgs),
-    /// Launch OpenCode with the oy integration.
-    Open(OpenArgs),
     /// Start the compatibility oy MCP server over stdio.
     #[command(about = "Start the compatibility oy MCP server over stdio")]
     Mcp,
     /// Run one task through OpenCode 2; prompt can be args or stdin.
     Run(RunArgs),
-    /// Launch opencode with oy session conveniences.
-    Chat(ChatArgs),
-    /// List OpenCode 2 models through the API.
-    Model(ModelArgs),
     /// Show config paths, executable/helper availability, and integration status.
     Doctor(DoctorArgs),
     /// Run a deterministic-input security audit and write Markdown or SARIF.
@@ -66,7 +57,7 @@ enum Command {
     Enhance(EnhanceArgs),
     /// Resume the retained OpenCode session for an interrupted bound workflow.
     Recover,
-    /// Upgrade oy and opencode when both are managed by mise.
+    /// Upgrade mise-managed oy and OpenCode, backing up the previous integration.
     Upgrade(UpgradeArgs),
 }
 
@@ -87,46 +78,20 @@ struct SetupArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Remove the oy plugin, legacy generated files, and owned config entries"
+        help = "Back up and remove oy-namespaced files and config entries"
     )]
     remove: bool,
 }
 
-#[derive(Debug, Args)]
-struct OpenArgs {
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Print the opencode command that would run"
-    )]
-    dry_run: bool,
-    #[arg(
-        long,
-        alias = "explain",
-        default_value_t = false,
-        help = "Explain the selected OpenCode executable and arguments without launching"
-    )]
-    explain: bool,
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
-}
-
 pub async fn run(argv: Vec<String>) -> Result<i32> {
-    let cli = match Cli::try_parse_from(std::iter::once("oy".to_string()).chain(argv.clone())) {
+    let cli = match Cli::try_parse_from(std::iter::once("oy".to_string()).chain(argv)) {
         Ok(cli) => cli,
-        Err(err) if should_passthrough_to_opencode(&argv, err.kind()) => {
-            crate::ui::init_output_mode(None);
-            return crate::opencode::open_command(argv, false);
-        }
         Err(err) => return print_clap_error(err),
     };
     crate::ui::init_output_mode(cli_output_mode(&cli));
     match cli.command {
         Some(Command::Setup(args)) => {
             crate::opencode::setup_command(args.workspace, args.dry_run, args.remove)
-        }
-        Some(Command::Open(args)) => {
-            crate::opencode::open_command(args.args, args.dry_run || args.explain)
         }
         Some(Command::Mcp) => crate::mcp::serve_stdio().await,
         Some(Command::Run(args)) => crate::opencode::run_task_command(
@@ -135,10 +100,6 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
             args.shared.resume,
             args.auto,
         ),
-        Some(Command::Chat(args)) => {
-            crate::opencode::chat_command(args.shared.continue_session, args.shared.resume)
-        }
-        Some(Command::Model(args)) => crate::opencode::models_command(args.model),
         Some(Command::Doctor(args)) => doctor_cmd::doctor_command(args).await,
         Some(Command::Audit(args)) => match args.action {
             Some(AuditAction::Prepare(prepare)) => prepare_artifacts(
@@ -188,7 +149,7 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
         ),
         Some(Command::Recover) => crate::opencode::recover_workflow_command(),
         Some(Command::Upgrade(args)) => upgrade_cmd::upgrade_command(args),
-        None => crate::opencode::open_command(Vec::new(), false),
+        None => crate::opencode::launch_command(),
     }
 }
 
@@ -232,35 +193,6 @@ fn print_clap_error(err: clap::Error) -> Result<i32> {
     let code = if err.use_stderr() { 2 } else { 0 };
     err.print()?;
     Ok(code)
-}
-
-fn should_passthrough_to_opencode(argv: &[String], kind: ErrorKind) -> bool {
-    matches!(
-        kind,
-        ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
-    ) && !starts_with_oy_command(argv)
-}
-
-fn starts_with_oy_command(argv: &[String]) -> bool {
-    const OY_COMMANDS: &[&str] = &[
-        "setup", "open", "mcp", "run", "chat", "model", "doctor", "modes", "audit", "review",
-        "enhance", "recover", "upgrade",
-    ];
-    first_action_arg(argv).is_some_and(|arg| OY_COMMANDS.contains(&arg))
-}
-
-fn first_action_arg(argv: &[String]) -> Option<&str> {
-    let mut idx = 0;
-    while idx < argv.len() {
-        let arg = argv[idx].as_str();
-        match arg {
-            "--" => return None,
-            "--quiet" | "--verbose" | "--json" => idx += 1,
-            _ if arg.starts_with('-') => return None,
-            _ => return Some(arg),
-        }
-    }
-    None
 }
 
 fn cli_output_mode(cli: &Cli) -> Option<crate::ui::OutputMode> {
@@ -409,27 +341,16 @@ mod audit_tests {
     fn upgrade_is_an_oy_command() {
         let cli = parse_cli_for_test(&["oy", "upgrade", "--dry-run"]);
         assert!(matches!(cli.command, Some(Command::Upgrade(_))));
-        assert!(!should_passthrough_to_opencode(
-            &["upgrade".to_string(), "--bogus".to_string()],
-            ErrorKind::UnknownArgument
-        ));
     }
 
     #[test]
-    fn setup_and_open_accept_dry_run_flags() {
+    fn setup_accepts_dry_run_flag() {
         let cli = parse_cli_for_test(&["oy", "setup", "--workspace", "--dry-run"]);
         let Some(Command::Setup(args)) = cli.command else {
             panic!("expected setup command");
         };
         assert!(args.workspace);
         assert!(args.dry_run);
-
-        let cli = parse_cli_for_test(&["oy", "open", "--dry-run", "--", "run", "hello"]);
-        let Some(Command::Open(args)) = cli.command else {
-            panic!("expected open command");
-        };
-        assert!(args.dry_run);
-        assert_eq!(args.args, vec!["run", "hello"]);
     }
 
     #[test]
@@ -448,44 +369,9 @@ mod audit_tests {
     }
 
     #[test]
-    fn retired_modes_command_does_not_pass_through() {
-        let argv = vec!["modes".to_string()];
-        assert!(!should_passthrough_to_opencode(
-            &argv,
-            ErrorKind::InvalidSubcommand
-        ));
-    }
-
-    #[test]
-    fn unknown_top_level_action_passes_through_to_opencode() {
-        let argv = vec!["tui".to_string(), "--foo".to_string()];
-        assert!(should_passthrough_to_opencode(
-            &argv,
-            ErrorKind::InvalidSubcommand
-        ));
-        assert_eq!(first_action_arg(&argv), Some("tui"));
-    }
-
-    #[test]
-    fn known_oy_command_errors_do_not_pass_through() {
-        let argv = vec!["review".to_string(), "--bogus".to_string()];
-        assert!(!should_passthrough_to_opencode(
-            &argv,
-            ErrorKind::UnknownArgument
-        ));
-    }
-
-    #[test]
-    fn opencode_agent_flag_before_known_word_still_passes_through() {
-        let argv = vec![
-            "--agent".to_string(),
-            "custom".to_string(),
-            "run".to_string(),
-        ];
-
-        assert!(should_passthrough_to_opencode(
-            &argv,
-            ErrorKind::UnknownArgument
-        ));
+    fn removed_and_unknown_commands_are_rejected() {
+        for command in ["open", "chat", "model", "tui"] {
+            assert!(Cli::try_parse_from(["oy", command]).is_err(), "{command}");
+        }
     }
 }

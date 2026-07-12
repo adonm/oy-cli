@@ -30,10 +30,6 @@ impl OpenCodeContract {
             Self::Unknown => "unknown (unprobed preview)",
         }
     }
-
-    pub(crate) fn uses_v2_cli(self) -> bool {
-        matches!(self, Self::V2Beta | Self::V2)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,17 +43,6 @@ pub(crate) struct OpenCodeHost {
 impl OpenCodeHost {
     pub(crate) fn selected_in(directory: &Path) -> Self {
         Self::probe(selected_executable(), Some(directory))
-    }
-
-    pub(crate) fn selected_for_preview() -> Self {
-        let executable = selected_executable();
-        let contract = preview_contract(&executable);
-        Self {
-            executable,
-            version: None,
-            available: false,
-            contract,
-        }
     }
 
     fn probe(executable: PathBuf, directory: Option<&Path>) -> Self {
@@ -140,17 +125,6 @@ fn selected_executable() -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("opencode2"))
-}
-
-fn preview_contract(executable: &Path) -> OpenCodeContract {
-    if executable
-        .file_stem()
-        .is_some_and(|name| name == "opencode2")
-    {
-        OpenCodeContract::V2Beta
-    } else {
-        OpenCodeContract::Unknown
-    }
 }
 
 fn probe_version(executable: &Path, directory: Option<&Path>) -> Option<(bool, Option<String>)> {
@@ -344,18 +318,6 @@ mod tests {
         assert_eq!(
             detect_contract(Path::new("opencode2"), Some("opencode2 v2.0.0-rc.1")),
             OpenCodeContract::Unknown
-        );
-    }
-
-    #[test]
-    fn custom_preview_does_not_guess_a_contract() {
-        assert_eq!(
-            preview_contract(Path::new("/custom/opencode")),
-            OpenCodeContract::Unknown
-        );
-        assert_eq!(
-            preview_contract(Path::new("opencode2")),
-            OpenCodeContract::V2Beta
         );
     }
 }

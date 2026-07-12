@@ -19,7 +19,6 @@ mod tests {
         assert!(resolve_workspace_output_path(dir.path(), Path::new("/tmp/out.md")).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn output_paths_reject_symlink_ancestor_escapes() {
         use std::os::unix::fs::symlink;
@@ -31,7 +30,6 @@ mod tests {
         assert!(err.to_string().contains("symlink ancestor"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn output_paths_reject_symlink_destinations() {
         use std::os::unix::fs::symlink;

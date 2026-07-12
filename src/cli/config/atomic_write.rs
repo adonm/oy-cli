@@ -25,7 +25,6 @@ pub(super) fn write_workspace_batch(writes: &[WorkspaceWrite<'_>]) -> Result<()>
 
 pub(crate) enum FileMutation<'a> {
     Write { path: &'a Path, bytes: &'a [u8] },
-    Delete { path: &'a Path },
 }
 
 fn apply_file_batch(mutations: &[FileMutation<'_>]) -> Result<()> {
@@ -58,7 +57,6 @@ fn apply_file_batch_with_root(
             FileMutation::Write { path, bytes } => {
                 prepare_workspace_write(path, bytes).map(PreparedMutation::Write)
             }
-            FileMutation::Delete { path } => Ok(PreparedMutation::Delete((*path).to_path_buf())),
         };
         match result {
             Ok(temp) => prepared.push(temp),
@@ -82,9 +80,7 @@ fn apply_file_batch_with_root(
 fn create_missing_parent_dirs(mutations: &[FileMutation<'_>]) -> Result<Vec<PathBuf>> {
     let mut missing = Vec::new();
     for mutation in mutations {
-        let FileMutation::Write { path, .. } = mutation else {
-            continue;
-        };
+        let FileMutation::Write { path, .. } = mutation;
         let Some(parent) = path.parent() else {
             continue;
         };
@@ -145,21 +141,18 @@ fn commit_mutations(prepared: Vec<PreparedMutation>) -> Result<()> {
 
 enum PreparedMutation {
     Write(PreparedWorkspaceWrite),
-    Delete(PathBuf),
 }
 
 impl PreparedMutation {
     fn path(&self) -> &Path {
         match self {
             Self::Write(write) => &write.path,
-            Self::Delete(path) => path,
         }
     }
 
     fn commit(self) -> Result<()> {
         match self {
             Self::Write(write) => write.commit(),
-            Self::Delete(path) => remove_file_if_exists(&path),
         }
     }
 }
@@ -195,7 +188,7 @@ fn restore_workspace_backups(committed: Vec<CommittedWorkspaceWrite>) -> Result<
 
 fn prevalidate_mutation(mutation: &FileMutation<'_>, trusted_root: Option<&Path>) -> Result<()> {
     let path = match mutation {
-        FileMutation::Write { path, .. } | FileMutation::Delete { path } => *path,
+        FileMutation::Write { path, .. } => *path,
     };
     if let Some(root) = trusted_root
         && (path == root || !path.starts_with(root))
@@ -227,46 +220,27 @@ fn prevalidate_mutation(mutation: &FileMutation<'_>, trusted_root: Option<&Path>
 }
 
 fn prepare_workspace_write(path: &Path, bytes: &[u8]) -> Result<PreparedWorkspaceWrite> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = fs::metadata(path)
-            .ok()
-            .map(|m| m.permissions().mode() & 0o777)
-            .unwrap_or(0o600);
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut file = tempfile::Builder::new()
-            .prefix(".oy-write-")
-            .tempfile_in(parent)
-            .with_context(|| format!("failed preparing temporary file for {}", path.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("failed writing {}", path.display()))?;
-        file.flush()
-            .with_context(|| format!("failed flushing {}", path.display()))?;
-        let mut perms = file.as_file().metadata()?.permissions();
-        perms.set_mode(mode);
-        file.as_file().set_permissions(perms)?;
-        Ok(PreparedWorkspaceWrite {
-            path: path.to_path_buf(),
-            temp: file,
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut file = tempfile::Builder::new()
-            .prefix(".oy-write-")
-            .tempfile_in(parent)
-            .with_context(|| format!("failed preparing temporary file for {}", path.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("failed writing {}", path.display()))?;
-        file.flush()
-            .with_context(|| format!("failed flushing {}", path.display()))?;
-        Ok(PreparedWorkspaceWrite {
-            path: path.to_path_buf(),
-            temp: file,
-        })
-    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = fs::metadata(path)
+        .ok()
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0o600);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::Builder::new()
+        .prefix(".oy-write-")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed preparing temporary file for {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed writing {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed flushing {}", path.display()))?;
+    let mut perms = file.as_file().metadata()?.permissions();
+    perms.set_mode(mode);
+    file.as_file().set_permissions(perms)?;
+    Ok(PreparedWorkspaceWrite {
+        path: path.to_path_buf(),
+        temp: file,
+    })
 }
 
 struct PreparedWorkspaceWrite {
@@ -383,16 +357,6 @@ mod tests {
         assert!(backup.exists());
     }
 
-    #[test]
-    fn batch_delete_removes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("generated.md");
-        fs::write(&path, "generated").unwrap();
-        apply_file_batch(&[FileMutation::Delete { path: &path }]).unwrap();
-        assert!(!path.exists());
-    }
-
-    #[cfg(unix)]
     #[test]
     fn scoped_batch_allows_symlink_above_root_but_rejects_one_below_it() {
         use std::os::unix::fs::symlink;

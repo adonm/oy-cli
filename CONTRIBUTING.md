@@ -2,6 +2,8 @@
 
 Keep `oy` focused. Its product is one concise autonomous OpenCode agent plus the audit → review → remediate loop. OpenCode owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Setup, MCP, and launcher/API compatibility are transitional surfaces.
 
+Native development and builds are supported on Linux and macOS. Use WSL2 rather than native Windows.
+
 ## Quick Start
 
 ```bash
@@ -73,7 +75,9 @@ python3 scripts/eval_runner.py run --dry-run
 
 | Path | Role |
 |---|---|
-| `src/opencode.rs` | Transitional setup/config plus the single agent, skills, and launch wrappers |
+| `src/opencode.rs` | Thin OpenCode integration facade and package-asset contract tests |
+| `src/opencode/setup.rs` | Setup, namespace migration, backup/rollback, config ownership, and prompting |
+| `src/opencode/runner.rs` | Bare launch, task/workflow execution, and recovery |
 | `src/opencode/host.rs`, `src/opencode/api.rs` | Root-bound OpenCode contract and managed-API adapters |
 | `src/workflow.rs` | Typed inherited workflow context and resolved scope |
 | `src/mcp.rs` | Transitional stdio MCP adapter and current deterministic workflow entrypoint |

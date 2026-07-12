@@ -112,7 +112,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn ctags_call_disables_options_and_parses_json_lines() {
         use std::fs;

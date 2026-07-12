@@ -6,6 +6,7 @@
 //! reports while the project moves toward file-backed CLI evidence. OpenCode remains responsible
 //! for model execution, providers, authenticated sessions, permissions, and general coding tools.
 //! oy does not store provider credentials.
+//! The native CLI supports Linux and macOS; Windows users should run it in WSL2.
 //!
 //! ## Start with the CLI
 //!

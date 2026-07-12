@@ -10,10 +10,9 @@ set -eu
 #   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases
 #   OY_INSTALL_SIGHTHOUND        set to 1/true to source-build optional pinned Sighthound
 #   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
-#   OY_RESET_SETUP               set to 0/false to update setup without first removing owned entries
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
-oy_version="0.13.2"
+oy_version="0.13.3"
 oy_tool="cargo:oy-cli@$oy_version"
 opencode_version="0.0.0-next-15353"
 opencode_tool="npm:@opencode-ai/cli@$opencode_version"
@@ -27,6 +26,11 @@ die() {
   log "error: $*"
   exit 1
 }
+
+case "$(uname -s)" in
+Linux | Darwin) ;;
+*) die "oy supports Linux and macOS only; Windows users should run the installer in WSL2" ;;
+esac
 
 find_mise() {
   if command -v mise >/dev/null 2>&1; then
@@ -154,18 +158,7 @@ case "${OY_SKIP_SETUP:-}" in
   log "Skipping oy setup because OY_SKIP_SETUP is set."
   ;;
 *)
-  case "${OY_RESET_SETUP:-1}" in
-  0 | false | FALSE | no | NO)
-    log "Updating OpenCode integration without a clean reset because OY_RESET_SETUP is disabled."
-    ;;
-  *)
-    log "Removing package/config entries and generated files from older oy versions..."
-    if ! "$mise_bin" exec -- oy setup --remove; then
-      log "Warning: old integration cleanup was incomplete; oy setup will preserve or reject modified user-owned files."
-    fi
-    ;;
-  esac
-  log "Installing the fresh OpenCode integration with oy setup..."
+  log "Installing the OpenCode integration with oy setup..."
   "$mise_bin" exec -- oy setup
   log "Starting OpenCode so it can install the version-matched oy plugin..."
   "$mise_bin" exec -- opencode2 service start >/dev/null \

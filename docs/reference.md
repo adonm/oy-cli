@@ -15,25 +15,26 @@
 | `oy setup` | Write global opencode integration. |
 | `oy setup --workspace` | Write integration under the current workspace's `.opencode/`. |
 | `oy setup --dry-run` | Preview package/config migration actions without writing. |
-| `oy setup --remove` | Remove the versioned plugin entry, legacy generated files, and current oy-owned global config values; combine with `--workspace` for local setup. |
+| `oy setup --remove` | Back up and remove oy-namespaced files and config entries; combine with `--workspace` for local setup. |
 | `oy doctor` | Show OpenCode contract, config paths, and deterministic helper status. |
 | `oy doctor --check` | Validate effective service version, `oy` agent, commands, skills, and model/provider/plugin availability. |
-| `oy` / `oy open ...` / `oy chat` | Validate integration and launch/pass arguments to the OpenCode 2 TUI. |
+| `oy` | Validate the integration and launch the OpenCode 2 TUI. |
 | `oy run [--auto]` | Run one task with `oy`; `--auto` uses OpenCode one-time approvals while explicit denies remain effective. |
-| `oy model [FILTER]` | List/filter models through the managed OpenCode API. |
 | `oy enhance --interactive [FOCUS...]` | Run remediation through OpenCode `mini` for native permissions, questions, and forms. |
-| `oy upgrade` | Upgrade mise-managed `cargo:oy-cli` and OpenCode, then explicitly rerun setup. |
+| `oy upgrade` | Quietly upgrade mise-managed `cargo:oy-cli` and OpenCode, refresh setup, and report any backup path. |
 | `oy mcp` | Serve the temporary compatibility MCP adapter over stdio. |
 
-Run `oy <command> --help` for all options and defaults. Unknown top-level actions and flags pass through to the selected OpenCode executable unless they begin with a known oy command.
+Run `oy <command> --help` for all options and defaults. Unknown actions and flags are errors; invoke `opencode2` directly for native host commands and options.
 
 oy defaults to `opencode2` and supports exactly beta `0.0.0-next-15353` plus tagged OpenCode 2.x. Other prereleases and major versions fail closed until tested. `OY_OPENCODE` remains an executable override. OpenCode 1 is unsupported.
 
-`oy run`, `audit`, `review`, and `enhance` invoke OpenCode 2's noninteractive runner. `oy model` uses the managed API because the pinned beta has no model-list command. With `--json`, noninteractive workflows forward OpenCode's JSON event stream.
+`oy run`, `audit`, `review`, and `enhance` invoke OpenCode 2's noninteractive runner. With `--json`, noninteractive workflows forward OpenCode's JSON event stream.
 
 ## Agent and permissions
 
-Oy installs one primary agent named `oy`. Its concise system prompt replaces OpenCode's provider-specific base prompt, so it explicitly retains inspect-first behavior, minimal changes, end-to-end implementation, verification, dirty-worktree safety, and concise reporting.
+Oy installs one primary agent named `oy`. Its concise [system prompt](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/agents/oy.md) replaces OpenCode's provider-specific base prompt, so it explicitly retains inspect-first behavior, minimal changes, end-to-end implementation, verification, dirty-worktree safety, and concise reporting.
+
+Canonical skill text is also public and versioned: [`oy-audit`](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/skills/oy-audit/SKILL.md), [`oy-review`](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/skills/oy-review/SKILL.md), and [`oy-enhance`](https://github.com/adonm/oy-cli/blob/main/packages/opencode/assets/skills/oy-enhance/SKILL.md).
 
 The agent defines no permission rules. OpenCode's effective global/project policy is authoritative. Use OpenCode's built-in Plan agent for read-only planning. `oy run --auto` delegates approval handling to OpenCode; it does not override configured denies.
 
@@ -41,27 +42,27 @@ Audit, review, and enhance all execute locally through `oy`; there are no dedica
 
 ## Setup Ownership
 
-Global setup writes `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup writes `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Setup pins `@oy-cli/opencode` to the binary version and removes superseded direct-file agents, skills, commands, MCP, and output-budget entries.
+Global setup writes `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup writes `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Setup pins `@oy-cli/opencode` to the binary version. If both config files exist, oy installs the plugin in the higher-precedence JSONC file and removes oy entries from the JSON file.
 
-oy owns and replaces:
+Before updating config, setup moves direct entries named `oy`, `oy-*`, or `oy.*` from the `agents`, `commands`, and `skills` directories into `oy/backups/<unique-id>/` under the platform user state directory. It does not inspect or match their contents. Setup also snapshots every existing config file it changes. In config, oy owns and replaces:
 
-- string-form `@oy-cli/opencode` entries in `plugins`;
-- exact legacy `commands.oy-audit`, `commands.oy-review`, and `commands.oy-enhance` values;
-- exact legacy generated agent/skill files containing the oy marker.
+- string- or object-form `@oy-cli/opencode` entries in `plugins`;
+- entries named `oy` or `oy-*` in `command` and `commands`;
+- `mcp.oy` and `mcp.servers.oy`.
 
-Unknown sibling entries are retained. The JSON/JSONC config is pretty-serialized, which removes comments and original formatting. Non-generated files at legacy Markdown paths are retained. Object-form oy plugin entries with custom options are rejected rather than overwritten.
+Unknown sibling entries and generic `tool_output` settings are retained. The JSON/JSONC config is pretty-serialized, which removes comments and original formatting from the active file; the exact previous config remains in the reported backup. Backup directories are mode `0700` because config may contain secrets.
 
 The published `@oy-cli/opencode` package provides the agent, skills, and commands through the OpenCode V2 plugin API without MCP wiring or permission overrides.
 
-Setup and removal use one staged batch and roll back already-committed mutations if a later mutation fails. There is no crash journal or durable persisted recovery. `--remove` removes current owned entries, not historical values that setup previously replaced.
+Setup and removal restore moved files if the config batch fails. Successfully moved files and config snapshots are retained until the user removes the reported backup directory. `--remove` uses the same backup behavior rather than deleting potentially modified files.
 
-Launch, model, and workflow commands validate that either global or workspace setup is complete, then stop if it is not. They never auto-refresh. `oy upgrade` explicitly runs setup after a successful upgrade. Direct OpenCode use keeps its normal TUI agent selection.
+Bare launch and workflow commands validate that either global or workspace setup is complete. In an interactive terminal, missing setup prompts to install globally, or to refresh a detected workspace integration. Noninteractive and JSON calls stop with an explicit setup command. `oy upgrade` runs its subprocesses silently on success, refreshes setup, then prints completion and the backup path. Direct OpenCode use keeps its normal TUI agent selection.
 
 ## Bound Workflows
 
 CLI `audit`, `review`, and `enhance` create an inherited typed context that binds `run_id`, session ID, model, scope, focus, output, format, and `max_chunks`. Review refs are resolved to a commit OID before launch, and noninteractive session titles carry `oy:<run-id>`. The OpenCode runner and every managed-API subprocess run with `OY_ROOT` as cwd.
 
-Audit/review skills call the nested `prepare` command, read every indexed artifact with native OpenCode tools, write separate candidate Markdown and findings JSON files, then call `finalize`. Private state binds the canonical workspace, scope/OID, output, format, preparation date, and SHA-256 hashes. Finalization rejects changed repository evidence, immutable artifacts, prior output, malformed findings, or a mismatched workspace before writing the report.
+Audit/review skills call the nested `prepare` command, page through every indexed artifact with native OpenCode tools until no content remains, write separate candidate Markdown and findings JSON files, then call `finalize`. Private state binds the canonical workspace, scope/OID, output, format, preparation date, and SHA-256 hashes. Finalization rejects changed repository evidence, immutable artifacts, prior output, malformed findings, or a mismatched workspace before writing the report.
 
 The small stdout descriptor contains only workspace-relative paths, counts, the run ID, and evidence digest. Source text remains in bounded `.oy/runs/<run-id>/chunks/*.txt` files. Private authoritative state is stored in the platform user state directory, not in the model-readable workspace index.
 
@@ -69,7 +70,7 @@ The small stdout descriptor contains only workspace-relative paths, counts, the 
 
 | Tool | Capability |
 |---|---|
-| `workflow_status` | Return immutable launcher-bound workflow context and current chunk progress; available only in bound runs. |
+| `workflow_status` | Return immutable launcher-bound workflow context and current chunk progress; advertised generally but errors without bound context. |
 | `repo_manifest` | Gitignore-aware inventory, approximate token estimates, language summary, optional security index. |
 | `repo_chunks` | Ordered repository chunks; summary first, then one-based full chunk retrieval. |
 | `git_diff_input` | Ordered `git diff <target>` chunks. |
@@ -94,7 +95,7 @@ mise use --global rust@1.96 'cargo:https://github.com/Corgea/Sighthound[bin=sigh
 brew install tokei universal-ctags
 ```
 
-Helpers resolve to canonical absolute paths. Relative `PATH` entries are ignored. Calls use fixed arguments, closed stdin, timeouts, and output limits. Sighthound uses embedded rules, one worker, stable sorting, and finding/byte caps.
+Helpers resolve to canonical absolute paths. Relative `PATH` entries are ignored. Calls use fixed arguments, closed stdin, Linux/macOS process groups, timeouts, and output limits. Sighthound uses embedded rules, one worker, stable sorting, and finding/byte caps.
 
 Sighthound is optional and source-built at immutable commit `c4608eb2b6ca256daf4dbd1e74aadc3570343685` with Rust 1.96, Cargo `--locked`, and only `bin=sighthound`. Prefer `oy doctor --install-sighthound`; routine `oy doctor --install-missing` deliberately omits it.
 
@@ -112,7 +113,6 @@ Sighthound is optional and source-built at immutable commit `c4608eb2b6ca256daf4
 | `OY_COLOR` | `auto`, `always`, or `never` color behavior. |
 | `NO_COLOR` | Disable color output. |
 | `OY_SKIP_SETUP` | Skip `oy setup` in `install.sh`. |
-| `OY_RESET_SETUP` | Set to `0`/`false` to update the package/config integration in place instead of removing and recreating it. |
 | `OY_MISE_MINIMUM_RELEASE_AGE` | Override the installer's mise release-age filter. |
 | `OY_INSTALL_SIGHTHOUND` | Set to `1`/`true` to include the pinned Sighthound source build in `install.sh`. |
 
