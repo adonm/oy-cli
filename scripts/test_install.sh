@@ -45,6 +45,9 @@ run_install() {
   : >"$log"
   PATH="$tmp/bin:/usr/bin:/bin" \
     HOME="$tmp/home" \
+    XDG_CONFIG_HOME="$tmp/home/.config" \
+    MISE_CONFIG_DIR= \
+    MISE_GLOBAL_CONFIG_FILE= \
     SHELL=/bin/bash \
     OY_INSTALL_TEST_LOG="$log" \
     OY_INSTALL_SIGHTHOUND="$install_sighthound" \
