@@ -26,7 +26,9 @@ oy audit / oy review
 | `src/cli/app.rs` | CLI parsing and dispatch |
 | `src/opencode.rs` | Thin facade for OpenCode integration modules and package-asset contract tests |
 | `src/opencode/host.rs` | Executable selection, version probing, and OpenCode 2 contract gate |
-| `src/opencode/setup.rs` | Package setup/removal, namespace migration, backups, rollback, and prompting |
+| `src/opencode/setup.rs` | Package setup/removal orchestration, namespace migration, locking, and prompting |
+| `src/opencode/setup/backup.rs` | Persistent setup backups and move/restore mechanics |
+| `src/opencode/setup/config_file.rs` | OpenCode JSON/JSONC parsing and oy-owned config transformations |
 | `src/opencode/runner.rs` | TUI/task launch, audit/review/enhance orchestration, and recovery |
 | `src/opencode/api.rs` | Bounded calls to the authenticated OpenCode API through `opencode2 api` |
 | `src/workflow.rs` | Typed workflow context and retained recovery lease |

@@ -24,8 +24,8 @@ use upgrade_cmd::UpgradeArgs;
 #[command(
     name = "oy",
     version,
-    about = "A concise autonomous OpenCode agent with repeatable repository audits and reviews.",
-    after_help = "Examples:\n  oy run --auto <task>            (autonomous task with the oy agent)\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor --check\n  oy                              (launch the OpenCode 2 TUI)\n\nPrimary direction: one concise oy agent plus deterministic-input audit/review/report workflows. OpenCode and the user own permissions; model conclusions are not deterministic."
+    about = "A focused OpenCode agent with repeatable audits, code reviews, and one-finding fixes.",
+    after_help = "Examples:\n  oy run --auto <task>            (autonomous task with the oy agent)\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor --check\n  oy                              (launch the OpenCode 2 TUI)\n\noy prepares and verifies review inputs and reports. OpenCode and the user own models, permissions, and tools; findings remain model-dependent."
 )]
 struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Select quiet output where supported")]

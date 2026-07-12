@@ -2,20 +2,20 @@
 
 - [Overview](index.md)
 - [Getting started](getting-started.md)
+
+# Use oy
+
 - [Workflow guide](workflows.md)
 - [Examples and CI](examples.md)
-
-# Reference
-
-- [CLI and OpenCode reference](reference.md)
+- [CLI reference](reference.md)
 - [Compatibility](compatibility.md)
 
-# Project
+# Understand the project
 
-- [Direction and roadmap](project.md)
+- [Project direction](project.md)
 - [Architecture](architecture.md)
 
-# Contributors
+# Contribute
 
 - [LLM evaluation](evaluation.md)
 - [Publishing the OpenCode npm package](npm-publishing.md)

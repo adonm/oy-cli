@@ -74,7 +74,9 @@ python3 scripts/eval_runner.py run --dry-run
 | Path | Role |
 |---|---|
 | `src/opencode.rs` | Thin OpenCode integration facade and package-asset contract tests |
-| `src/opencode/setup.rs` | Setup, namespace migration, backup/rollback, config ownership, and prompting |
+| `src/opencode/setup.rs` | Setup orchestration, namespace migration, locking, and prompting |
+| `src/opencode/setup/backup.rs` | Persistent setup backups and move/restore mechanics |
+| `src/opencode/setup/config_file.rs` | OpenCode JSON/JSONC parsing and oy-owned config transformations |
 | `src/opencode/runner.rs` | Bare launch, task/workflow execution, and recovery |
 | `src/opencode/host.rs`, `src/opencode/api.rs` | Root-bound OpenCode contract and managed-API adapters |
 | `src/workflow.rs` | Typed workflow context, resolved scope, and recovery lease |

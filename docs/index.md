@@ -1,61 +1,64 @@
-# Repeatable repository audits and reviews for opencode
+# Audits and code reviews for OpenCode
 
-`oy` gives [opencode](https://opencode.ai/) users one concise autonomous agent and a bounded path from deterministic repository inputs to security audits, code-quality reviews, and focused remediation.
+`oy` adds a focused coding agent and a repeatable review workflow to [OpenCode 2](https://v2.opencode.ai/).
 
-## Why oy
+Use it to:
 
-### Visible coverage
+- audit a repository and write `ISSUES.md` or SARIF;
+- review a workspace or `git diff <target>` and write `REVIEW.md`;
+- fix one reported finding, verify it, and rerun the review.
 
-Gitignore-aware manifests and ordered chunks replace silent, model-selected sampling. Oversized runs fail closed.
+## The simple mental model
 
-### OpenCode-native execution
+```text
+oy selects and freezes the review input
+  → OpenCode analyzes it with your model and permissions
+  → oy validates and writes the report
+```
 
-Three canonical skills define audit, review, and remediation and execute through the single `oy` agent under the user's OpenCode permissions. Audit/review use file-backed CLI preparation, native OpenCode reads/edits, and verified finalization.
+This prevents silent model-selected sampling and makes the reviewed input visible. Findings are still model-generated and can vary.
 
-### Reports that survive chat
-
-Markdown and SARIF reports carry stable finding IDs and statuses into reruns and one-finding remediation.
-
-## Quick start
+## Start here
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
-# Restart or activate your shell as instructed, then:
-oy doctor
+# Restart your shell if requested.
+oy doctor --check
+
+cd your-repository
 oy audit
 ```
 
-The full installer uses [mise](https://mise.jdx.dev/) to install pinned oy 0.13.4, OpenCode 2 beta `0.0.0-next-15353`, plus `tokei` and Universal Ctags for compact context; it verifies versions, prunes unreferenced old installs, registers the matching npm plugin, and waits for OpenCode to load it. [Review the installer](install.sh) before piping it to a shell.
-
-For a minimal manual install:
+Then try:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.4 npm:@opencode-ai/cli@0.0.0-next-15353
-oy setup
-oy audit
+oy review main
+oy enhance <finding-id>
 ```
 
-Continue with [Getting started](getting-started.md) or go directly to the [workflow guide](workflows.md).
+See [Getting started](getting-started.md) for manual installation, provider setup, and global versus project-local configuration.
 
-## One focused loop
+## What oy owns
 
-1. **Audit:** `oy audit` writes `ISSUES.md` or SARIF.
-2. **Review:** `oy review main` writes `REVIEW.md` for a target diff.
-3. **Remediate:** `oy enhance <finding-id>` fixes and verifies one finding.
-4. **Confirm:** rerun the originating audit or review to update its status.
+- gitignore-aware repository and target-diff collection;
+- ordered evidence files and explicit coverage limits;
+- changed-input and artifact-integrity checks;
+- normalized Markdown/SARIF reports with stable finding IDs.
 
-## A precise claim
+## What OpenCode owns
 
-> **Deterministic inputs, not deterministic conclusions.**
+- models and provider credentials;
+- permissions and approvals;
+- shell, edit, web, and other tools;
+- sessions, the TUI, and model execution.
 
-oy owns collection, ordering, limits, and report rendering. opencode owns model execution, and model findings vary by model and prompt. “Every chunk” means every collected chunk; [documented exclusions](workflows.md#coverage-and-failure-limits) still apply.
+`oy` does not broaden your OpenCode permissions and is not a sandbox.
 
-## Where to go next
+## Choose your next page
 
-- [Install and configure oy](getting-started.md)
-- [Understand audit, review, and remediation](workflows.md)
-- [See representative reports and CI integration](examples.md)
-- [Look up CLI commands, OpenCode slash commands, setup behavior, and environment variables](reference.md)
-- [Check supported and tested environments](compatibility.md)
-- [Read the project direction](project.md)
-- [Browse the Rust API](https://docs.rs/oy-cli)
+- [Getting started](getting-started.md) — install and create a first report
+- [Workflow guide](workflows.md) — choose scope, understand findings, and remediate
+- [Examples and CI](examples.md) — inspect reports and upload SARIF
+- [CLI reference](reference.md) — exact commands, setup behavior, and environment variables
+- [Compatibility](compatibility.md) — supported platforms and OpenCode versions
+- [Security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) — trust and disclosure boundaries

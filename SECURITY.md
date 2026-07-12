@@ -1,43 +1,37 @@
-# Security Policy
+# Security
 
-## Threat Model
+## Trust model
 
-`oy` is not a sandbox. It provides one autonomous OpenCode agent and file-backed deterministic repository evidence/report helpers.
+`oy` is not a sandbox. It adds a coding agent and repository review workflows to OpenCode.
 
-opencode owns model traffic, chat UI, sessions, permissions, edits, shell commands, web fetches, and other high-risk tools. The packaged `oy` agent intentionally has no permission overrides. Configure those surfaces in OpenCode and review its security guidance for provider credentials and tool permissions.
+OpenCode and the user control models, provider credentials, permissions, edits, shell commands, web access, and sessions. The `oy` plugin does not add permission overrides.
 
-Native `oy` can:
+The oy CLI can:
 
-- write global integration files during explicit setup/upgrade or after an interactive setup confirmation, and write `.opencode` files with `oy setup --workspace`,
-- launch OpenCode `run`, TUI, `mini`, and managed-API processes with `OY_ROOT` as their working directory,
-- read workspace files for prepared manifests and chunks,
-- run read-only `git` commands for diff input,
-- write `.oy/runs` evidence/candidate paths and generated audit/review reports inside the workspace,
-- write private prepared-run metadata with artifact hashes in the platform state location, falling back to the local-data directory when needed.
-- install OpenCode, `tokei`, and Universal Ctags into the user's global mise configuration when `oy doctor --install-missing` is requested.
+- read eligible files inside the selected workspace;
+- run read-only Git commands for target-diff reviews;
+- write `.oy/runs/` evidence, reports, and private workflow metadata;
+- update OpenCode configuration during explicit setup or upgrade;
+- launch OpenCode and optional mise-managed installers.
 
-Repository text read from prepared artifacts can be sent to the configured model provider. Treat selected workspace content as disclosed to that provider.
+Prepared source text may be sent to the model provider configured in OpenCode. Treat prompts, reports, OpenCode logs/sessions, and setup backups as potentially sensitive.
 
-## Safer Use For Untrusted Repositories
+## Safer use
 
-Prefer a disposable container or VM. Start with the workspace read-only, then opt into writes only when you trust the workspace and proposed changes. oy does not publish a container image, so any container must be user-built and supplied with the required OpenCode configuration and credentials.
+- Review [`docs/install.sh`](docs/install.sh) before piping it to a shell.
+- Run `oy setup --dry-run` before changing an existing OpenCode configuration.
+- Configure OpenCode permissions for the repository you are reviewing.
+- Use a disposable container or VM for untrusted repositories.
+- Do not mount the host Docker socket into an AI-assisted container.
+- Do not keep secrets under the workspace root solely because secret-like filenames are excluded from collection.
+- Inspect generated findings before publishing or uploading them.
 
-Avoid mounting the host Docker socket into AI-assisted containers. Docker socket access is usually host-root-equivalent.
+Setup backs up changed oy-owned configuration and files before replacing them. A machine crash can still interrupt the operation, so keep the reported backup until the new setup is verified.
 
-## Local Files
+## Report a security problem
 
-`oy setup` writes a versioned `@oy-cli/opencode` plugin entry under `OPENCODE_CONFIG_DIR` when set, otherwise the platform OpenCode config directory; `oy setup --workspace` writes under `.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Interactive launch and workflow commands may offer to run setup when it is missing; noninteractive and JSON calls never do so. Use `oy setup --dry-run` before first setup and `oy setup --remove` to remove the current oy integration.
+Open an issue in the public GitHub repository:
 
-Setup owns the `oy`, `oy-*`, and `oy.*` direct-file namespace under OpenCode's `agents`, `commands`, and `skills` directories, plus oy package and command config entries. It also removes obsolete oy integration entries from older releases. Those paths are moved without reading or classifying their contents, so locally modified files are not lost. Unrelated files and generic settings such as `tool_output` are retained.
+https://github.com/adonm/oy-cli/issues/new
 
-Before changing an existing config, oy copies its exact bytes and permissions into `oy/backups/<unique-id>/` under the platform state location, falling back to the local-data directory when needed; namespaced files are moved there. Backup directories are restricted to mode `0700` because configs can contain credentials or provider metadata. If the config batch fails, moved files are restored. A machine crash can still interrupt the operation, so inspect the reported backup before deleting it. JSONC comments and formatting remain available in the snapshot even though the active config is reserialized.
-
-opencode owns its own local state. Treat sessions, logs, and config as sensitive because they may contain prompts, source snippets, command output, or provider metadata.
-
-## Reporting A Vulnerability
-
-If you believe you have found a security vulnerability in this project, do not report it in a public GitHub issue or discussion.
-
-Please follow the Government of Western Australia Vulnerability Disclosure Policy:
-
-https://www.wa.gov.au/government/publications/vulnerability-disclosure-policy
+Include the affected oy/OpenCode versions, operating system, reproduction steps, impact, and relevant logs. Redact credentials, authorization headers, prompts, private source code, session contents, and local paths that should not be public.

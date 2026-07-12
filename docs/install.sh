@@ -11,7 +11,7 @@ set -eu
 #   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
-oy_version="0.13.4"
+oy_version="0.13.5"
 oy_tool="cargo:oy-cli@$oy_version"
 opencode_version="0.0.0-next-15353"
 opencode_tool="npm:@opencode-ai/cli@$opencode_version"

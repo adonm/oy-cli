@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-07-13
+
+### Changed
+- Split the near-1000-line OpenCode setup implementation into focused orchestration, backup/recovery, and JSON/JSONC configuration modules without changing setup behavior.
+- Reorganized the user documentation around a shorter newcomer path, task-first workflows, and a clearer split between guides, reference material, and contributor internals.
+- Refreshed the CLI, crate, npm package, documentation-site, and repository discovery descriptions around audits, code reviews, and focused remediation.
+- Simplified the personal-project security policy and moved issue reporting to the public GitHub repository.
+
 ## [0.13.4] - 2026-07-13
 
 ### Changed

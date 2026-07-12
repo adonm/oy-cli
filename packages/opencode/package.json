@@ -1,8 +1,16 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@oy-cli/opencode",
-  "version": "0.13.4",
-  "description": "OpenCode 2 agent and skills for the oy deterministic evidence CLI",
+  "version": "0.13.5",
+  "description": "OpenCode agent and skills for repeatable audits, code reviews, and focused fixes",
+  "keywords": [
+    "opencode",
+    "coding-agent",
+    "code-review",
+    "security-audit",
+    "sarif",
+    "developer-tools"
+  ],
   "type": "module",
   "license": "Apache-2.0",
   "repository": {

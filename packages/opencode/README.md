@@ -1,26 +1,43 @@
 # @oy-cli/opencode
 
-OpenCode 2 package for the [oy](https://github.com/adonm/oy-cli) deterministic evidence CLI.
+OpenCode plugin for [oy](https://github.com/adonm/oy-cli): a focused coding agent with repeatable audits, code reviews, and one-finding fixes.
 
-oy supports Linux and macOS. Windows users should install and run both oy and OpenCode inside WSL2.
+> This package is the OpenCode integration. Install the `oy` CLI as well; the audit/review skills call its local `prepare` and `finalize` commands.
 
-Install the `oy` binary, then add the package to OpenCode:
+## Install
+
+The recommended path installs matching CLI and plugin versions:
+
+```bash
+cargo install oy-cli --locked
+oy setup
+```
+
+To configure the package manually, add it to an OpenCode JSON/JSONC file:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@oy-cli/opencode@0.13.4"]
+  "plugins": ["@oy-cli/opencode@0.13.5"]
 }
 ```
 
-The package registers:
+Restart OpenCode after changing the package version. OpenCode installs package dependencies into its isolated plugin cache.
 
-- one concise `oy` primary agent without permission overrides;
-- `oy-audit`, `oy-review`, and `oy-enhance` skills;
-- `/oy-audit`, `/oy-review`, and `/oy-enhance` commands.
+## What it registers
 
-The package does not change OpenCode permissions. The slash commands are OpenCode prompt commands, not `oy` shell subcommands. The agent may use optional `tokei` and Universal Ctags commands for compact orientation; `oy doctor --install-missing` installs them.
+- one primary agent: `oy`;
+- skills: `oy-audit`, `oy-review`, and `oy-enhance`;
+- slash commands: `/oy-audit`, `/oy-review`, and `/oy-enhance`.
 
-Audit and review use `oy audit|review prepare` to write bounded workspace-local evidence files, OpenCode's native `read` and edit tools, and `oy audit|review finalize` to recheck evidence and normalize the final report. OpenCode and the user own permissions.
+The plugin defines no permission rules. Models, credentials, permissions, and tools remain controlled by OpenCode and the user.
 
-Maintainer publishing instructions are documented in [`docs/npm-publishing.md`](../../docs/npm-publishing.md).
+Audit and review prepare ordered workspace-local evidence, require the agent to read every prepared chunk, and verify the final report. Model conclusions remain nondeterministic.
+
+## Requirements
+
+- OpenCode 2 compatible with this package version;
+- the matching `oy` CLI on `PATH`;
+- Linux or macOS (use WSL2 on Windows).
+
+See the [oy documentation](https://oy.adonm.dev/) for setup, workflows, compatibility, and security guidance. Maintainer publishing instructions are in [`docs/npm-publishing.md`](../../docs/npm-publishing.md).

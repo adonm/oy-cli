@@ -1,6 +1,6 @@
 [book]
 authors = ["oy contributors"]
-description = "A concise autonomous OpenCode agent with repeatable repository audits and reviews"
+description = "A focused OpenCode agent with repeatable audits, code reviews, and one-finding fixes"
 language = "en"
 src = "docs"
 title = "oy documentation"

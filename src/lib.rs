@@ -1,6 +1,6 @@
 //! # oy
 //!
-//! `oy` adds one concise autonomous agent and repeatable repository audit/review workflows to
+//! `oy` adds one focused coding agent and repeatable repository audit/review workflows to
 //! [OpenCode 2](https://v2.opencode.ai/). File-backed CLI preparation and finalization provide
 //! deterministic repository collection, ordered chunks, target-diff input, and normalized
 //! Markdown/SARIF reports. OpenCode remains responsible for model execution, providers,
