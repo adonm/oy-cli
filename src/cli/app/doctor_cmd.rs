@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::config;
 
-const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli@0.0.0-next-15323";
+const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli@0.0.0-next-15353";
 const OPENCODE_NODE_TOOL: &str = "node@24";
 const TOKEI_MISE_TOOL: &str = "cargo:tokei";
 const CTAGS_MISE_TOOL: &str = "github:universal-ctags/ctags";
@@ -20,13 +20,6 @@ const SIGHTHOUND_HINT: &str = "oy doctor --install-sighthound";
 
 #[derive(Debug, Args, Clone)]
 pub(super) struct DoctorArgs {
-    #[arg(
-        long,
-        alias = "agent",
-        default_value = "default",
-        help = "Safety mode to inspect (default: balanced): plan, ask, edit, or auto"
-    )]
-    mode: config::SafetyMode,
     #[arg(
         long,
         default_value_t = false,
@@ -43,7 +36,7 @@ pub(super) struct DoctorArgs {
         long,
         conflicts_with_all = ["install_missing", "install_sighthound"],
         default_value_t = false,
-        help = "Validate effective OpenCode agents, commands, MCP, and models; exit nonzero on failure"
+        help = "Validate the effective oy agent, commands, skills, and models; exit nonzero on failure"
     )]
     check: bool,
 }
@@ -53,13 +46,10 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
         bail!("--json cannot be combined with doctor install flags");
     }
     let root = config::oy_root()?;
-    let mode = args.mode;
-    let policy = config::tool_policy(mode);
     let opencode_host = crate::opencode::OpenCodeHost::selected_in(&root);
     let opencode_ok = opencode_host.available();
     let opencode_supported = opencode_host.supported();
     let mise_ok = command_ok("mise", &["--version"]);
-    let oy_mcp_ok = command_ok("oy", &["mcp"]);
     let tokei_ok = crate::tools::has_external_sloc_counter();
     let ctags_ok = crate::tools::has_external_outline_tool();
     let sighthound_ok = crate::tools::has_external_security_scanner();
@@ -83,8 +73,6 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
             && runtime.agents
             && runtime.commands
             && runtime.skills
-            && runtime.permissions
-            && runtime.mcp_connected
             && runtime.models
             && runtime.providers
             && runtime.plugins
@@ -94,8 +82,6 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
     if crate::ui::is_json() {
         let payload = serde_json::json!({
             "workspace": root,
-            "mode": mode.name(),
-            "policy": policy,
             "opencode": opencode_ok,
             "opencode_host": {
                 "executable": opencode_host.executable_display(),
@@ -106,7 +92,6 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
                 "model_api": opencode_supported,
             },
             "mise": mise_ok,
-            "oy_mcp_command": oy_mcp_ok,
             "optional_tools": {
                 "tokei": {
                     "available": tokei_ok,
@@ -137,9 +122,6 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
 
     crate::ui::section("Doctor");
     crate::ui::kv("workspace", root.display());
-    crate::ui::kv("mode", mode.name());
-    crate::ui::kv("files-write", format_args!("{:?}", policy.files_write()));
-    crate::ui::kv("shell", format_args!("{:?}", policy.shell));
     crate::ui::kv(
         "opencode",
         crate::ui::status_text(
@@ -222,15 +204,13 @@ pub(super) async fn doctor_command(args: DoctorArgs) -> Result<i32> {
                     .as_ref()
                     .map(|runtime| {
                         format!(
-                            "service={} openapi={} location={} agents={} commands={} skills={} permissions={} mcp={} models={} providers={} plugins={}",
+                            "service={} openapi={} location={} agent={} commands={} skills={} models={} providers={} plugins={}",
                             runtime.service_version,
                             runtime.openapi,
                             runtime.location,
                             runtime.agents,
                             runtime.commands,
                             runtime.skills,
-                            runtime.permissions,
-                            runtime.mcp_connected,
                             runtime.models,
                             runtime.providers,
                             runtime.plugins

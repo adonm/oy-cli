@@ -7,10 +7,7 @@ use std::path::PathBuf;
 
 mod args;
 mod external;
-pub(crate) mod policy;
 mod workspace;
-
-pub(crate) use policy::{Approval, ToolPolicy};
 
 pub(crate) fn has_external_sloc_counter() -> bool {
     workspace::has_tokei()

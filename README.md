@@ -3,23 +3,25 @@
 [![Crates.io](https://img.shields.io/crates/v/oy-cli.svg)](https://crates.io/crates/oy-cli)
 [![docs.rs](https://docs.rs/oy-cli/badge.svg)](https://docs.rs/oy-cli)
 
-**Repeatable repository audits and reviews for opencode.**
+**A concise autonomous OpenCode agent with repeatable repository audits and reviews.**
 
-`oy` is for maintainers who already use [opencode](https://opencode.ai/) and want a bounded, reviewable workflow for repository-wide security audits, code-quality reviews, and finding remediation.
+`oy` is for maintainers who already use [opencode](https://opencode.ai/) and want a concise autonomous coding agent plus bounded, reviewable security audit, code-quality review, and finding-remediation workflows.
 
 opencode still owns the model, provider, UI, sessions, permissions, edits, shell, and web tools. `oy` adds:
 
 - deterministic, gitignore-aware repository and diff collection,
-- three canonical audit/review/enhance workflow skills with thin command and agent adapters,
-- restricted audit/review agent permissions plus Rust/MCP enforcement of bound workflow inputs,
+- one autonomous `oy` agent aligned with OpenCode 2's inspect/implement/verify behavior,
+- three canonical audit/review/enhance skills that run under the user's OpenCode permissions,
+- file-backed deterministic evidence with private SHA-256-bound workflow state,
+- an `@oy-cli/opencode` OpenCode V2 package for the agent, skills, and commands,
 - Markdown and SARIF rendering with stable finding IDs and statuses,
 - a one-finding-at-a-time remediation handoff.
 
-The **inputs, ordering, limits, and report rendering** are deterministic. Model conclusions are not; model choice and prompt quality still affect findings.
+The **inputs, ordering, limits, and report rendering** are deterministic. Model conclusions are not; model choice, prompt quality, and the user's OpenCode tool policy still affect outcomes. Oy does not maintain a second permission system.
 
 ## Quick start
 
-Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.12.0 no longer supports OpenCode 1.
+Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.13.0 no longer supports OpenCode 1.
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
@@ -28,17 +30,17 @@ oy doctor
 oy audit
 ```
 
-The installer uses [`mise`](https://mise.jdx.dev/) to install or upgrade `oy`, `@opencode-ai/cli@0.0.0-next-15323`, `tokei`, and Universal Ctags, then writes the global OpenCode integration with `oy setup`. Source-built Sighthound is opt-in with `OY_INSTALL_SIGHTHOUND=1`; the installer provisions Rust 1.96 for it.
+The installer uses [`mise`](https://mise.jdx.dev/) to install pinned oy 0.13.0, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies both primary versions, stops stale OpenCode services, prunes unreferenced old mise versions, and resets generated integration files before running `oy setup`. Set `OY_RESET_SETUP=0` to preserve the generated setup in place or `OY_SKIP_SETUP=1` to skip setup. Source-built Sighthound is opt-in with `OY_INSTALL_SIGHTHOUND=1`.
 
 For a minimal manual install:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli npm:@opencode-ai/cli@0.0.0-next-15323
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.0 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy doctor
 ```
 
-Configure authentication and models with OpenCode's [provider guide](https://opencode.ai/docs/providers/). See the [getting-started guide](https://oy.adonm.dev/getting-started.html) for install behavior, supported host versions, and workspace-local setup.
+Configure authentication and models with OpenCode's [provider guide](https://v2.opencode.ai/providers). See the [getting-started guide](https://oy.adonm.dev/getting-started.html) for install behavior, supported host versions, and workspace-local setup.
 
 ## Core workflow
 
@@ -69,7 +71,7 @@ With no target, `oy` reviews the collected workspace. With a branch, commit, or 
 oy enhance <finding-id>
 ```
 
-Reports include stable IDs and statuses. `oy enhance` selects one actionable finding, makes a focused change through opencode's permission system, and verifies it when possible. Rerunning an audit or review reads the previous generated report once and carries forward only findings that remain current.
+Reports include stable IDs and statuses. `oy enhance` selects one actionable finding, makes a focused change under the user's effective OpenCode permissions, and verifies it when possible. Rerunning an audit or review reads the previous generated report once and carries forward only findings that remain current.
 
 See the [workflow guide](https://oy.adonm.dev/workflows.html) for report semantics, scope behavior, failure limits, and practical examples.
 
@@ -80,8 +82,9 @@ A free-form agent can choose what to inspect and may silently sample a large rep
 1. inventories the requested scope,
 2. creates ordered chunks or target-diff chunks,
 3. fails closed when the configured chunk budget is exceeded,
-4. rejects changed input, skipped chunks, out-of-order reads, and early rendering,
-5. normalizes the final report for reruns and remediation.
+4. exposes every bounded chunk in one versioned index for native OpenCode reads,
+5. rejects changed input, artifact tampering, concurrent output changes, and malformed findings,
+6. normalizes the final report for reruns and remediation.
 
 This makes coverage decisions visible and repeatable without rebuilding opencode's general coding agent.
 
@@ -109,43 +112,47 @@ mise use --global rust@1.96 'cargo:https://github.com/Corgea/Sighthound[bin=sigh
 
 Sighthound remains optional and source-built. The install pins immutable commit `c4608eb2b6ca256daf4dbd1e74aadc3570343685`, uses `--locked`, and builds only `bin=sighthound`; `oy doctor --install-sighthound` performs the same pinned build. Routine `oy doctor --install-missing` does not build it. Sighthound scans Python, JavaScript/TypeScript, Java, PHP, C#, Go, Ruby, HTML, and Django templates; it does not scan Rust or C/C++. `OY_TOKEI`, `OY_CTAGS`, and `OY_SIGHTHOUND` can select absolute helper paths. Automatic discovery rejects relative `PATH` entries.
 
-## Setup and launcher behavior
+## Agent, package, and setup
 
-`oy setup` writes native OpenCode 2 JSON plus seven generated agents and three canonical skills. Global setup uses `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup uses `.opencode/`. In either directory, an existing `opencode.jsonc` is selected before `opencode.json`. Use `--dry-run` to preview or `--remove` to remove oy's current generated files and owned config entries.
+The OpenCode V2 package lives at `packages/opencode` and publishes as `@oy-cli/opencode`. It registers one `oy` primary agent, the three canonical skills, and their slash commands without permission overrides. Add `"@oy-cli/opencode@0.13.0"` to OpenCode's `plugins` array after installing the `oy` binary.
 
-Setup and removal stage one multi-file batch and roll back mutations already committed if a later mutation fails. This is in-process rollback, not crash journaling or durable recovery. Setup migrates exact legacy command/MCP conversions and fails closed on ambiguous fields. JSON and JSONC are still pretty-reserialized, so comments and formatting are not preserved. Removal deletes owned current values; it does not restore values that existed before setup.
+`oy setup` remains the direct-file installer: it writes the same agent and skills plus thin skill commands, but does not register MCP or change OpenCode's tool-output budget. Global setup uses `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup uses `.opencode/`. Use `--dry-run` to preview or `--remove` to remove generated files and owned config entries.
+
+The `oy` agent has no permission overrides. Its short system prompt carries the useful OpenCode 2 defaults that a custom prompt would otherwise replace: inspect before editing, follow repository conventions, make the smallest correct change, persist through verification, preserve unrelated worktree changes, avoid destructive Git operations, and report concisely. OpenCode and the user remain authoritative for permissions and approvals.
+
+Setup and removal stage one multi-file batch and roll back mutations already committed if a later mutation fails. This is in-process rollback, not crash journaling or durable recovery. JSON and JSONC are still pretty-reserialized, so comments and formatting are not preserved. Removal deletes owned current values; it does not restore values that existed before setup.
 
 Launch, model, and workflow commands only validate that a complete global or workspace integration exists; they never auto-refresh it. Run `oy setup` explicitly after generated assets change (`oy upgrade` does this as an explicit post-upgrade step). All selected OpenCode runner and managed-API processes use `OY_ROOT` as their working directory.
 
-oy defaults to the `opencode2` executable. This release supports exactly beta `0.0.0-next-15323` and tagged OpenCode 2.x; other prereleases and major versions fail closed until tested. `OY_OPENCODE` remains an executable override. `oy run`, `audit`, `review`, and `enhance` use OpenCode 2's noninteractive `run` command; `oy model` uses its managed API because the beta has no model-list command. `oy run` supports `--continue-session`, `--resume`, and mode-selected agents; set `OY_OPENCODE_MODEL=provider/model#variant` to override the noninteractive workflow model. JSON mode forwards OpenCode's JSON event stream.
+oy defaults to the `opencode2` executable. This release supports exactly beta `0.0.0-next-15353` and tagged OpenCode 2.x; other prereleases and major versions fail closed until tested. `OY_OPENCODE` remains an executable override. `oy run`, `audit`, `review`, and `enhance` use the single `oy` agent. `oy run --auto` asks OpenCode to approve pending requests once while preserving explicit denies; without it, the user's normal policy applies. Set `OY_OPENCODE_MODEL=provider/model#variant` to override the noninteractive workflow model.
 
-`oy`, `oy open`, and `oy chat` launch the OpenCode 2 TUI. Session continuation/resume is supported, but the beta TUI cannot select an agent or oy mode per launch, so select the desired agent inside the TUI; use `oy run` when mode selection is required.
+`oy`, `oy open`, and `oy chat` launch the OpenCode 2 TUI. Select `oy` in the TUI when its concise autonomous prompt is useful; use OpenCode's built-in Plan agent when planning is wanted.
 
-CLI audit/review/enhance runs inherit a typed context binding the run ID, session, model, scope, output, format, and maximum chunks. Review targets are resolved to a commit OID before launch. MCP enforces those values, stable input, chunk count/order/completion, and renderer output metadata; noninteractive workflow session titles include `oy:<run-id>` for correlation.
-
-OpenCode's noninteractive runner cannot pause for unresolved `ask` permissions. Use `plan` for read-only work, `edit` when file edits are intentionally pre-approved, and `auto` only in trusted workspaces where both edits and shell are pre-approved.
+Audit and review use `prepare → native OpenCode reads/edits → finalize`. Preparation writes a small index, manifest, prior report, and bounded chunks under `.oy/runs/<run-id>/`. Private platform-state metadata binds their hashes, canonical workspace, scope or target OID, output, and format. Finalization verifies those bindings and separate candidate Markdown/findings JSON before writing the report. `oy mcp` remains only as a temporary compatibility adapter and is not registered by default.
 
 ## Command map
 
 | Command | Purpose |
 |---|---|
 | `oy audit [focus]` | Write `ISSUES.md` or SARIF from deterministic-input audit coverage |
+| `oy audit prepare` / `oy audit finalize --run ID` | Prepare audit artifacts and finalize a verified candidate |
 | `oy review [target]` | Write `REVIEW.md` for a workspace or target diff |
+| `oy review prepare [target]` / `oy review finalize --run ID` | Prepare review artifacts and finalize a verified candidate |
 | `oy enhance [--interactive] [focus]` | Fix one finding; `--interactive` delegates to OpenCode `mini` |
 | `oy setup [--workspace] [--dry-run] [--remove]` | Install, preview, or remove generated OpenCode integration |
 | `oy doctor [--check]` | Show local status; `--check` validates effective OpenCode runtime integration |
 | `oy` / `oy open ...` / `oy chat` | Launch or pass arguments to the OpenCode 2 TUI |
-| `oy run`, `model`, `modes` | Noninteractive task, model-list, and safety-mode conveniences |
+| `oy run [--auto]`, `model` | Noninteractive task with the `oy` agent, and transitional model-list convenience |
 | `oy upgrade` | Upgrade mise-managed `oy` and OpenCode together |
-| `oy mcp` | Serve the local stdio MCP integration; normally started by opencode |
+| `oy mcp` | Serve the temporary stdio MCP compatibility adapter |
 
 The full CLI and MCP inventory are in the [reference](https://oy.adonm.dev/reference.html).
 
 ## Safety
 
-`oy` is not a sandbox. Repository text returned by MCP may be sent to the model provider selected in OpenCode. Native oy can read collected workspace text, run fixed read-only helper processes, write requested reports inside the workspace, update integration config, launch OpenCode's noninteractive runner, and query its managed model API through the CLI. oy does not store provider credentials; general edits, shell, web, authentication, and provider traffic remain governed by OpenCode.
+`oy` is not a sandbox. Repository text read from prepared artifacts or returned by compatibility MCP may be sent to the model provider selected in OpenCode. Native oy can read collected workspace text, run fixed read-only helper processes, write requested reports inside the workspace, update integration config, launch OpenCode's noninteractive runner, and query its managed model API through the CLI. oy does not store provider credentials; general edits, shell, web, authentication, and provider traffic remain governed by OpenCode.
 
-Use restrictive opencode [permissions](https://opencode.ai/docs/permissions/) and a disposable environment for untrusted repositories. Read [SECURITY.md](SECURITY.md) and the [tool safety notes](docs/tool-safety.md) before high-risk use.
+Configure OpenCode [permissions](https://v2.opencode.ai/permissions) for your trust boundary and use a disposable environment for untrusted repositories. Read [SECURITY.md](SECURITY.md) and the [tool safety notes](docs/tool-safety.md) before high-risk use.
 
 ## Project direction and development
 

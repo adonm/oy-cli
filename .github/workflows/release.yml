@@ -179,3 +179,39 @@ jobs:
               exit "$exit_code"
             fi
           fi
+
+  publish-npm:
+    if: github.repository_owner == 'adonm' && vars.NPM_PUBLISH_ENABLED == 'true'
+    needs: release
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    defaults:
+      run:
+        working-directory: packages/opencode
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install OIDC-capable npm
+        run: npm install --global npm@12.0.1
+      - name: Require package version to match tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: test "v$(node -p 'require("./package.json").version')" = "$REF_NAME"
+      - name: Install, build, and test
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          npm test
+      - name: Publish public package with npm trusted publishing
+        run: npm publish --access public

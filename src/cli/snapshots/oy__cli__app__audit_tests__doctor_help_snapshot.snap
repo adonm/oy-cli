@@ -1,17 +1,13 @@
 ---
 source: src/cli/app.rs
+assertion_line: 342
 expression: "command_help_for_test(\"doctor\")"
 ---
-Show config paths, executable/helper availability, and safety mode
+Show config paths, executable/helper availability, and integration status
 
 Usage: doctor [OPTIONS]
 
 Options:
-      --mode <MODE>
-          Safety mode to inspect (default: balanced): plan, ask, edit, or auto
-          
-          [default: default]
-
       --install-missing
           Install missing OpenCode 2, tokei, and ctags with global mise config
 
@@ -19,7 +15,7 @@ Options:
           Source-build pinned Sighthound with Rust 1.96 and global mise config
 
       --check
-          Validate effective OpenCode agents, commands, MCP, and models; exit nonzero on failure
+          Validate the effective oy agent, commands, skills, and models; exit nonzero on failure
 
   -h, --help
           Print help

@@ -1,4 +1,4 @@
-# justfile for oy-cli — OpenCode launcher and oy MCP helpers
+# justfile for oy-cli — autonomous OpenCode agent and deterministic repository workflows
 #
 # Run `just` or `just --list` to see available recipes.
 #
@@ -101,6 +101,10 @@ _help-smoke:
     cargo run --locked -- open --help
     cargo run --locked -- mcp --help
     cargo run --locked -- run --help
+    cargo run --locked -- audit prepare --help
+    cargo run --locked -- audit finalize --help
+    cargo run --locked -- review prepare --help
+    cargo run --locked -- review finalize --help
     cargo run --locked -- chat --help
     cargo run --locked -- audit --help
     cargo run --locked -- review --help
@@ -108,7 +112,6 @@ _help-smoke:
     cargo run --locked -- recover --help
     cargo run --locked -- model --help
     cargo run --locked -- doctor --help
-    cargo run --locked -- modes --help
     cargo run --locked -- upgrade --help
 
 # Exercise installer sequencing and pins with a fake mise executable.

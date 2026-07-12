@@ -43,8 +43,6 @@ pub(crate) struct RuntimeHealth {
     pub agents: bool,
     pub commands: bool,
     pub skills: bool,
-    pub permissions: bool,
-    pub mcp_connected: bool,
     pub models: bool,
     pub providers: bool,
     pub plugins: bool,
@@ -291,20 +289,15 @@ impl<'a> OpenCodeApi<'a> {
         )
     }
 
-    pub(crate) fn ensure_workflow(&self, directory: &Path, agent: &str, skill: &str) -> Result<()> {
+    pub(crate) fn ensure_workflow(&self, directory: &Path, skill: &str) -> Result<()> {
         for attempt in 0..8 {
             let agents = self.operation("v2.agent.list", directory)?;
             let commands = self.operation("v2.command.list", directory)?;
             let skills = self.operation("v2.skill.list", directory)?;
-            let mcp = self.operation("v2.mcp.list", directory)?;
-            let agent_ok = exact_workflow_agent(data_array(&agents)?, agent, skill);
+            let agent_ok = exact_oy_agent(data_array(&agents)?, "oy");
             let skill_ok = exact_skill(data_array(&skills)?, skill);
             let command_ok = workflow_commands(data_array(&commands)?);
-            let mcp_ok = data_array(&mcp)?.iter().any(|entry| {
-                entry.get("name").and_then(Value::as_str) == Some("oy")
-                    && entry.pointer("/status/status").and_then(Value::as_str) == Some("connected")
-            });
-            if agent_ok && skill_ok && command_ok && mcp_ok {
+            if agent_ok && skill_ok && command_ok {
                 return Ok(());
             }
             if attempt < 7 {
@@ -312,7 +305,7 @@ impl<'a> OpenCodeApi<'a> {
             }
         }
         bail!(
-            "OpenCode effective configuration is missing skill `{skill}` or connected oy MCP; run `oy setup` and retry"
+            "OpenCode effective configuration is missing skill `{skill}` or the oy agent; run `oy setup` and retry"
         )
     }
 
@@ -331,8 +324,6 @@ impl<'a> OpenCodeApi<'a> {
             let ready = current.agents
                 && current.commands
                 && current.skills
-                && current.permissions
-                && current.mcp_connected
                 && current.models
                 && current.providers
                 && current.plugins
@@ -359,7 +350,6 @@ impl<'a> OpenCodeApi<'a> {
         let agent_response = self.operation("v2.agent.list", directory)?;
         let command_response = self.operation("v2.command.list", directory)?;
         let skill_response = self.operation("v2.skill.list", directory)?;
-        let mcp_response = self.operation("v2.mcp.list", directory)?;
         let model_response = self.operation("v2.model.list", directory)?;
         let provider_response = self.operation("v2.provider.list", directory)?;
         let plugin_response = self.operation("v2.plugin.list", directory)?;
@@ -376,7 +366,6 @@ impl<'a> OpenCodeApi<'a> {
                     .and_then(Value::as_str)
             })
             .collect::<std::collections::BTreeSet<_>>();
-        let mcp = data_array(&mcp_response)?;
         let models = data_array(&model_response)?;
         let providers = data_array(&provider_response)?;
         let required_operations = [
@@ -385,7 +374,6 @@ impl<'a> OpenCodeApi<'a> {
             "v2.agent.list",
             "v2.command.list",
             "v2.skill.list",
-            "v2.mcp.list",
             "v2.model.list",
             "v2.model.default",
             "v2.provider.list",
@@ -423,34 +411,12 @@ impl<'a> OpenCodeApi<'a> {
                 .iter()
                 .all(|operation| operation_ids.contains(operation)),
             location: location_ok,
-            agents: [
-                "oy",
-                "oy-plan",
-                "oy-edit",
-                "oy-auto",
-                "oy-auditor",
-                "oy-reviewer",
-                "oy-enhancer",
-            ]
-            .iter()
-            .all(|name| {
-                agents.contains(name)
-                    && exact_workflow_agent(
-                        data_array(&agent_response).unwrap_or(&Vec::new()),
-                        name,
-                        workflow_skill_for_agent(name),
-                    )
-            }),
+            agents: agents.contains("oy") && exact_oy_agent(data_array(&agent_response)?, "oy"),
             commands: workflow_commands(data_array(&command_response)?),
             skills: workflow_skills(data_array(&skill_response)?)
                 && ["oy-audit", "oy-review", "oy-enhance"]
                     .iter()
                     .all(|name| skills.contains(name)),
-            permissions: workflow_agent_permissions(data_array(&agent_response)?),
-            mcp_connected: mcp.iter().any(|entry| {
-                entry.get("name").and_then(Value::as_str) == Some("oy")
-                    && entry.pointer("/status/status").and_then(Value::as_str) == Some("connected")
-            }),
             models: model_ok,
             providers: !providers.is_empty(),
             plugins: plugin_response.get("data").is_some_and(Value::is_array),
@@ -567,120 +533,30 @@ impl<'a> OpenCodeApi<'a> {
     }
 }
 
-fn workflow_agent_permissions(agents: &[Value]) -> bool {
-    [
-        ("oy-auditor", "oy-audit"),
-        ("oy-reviewer", "oy-review"),
-        ("oy-enhancer", "oy-enhance"),
-    ]
-    .iter()
-    .all(|(id, skill)| exact_workflow_agent(agents, id, skill))
-}
-
-fn exact_workflow_agent(agents: &[Value], id: &str, skill: &str) -> bool {
+fn exact_oy_agent(agents: &[Value], id: &str) -> bool {
     let Some(agent) = agents
         .iter()
         .find(|agent| agent.get("id").and_then(Value::as_str) == Some(id))
     else {
         return false;
     };
-    let expected_mode = if matches!(id, "oy-auditor" | "oy-reviewer" | "oy-enhancer") {
-        "all"
-    } else {
-        "primary"
-    };
-    agent.get("mode").and_then(Value::as_str) == Some(expected_mode)
+    agent.get("mode").and_then(Value::as_str) == Some("primary")
         && agent.get("system").and_then(Value::as_str).map(str::trim) == canonical_agent_body(id)
-        && permissions_end_with(agent, expected_permission_suffix(id, skill))
-}
-
-fn workflow_skill_for_agent(id: &str) -> &str {
-    match id {
-        "oy-auditor" => "oy-audit",
-        "oy-reviewer" => "oy-review",
-        "oy-enhancer" => "oy-enhance",
-        _ => "",
-    }
 }
 
 fn canonical_agent_body(id: &str) -> Option<&str> {
     let source = match id {
         "oy" => super::OY_AGENT,
-        "oy-plan" => super::OY_PLAN_AGENT,
-        "oy-edit" => super::OY_EDIT_AGENT,
-        "oy-auto" => super::OY_AUTO_AGENT,
-        "oy-auditor" => super::OY_AUDITOR_AGENT,
-        "oy-reviewer" => super::OY_REVIEWER_AGENT,
-        "oy-enhancer" => super::OY_ENHANCER_AGENT,
         _ => return None,
     };
     source.splitn(3, "---").nth(2).map(str::trim)
 }
 
-fn expected_permission_suffix<'a>(id: &str, skill: &'a str) -> Vec<(&'a str, &'a str, &'a str)> {
-    match id {
-        "oy-auditor" => vec![
-            ("*", "*", "deny"),
-            ("execute", "*", "allow"),
-            ("skill", skill, "allow"),
-            ("oy_workflow_status", "*", "allow"),
-            ("oy_repo_manifest", "*", "allow"),
-            ("oy_repo_chunks", "*", "allow"),
-            ("oy_existing_report", "*", "allow"),
-            ("oy_sighthound", "*", "allow"),
-            ("oy_render_audit_report", "*", "allow"),
-        ],
-        "oy-reviewer" => vec![
-            ("*", "*", "deny"),
-            ("execute", "*", "allow"),
-            ("skill", skill, "allow"),
-            ("oy_workflow_status", "*", "allow"),
-            ("oy_git_diff_input", "*", "allow"),
-            ("oy_repo_chunks", "*", "allow"),
-            ("oy_repo_manifest", "*", "allow"),
-            ("oy_existing_report", "*", "allow"),
-            ("oy_render_review_report", "*", "allow"),
-        ],
-        "oy-enhancer" => vec![
-            ("edit", "*", "allow"),
-            ("shell", "*", "deny"),
-            ("skill", skill, "allow"),
-            ("oy_workflow_status", "*", "allow"),
-        ],
-        "oy" => vec![("edit", "*", "ask"), ("shell", "*", "ask")],
-        "oy-plan" => vec![
-            ("edit", "*", "deny"),
-            ("shell", "*", "deny"),
-            ("lsp", "*", "deny"),
-        ],
-        "oy-edit" => vec![("edit", "*", "allow"), ("shell", "*", "ask")],
-        "oy-auto" => vec![("edit", "*", "allow"), ("shell", "*", "allow")],
-        _ => Vec::new(),
-    }
-}
-
-fn permissions_end_with(agent: &Value, expected: Vec<(&str, &str, &str)>) -> bool {
-    let Some(permissions) = agent.get("permissions").and_then(Value::as_array) else {
-        return false;
-    };
-    if expected.is_empty() || permissions.len() < expected.len() {
-        return false;
-    }
-    permissions[permissions.len() - expected.len()..]
-        .iter()
-        .zip(expected)
-        .all(|(actual, (action, resource, effect))| {
-            actual.get("action").and_then(Value::as_str) == Some(action)
-                && actual.get("resource").and_then(Value::as_str) == Some(resource)
-                && actual.get("effect").and_then(Value::as_str) == Some(effect)
-        })
-}
-
 fn workflow_commands(commands: &[Value]) -> bool {
     [
-        ("oy-audit", "oy-auditor", "oy-audit"),
-        ("oy-review", "oy-reviewer", "oy-review"),
-        ("oy-enhance", "oy-enhancer", "oy-enhance"),
+        ("oy-audit", "oy", "oy-audit"),
+        ("oy-review", "oy", "oy-review"),
+        ("oy-enhance", "oy", "oy-enhance"),
     ]
     .iter()
     .all(|(name, agent, skill)| {

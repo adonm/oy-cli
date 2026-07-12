@@ -8,8 +8,8 @@ use std::time::Duration;
 use wait_timeout::ChildExt as _;
 
 pub(crate) const OPENCODE_ENV: &str = "OY_OPENCODE";
-pub(crate) const PINNED_BETA_BUILD: u64 = 15_323;
-pub(crate) const PINNED_BETA_VERSION: &str = "0.0.0-next-15323";
+pub(crate) const PINNED_BETA_BUILD: u64 = 15_353;
+pub(crate) const PINNED_BETA_VERSION: &str = "0.0.0-next-15353";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_OUTPUT_LIMIT: u64 = 16 * 1024;
 
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn extracts_beta_build() {
-        assert_eq!(beta_build("0.0.0-next-15323"), Some(15_323));
+        assert_eq!(beta_build("0.0.0-next-15353"), Some(15_353));
         assert_eq!(beta_build("opencode 0.0.0-next-15324"), Some(15_324));
         assert_eq!(beta_build("2.0.0"), None);
     }
@@ -317,7 +317,7 @@ mod tests {
         );
         assert!(!host("0.0.0-next-15322", OpenCodeContract::V2Beta).supported());
         assert!(!host("0.0.0-next-15324", OpenCodeContract::V2Beta).supported());
-        assert!(!host("1.0.0-next-15323", OpenCodeContract::V2Beta).supported());
+        assert!(!host("1.0.0-next-15353", OpenCodeContract::V2Beta).supported());
         assert!(host("2.0.0", OpenCodeContract::V2).supported());
         assert!(!host("3.0.0", OpenCodeContract::Unknown).supported());
         assert!(!host("1.17.18", OpenCodeContract::V1).supported());

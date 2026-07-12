@@ -4,7 +4,6 @@ use crate::audit;
 use anyhow::Result;
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
 
 mod audit_cmd;
 mod doctor_cmd;
@@ -14,11 +13,13 @@ mod review_cmd;
 mod session_cmd;
 mod upgrade_cmd;
 
+#[cfg(test)]
 use audit_cmd::AuditFormat;
+use audit_cmd::{AuditAction, AuditArgs};
 use doctor_cmd::DoctorArgs;
 use enhance_cmd::EnhanceArgs;
 use model_cmd::ModelArgs;
-use review_cmd::ReviewArgs;
+use review_cmd::{ReviewAction, ReviewArgs};
 use session_cmd::{ChatArgs, RunArgs};
 use upgrade_cmd::UpgradeArgs;
 
@@ -26,8 +27,8 @@ use upgrade_cmd::UpgradeArgs;
 #[command(
     name = "oy",
     version,
-    about = "Repeatable repository audits and reviews for opencode.",
-    after_help = "Examples:\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor --check\n  oy                              (launch the OpenCode 2 TUI)\n\nPrimary direction: deterministic-input audit/review/report workflows. Non-interactive workflows use OpenCode 2's runner; model conclusions are not deterministic. Launches validate the existing integration without rewriting it; unknown top-level commands/flags pass through."
+    about = "A concise autonomous OpenCode agent with repeatable repository audits and reviews.",
+    after_help = "Examples:\n  oy run --auto <task>            (autonomous task with the oy agent)\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor --check\n  oy                              (launch the OpenCode 2 TUI)\n\nPrimary direction: one concise oy agent plus deterministic-input audit/review/report workflows. OpenCode and the user own permissions; model conclusions are not deterministic."
 )]
 struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Select quiet output where supported")]
@@ -36,13 +37,6 @@ struct Cli {
     verbose: bool,
     #[arg(long, global = true, conflicts_with_all = ["quiet", "verbose"], help = "Print machine-readable JSON where supported")]
     json: bool,
-    #[arg(
-        long,
-        default_value = "default",
-        global = true,
-        help = "Safety mode: plan, ask, edit, or auto (default: balanced)"
-    )]
-    mode: crate::config::SafetyMode,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -51,45 +45,21 @@ struct Cli {
 enum Command {
     /// Install integration files globally, or in this workspace with --workspace.
     Setup(SetupArgs),
-    /// Launch opencode with oy MCP wiring.
+    /// Launch OpenCode with the oy integration.
     Open(OpenArgs),
-    /// Start the oy MCP server over stdio.
+    /// Start the compatibility oy MCP server over stdio.
+    #[command(about = "Start the compatibility oy MCP server over stdio")]
     Mcp,
     /// Run one task through OpenCode 2; prompt can be args or stdin.
     Run(RunArgs),
-    /// Launch opencode with oy session/mode conveniences.
+    /// Launch opencode with oy session conveniences.
     Chat(ChatArgs),
     /// List OpenCode 2 models through the API.
     Model(ModelArgs),
-    /// Show config paths, executable/helper availability, and safety mode.
+    /// Show config paths, executable/helper availability, and integration status.
     Doctor(DoctorArgs),
-    /// Explain oy safety modes and their opencode mapping.
-    Modes,
     /// Run a deterministic-input security audit and write Markdown or SARIF.
-    Audit {
-        #[arg(
-            long,
-            value_enum,
-            default_value_t = AuditFormat::Markdown,
-            help = "Output format: markdown or sarif"
-        )]
-        format: AuditFormat,
-        #[arg(
-            long,
-            value_name = "PATH",
-            help = "Write findings to a workspace file (default: ISSUES.md or oy.sarif)"
-        )]
-        out: Option<PathBuf>,
-        #[arg(
-            long,
-            value_name = "N",
-            default_value_t = audit::DEFAULT_MAX_REVIEW_CHUNKS,
-            help = "Maximum audit chunks to review before failing closed"
-        )]
-        max_chunks: usize,
-        #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
-        focus: Vec<String>,
-    },
+    Audit(AuditArgs),
     /// Run a deterministic-input code-quality review and write REVIEW.md.
     Review(ReviewArgs),
     /// Fix one finding from ISSUES.md or REVIEW.md.
@@ -134,7 +104,7 @@ struct OpenArgs {
         long,
         alias = "explain",
         default_value_t = false,
-        help = "Explain selected mode, agent, and opencode arguments without launching"
+        help = "Explain the selected OpenCode executable and arguments without launching"
     )]
     explain: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -146,78 +116,115 @@ pub async fn run(argv: Vec<String>) -> Result<i32> {
         Ok(cli) => cli,
         Err(err) if should_passthrough_to_opencode(&argv, err.kind()) => {
             crate::ui::init_output_mode(None);
-            let (args, mode) = opencode_passthrough_args(argv);
-            return crate::opencode::open_command(args, mode, false);
+            return crate::opencode::open_command(argv, false);
         }
         Err(err) => return print_clap_error(err),
     };
     crate::ui::init_output_mode(cli_output_mode(&cli));
-    let mode = cli.mode;
     match cli.command {
         Some(Command::Setup(args)) => {
             crate::opencode::setup_command(args.workspace, args.dry_run, args.remove)
         }
         Some(Command::Open(args)) => {
-            crate::opencode::open_command(args.args, mode, args.dry_run || args.explain)
+            crate::opencode::open_command(args.args, args.dry_run || args.explain)
         }
         Some(Command::Mcp) => crate::mcp::serve_stdio().await,
         Some(Command::Run(args)) => crate::opencode::run_task_command(
             args.task,
             args.shared.continue_session,
             args.shared.resume,
-            args.shared.mode,
+            args.auto,
         ),
-        Some(Command::Chat(args)) => crate::opencode::chat_command(
-            args.shared.continue_session,
-            args.shared.resume,
-            args.shared.mode,
-        ),
+        Some(Command::Chat(args)) => {
+            crate::opencode::chat_command(args.shared.continue_session, args.shared.resume)
+        }
         Some(Command::Model(args)) => crate::opencode::models_command(args.model),
         Some(Command::Doctor(args)) => doctor_cmd::doctor_command(args).await,
-        Some(Command::Modes) => modes_command(),
-        Some(Command::Audit {
-            format,
-            out,
-            max_chunks,
-            focus,
-        }) => crate::opencode::audit_workflow_command(
-            focus,
-            out.unwrap_or_else(|| audit::default_output_path(format.into())),
-            max_chunks,
-            format.into(),
-        ),
-        Some(Command::Review(args)) => crate::opencode::review_workflow_command(
-            args.target,
-            args.focus,
-            args.out.unwrap_or_else(review_cmd::default_output_path),
-            args.max_chunks,
-        ),
+        Some(Command::Audit(args)) => match args.action {
+            Some(AuditAction::Prepare(prepare)) => prepare_artifacts(
+                crate::artifacts::Kind::Audit,
+                prepare.path,
+                None,
+                prepare
+                    .out
+                    .unwrap_or_else(|| audit::default_output_path(prepare.format.into())),
+                prepare.format.name(),
+                prepare.focus,
+                prepare.max_chunks,
+            ),
+            Some(AuditAction::Finalize(finalize)) => finalize_artifacts(&finalize.run),
+            None => crate::opencode::audit_workflow_command(
+                args.focus,
+                args.out
+                    .unwrap_or_else(|| audit::default_output_path(args.format.into())),
+                args.max_chunks,
+                args.format.into(),
+            ),
+        },
+        Some(Command::Review(args)) => match args.action {
+            Some(ReviewAction::Prepare(prepare)) => prepare_artifacts(
+                crate::artifacts::Kind::Review,
+                prepare.path,
+                prepare.target,
+                prepare.out.unwrap_or_else(review_cmd::default_output_path),
+                "markdown",
+                prepare.focus,
+                prepare.max_chunks,
+            ),
+            Some(ReviewAction::Finalize(finalize)) => finalize_artifacts(&finalize.run),
+            None => crate::opencode::review_workflow_command(
+                args.target,
+                args.focus,
+                args.out.unwrap_or_else(review_cmd::default_output_path),
+                args.max_chunks,
+            ),
+        },
         Some(Command::Enhance(args)) => crate::opencode::enhance_workflow_command(
             args.review_target,
             args.focus,
             args.audit_max_chunks,
             args.review_max_chunks,
-            args.mode,
             args.interactive,
         ),
         Some(Command::Recover) => crate::opencode::recover_workflow_command(),
         Some(Command::Upgrade(args)) => upgrade_cmd::upgrade_command(args),
-        None => crate::opencode::open_command(Vec::new(), mode, false),
+        None => crate::opencode::open_command(Vec::new(), false),
     }
 }
 
-fn modes_command() -> Result<i32> {
-    crate::ui::section("oy modes");
-    crate::ui::line("  Noninteractive `oy run` and remediation sessions:");
-    crate::ui::line("  default / ask       -> agent oy");
-    crate::ui::line("                         edits ask, bash asks");
-    crate::ui::line("  plan / read         -> agent oy-plan");
-    crate::ui::line("                         edits denied, bash denied");
-    crate::ui::line("  edit / accept-edits -> agent oy-edit");
-    crate::ui::line("                         edits allowed, bash asks");
-    crate::ui::line("  auto / yolo         -> agent oy-auto");
-    crate::ui::line("                         edits and shell allowed in trusted workspaces");
-    crate::ui::line("  TUI launches        -> select the desired agent inside OpenCode 2");
+fn prepare_artifacts(
+    kind: crate::artifacts::Kind,
+    path: String,
+    target: Option<String>,
+    output: std::path::PathBuf,
+    format: &str,
+    focus: Vec<String>,
+    max_chunks: usize,
+) -> Result<i32> {
+    let root = crate::config::oy_root()?;
+    let result = crate::artifacts::prepare(
+        &root,
+        crate::artifacts::PrepareRequest {
+            kind,
+            path,
+            target,
+            output,
+            format: format.to_string(),
+            focus,
+            max_chunks,
+            model: std::env::var("OY_OPENCODE_MODEL")
+                .ok()
+                .filter(|model| !model.trim().is_empty()),
+        },
+    )?;
+    crate::ui::line(serde_json::to_string_pretty(&result)?);
+    Ok(0)
+}
+
+fn finalize_artifacts(run_id: &str) -> Result<i32> {
+    let root = crate::config::oy_root()?;
+    let result = crate::artifacts::finalize(&root, run_id)?;
+    crate::ui::line(serde_json::to_string_pretty(&result)?);
     Ok(0)
 }
 
@@ -249,48 +256,11 @@ fn first_action_arg(argv: &[String]) -> Option<&str> {
         match arg {
             "--" => return None,
             "--quiet" | "--verbose" | "--json" => idx += 1,
-            "--mode" => idx += 2,
-            _ if arg.starts_with("--mode=") => idx += 1,
             _ if arg.starts_with('-') => return None,
             _ => return Some(arg),
         }
     }
     None
-}
-
-fn opencode_passthrough_args(argv: Vec<String>) -> (Vec<String>, crate::config::SafetyMode) {
-    let mut mode = crate::config::SafetyMode::Default;
-    let mut args = Vec::with_capacity(argv.len());
-    let mut idx = 0;
-    let mut before_action = true;
-    while idx < argv.len() {
-        let arg = argv[idx].as_str();
-        if before_action {
-            if arg == "--mode" {
-                if let Some(value) = argv.get(idx + 1)
-                    && let Ok(parsed) = crate::config::SafetyMode::parse(value)
-                {
-                    mode = parsed;
-                    idx += 2;
-                    continue;
-                }
-            } else if let Some(value) = arg.strip_prefix("--mode=") {
-                if let Ok(parsed) = crate::config::SafetyMode::parse(value) {
-                    mode = parsed;
-                    idx += 1;
-                    continue;
-                }
-            } else if arg == "--" {
-                args.extend(argv[idx..].iter().cloned());
-                break;
-            } else if !arg.starts_with('-') {
-                before_action = false;
-            }
-        }
-        args.push(argv[idx].clone());
-        idx += 1;
-    }
-    (args, mode)
 }
 
 fn cli_output_mode(cli: &Cli) -> Option<crate::ui::OutputMode> {
@@ -328,14 +298,37 @@ mod audit_tests {
     #[test]
     fn audit_accepts_max_chunks_flag() {
         let cli = parse_cli_for_test(&["oy", "audit", "--max-chunks", "240", "auth paths"]);
-        let Some(Command::Audit {
-            max_chunks, focus, ..
-        }) = cli.command
-        else {
+        let Some(Command::Audit(args)) = cli.command else {
             panic!("expected audit command");
         };
-        assert_eq!(max_chunks, 240);
-        assert_eq!(focus, vec!["auth paths"]);
+        assert_eq!(args.max_chunks, 240);
+        assert_eq!(args.focus, vec!["auth paths"]);
+    }
+
+    #[test]
+    fn review_prepare_accepts_file_backed_options() {
+        let cli = parse_cli_for_test(&["oy", "review", "prepare", "main", "--max-chunks", "20"]);
+        let Some(Command::Review(args)) = cli.command else {
+            panic!("expected review command");
+        };
+        let Some(ReviewAction::Prepare(prepare)) = args.action else {
+            panic!("expected review prepare action");
+        };
+        assert_eq!(prepare.target.as_deref(), Some("main"));
+        assert_eq!(prepare.max_chunks, 20);
+    }
+
+    #[test]
+    fn audit_finalize_requires_run_flag() {
+        let run = "a".repeat(48);
+        let cli = parse_cli_for_test(&["oy", "audit", "finalize", "--run", &run]);
+        let Some(Command::Audit(args)) = cli.command else {
+            panic!("expected audit command");
+        };
+        let Some(AuditAction::Finalize(finalize)) = args.action else {
+            panic!("expected audit finalize action");
+        };
+        assert_eq!(finalize.run, run);
     }
 
     #[test]
@@ -389,28 +382,19 @@ mod audit_tests {
     #[test]
     fn audit_accepts_sarif_format() {
         let cli = parse_cli_for_test(&["oy", "audit", "--format", "sarif", "auth paths"]);
-        let Some(Command::Audit { format, out, .. }) = cli.command else {
+        let Some(Command::Audit(args)) = cli.command else {
             panic!("expected audit command");
         };
-        assert_eq!(format, AuditFormat::Sarif);
-        assert_eq!(out, None);
+        assert_eq!(args.format, AuditFormat::Sarif);
+        assert_eq!(args.out, None);
     }
 
     #[test]
-    fn enhance_accepts_auto_mode_and_focus() {
-        let cli = parse_cli_for_test(&[
-            "oy",
-            "enhance",
-            "--mode",
-            "auto",
-            "--review-target",
-            "main",
-            "security",
-        ]);
+    fn enhance_accepts_target_and_focus() {
+        let cli = parse_cli_for_test(&["oy", "enhance", "--review-target", "main", "security"]);
         let Some(Command::Enhance(args)) = cli.command else {
             panic!("expected enhance command");
         };
-        assert_eq!(args.mode, crate::config::SafetyMode::AutoAll);
         assert_eq!(args.review_target.as_deref(), Some("main"));
         assert_eq!(args.focus, vec!["security"]);
     }
@@ -418,7 +402,6 @@ mod audit_tests {
     #[test]
     fn help_documents_enhance_options() {
         let help = command_help_for_test("enhance");
-        assert!(help.contains("--mode <MODE>"));
         assert!(help.contains("--review-target <TARGET>"));
     }
 
@@ -450,19 +433,27 @@ mod audit_tests {
     }
 
     #[test]
-    fn modes_is_an_oy_command() {
-        let cli = parse_cli_for_test(&["oy", "modes"]);
-        assert!(matches!(cli.command, Some(Command::Modes)));
-        assert!(!should_passthrough_to_opencode(
-            &["modes".to_string(), "--bogus".to_string()],
-            ErrorKind::UnknownArgument
-        ));
-    }
-
-    #[test]
     fn no_subcommand_launches_opencode() {
         let cli = parse_cli_for_test(&["oy"]);
         assert!(cli.command.is_none(), "expected None for default launch");
+    }
+
+    #[test]
+    fn run_auto_uses_the_single_oy_agent_flag() {
+        let cli = parse_cli_for_test(&["oy", "run", "--auto", "finish the task"]);
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected run command");
+        };
+        assert!(args.auto);
+    }
+
+    #[test]
+    fn retired_modes_command_does_not_pass_through() {
+        let argv = vec!["modes".to_string()];
+        assert!(!should_passthrough_to_opencode(
+            &argv,
+            ErrorKind::InvalidSubcommand
+        ));
     }
 
     #[test]
@@ -482,19 +473,6 @@ mod audit_tests {
             &argv,
             ErrorKind::UnknownArgument
         ));
-    }
-
-    #[test]
-    fn passthrough_keeps_opencode_agent_flags_and_consumes_oy_mode() {
-        let (args, mode) = opencode_passthrough_args(vec![
-            "--mode".to_string(),
-            "plan".to_string(),
-            "--agent".to_string(),
-            "build".to_string(),
-        ]);
-
-        assert_eq!(mode, crate::config::SafetyMode::Plan);
-        assert_eq!(args, vec!["--agent", "build"]);
     }
 
     #[test]

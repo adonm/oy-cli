@@ -2,17 +2,8 @@
 
 use clap::Args;
 
-use crate::config;
-
 #[derive(Debug, Args, Clone)]
-pub(super) struct SharedModeArgs {
-    #[arg(
-        long,
-        alias = "agent",
-        default_value = "default",
-        help = "Safety mode (default: balanced): plan, ask, edit, or auto"
-    )]
-    pub(super) mode: config::SafetyMode,
+pub(super) struct SharedSessionArgs {
     #[arg(
         long = "continue-session",
         conflicts_with = "resume",
@@ -33,7 +24,13 @@ pub(super) struct SharedModeArgs {
 #[derive(Debug, Args, Clone)]
 pub(super) struct RunArgs {
     #[command(flatten)]
-    pub(super) shared: SharedModeArgs,
+    pub(super) shared: SharedSessionArgs,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Let OpenCode approve permission requests once; explicit denies still apply"
+    )]
+    pub(super) auto: bool,
     #[arg(
         value_name = "PROMPT",
         help = "Task prompt; omitted means read stdin or launch opencode in a TTY"
@@ -44,5 +41,5 @@ pub(super) struct RunArgs {
 #[derive(Debug, Args, Clone)]
 pub(super) struct ChatArgs {
     #[command(flatten)]
-    pub(super) shared: SharedModeArgs,
+    pub(super) shared: SharedSessionArgs,
 }

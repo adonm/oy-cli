@@ -2,17 +2,8 @@
 
 use clap::Args;
 
-use crate::config::SafetyMode;
-
 #[derive(Debug, Args, Clone)]
 pub(super) struct EnhanceArgs {
-    #[arg(
-        long,
-        alias = "agent",
-        default_value = "default",
-        help = "Remediation mode mapped to the host where possible"
-    )]
-    pub(super) mode: SafetyMode,
     #[arg(
         long,
         default_value_t = false,

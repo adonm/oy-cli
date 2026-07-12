@@ -1,6 +1,6 @@
 # Contributing
 
-Keep `oy` focused. Its product is the audit → review → remediate loop for opencode; setup and launcher compatibility support that loop. opencode owns AI behavior, while `oy` owns deterministic collection/report boundaries.
+Keep `oy` focused. Its product is one concise autonomous OpenCode agent plus the audit → review → remediate loop. OpenCode owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Setup, MCP, and launcher/API compatibility are transitional surfaces.
 
 ## Quick Start
 
@@ -58,9 +58,11 @@ python3 scripts/eval_runner.py run --dry-run
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
-- Keep the three generated skills canonical for audit, review, and enhance protocols; commands and agents should remain thin adapters.
-- Put immutable workflow-input, ordering, limit, and render enforcement in typed Rust/MCP boundaries rather than relying on prompt text.
-- Keep MCP tools deterministic and narrow.
+- Keep the three generated skills canonical for audit, review, and enhance protocols. They execute under the user's OpenCode permissions through the single `oy` agent.
+- Keep `oy` concise but compare it with tagged OpenCode 2 Build behavior: inspect first, preserve unrelated changes, implement end-to-end, verify, and avoid destructive or unrequested Git operations.
+- Do not add oy-owned plan/edit/auto permission modes. OpenCode policy is authoritative.
+- Put immutable workflow-input, ordering, limit, and render enforcement in typed Rust boundaries rather than relying on prompt text.
+- Keep MCP tools deterministic and narrow while they remain; new core behavior should be reusable from the CLI and a future file-artifact workflow.
 - Describe model-backed outcomes as nondeterministic even when their inputs and report rendering are deterministic.
 - Do not duplicate built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
 - Validate workspace paths near every read/write boundary.
@@ -71,10 +73,10 @@ python3 scripts/eval_runner.py run --dry-run
 
 | Path | Role |
 |---|---|
-| `src/opencode.rs` | Setup, generated config/agents/skills, launch wrappers |
+| `src/opencode.rs` | Transitional setup/config plus the single agent, skills, and launch wrappers |
 | `src/opencode/host.rs`, `src/opencode/api.rs` | Root-bound OpenCode contract and managed-API adapters |
 | `src/workflow.rs` | Typed inherited workflow context and resolved scope |
-| `src/mcp.rs` | Minimal stdio MCP JSON-RPC server |
+| `src/mcp.rs` | Transitional stdio MCP adapter and current deterministic workflow entrypoint |
 | `src/audit/input.rs` | Repo file collection, manifest, security index, chunking, git diff input |
 | `src/audit/findings.rs` | Finding extraction and structured findings blocks |
 | `src/audit/sarif.rs` | SARIF rendering |
@@ -97,4 +99,4 @@ See also:
 
 ## Release Notes
 
-Update `CHANGELOG.md` for user-visible behavior changes. Keep historical release notes factual, but current docs should describe the MCP integration architecture.
+Update `CHANGELOG.md` for user-visible behavior changes. Keep historical release notes factual; current docs should distinguish the supported MCP implementation from the CLI-first target architecture.

@@ -16,11 +16,11 @@ The curl installer requires a Unix-like POSIX shell. Rust 1.96 is the minimum so
 
 ## OpenCode host compatibility
 
-oy 0.12.0 integrates with OpenCode 2 through its noninteractive runner, managed model API, native JSON/Markdown configuration, and local stdio MCP. It defaults to the `opencode2` executable; `OY_OPENCODE` can override the executable but not the required contract.
+oy 0.13.0 integrates with OpenCode 2 through its noninteractive runner, managed model API, native JSON/Markdown configuration, and local stdio MCP. It defaults to the `opencode2` executable; `OY_OPENCODE` can override the executable but not the required contract.
 
 | Host line | Status |
 |---|---|
-| OpenCode beta `0.0.0-next-15323` | Supported pinned beta; installed as `@opencode-ai/cli@0.0.0-next-15323` and exposed as `opencode2`. |
+| OpenCode beta `0.0.0-next-15353` | Supported pinned beta; installed as `@opencode-ai/cli@0.0.0-next-15353` and exposed as `opencode2`. |
 | Other OpenCode beta builds | Unsupported until pinned and exercised by the compatibility smoke. |
 | Tagged OpenCode 2.x | Accepted by the tagged-major contract; test coverage will be added when a tagged release exists. |
 | OpenCode major >2 | Unsupported until its contract is reviewed. |
@@ -29,9 +29,9 @@ oy 0.12.0 integrates with OpenCode 2 through its noninteractive runner, managed 
 
 The installer uses mise's npm backend for the exact pinned beta package. There is not yet an automated pinned cross-version API smoke matrix or provider-backed integration suite; the [roadmap](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) keeps those limits explicit.
 
-Setup writes native `commands`, `mcp.servers`, timeout objects, ordered agent permissions, and three canonical workflow skills. Existing legacy command and MCP entries are migrated automatically. Ambiguous legacy permissions, providers, plugins, skills objects, and related fields fail closed with manual-migration guidance. Global setup honors `OPENCODE_CONFIG_DIR` and selects an existing `opencode.jsonc` before `opencode.json`.
+Setup writes one permission-neutral `oy` agent, native `commands`, `mcp.servers`, timeout objects, and three canonical workflow skills. It removes older generated mode/workflow agents. Existing legacy command and MCP entries are migrated automatically; ambiguous legacy fields fail closed with manual-migration guidance. Global setup honors `OPENCODE_CONFIG_DIR` and selects an existing `opencode.jsonc` before `opencode.json`.
 
-`oy doctor --check` validates the effective selected service version, required agents/commands, connected MCP entry, and model/provider/plugin availability. It does not start or claim an isolated validation server.
+`oy doctor --check` validates the effective selected service version, `oy` agent, commands, skills, connected MCP entry, and model/provider/plugin availability. It deliberately does not validate or prescribe the user's permission policy.
 
 ## Optional evidence helpers
 

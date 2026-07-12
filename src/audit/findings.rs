@@ -1,9 +1,11 @@
 //! Audit finding types, markdown/JSON extraction, and structured-findings
 //! round-trip helpers.
 
+use anyhow::{Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 use super::transparency::{finish_markdown, finish_markdown_owned};
 
@@ -547,6 +549,44 @@ pub(crate) fn normalized_findings_payload(value: &Value, fallback_source: &str) 
     serde_json::to_string_pretty(&findings).ok()
 }
 
+pub(crate) fn normalized_findings_payload_strict(
+    value: &Value,
+    fallback_source: &str,
+) -> Result<String> {
+    let Some(items) = findings_array(value) else {
+        bail!("candidate findings must be a JSON array or an object containing `findings`");
+    };
+    let mut findings = Vec::with_capacity(items.len());
+    let mut ids = HashSet::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        if !item.is_object() {
+            bail!("candidate finding {} must be a JSON object", index + 1);
+        }
+        let Some(mut finding) = finding_from_value(item) else {
+            bail!(
+                "candidate finding {} is invalid or has an empty title",
+                index + 1
+            );
+        };
+        if finding.source == "unknown" && !fallback_source.trim().is_empty() {
+            let supplied_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty());
+            finding.source = normalize_identifier_part(fallback_source);
+            if !supplied_id {
+                finding.id.clear();
+            }
+            let _ = finding.normalize();
+        }
+        if !ids.insert(finding.id.clone()) {
+            bail!("candidate findings contain duplicate id `{}`", finding.id);
+        }
+        findings.push(finding);
+    }
+    serde_json::to_string_pretty(&findings).map_err(Into::into)
+}
+
 pub(crate) fn with_structured_findings_block(report: &str, source: &str) -> String {
     let lines = report.lines().collect::<Vec<_>>();
     if let Some(payload) = structured_findings_payload(report)
@@ -883,5 +923,29 @@ Evidence: src/stale.rs:1
         assert!(normalized.contains("\"id\": \"audit-finding-1\""));
         assert!(normalized.contains("\"source\": \"security-audit\""));
         assert!(normalized.contains("\"status\": \"carried-forward\""));
+    }
+
+    #[test]
+    fn strict_normalization_rejects_invalid_entries() {
+        let payload = serde_json::json!([
+            { "severity": "High", "title": "" },
+            "not an object"
+        ]);
+
+        let error = normalized_findings_payload_strict(&payload, "audit").unwrap_err();
+
+        assert!(error.to_string().contains("empty title"));
+    }
+
+    #[test]
+    fn strict_normalization_rejects_duplicate_ids() {
+        let payload = serde_json::json!([
+            { "id": "audit-duplicate", "severity": "High", "title": "first" },
+            { "id": "audit-duplicate", "severity": "Low", "title": "second" }
+        ]);
+
+        let error = normalized_findings_payload_strict(&payload, "audit").unwrap_err();
+
+        assert!(error.to_string().contains("duplicate id"));
     }
 }

@@ -3,12 +3,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::fs;
-use std::hash::{Hash as _, Hasher as _};
 use std::io::{BufRead as _, Write as _};
-use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use crate::audit::input;
@@ -24,15 +21,13 @@ const HOST_TOOL_OUTPUT_MAX_LINES: usize = 20_000;
 const EXISTING_REPORT_OUTPUT_BUDGET: usize = HOST_TOOL_OUTPUT_MAX_BYTES - 8 * 1024;
 const MAX_TOOL_ERROR_CHARS: usize = 300;
 
-static CLEAN_REPO_INPUT_CACHE: LazyLock<Mutex<HashMap<String, Vec<input::AuditFile>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 static BOUND_WORKFLOW_STATE: LazyLock<Mutex<Option<BoundWorkflowState>>> =
     LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone)]
 struct BoundWorkflowState {
     run_id: String,
-    input_digest: u64,
+    input_digest: String,
     chunk_count: usize,
     next_chunk: usize,
 }
@@ -480,8 +475,6 @@ struct ChunkArgs {
     path: String,
     #[serde(default = "default_model")]
     model: String,
-    #[serde(default = "default_target_tokens")]
-    target_tokens: usize,
     #[serde(default)]
     chunk: Option<usize>,
 }
@@ -491,8 +484,6 @@ struct DiffArgs {
     target: String,
     #[serde(default = "default_model")]
     model: String,
-    #[serde(default = "default_target_tokens")]
-    target_tokens: usize,
     #[serde(default)]
     chunk: Option<usize>,
 }
@@ -538,17 +529,18 @@ fn repo_manifest(args: Value) -> Result<Value> {
             args.model = model;
         }
     }
-    let files = collect_workspace_input_files(&root, &args.path, &args.model)?;
-    if files.is_empty() {
-        bail!("no reviewable text files found");
-    }
-    let manifest = input::build_manifest(&files);
+    let evidence = crate::artifacts::repository(&root, &args.path, &args.model)?;
+    let files = evidence
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.files.iter().cloned())
+        .collect::<Vec<_>>();
     let security_index = args
         .security_index
         .then(|| input::build_security_index(&files, args.security_index_limit));
     Ok(json!({
         "path": args.path,
-        "manifest": manifest,
+        "manifest": evidence.manifest,
         "security_index": security_index,
         "files": file_summaries(&files),
     }))
@@ -568,15 +560,10 @@ fn repo_chunks(args: Value) -> Result<Value> {
         if let Some(model) = &context.model {
             args.model = model.clone();
         }
-        args.target_tokens = DEFAULT_TARGET_TOKENS;
     }
-    let files = collect_workspace_input_files(&root, &args.path, &args.model)?;
-    if files.is_empty() {
-        bail!("no reviewable text files found");
-    }
-    let manifest = input::build_manifest(&files);
-    let chunks = input::chunk_files(files, args.target_tokens.max(1));
-    input::ensure_chunks_fit_prompt(&chunks, args.target_tokens.max(1))?;
+    let evidence = crate::artifacts::repository(&root, &args.path, &args.model)?;
+    let manifest = evidence.manifest;
+    let chunks = evidence.chunks;
     if let Some(context) = &context
         && chunks.len() > context.max_chunks
     {
@@ -604,41 +591,10 @@ fn git_diff_input(args: Value) -> Result<Value> {
         if let Some(model) = &context.model {
             args.model = model.clone();
         }
-        args.target_tokens = DEFAULT_TARGET_TOKENS;
     }
-    validate_target_ref(&args.target)?;
-    let _ = git_output(&root, &["rev-parse", "--show-toplevel"])
-        .context("git_diff_input requires a git workspace")?;
-    let diff = git_output(
-        &root,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--find-renames",
-            "--find-copies",
-            "--unified=80",
-            &args.target,
-            "--",
-        ],
-    )
-    .with_context(|| format!("failed to collect git diff against {}", args.target))?;
-    if diff.trim().is_empty() {
-        bail!("no git diff found against target {}", args.target);
-    }
-    let stats = input::parse_numstat(&git_output(
-        &root,
-        &["diff", "--numstat", &args.target, "--"],
-    )?);
-    let files = input::collect_diff_files(&diff, &args.model);
-    if files.is_empty() {
-        bail!(
-            "no reviewable text diff found against target {}",
-            args.target
-        );
-    }
-    let manifest = input::build_diff_manifest(&args.target, &files, &stats);
-    let chunks = input::chunk_files(files, args.target_tokens.max(1));
-    input::ensure_chunks_fit_prompt(&chunks, args.target_tokens.max(1))?;
+    let evidence = crate::artifacts::diff(&root, &args.target, &args.model)?;
+    let manifest = evidence.manifest;
+    let chunks = evidence.chunks;
     if let Some(context) = &context
         && chunks.len() > context.max_chunks
     {
@@ -665,7 +621,7 @@ fn enforce_bound_chunk_sequence(
     let Some(context) = context else {
         return Ok(());
     };
-    let digest = input_digest(chunks);
+    let digest = crate::artifacts::evidence_digest(chunks);
     let mut state = BOUND_WORKFLOW_STATE
         .lock()
         .map_err(|_| anyhow!("workflow state lock poisoned"))?;
@@ -728,17 +684,6 @@ fn acknowledge_bound_chunk(number: Option<usize>) -> Result<()> {
         current.next_chunk += 1;
     }
     Ok(())
-}
-
-fn input_digest(chunks: &[input::AuditChunk]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for chunk in chunks {
-        for file in &chunk.files {
-            file.path.hash(&mut hasher);
-            file.text.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
 }
 
 fn existing_report(args: Value) -> Result<Value> {
@@ -1059,141 +1004,6 @@ fn workspace_root() -> Result<PathBuf> {
     config::oy_root()
 }
 
-fn collect_workspace_input_files(
-    root: &Path,
-    path: &str,
-    model: &str,
-) -> Result<Vec<input::AuditFile>> {
-    if let Some(key) = clean_repo_cache_key(root, path, model) {
-        if let Some(files) = CLEAN_REPO_INPUT_CACHE.lock().unwrap().get(&key).cloned() {
-            return Ok(files);
-        }
-        let files = collect_workspace_input_files_uncached(root, path, model)?;
-        CLEAN_REPO_INPUT_CACHE
-            .lock()
-            .unwrap()
-            .insert(key, files.clone());
-        return Ok(files);
-    }
-    collect_workspace_input_files_uncached(root, path, model)
-}
-
-fn collect_workspace_input_files_uncached(
-    root: &Path,
-    path: &str,
-    model: &str,
-) -> Result<Vec<input::AuditFile>> {
-    let resolved = resolve_workspace_path(root, path)?;
-    if resolved.is_dir() {
-        let prefix = resolved
-            .strip_prefix(
-                root.canonicalize()
-                    .context("failed to resolve workspace root")?,
-            )
-            .context("path escapes workspace")?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let prefix = prefix.trim_matches('/').to_string();
-        let prefix_with_sep = format!("{prefix}/");
-        return Ok(input::collect_files(root, None, model)?
-            .into_iter()
-            .filter(|file| {
-                prefix.is_empty()
-                    || file.path == prefix
-                    || file.path.starts_with(prefix_with_sep.as_str())
-            })
-            .collect());
-    }
-    if !resolved.is_file() {
-        bail!("path is not a file or directory: {path}");
-    }
-    Ok(input::collect_file(root, &resolved, model)?
-        .into_iter()
-        .collect())
-}
-
-fn clean_repo_cache_key(root: &Path, path: &str, model: &str) -> Option<String> {
-    let head = git_output(root, &["rev-parse", "HEAD"]).ok()?;
-    let status = git_output(
-        root,
-        &["status", "--porcelain=v1", "--untracked-files=normal"],
-    )
-    .ok()?;
-    if !status.trim().is_empty() {
-        return None;
-    }
-    Some(format!(
-        "{}\0{}\0{}\0{}",
-        root.canonicalize().ok()?.display(),
-        head.trim(),
-        path,
-        model
-    ))
-}
-
-fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
-    let root = root
-        .canonicalize()
-        .context("failed to resolve workspace root")?;
-    let raw = Path::new(path);
-    if raw
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        bail!("path must stay inside workspace: {path}");
-    }
-    if !raw.is_absolute()
-        && raw
-            .components()
-            .any(|component| matches!(component, Component::Prefix(_)))
-    {
-        bail!("path must stay inside workspace: {path}");
-    }
-
-    let candidate = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        root.join(raw)
-    };
-    let resolved = candidate
-        .canonicalize()
-        .with_context(|| format!("path does not exist: {path}"))?;
-    if !resolved.starts_with(&root) {
-        bail!("path escapes workspace: {path}");
-    }
-    Ok(resolved)
-}
-
-fn validate_target_ref(target: &str) -> Result<()> {
-    if target.trim().is_empty() {
-        bail!("target cannot be empty");
-    }
-    if target.starts_with('-') {
-        bail!("target must be a branch/commit/ref, not an option-like value");
-    }
-    if target.contains('\0') || target.contains('\n') || target.contains('\r') {
-        bail!("target contains invalid control characters");
-    }
-    Ok(())
-}
-
-fn git_output(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim().lines().next().unwrap_or("unknown git error")
-        );
-    }
-    String::from_utf8(output.stdout).context("git output was not UTF-8")
-}
-
 fn parse_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
     serde_json::from_value(value).context("invalid tool arguments")
 }
@@ -1220,10 +1030,6 @@ fn default_true() -> bool {
 
 fn default_security_index_limit() -> usize {
     120
-}
-
-fn default_target_tokens() -> usize {
-    DEFAULT_TARGET_TOKENS
 }
 
 fn default_markdown() -> String {
@@ -1437,10 +1243,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("src");
         std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("lib.rs"), "fn lib() {}\n").unwrap();
 
-        let resolved = resolve_workspace_path(dir.path(), nested.to_str().unwrap()).unwrap();
+        let evidence =
+            crate::artifacts::repository(dir.path(), nested.to_str().unwrap(), "cl100k_base")
+                .unwrap();
 
-        assert_eq!(resolved, nested.canonicalize().unwrap());
+        assert_eq!(evidence.chunks[0].files[0].path, "src/lib.rs");
     }
 
     #[test]
@@ -1448,7 +1257,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
 
-        let err = resolve_workspace_path(dir.path(), outside.path().to_str().unwrap()).unwrap_err();
+        let err = crate::artifacts::repository(
+            dir.path(),
+            outside.path().to_str().unwrap(),
+            "cl100k_base",
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("path escapes workspace"));
     }
@@ -1460,7 +1274,9 @@ mod tests {
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(nested.join("lib.rs"), "fn main() {}\n").unwrap();
 
-        let files = collect_workspace_input_files(dir.path(), "src/lib.rs", "cl100k_base").unwrap();
+        let evidence =
+            crate::artifacts::repository(dir.path(), "src/lib.rs", "cl100k_base").unwrap();
+        let files = &evidence.chunks[0].files;
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "src/lib.rs");
@@ -1474,7 +1290,8 @@ mod tests {
         std::fs::write(nested.join("lib.rs"), "fn lib() {}\n").unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
 
-        let files = collect_workspace_input_files(dir.path(), "src", "cl100k_base").unwrap();
+        let evidence = crate::artifacts::repository(dir.path(), "src", "cl100k_base").unwrap();
+        let files = &evidence.chunks[0].files;
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "src/lib.rs");

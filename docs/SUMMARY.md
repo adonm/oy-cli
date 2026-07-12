@@ -19,3 +19,4 @@
 # Contributors
 
 - [LLM evaluation](evaluation.md)
+- [Publishing the OpenCode npm package](npm-publishing.md)

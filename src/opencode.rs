@@ -11,7 +11,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::mcp::DEFAULT_TARGET_TOKENS;
 use crate::{audit, config, ui};
 
 pub(crate) use api::RuntimeHealth;
@@ -24,28 +23,10 @@ struct GeneratedAsset {
     body: &'static str,
 }
 
-/// Bytes-per-token assumed by `crate::mcp::count_tokens` (`text.len() / 4`).
-/// Used to size `tool_output.max_bytes` so a full default chunk fits in one
-/// opencode tool result without truncation.
-const CHARS_PER_TOKEN: usize = 4;
-
-/// `tool_output.max_bytes` written by `oy setup`. Sized to fit one default
-/// oy chunk (`DEFAULT_TARGET_TOKENS * CHARS_PER_TOKEN`) plus headroom for the
-/// `## path` headers `chunk_text` adds and JSON framing. Rounded up to 256 KiB.
+/// Exact transitional setup values retained only so setup/removal can identify
+/// and remove old oy-owned output-budget entries without touching user values.
 const TOOL_OUTPUT_MAX_BYTES: usize = 262_144;
-
-/// `tool_output.max_lines` written by `oy setup`. opencode's default (2000)
-/// would trip before `TOOL_OUTPUT_MAX_BYTES` on typical ~30-40 char code lines,
-/// so raise it to match the byte budget with comfortable headroom.
 const TOOL_OUTPUT_MAX_LINES: usize = 20_000;
-
-// Compile-time guard for the byte/token coupling. If you raise
-// DEFAULT_TARGET_TOKENS, raise TOOL_OUTPUT_MAX_BYTES too (or document that
-// chunks above this size will be truncated to a preview by opencode).
-const _: () = assert!(
-    TOOL_OUTPUT_MAX_BYTES as u128 >= DEFAULT_TARGET_TOKENS as u128 * CHARS_PER_TOKEN as u128,
-    "TOOL_OUTPUT_MAX_BYTES must cover at least one default-sized chunk"
-);
 
 pub(crate) fn setup_command(workspace: bool, dry_run: bool, remove: bool) -> Result<i32> {
     let scope = SetupScope::from_workspace_flag(workspace);
@@ -126,6 +107,7 @@ fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32>
     for (path, body) in &files {
         validate_generated_destination(path, body)?;
     }
+    let retired = retired_generated_files(&dir)?;
     let config_path = config_path_in(&dir);
     let config = config_body(&config_path)?;
     let mut mutations = files
@@ -139,6 +121,11 @@ fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32>
         path: &config_path,
         bytes: config.as_bytes(),
     });
+    mutations.extend(
+        retired
+            .iter()
+            .map(|path| crate::config::FileMutation::Delete { path }),
+    );
     crate::config::apply_file_batch_in(&dir, &mutations)?;
     if let Ok(root) = config::oy_root() {
         let host = OpenCodeHost::selected_in(&root);
@@ -153,7 +140,7 @@ fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32>
             scope.label(),
             dir.display()
         ));
-        ui::line("Restart opencode for the new MCP server, agents, skills, and commands to load.");
+        ui::line("Restart opencode for the updated oy agent, skills, and commands to load.");
     }
     Ok(0)
 }
@@ -179,11 +166,15 @@ fn remove_opencode(scope: SetupScope, dry_run: bool) -> Result<i32> {
             Err(error) => Some(Err(error.into())),
         })
         .collect::<Result<Vec<_>>>()?;
+    let retired = retired_generated_files(&dir)?;
     let config_path = config_path_in(&dir);
     let config = remove_owned_config(&config_path)?;
     if dry_run {
         ui::section(format!("{} oy integration removal dry run", scope.label()).as_str());
         for (path, _) in &files {
+            ui::kv("delete", path.display());
+        }
+        for path in &retired {
             ui::kv("delete", path.display());
         }
         ui::kv("update", config_path.display());
@@ -193,6 +184,11 @@ fn remove_opencode(scope: SetupScope, dry_run: bool) -> Result<i32> {
         .iter()
         .map(|(path, _)| crate::config::FileMutation::Delete { path })
         .collect::<Vec<_>>();
+    mutations.extend(
+        retired
+            .iter()
+            .map(|path| crate::config::FileMutation::Delete { path }),
+    );
     if config_path.exists() {
         mutations.push(crate::config::FileMutation::Write {
             path: &config_path,
@@ -309,7 +305,7 @@ fn remove_owned_config(path: &Path) -> Result<String> {
     if let Some(commands) = object.get_mut("commands").and_then(Value::as_object_mut) {
         for (name, expected) in generated_commands() {
             if let Some(current) = commands.get(name) {
-                if current != &expected {
+                if current != &expected && !is_retired_owned_command(name, current) {
                     bail!("refusing to remove modified owned command `{name}`");
                 }
                 commands.remove(name);
@@ -370,6 +366,9 @@ fn preview_setup(scope: SetupScope, dir: &Path) -> Result<i32> {
     for (path, body) in generated_files(dir) {
         ui::kv(setup_action(&path, body)?, path.display());
     }
+    for path in retired_generated_files(dir)? {
+        ui::kv("delete", path.display());
+    }
     let config_path = config_path_in(dir);
     let config_body = config_body(&config_path)?;
     ui::kv(
@@ -383,6 +382,19 @@ fn generated_files(dir: &Path) -> Vec<(PathBuf, &'static str)> {
     GENERATED_ASSETS
         .iter()
         .map(|asset| (dir.join(asset.path), asset.body))
+        .collect()
+}
+
+fn retired_generated_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    RETIRED_GENERATED_ASSETS
+        .iter()
+        .map(|relative| dir.join(relative))
+        .filter(|path| path.exists())
+        .filter_map(|path| match fs::read_to_string(&path) {
+            Ok(current) if current.contains(GENERATED_MARKER) => Some(Ok(path)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error.into())),
+        })
         .collect()
 }
 
@@ -431,20 +443,16 @@ fn integration_complete(dir: &Path) -> bool {
         })
 }
 
-pub(crate) fn open_command(
-    args: Vec<String>,
-    mode: config::SafetyMode,
-    dry_run: bool,
-) -> Result<i32> {
+pub(crate) fn open_command(args: Vec<String>, dry_run: bool) -> Result<i32> {
     let root = config::oy_root()?;
     let host = if dry_run {
         OpenCodeHost::selected_for_preview()
     } else {
         OpenCodeHost::selected_in(&root)
     };
-    let opencode_args = open_args(args, mode, host.contract())?;
+    let opencode_args = open_args(args, host.contract())?;
     if dry_run {
-        explain_opencode_launch(&host, mode, &opencode_args);
+        explain_opencode_launch(&host, &opencode_args);
         return Ok(0);
     }
     require_supported_host(&host)?;
@@ -452,20 +460,10 @@ pub(crate) fn open_command(
     run_opencode(&host, &root, opencode_args, None)
 }
 
-fn open_args(
-    args: Vec<String>,
-    mode: config::SafetyMode,
-    contract: OpenCodeContract,
-) -> Result<Vec<String>> {
+fn open_args(args: Vec<String>, contract: OpenCodeContract) -> Result<Vec<String>> {
     if !contract.uses_v2_cli() {
         bail!(
             "OpenCode 2 is required; install the pinned beta or set {OPENCODE_ENV} to a supported v2 executable"
-        );
-    }
-    if mode != config::SafetyMode::Default {
-        bail!(
-            "OpenCode 2 does not expose a per-launch TUI agent flag; launch in default mode and select `{}` in the TUI",
-            agent_for_mode(mode)
         );
     }
     Ok(args)
@@ -475,24 +473,20 @@ pub(crate) fn run_task_command(
     task: Vec<String>,
     continue_session: bool,
     resume: String,
-    mode: config::SafetyMode,
+    auto: bool,
 ) -> Result<i32> {
     let root = config::oy_root()?;
     let host = OpenCodeHost::selected_in(&root);
     require_supported_host(&host)?;
     validate_opencode_integration()?;
-    api::OpenCodeApi::new(&host).ensure_agent(&root, agent_for_mode(mode))?;
+    api::OpenCodeApi::new(&host).ensure_agent(&root, "oy")?;
     let prompt = collect_prompt(task)?;
     if prompt.trim().is_empty() {
-        return chat_command_with_host(&host, continue_session, resume, mode);
+        return chat_command_with_host(&host, continue_session, resume);
     }
     let mut args = vec!["run".to_string()];
     push_session_args(&mut args, continue_session, &resume);
-    push_run_agent_args(
-        &mut args,
-        agent_for_mode(mode),
-        mode == config::SafetyMode::AutoAll,
-    );
+    push_run_agent_args(&mut args, "oy", auto);
     if let Some(model) = selected_model() {
         args.extend(["--model".to_string(), model]);
     }
@@ -503,29 +497,18 @@ pub(crate) fn run_task_command(
     run_opencode(&host, &root, args, None)
 }
 
-pub(crate) fn chat_command(
-    continue_session: bool,
-    resume: String,
-    mode: config::SafetyMode,
-) -> Result<i32> {
+pub(crate) fn chat_command(continue_session: bool, resume: String) -> Result<i32> {
     let root = config::oy_root()?;
     let host = OpenCodeHost::selected_in(&root);
     require_supported_host(&host)?;
-    chat_command_with_host(&host, continue_session, resume, mode)
+    chat_command_with_host(&host, continue_session, resume)
 }
 
 fn chat_command_with_host(
     host: &OpenCodeHost,
     continue_session: bool,
     resume: String,
-    mode: config::SafetyMode,
 ) -> Result<i32> {
-    if mode != config::SafetyMode::Default {
-        bail!(
-            "OpenCode 2 TUI launch does not expose an agent flag; select `{}` in the TUI",
-            agent_for_mode(mode)
-        );
-    }
     validate_opencode_integration()?;
     let mut args = Vec::new();
     push_session_args(&mut args, continue_session, &resume);
@@ -579,7 +562,7 @@ pub(crate) fn audit_workflow_command(
     validate_opencode_integration()?;
     config::resolve_workspace_output_path(&root, &out)?;
     let api = api::OpenCodeApi::new(&host);
-    api.ensure_workflow(&root, "oy-auditor", "oy-audit")?;
+    api.ensure_workflow(&root, "oy-audit")?;
     let model = match selected_model() {
         Some(model) => Some(model),
         None => Some(api.default_model(&root)?),
@@ -597,14 +580,14 @@ pub(crate) fn audit_workflow_command(
         max_chunks,
         model,
         session_id: None,
-        mode: None,
+        legacy_mode: None,
         output_before: crate::workflow::output_digest(&root, &out)?,
     };
     let message = format!(
         "Load the `oy-audit` skill and execute it locally. Bound workflow request: {}",
         context.encode()?
     );
-    run_agent_workflow(&host, &root, "oy-auditor", message, false, Some(&context))
+    run_agent_workflow(&host, &root, "oy", message, &context)
 }
 
 pub(crate) fn review_workflow_command(
@@ -622,7 +605,7 @@ pub(crate) fn review_workflow_command(
     validate_opencode_integration()?;
     config::resolve_workspace_output_path(&root, &out)?;
     let api = api::OpenCodeApi::new(&host);
-    api.ensure_workflow(&root, "oy-reviewer", "oy-review")?;
+    api.ensure_workflow(&root, "oy-review")?;
     let model = match selected_model() {
         Some(model) => Some(model),
         None => Some(api.default_model(&root)?),
@@ -644,14 +627,14 @@ pub(crate) fn review_workflow_command(
         max_chunks,
         model,
         session_id: None,
-        mode: None,
+        legacy_mode: None,
         output_before: crate::workflow::output_digest(&root, &out)?,
     };
     let message = format!(
         "Load the `oy-review` skill and execute it locally. Bound workflow request: {}",
         context.encode()?
     );
-    run_agent_workflow(&host, &root, "oy-reviewer", message, false, Some(&context))
+    run_agent_workflow(&host, &root, "oy", message, &context)
 }
 
 pub(crate) fn enhance_workflow_command(
@@ -659,7 +642,6 @@ pub(crate) fn enhance_workflow_command(
     focus: Vec<String>,
     audit_max_chunks: usize,
     review_max_chunks: usize,
-    mode: config::SafetyMode,
     interactive: bool,
 ) -> Result<i32> {
     if audit_max_chunks == 0 || review_max_chunks == 0 {
@@ -684,25 +666,20 @@ pub(crate) fn enhance_workflow_command(
         scope,
         focus,
         output: PathBuf::from("REVIEW.md"),
-        format: mode.name().to_string(),
+        format: "markdown".to_string(),
         max_chunks: audit_max_chunks.max(review_max_chunks),
         model: selected_model(),
         session_id: None,
-        mode: Some(mode),
+        legacy_mode: None,
         output_before: None,
     };
     let message = format!(
         "Load the `oy-enhance` skill and execute it locally. Bound workflow request: {}",
         context.encode()?
     );
-    let agent = match mode {
-        config::SafetyMode::Default => "oy-enhancer",
-        config::SafetyMode::Plan => "oy-plan",
-        config::SafetyMode::AutoEdits => "oy-edit",
-        config::SafetyMode::AutoAll => "oy-auto",
-    };
+    let agent = "oy";
     let api = api::OpenCodeApi::new(&host);
-    api.ensure_workflow(&root, agent, "oy-enhance")?;
+    api.ensure_workflow(&root, "oy-enhance")?;
     let model = match selected_model() {
         Some(model) => Some(model),
         None => Some(api.default_model(&root)?),
@@ -725,14 +702,7 @@ pub(crate) fn enhance_workflow_command(
         args.extend(["--prompt".to_string(), message]);
         return run_opencode(&host, &root, args, Some(&context));
     }
-    run_agent_workflow(
-        &host,
-        &root,
-        agent,
-        message,
-        mode == config::SafetyMode::AutoAll,
-        Some(&context),
-    )
+    run_agent_workflow(&host, &root, agent, message, &context)
 }
 
 pub(crate) fn recover_workflow_command() -> Result<i32> {
@@ -748,21 +718,12 @@ pub(crate) fn recover_workflow_command() -> Result<i32> {
         .ok_or_else(|| anyhow::anyhow!("retained workflow session was not found"))?;
     let mut context = retained;
     context.session_id = Some(session);
-    let agent = match context.kind {
-        crate::workflow::WorkflowKind::Audit => "oy-auditor",
-        crate::workflow::WorkflowKind::Review => "oy-reviewer",
-        crate::workflow::WorkflowKind::Enhance => match context.mode.unwrap_or_default() {
-            config::SafetyMode::Default => "oy-enhancer",
-            config::SafetyMode::Plan => "oy-plan",
-            config::SafetyMode::AutoEdits => "oy-edit",
-            config::SafetyMode::AutoAll => "oy-auto",
-        },
-    };
+    let agent = "oy";
     let message = format!(
         "Resume the bound oy workflow from its retained context. Call `oy_workflow_status` first. Bound workflow request: {}",
         context.encode()?
     );
-    run_agent_workflow(&host, &root, agent, message, false, Some(&context))
+    run_agent_workflow(&host, &root, agent, message, &context)
 }
 
 fn require_supported_host(host: &OpenCodeHost) -> Result<()> {
@@ -778,70 +739,57 @@ fn run_agent_workflow(
     root: &Path,
     agent: &str,
     message: String,
-    auto: bool,
-    context: Option<&crate::workflow::WorkflowContext>,
+    context: &crate::workflow::WorkflowContext,
 ) -> Result<i32> {
-    if let Some(context) = context {
-        let api = api::OpenCodeApi::new(host);
-        let mut bound = context.clone();
-        let session = match &bound.session_id {
-            Some(session) => session.clone(),
-            None => api.create_session(root, agent, bound.model.as_deref())?,
-        };
-        bound.session_id = Some(session.clone());
-        api.rename_session(root, &session, &format!("oy:{}", bound.run_id))?;
-        let lease = crate::workflow::WorkflowLease::acquire(&bound)?;
-        let prefix = message
-            .split_once("Bound workflow request:")
-            .map_or(message.as_str(), |(prefix, _)| prefix);
-        let prompt = format!("{prefix}Bound workflow request: {}", bound.encode()?);
-        let result = match api.run_prompt(root, &session, &prompt) {
-            Ok(result) => result,
-            Err(error) => {
-                ui::err_line(format_args!(
-                    "workflow {} interrupted; session {} and recovery context retained at {}",
-                    bound.run_id,
-                    session,
-                    lease.path().display()
-                ));
-                return Err(error);
-            }
-        };
-        let output_ok = bound.kind == crate::workflow::WorkflowKind::Enhance
-            || crate::workflow::output_digest(root, &bound.output)? != bound.output_before;
-        if !output_ok {
+    let api = api::OpenCodeApi::new(host);
+    let mut bound = context.clone();
+    let session = match &bound.session_id {
+        Some(session) => session.clone(),
+        None => api.create_session(root, agent, bound.model.as_deref())?,
+    };
+    bound.session_id = Some(session.clone());
+    api.rename_session(root, &session, &format!("oy:{}", bound.run_id))?;
+    let lease = crate::workflow::WorkflowLease::acquire(&bound)?;
+    let prefix = message
+        .split_once("Bound workflow request:")
+        .map_or(message.as_str(), |(prefix, _)| prefix);
+    let prompt = format!("{prefix}Bound workflow request: {}", bound.encode()?);
+    let result = match api.run_prompt(root, &session, &prompt) {
+        Ok(result) => result,
+        Err(error) => {
             ui::err_line(format_args!(
-                "workflow {} ended without writing {}; recovery context retained at {}",
+                "workflow {} interrupted; session {} and recovery context retained at {}",
                 bound.run_id,
-                bound.output.display(),
+                session,
                 lease.path().display()
             ));
-            return Ok(1);
+            return Err(error);
         }
-        if ui::is_json() {
-            ui::line(serde_json::to_string_pretty(&json!({
-                "run_id": bound.run_id,
-                "session_id": result.session_id,
-                "admitted": result.admitted,
-                "assistant": result.assistant,
-                "text": result.text,
-            }))?);
-        } else if !result.text.trim().is_empty() {
-            ui::line(result.text);
-        }
-        lease.complete();
-        return Ok(0);
-    }
-    let mut args = vec!["run".to_string()];
-    push_run_agent_args(&mut args, agent, auto);
-    if let Some(model) = selected_model() {
-        args.extend(["--model".to_string(), model]);
+    };
+    let output_ok = bound.kind == crate::workflow::WorkflowKind::Enhance
+        || crate::workflow::output_digest(root, &bound.output)? != bound.output_before;
+    if !output_ok {
+        ui::err_line(format_args!(
+            "workflow {} ended without writing {}; recovery context retained at {}",
+            bound.run_id,
+            bound.output.display(),
+            lease.path().display()
+        ));
+        return Ok(1);
     }
     if ui::is_json() {
-        args.extend(["--format".to_string(), "json".to_string()]);
+        ui::line(serde_json::to_string_pretty(&json!({
+            "run_id": bound.run_id,
+            "session_id": result.session_id,
+            "admitted": result.admitted,
+            "assistant": result.assistant,
+            "text": result.text,
+        }))?);
+    } else if !result.text.trim().is_empty() {
+        ui::line(result.text);
     }
-    args.push(message);
-    run_opencode(host, root, args, None)
+    lease.complete();
+    Ok(0)
 }
 
 fn selected_model() -> Option<String> {
@@ -914,12 +862,11 @@ fn run_opencode(
     Ok(code)
 }
 
-fn explain_opencode_launch(host: &OpenCodeHost, mode: config::SafetyMode, args: &[String]) {
+fn explain_opencode_launch(host: &OpenCodeHost, args: &[String]) {
     ui::section("opencode launch");
     ui::kv("host", host.executable().display());
     ui::kv("contract", host.contract().label());
-    ui::kv("mode", mode.name());
-    ui::kv("agent", "select in OpenCode 2 TUI");
+    ui::kv("agent", "select `oy` in the OpenCode 2 TUI");
     ui::kv("command", shell_command(&host.executable_display(), args));
 }
 
@@ -954,15 +901,6 @@ fn collect_prompt(parts: Vec<String>) -> Result<String> {
     Ok(input.trim().to_string())
 }
 
-fn agent_for_mode(mode: config::SafetyMode) -> &'static str {
-    match mode {
-        config::SafetyMode::Default => "oy",
-        config::SafetyMode::Plan => "oy-plan",
-        config::SafetyMode::AutoEdits => "oy-edit",
-        config::SafetyMode::AutoAll => "oy-auto",
-    }
-}
-
 fn config_body(path: &Path) -> Result<String> {
     let mut root = if path.exists() {
         let text = fs::read_to_string(path)
@@ -980,9 +918,8 @@ fn config_body(path: &Path) -> Result<String> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("{} must contain a JSON object", path.display()))?;
     migrate_legacy_config(object, path)?;
-    merge_mcp(object);
+    remove_transitional_owned_config(object);
     merge_commands(object);
-    merge_tool_output(object);
     format_json(&root)
 }
 
@@ -1133,26 +1070,6 @@ fn migrate_legacy_mcp_server(mut server: Value) -> Result<Value> {
     Ok(server)
 }
 
-fn merge_mcp(object: &mut Map<String, Value>) {
-    let mcp = object
-        .entry("mcp")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !mcp.is_object() {
-        *mcp = Value::Object(Map::new());
-    }
-    let mcp = mcp.as_object_mut().unwrap();
-    let servers = mcp
-        .entry("servers")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !servers.is_object() {
-        *servers = Value::Object(Map::new());
-    }
-    servers
-        .as_object_mut()
-        .unwrap()
-        .insert("oy".to_string(), generated_mcp_server());
-}
-
 fn generated_mcp_server() -> Value {
     let executable = std::env::current_exe()
         .ok()
@@ -1166,6 +1083,35 @@ fn generated_mcp_server() -> Value {
         "disabled": false,
         "timeout": { "catalog": 300000, "execution": 300000 }
     })
+}
+
+fn remove_transitional_owned_config(object: &mut Map<String, Value>) {
+    if let Some(mcp) = object.get_mut("mcp").and_then(Value::as_object_mut) {
+        if let Some(servers) = mcp.get_mut("servers").and_then(Value::as_object_mut) {
+            if servers.get("oy") == Some(&generated_mcp_server()) {
+                servers.remove("oy");
+            }
+            if servers.is_empty() {
+                mcp.remove("servers");
+            }
+        }
+        if mcp.is_empty() {
+            object.remove("mcp");
+        }
+    }
+    if let Some(output) = object.get_mut("tool_output").and_then(Value::as_object_mut) {
+        for (key, expected) in [
+            ("max_bytes", json!(TOOL_OUTPUT_MAX_BYTES)),
+            ("max_lines", json!(TOOL_OUTPUT_MAX_LINES)),
+        ] {
+            if output.get(key) == Some(&expected) {
+                output.remove(key);
+            }
+        }
+        if output.is_empty() {
+            object.remove("tool_output");
+        }
+    }
 }
 
 fn merge_commands(object: &mut Map<String, Value>) {
@@ -1186,16 +1132,16 @@ fn generated_commands() -> [(&'static str, Value); 3] {
         (
             "oy-audit",
             json!({
-                "description": "Run a deterministic-input, no-generic-tools security audit.",
-                "agent": "oy-auditor",
+                "description": "Run a deterministic-evidence security audit.",
+                "agent": "oy",
                 "template": "Load the `oy-audit` skill and execute it locally.\n\n$ARGUMENTS"
             }),
         ),
         (
             "oy-review",
             json!({
-                "description": "Run a deterministic-input, no-generic-tools code-quality review.",
-                "agent": "oy-reviewer",
+                "description": "Run a deterministic-evidence code-quality review.",
+                "agent": "oy",
                 "template": "Load the `oy-review` skill and execute it locally.\n\n$ARGUMENTS"
             }),
         ),
@@ -1203,29 +1149,38 @@ fn generated_commands() -> [(&'static str, Value); 3] {
             "oy-enhance",
             json!({
                 "description": "Fix findings from ISSUES.md or REVIEW.md one at a time.",
-                "agent": "oy-enhancer",
+                "agent": "oy",
                 "template": "Load the `oy-enhance` skill and execute it locally.\n\n$ARGUMENTS"
             }),
         ),
     ]
 }
 
-/// Writes `tool_output.max_bytes` / `max_lines` so a full default oy chunk
-/// (DEFAULT_TARGET_TOKENS at ~4 chars/token) fits in one opencode tool result
-/// without being truncated to a preview. opencode's schema only exposes this
-/// knob at the config root, so the bump applies to all agents in this scope,
-/// not just oy's. See `OY_AUDITOR_AGENT` / `OY_REVIEWER_AGENT` for the
-/// coupling with `target_tokens`.
-fn merge_tool_output(object: &mut Map<String, Value>) {
-    let tool_output = object
-        .entry("tool_output")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !tool_output.is_object() {
-        *tool_output = Value::Object(Map::new());
+fn is_retired_owned_command(name: &str, current: &Value) -> bool {
+    let Some(agent) = (match name {
+        "oy-audit" => Some("oy-auditor"),
+        "oy-review" => Some("oy-reviewer"),
+        "oy-enhance" => Some("oy-enhancer"),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let Some((_, mut expected)) = generated_commands()
+        .into_iter()
+        .find(|(command, _)| *command == name)
+    else {
+        return false;
+    };
+    expected["agent"] = json!(agent);
+    if name == "oy-audit" {
+        expected["description"] =
+            json!("Run a deterministic-input, no-generic-tools security audit.");
     }
-    let tool_output = tool_output.as_object_mut().unwrap();
-    tool_output.insert("max_bytes".to_string(), json!(TOOL_OUTPUT_MAX_BYTES));
-    tool_output.insert("max_lines".to_string(), json!(TOOL_OUTPUT_MAX_LINES));
+    if name == "oy-review" {
+        expected["description"] =
+            json!("Run a deterministic-input, no-generic-tools code-quality review.");
+    }
+    current == &expected
 }
 
 fn config_has_all_oy_entries(path: &Path) -> bool {
@@ -1235,12 +1190,9 @@ fn config_has_all_oy_entries(path: &Path) -> bool {
     let Ok(config) = parse_opencode_config(&text) else {
         return false;
     };
-    config.pointer("/mcp/servers/oy") == Some(&generated_mcp_server())
-        && generated_commands()
-            .iter()
-            .all(|(name, expected)| config.pointer(&format!("/commands/{name}")) == Some(expected))
-        && config.pointer("/tool_output/max_bytes") == Some(&json!(TOOL_OUTPUT_MAX_BYTES))
-        && config.pointer("/tool_output/max_lines") == Some(&json!(TOOL_OUTPUT_MAX_LINES))
+    generated_commands()
+        .iter()
+        .all(|(name, expected)| config.pointer(&format!("/commands/{name}")) == Some(expected))
 }
 
 fn format_json(value: &Value) -> Result<String> {
@@ -1394,9 +1346,7 @@ mod tests {
         let global = config_home.path().join("opencode");
         assert!(global.join("opencode.json").exists());
         assert!(global.join("agents/oy.md").exists());
-        assert!(global.join("agents/oy-plan.md").exists());
-        assert!(global.join("agents/oy-edit.md").exists());
-        assert!(global.join("agents/oy-auto.md").exists());
+        assert!(!global.join("agents/oy-plan.md").exists());
         assert!(!workspace.path().join(".opencode/opencode.json").exists());
     }
 
@@ -1450,21 +1400,12 @@ mod tests {
         let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(updated["model"], "test/model");
         assert_eq!(updated["commands"]["keep"]["template"], "keep me");
-        assert_eq!(updated["commands"]["oy-audit"]["agent"], "oy-auditor");
+        assert_eq!(updated["commands"]["oy-audit"]["agent"], "oy");
         assert_eq!(updated["mcp"]["servers"]["other"]["command"][0], "other");
-        assert!(
-            Path::new(
-                updated["mcp"]["servers"]["oy"]["command"][0]
-                    .as_str()
-                    .unwrap()
-            )
-            .is_absolute()
-        );
-        assert_eq!(updated["mcp"]["servers"]["oy"]["command"][1], "mcp");
+        assert!(updated.pointer("/mcp/servers/oy").is_none());
         assert!(updated.get("command").is_none());
         assert!(updated.pointer("/mcp/oy").is_none());
-        assert_eq!(updated["tool_output"]["max_bytes"], 262_144);
-        assert_eq!(updated["tool_output"]["max_lines"], 20_000);
+        assert!(updated.get("tool_output").is_none());
         assert!(updated.get("default_agent").is_none());
     }
 
@@ -1536,18 +1477,14 @@ mod tests {
     }
 
     #[test]
-    fn setup_overwrites_tool_output_budget_to_match_default_chunk() {
-        // The byte/token coupling itself is enforced at compile time by the
-        // `const _: () = assert!(...)` near TOOL_OUTPUT_MAX_BYTES; this test
-        // only verifies what `update_config` writes.
-
+    fn setup_removes_transitional_owned_tool_output_budget() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.json");
         fs::write(
             &path,
             r#"{
   "$schema": "https://opencode.ai/config.json",
-  "tool_output": { "max_bytes": 51200, "max_lines": 2000, "extra_user_key": true }
+  "tool_output": { "max_bytes": 262144, "max_lines": 20000, "extra_user_key": true }
 }
 "#,
         )
@@ -1556,10 +1493,8 @@ mod tests {
         update_config(&path).unwrap();
 
         let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        // oy owns these two keys and pins them; user values are overwritten.
-        assert_eq!(updated["tool_output"]["max_bytes"], 262_144);
-        assert_eq!(updated["tool_output"]["max_lines"], 20_000);
-        // Unknown sibling keys under tool_output are preserved.
+        assert!(updated["tool_output"].get("max_bytes").is_none());
+        assert!(updated["tool_output"].get("max_lines").is_none());
         assert_eq!(updated["tool_output"]["extra_user_key"], true);
     }
 
@@ -1589,7 +1524,7 @@ mod tests {
             updated["commands"]["keep"]["template"],
             "https://example.com//not-a-comment"
         );
-        assert_eq!(updated["mcp"]["servers"]["oy"]["type"], "local");
+        assert!(updated.pointer("/mcp/servers/oy").is_none());
     }
 
     #[test]
@@ -1609,8 +1544,8 @@ mod tests {
         update_config(&path).unwrap();
         let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(updated["commands"]["keep"]["template"], "keep me");
-        assert_eq!(updated["commands"]["oy-audit"]["agent"], "oy-auditor");
-        assert_eq!(updated["mcp"]["servers"]["oy"]["disabled"], false);
+        assert_eq!(updated["commands"]["oy-audit"]["agent"], "oy");
+        assert!(updated.pointer("/mcp/servers/oy").is_none());
     }
 
     #[test]
@@ -1636,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_setup_updates_existing_workspace_integration() {
+    fn explicit_setup_removes_retired_generated_agents() {
         let _lock = ENV_LOCK.lock().unwrap();
         let config_home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -1653,63 +1588,45 @@ mod tests {
 
         setup_opencode(SetupScope::Workspace, false, false).unwrap();
 
-        let refreshed = fs::read_to_string(reviewer).unwrap();
-        assert!(refreshed.contains("action: oy_git_diff_input"));
-        assert!(refreshed.contains("action: \"*\""));
-        assert!(refreshed.contains("effect: deny"));
+        assert!(!reviewer.exists());
+        assert!(workspace.path().join(".opencode/agents/oy.md").exists());
         assert!(!config_home.path().join("opencode/opencode.json").exists());
     }
 
     #[test]
-    fn audit_skill_is_canonical_and_agent_is_thin() {
-        assert!(OY_AUDITOR_AGENT.contains("action: oy_existing_report"));
-        assert!(OY_AUDITOR_AGENT.contains("action: oy_sighthound"));
-        assert!(OY_AUDITOR_AGENT.contains("Load the `oy-audit` skill"));
-        assert!(!OY_AUDITOR_AGENT.contains("OWASP ASVS"));
+    fn audit_skill_is_canonical() {
         assert!(OY_AUDIT_SKILL.contains("OWASP ASVS 5.0"));
-        assert!(OY_AUDIT_SKILL.contains("oy_existing_report(kind=\"audit\")"));
+        assert!(OY_AUDIT_SKILL.contains("oy audit prepare"));
+        assert!(OY_AUDIT_SKILL.contains("oy audit finalize"));
         assert!(OY_AUDIT_SKILL.contains("opencode/autoinvoke: true"));
+        assert!(OY_AUDIT_SKILL.contains("current OpenCode permissions"));
     }
 
     #[test]
-    fn review_skill_is_canonical_and_agent_is_thin() {
-        assert!(OY_REVIEWER_AGENT.contains("action: oy_existing_report"));
-        assert!(OY_REVIEWER_AGENT.contains("Load the `oy-review` skill"));
-        assert!(!OY_REVIEWER_AGENT.contains("complexity is the apex predator"));
+    fn review_skill_is_canonical() {
         assert!(OY_REVIEW_SKILL.contains("complexity is the apex predator"));
-        assert!(OY_REVIEW_SKILL.contains("oy_existing_report(kind=\"review\""));
+        assert!(OY_REVIEW_SKILL.contains("oy review prepare"));
+        assert!(OY_REVIEW_SKILL.contains("oy review finalize"));
+        assert!(OY_REVIEW_SKILL.contains("current OpenCode permissions"));
     }
 
     #[test]
-    fn generated_audit_and_review_agents_require_deterministic_protocol() {
-        for agent in [OY_AUDITOR_AGENT, OY_REVIEWER_AGENT] {
-            assert!(agent.contains("mode: all"));
-            assert!(agent.contains("action: execute"));
-            assert!(agent.contains("action: skill"));
-        }
+    fn generated_skills_require_deterministic_protocol() {
         for skill in [OY_AUDIT_SKILL, OY_REVIEW_SKILL] {
             assert!(skill.contains("Protocol"));
-            assert!(skill.contains("findings=[]"));
+            assert!(skill.contains("`[]`"));
             assert!(skill.contains("untrusted"));
         }
-        assert!(OY_ENHANCE_SKILL.contains("one finding per pass"));
+        assert!(OY_ENHANCE_SKILL.contains("Fix one finding per pass"));
     }
 
     #[test]
-    fn all_generated_agents_use_native_v2_permissions() {
-        for agent in [
-            OY_AGENT,
-            OY_PLAN_AGENT,
-            OY_EDIT_AGENT,
-            OY_AUTO_AGENT,
-            OY_AUDITOR_AGENT,
-            OY_REVIEWER_AGENT,
-            OY_ENHANCER_AGENT,
-        ] {
-            assert!(agent.contains("permissions:"));
-            assert!(!agent.contains("\npermission:"));
-            assert!(!agent.contains("\n  bash:"));
-        }
+    fn generated_oy_agent_is_autonomous_without_permission_overrides() {
+        assert!(OY_AGENT.contains("mode: primary"));
+        assert!(!OY_AGENT.contains("permissions:"));
+        assert!(OY_AGENT.contains("carry the task through"));
+        assert!(OY_AGENT.contains("Never discard or rewrite changes you did not make"));
+        assert!(OY_AGENT.contains("OpenCode and the user own permissions"));
     }
 
     #[test]
@@ -1748,22 +1665,35 @@ mod tests {
     }
 
     #[test]
-    fn modes_map_to_noninteractive_agents() {
-        assert_eq!(agent_for_mode(config::SafetyMode::Default), "oy");
-        assert_eq!(agent_for_mode(config::SafetyMode::Plan), "oy-plan");
-        assert_eq!(agent_for_mode(config::SafetyMode::AutoEdits), "oy-edit");
-        assert_eq!(agent_for_mode(config::SafetyMode::AutoAll), "oy-auto");
+    fn removal_recognizes_retired_owned_commands() {
+        for (name, retired_agent) in [
+            ("oy-audit", "oy-auditor"),
+            ("oy-review", "oy-reviewer"),
+            ("oy-enhance", "oy-enhancer"),
+        ] {
+            let (_, mut command) = generated_commands()
+                .into_iter()
+                .find(|(candidate, _)| *candidate == name)
+                .unwrap();
+            command["agent"] = json!(retired_agent);
+            if name == "oy-audit" {
+                command["description"] =
+                    json!("Run a deterministic-input, no-generic-tools security audit.");
+            }
+            if name == "oy-review" {
+                command["description"] =
+                    json!("Run a deterministic-input, no-generic-tools code-quality review.");
+            }
+            assert!(is_retired_owned_command(name, &command));
+        }
     }
 
     #[test]
     fn v2_run_arguments_preserve_sessions_agents_and_auto() {
         let mut args = vec!["run".to_string()];
         push_session_args(&mut args, true, "");
-        push_run_agent_args(&mut args, "oy-auto", true);
-        assert_eq!(
-            args,
-            vec!["run", "--continue", "--agent", "oy-auto", "--auto"]
-        );
+        push_run_agent_args(&mut args, "oy", true);
+        assert_eq!(args, vec!["run", "--continue", "--agent", "oy", "--auto"]);
 
         let mut resumed = Vec::new();
         push_session_args(&mut resumed, false, "ses_123");
@@ -1772,106 +1702,42 @@ mod tests {
 
     #[test]
     fn v1_tui_launch_is_rejected() {
-        assert!(
-            open_args(
-                Vec::new(),
-                config::SafetyMode::Default,
-                OpenCodeContract::V1
-            )
-            .is_err()
-        );
+        assert!(open_args(Vec::new(), OpenCodeContract::V1).is_err());
     }
 
     #[test]
     fn v2_launch_avoids_removed_v1_flags() {
         assert!(
-            open_args(
-                Vec::new(),
-                config::SafetyMode::Default,
-                OpenCodeContract::V2Beta
-            )
-            .unwrap()
-            .is_empty()
+            open_args(Vec::new(), OpenCodeContract::V2Beta)
+                .unwrap()
+                .is_empty()
         );
         assert_eq!(
             open_args(
                 vec!["service".to_string(), "status".to_string()],
-                config::SafetyMode::Default,
                 OpenCodeContract::V2Beta
             )
             .unwrap(),
             vec!["service", "status"]
         );
-        assert!(
-            open_args(
-                Vec::new(),
-                config::SafetyMode::Plan,
-                OpenCodeContract::V2Beta
-            )
-            .is_err()
-        );
     }
 
     #[test]
     fn unprobed_custom_preview_is_rejected() {
-        assert!(
-            open_args(
-                Vec::new(),
-                config::SafetyMode::Default,
-                OpenCodeContract::Unknown
-            )
-            .is_err()
-        );
-        assert!(
-            open_args(
-                Vec::new(),
-                config::SafetyMode::Plan,
-                OpenCodeContract::Unknown
-            )
-            .is_err()
-        );
+        assert!(open_args(Vec::new(), OpenCodeContract::Unknown).is_err());
     }
 }
 
-const OY_AGENT: &str = include_str!("opencode/agents/oy.md");
-const OY_PLAN_AGENT: &str = include_str!("opencode/agents/oy-plan.md");
-const OY_EDIT_AGENT: &str = include_str!("opencode/agents/oy-edit.md");
-const OY_AUTO_AGENT: &str = include_str!("opencode/agents/oy-auto.md");
-const OY_AUDITOR_AGENT: &str = include_str!("opencode/agents/oy-auditor.md");
-const OY_REVIEWER_AGENT: &str = include_str!("opencode/agents/oy-reviewer.md");
-const OY_ENHANCER_AGENT: &str = include_str!("opencode/agents/oy-enhancer.md");
-const OY_AUDIT_SKILL: &str = include_str!("opencode/skills/oy-audit/SKILL.md");
-const OY_REVIEW_SKILL: &str = include_str!("opencode/skills/oy-review/SKILL.md");
-const OY_ENHANCE_SKILL: &str = include_str!("opencode/skills/oy-enhance/SKILL.md");
+const OY_AGENT: &str = include_str!("../packages/opencode/assets/agents/oy.md");
+const OY_AUDIT_SKILL: &str = include_str!("../packages/opencode/assets/skills/oy-audit/SKILL.md");
+const OY_REVIEW_SKILL: &str = include_str!("../packages/opencode/assets/skills/oy-review/SKILL.md");
+const OY_ENHANCE_SKILL: &str =
+    include_str!("../packages/opencode/assets/skills/oy-enhance/SKILL.md");
 
 const GENERATED_ASSETS: &[GeneratedAsset] = &[
     GeneratedAsset {
         path: "agents/oy.md",
         body: OY_AGENT,
-    },
-    GeneratedAsset {
-        path: "agents/oy-plan.md",
-        body: OY_PLAN_AGENT,
-    },
-    GeneratedAsset {
-        path: "agents/oy-edit.md",
-        body: OY_EDIT_AGENT,
-    },
-    GeneratedAsset {
-        path: "agents/oy-auto.md",
-        body: OY_AUTO_AGENT,
-    },
-    GeneratedAsset {
-        path: "agents/oy-auditor.md",
-        body: OY_AUDITOR_AGENT,
-    },
-    GeneratedAsset {
-        path: "agents/oy-reviewer.md",
-        body: OY_REVIEWER_AGENT,
-    },
-    GeneratedAsset {
-        path: "agents/oy-enhancer.md",
-        body: OY_ENHANCER_AGENT,
     },
     GeneratedAsset {
         path: "skills/oy-audit/SKILL.md",
@@ -1885,4 +1751,13 @@ const GENERATED_ASSETS: &[GeneratedAsset] = &[
         path: "skills/oy-enhance/SKILL.md",
         body: OY_ENHANCE_SKILL,
     },
+];
+
+const RETIRED_GENERATED_ASSETS: &[&str] = &[
+    "agents/oy-plan.md",
+    "agents/oy-edit.md",
+    "agents/oy-auto.md",
+    "agents/oy-auditor.md",
+    "agents/oy-reviewer.md",
+    "agents/oy-enhancer.md",
 ];

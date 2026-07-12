@@ -25,6 +25,17 @@ pub(crate) fn audit_transparency_snippet(
     max_chunks: Option<usize>,
     format: AuditOutputFormat,
 ) -> String {
+    audit_transparency_snippet_at(model, focus, out, max_chunks, format, &utc_date_string())
+}
+
+pub(crate) fn audit_transparency_snippet_at(
+    model: Option<&str>,
+    focus: Option<&str>,
+    out: &std::path::Path,
+    max_chunks: Option<usize>,
+    format: AuditOutputFormat,
+    generated_on: &str,
+) -> String {
     let mut command = base_command(model, "audit");
     if format != AuditOutputFormat::Markdown {
         command.push("--format".to_string());
@@ -38,7 +49,7 @@ pub(crate) fn audit_transparency_snippet(
     if let Some(focus) = non_empty(focus) {
         command.push(shell_quote(focus));
     }
-    transparency_snippet(command)
+    transparency_snippet(command, generated_on)
 }
 
 pub(crate) fn review_transparency_snippet(
@@ -47,6 +58,17 @@ pub(crate) fn review_transparency_snippet(
     focus: Option<&str>,
     out: &std::path::Path,
     max_chunks: Option<usize>,
+) -> String {
+    review_transparency_snippet_at(model, target, focus, out, max_chunks, &utc_date_string())
+}
+
+pub(crate) fn review_transparency_snippet_at(
+    model: Option<&str>,
+    target: Option<&str>,
+    focus: Option<&str>,
+    out: &std::path::Path,
+    max_chunks: Option<usize>,
+    generated_on: &str,
 ) -> String {
     let mut command = base_command(model, "review");
     if out != Path::new("REVIEW.md") {
@@ -61,7 +83,7 @@ pub(crate) fn review_transparency_snippet(
         command.push("--focus".to_string());
         command.push(shell_quote(focus));
     }
-    transparency_snippet(command)
+    transparency_snippet(command, generated_on)
 }
 
 fn base_command(model: Option<&str>, workflow: &str) -> Vec<String> {
@@ -98,12 +120,12 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn transparency_snippet(command: Vec<String>) -> String {
+fn transparency_snippet(command: Vec<String>, generated_on: &str) -> String {
     format!(
         "> {} `{}` · {}",
         TRANSPARENCY_PREFIX,
         command.join(" "),
-        utc_date_string()
+        generated_on
     )
 }
 
@@ -203,7 +225,7 @@ fn transparency_insert_index(lines: &[&str], title: &str, transparency_prefix: &
         })
 }
 
-fn utc_date_string() -> String {
+pub(crate) fn utc_date_string() -> String {
     let days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

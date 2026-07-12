@@ -127,7 +127,14 @@ pub(crate) fn collect_file(
     }))
 }
 
-const SKIP_DIR_PREFIXES: &[&str] = &[".git/", "target/", "node_modules/", ".venv/", ".tmp/"];
+const SKIP_DIR_PREFIXES: &[&str] = &[
+    ".git/",
+    ".oy/",
+    "target/",
+    "node_modules/",
+    ".venv/",
+    ".tmp/",
+];
 const SKIP_FILENAMES: &[&str] = &[
     "cargo.lock",
     "package-lock.json",

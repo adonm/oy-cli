@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@oy-cli/opencode",
+  "version": "0.13.0",
+  "description": "OpenCode 2 agent and skills for the oy deterministic evidence CLI",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adonm/oy-cli.git",
+    "directory": "packages/opencode"
+  },
+  "exports": "./src/index.js",
+  "files": [
+    "src",
+    "assets",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node --check src/index.js",
+    "test": "node --test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "0.0.0-next-15353"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

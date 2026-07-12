@@ -1,65 +1,112 @@
 # Project direction
 
-oy exists to improve the audit → review → remediate loop in opencode, not to become another general AI coding runtime.
+Oy gives OpenCode a concise autonomous agent and deterministic repository evidence/report workflows. It does not replace OpenCode's model runtime, tools, or permission system.
 
-## Mission and audience
+## Mission
 
-**Mission:** make repository-wide audit, review, and remediation in opencode more repeatable, bounded, and reviewable.
+Make audit, review, and remediation in OpenCode autonomous, bounded, and reviewable:
 
-**Primary user:** a maintainer already using opencode who wants better evidence coverage and durable reports without adopting another provider client, chat UI, or agent framework.
+```text
+prepare deterministic evidence
+  → OpenCode reasons and edits under the user's permissions
+  → oy validates a durable report
+  → rerun to confirm
+```
 
-**Primary artifact:** a scoped, evidence-backed Markdown or SARIF report that can be rerun, compared, and handed to one-finding remediation.
+## Product boundary
 
-## Product scope
-
-| Scope | Responsibilities |
+| Layer | Ownership |
 |---|---|
-| Core | Audit, target-diff review, deterministic evidence tools, report rendering, stable IDs, and remediation handoff. |
-| Supporting | Safe setup, doctor diagnostics, optional local evidence helpers, and opencode launch integration. |
-| Compatibility | General oy agent, API task/model wrappers, TUI launch, safety-mode aliases, upgrade, and OpenCode passthrough. |
+| Core | Gitignore-aware evidence, ordered chunks, diff preparation, stable findings, Markdown/SARIF normalization, safe report writes |
+| OpenCode integration | One concise `oy` agent and three canonical skills: audit, review, enhance |
+| User/OpenCode | Models, providers, permissions, approvals, edits, shell, web, sessions, UI, project instructions |
+| Transitional compatibility | MCP transport, generated commands, setup/config merging, launcher/API wrappers |
 
-## Decision principles
+## Principles
 
-1. **Own the evidence boundary, not the model.** Deterministic collection and rendering are oy's value.
-2. **Fail closed instead of sampling silently.** Scope, limits, and exclusions should be inspectable.
-3. **Optimize for handoff artifacts.** Reports and finding lifecycle matter more than chat features.
-4. **Make setup reversible and unsurprising.** Owned writes and setup/removal behavior must be explicit.
-5. **Add native code only for deterministic value.** Prefer host capabilities when they already solve the job.
+1. **OpenCode permissions are authoritative.** Oy does not maintain separate plan/edit/auto policies or override user rules.
+2. **One agent is enough.** Keep `oy` as a short autonomous engineering prompt; use OpenCode's built-in Plan agent when planning is wanted.
+3. **Skills carry workflow knowledge.** Audit, review, and remediation execute locally in the selected agent rather than delegating to permission adapters.
+4. **Determinism stops at inference.** Oy can make evidence and report normalization repeatable; model findings remain model-dependent.
+5. **Prefer file artifacts.** Large evidence should be prepared once into workspace-local immutable files with a small structured index.
+6. **Fail closed.** Do not silently sample around changed input, skipped chunks, output escapes, malformed findings, or explicit limits.
+7. **Minimize host coupling.** Every OpenCode-specific launcher, API, config, and version dependency must justify itself against a CLI-and-skills alternative.
 
-## Roadmap summary
+## The oy agent
 
-### Now: dependable core contract
+A custom OpenCode agent system prompt replaces the provider-specific base prompt, so `oy` must carry the important general coding behaviors itself while staying concise.
 
-- Preserve unrelated user config and validate setup ownership/idempotency.
-- Add MCP transport, collection, diff, Markdown, and SARIF fixtures.
-- Report included scope and skipped categories; resolve lockfile coverage.
-- Expand the pinned OpenCode 2 compatibility smoke and strengthen doctor checks.
-- Expand evaluated audit/review/remediation examples and quality canaries.
+It aligns with OpenCode 2 Build on:
 
-### Next: lower friction
+- inspecting before editing;
+- following established dependencies and conventions;
+- making the smallest correct change;
+- completing implementation and verification rather than stopping at a proposal;
+- preserving unrelated dirty-worktree changes;
+- avoiding destructive Git operations and unrequested commits;
+- parallelizing independent inspection;
+- concise progress and completion reporting.
 
-- Keep CLI/MCP reference material verified against source.
-- Improve practical SARIF/CI integration and machine-readable preflight.
-- Improve explicit monorepo scoping without hidden sampling.
-- Retain optional helpers only when evaluation shows measurable value.
+It intentionally differs by emphasizing local reasoning, narrow deterministic boundaries, evidence-first summaries, and unattended completion. It does not define permissions; the user's effective OpenCode policy applies.
 
-### Later: broader migration coverage
+Prompt changes require comparison against a tagged OpenCode 2 default and live evaluation. Do not copy provider-specific UI taste, temporary tool names, or large formatting manuals into the prompt.
 
-Expand safe legacy-config migration only when behavior can be preserved exactly; keep ambiguous permission/provider/plugin conversions fail-closed.
+## Current state
 
-Read the [canonical roadmap and success criteria](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md).
+The current release exposes deterministic collection and report finalization through file-backed CLI commands. The local MCP server remains callable as a compatibility adapter but is not registered by default.
+
+Current setup installs:
+
+- one `oy` primary agent without permission overrides;
+- `oy-audit`, `oy-review`, and `oy-enhance` skills;
+- three thin commands selecting `oy`.
+
+The `@oy-cli/opencode` package registers the same agent, skills, and commands through the OpenCode V2 plugin API.
+
+## File-backed contract
+
+The deterministic CLI exposes:
+
+```text
+oy audit prepare --json
+oy audit finalize --run <id> --json
+oy review prepare [target] --json
+oy review finalize --run <id> --json
+```
+
+Preparation writes an index, manifest, prior report, and bounded evidence chunks under a workspace-local run directory. OpenCode reads those artifacts and writes separate candidate Markdown and findings JSON with native tools. Finalization verifies the bound evidence and canonicalizes the report. Authoritative state remains private in the platform user state directory.
+
+Default setup no longer registers MCP or rewrites the global tool-output budget. Further work can retire direct command config mutation in favor of the package alone.
+
+## Keep
+
+- Repository manifests and explicit coverage/exclusions.
+- Deterministic repository and diff chunking.
+- Stable evidence identity and changed-input rejection.
+- Existing-report carry-forward.
+- Stable finding IDs and statuses.
+- Markdown and SARIF rendering.
+- Safe workspace output handling.
+- Optional bounded tokei, Universal Ctags, and Sighthound evidence.
+- One-finding remediation and rerun confirmation.
+- The concise autonomous `oy` agent.
+
+## Remove or demote
+
+- Oy-owned plan/edit/auto permission modes.
+- Dedicated auditor/reviewer/enhancer permission agents.
+- General chat/TUI/model wrappers once native OpenCode use is simpler.
+- Coupled oy/OpenCode installation and upgrades.
+- Exact host API/version coupling not needed by skills.
+- Global output-budget mutation after evidence moves to files.
+- MCP after the CLI adapter has proven parity and compatibility demand is low.
 
 ## Non-goals
 
-- Rebuild opencode's provider routing, model loop, chat, sessions, editing, shell, web, or general search.
-- Add arbitrary shell, edit, network fetch, or clone capabilities to oy MCP.
-- Claim deterministic findings from model reasoning.
-- Persist provider credentials, transcripts, model selection, or session state.
-- Run paid/provider-backed evaluations in default CI.
-- Chase every host prerelease before its integration contract stabilizes.
+- Becoming a second coding-agent runtime.
+- Owning permission policy or presenting oy as a sandbox.
+- Adding general shell, edit, web, clone, credential, or provider capabilities.
+- Claiming deterministic security or quality conclusions.
+- Persisting OpenCode credentials or transcripts.
 
-## Contribute
-
-Changes should improve evidence coverage, report usefulness, setup safety, or measured prompt quality without broadening the product into a second host.
-
-Read the [contributor guide](https://github.com/adonm/oy-cli/blob/main/CONTRIBUTING.md), [architecture](architecture.md), and [evaluation playbook](evaluation.md).
+Changes should improve autonomous completion, deterministic evidence, report usefulness, or integration simplicity without broadening oy into another host.

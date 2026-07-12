@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## [0.13.0] - 2026-07-12
+
+### Added
+- Added `oy audit prepare/finalize` and `oy review prepare/finalize`, with bounded `.oy/runs` evidence, private SHA-256-bound state, target OID binding, changed-input/output rejection, strict findings JSON, and Markdown/SARIF finalization.
+- Added the `@oy-cli/opencode` OpenCode V2 plugin package containing the `oy` agent, canonical skills, and slash commands.
+- Added locked npm package build/install verification in CI and an opt-in npm trusted-publishing release job.
+
+### Changed
+- Consolidated the generated OpenCode integration on one autonomous `oy` agent and three canonical skills; audit, review, and enhance now run under the user's effective OpenCode permissions.
+- Updated the concise `oy` prompt against OpenCode 2 Build behavior for inspect-first implementation, minimal changes, end-to-end verification, dirty-worktree safety, and unrequested/destructive Git safeguards.
+- Replaced oy's plan/edit/auto mode selection with `oy run --auto`, which delegates one-time approvals to OpenCode and preserves explicit denies.
+- Rewrote audit/review skills around file-backed preparation, native OpenCode reads/edits, and verified finalization.
+- Stopped registering MCP and changing OpenCode's global tool-output budget during setup; `oy mcp` remains a temporary compatibility adapter.
+- Updated the tested OpenCode V2 beta from `0.0.0-next-15323` to `0.0.0-next-15353`.
+- Made the curl installer pin this oy release, verify both installed versions, stop stale OpenCode services, prune unreferenced old mise versions, and cleanly remove/reinstall generated integration files.
+
+### Removed
+- Removed generated `oy-plan`, `oy-edit`, `oy-auto`, `oy-auditor`, `oy-reviewer`, and `oy-enhancer` agents plus the duplicate Rust safety-mode/tool-policy layer. `oy setup` removes retired generated files from existing installations.
+- Removed the `oy modes` command, `--mode` flags, and the corresponding `mode`, `policy`, and `runtime.permissions` doctor JSON fields.
 
 ## [0.12.0] - 2026-07-11
 

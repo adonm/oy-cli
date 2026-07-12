@@ -2,10 +2,10 @@
 
 `oy` has two different quality bars:
 
-1. Deterministic Rust/CI tests for the code `oy` owns: setup, config merging,
-   MCP protocol behavior, path safety, repository chunking, and report rendering.
-2. Live model evaluations for the behavior opencode owns: whether generated
-   agents find useful findings, avoid noise, and follow the audit/review
+1. Deterministic Rust/CI tests for the code `oy` owns: evidence preparation,
+   path safety, repository chunking, report rendering, and transitional setup/MCP behavior.
+2. Live model evaluations for the behavior opencode owns: whether the `oy`
+   agent and skills find useful findings, avoid noise, and follow the audit/review
    protocol with a real model.
 
 Do not mix them. CI should stay deterministic and provider-free. Prompt changes
@@ -18,11 +18,11 @@ Current generated capabilities:
 
 | Surface | Owner | Evaluation posture |
 |---|---|---|
-| Primary agents: `oy`, `oy-plan`, `oy-edit`, `oy-auto` | opencode host plus generated prompts | Smoke-test launch/setup; use manual tasks for style regressions |
+| Primary agent: `oy` | concise autonomous prompt under user-managed OpenCode permissions | Compare with tagged OpenCode 2 Build; score completion, verification, worktree safety, concision |
 | `oy-audit`, `oy-review`, `oy-enhance` skills | Canonical generated workflow protocols | Live corpus plus adapter/source-drift tests |
-| `oy-auditor` | Thin permission adapter loading `oy-audit` | Live audit corpus; no generic read/search/bash/edit tools |
-| `oy-reviewer` | Thin permission adapter loading `oy-review` | Live diff and whole-workspace review corpus |
-| `oy-enhancer` | Thin permission adapter loading `oy-enhance`; edits allowed and shell denied | Disposable repos only; verify tests separately after one finding |
+| `oy-audit` execution | Current `oy` agent and deterministic evidence tools | Live audit corpus; verify protocol and report shape |
+| `oy-review` execution | Current `oy` agent and deterministic evidence tools | Live diff and whole-workspace review corpus |
+| `oy-enhance` execution | Current `oy` agent under the user's effective permissions | Disposable repos only; verify tests after one finding |
 | MCP input tools | `oy mcp` | Rust fixture/unit tests and protocol tests |
 | MCP report renderers | `oy mcp` | Rust fixture/unit tests plus report-shape checks in live runs |
 

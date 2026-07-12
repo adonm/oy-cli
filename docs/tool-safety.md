@@ -30,7 +30,7 @@ mise use --global rust@1.96 'cargo:https://github.com/Corgea/Sighthound[bin=sigh
 
 Sighthound remains optional and source-built. The mise source pins commit `c4608eb2b6ca256daf4dbd1e74aadc3570343685`, Rust 1.96, Cargo `--locked`, and only `bin=sighthound`. `oy doctor --install-sighthound` performs this build; `oy doctor --install-missing` does not.
 
-Optional helpers are resolved once per `oy mcp` process to canonical absolute paths. Relative `PATH` entries are ignored; `OY_TOKEI`, `OY_CTAGS`, and `OY_SIGHTHOUND` can override discovery with an explicit absolute executable path. Probes verify successful version/capability output; calls close stdin and enforce tool-specific time and per-stream output limits. On Unix, helpers run in a dedicated process group that is terminated after direct-child exit or timeout so descendants cannot hold captured pipes open. Ctags option-file loading is disabled with `--options=NONE`. Sighthound is restricted to embedded rules and one worker; returned findings are stably sorted, string/array bounded, and capped below the generated host tool-output budget. Unsupported-language scopes return an empty status, and all-mode scans fall back to simple analysis when a language pack has no taint rules.
+Optional helpers are resolved to canonical absolute paths. Relative `PATH` entries are ignored; `OY_TOKEI`, `OY_CTAGS`, and `OY_SIGHTHOUND` can override discovery with an explicit absolute executable path. Probes verify successful version/capability output; calls close stdin and enforce tool-specific time and per-stream output limits. On Unix, helpers run in a dedicated process group that is terminated after direct-child exit or timeout so descendants cannot hold captured pipes open. Ctags option-file loading is disabled with `--options=NONE`. Sighthound is restricted to embedded rules and one worker; returned findings are stably sorted, string/array bounded, and size capped. Unsupported-language scopes return an empty status, and all-mode scans fall back to simple analysis when a language pack has no taint rules.
 
 Run `oy doctor` to check whether the optional MCP tools are currently exposed.
 
@@ -47,7 +47,7 @@ Run `oy doctor` to check whether the optional MCP tools are currently exposed.
 - model calls
 - session persistence
 
-Use built-in tools and permissions for those capabilities. `oy run` maps safety modes to the generated `oy`, `oy-plan`, `oy-edit`, and `oy-auto` agents. TUI launches require agent selection inside OpenCode 2.
+Use built-in tools and user-managed OpenCode permissions for those capabilities. `oy run` selects the single permission-neutral `oy` agent; `--auto` delegates one-time approvals to OpenCode while explicit denies remain effective. TUI launches require agent selection inside OpenCode 2.
 
 ## Filesystem Boundary
 
@@ -75,7 +75,7 @@ Sighthound does not use that collected file list. It has independent gitignore-a
 
 The host handles user approval for its own tools. `oy mcp` report-writing tools are exposed as MCP tools, so permission behavior follows the host MCP/tool configuration. Keep generated agents explicit about when they call report renderers.
 
-For CLI-bound workflows, safety and coverage do not rely on those instructions alone. MCP replaces caller-supplied scope/model/chunk sizing with the inherited context, checks the maximum chunk count and evidence digest, requires ordered complete chunk reads, and binds render output/metadata. The three skills define the canonical workflow; generated commands and agents are loaders and permission adapters.
+For CLI-bound workflows, coverage does not rely on instructions alone. MCP currently replaces caller-supplied scope/model/chunk sizing with inherited context, checks the maximum chunk count and evidence digest, requires ordered complete chunk reads, and binds render output/metadata. The three skills define the canonical workflow and commands select `oy`; OpenCode owns tool permissions. MCP remains a transitional adapter until file-backed CLI preparation/finalization reaches parity.
 
 MCP negotiates `2025-06-18` when requested and returns successful tool data in both text `content` and `structuredContent` with `isError: false`. Tool execution failures are normal MCP tool results with `isError: true`; malformed protocol methods remain JSON-RPC errors.
 

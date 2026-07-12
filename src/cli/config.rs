@@ -1,33 +1,15 @@
-//! Configuration facade: re-exports from focused config modules
-//! for safety modes, paths, prompts, model config, environment knobs,
-//! and saved sessions.
+//! Configuration facade for workspace paths and atomic writes.
 
 mod atomic_write;
-mod mode;
 mod paths;
 
 pub(crate) use atomic_write::{FileMutation, apply_file_batch_in};
-pub use mode::{SafetyMode, tool_policy};
 pub use paths::{oy_root, resolve_workspace_output_path, write_workspace_file};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{fs, path::Path};
-
-    #[test]
-    fn mode_policy_and_risk_labels_are_centralized() {
-        let plan = tool_policy(SafetyMode::Plan);
-        assert_eq!(SafetyMode::parse("ask").unwrap().name(), "default");
-        assert_eq!(SafetyMode::parse("read_only").unwrap().name(), "plan");
-        assert_eq!(SafetyMode::parse("edit").unwrap().name(), "accept-edits");
-        assert_eq!(SafetyMode::parse("yolo").unwrap().name(), "auto-approve");
-        assert_eq!(plan.files, crate::tools::policy::FileAccess::ReadOnly);
-        assert_eq!(
-            tool_policy(SafetyMode::AutoAll).shell,
-            crate::tools::Approval::Auto
-        );
-    }
 
     #[test]
     fn output_paths_stay_in_workspace() {

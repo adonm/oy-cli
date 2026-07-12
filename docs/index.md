@@ -1,6 +1,6 @@
 # Repeatable repository audits and reviews for opencode
 
-`oy` gives [opencode](https://opencode.ai/) users a bounded path from deterministic repository inputs to security audits, code-quality reviews, and focused remediation.
+`oy` gives [opencode](https://opencode.ai/) users one concise autonomous agent and a bounded path from deterministic repository inputs to security audits, code-quality reviews, and focused remediation.
 
 ## Why oy
 
@@ -10,7 +10,7 @@ Gitignore-aware manifests and ordered chunks replace silent, model-selected samp
 
 ### Restricted review
 
-Three canonical skills define audit, review, and remediation. Thin restricted agents load those protocols, while MCP enforces bound scope, limits, evidence order/stability, and report metadata.
+Three canonical skills define audit, review, and remediation and execute through the single `oy` agent under the user's OpenCode permissions. Audit/review use file-backed CLI preparation and verified finalization; MCP remains only as an unregistered compatibility adapter.
 
 ### Reports that survive chat
 
@@ -25,12 +25,12 @@ oy doctor
 oy audit
 ```
 
-The full installer uses [mise](https://mise.jdx.dev/) to install oy, pinned OpenCode 2 beta `0.0.0-next-15323`, and local evidence helpers, then runs global setup. [Review the installer](install.sh) before piping it to a shell.
+The full installer uses [mise](https://mise.jdx.dev/) to install pinned oy 0.13.0, OpenCode 2 beta `0.0.0-next-15353`, and local evidence helpers; it verifies versions, prunes unreferenced old installs, and resets generated integration before global setup. [Review the installer](install.sh) before piping it to a shell.
 
 For a minimal manual install:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli npm:@opencode-ai/cli@0.0.0-next-15323
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.0 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy audit
 ```
@@ -55,7 +55,7 @@ oy owns collection, ordering, limits, and report rendering. opencode owns model 
 - [Install and configure oy](getting-started.md)
 - [Understand audit, review, and remediation](workflows.md)
 - [See representative reports and CI integration](examples.md)
-- [Look up commands, MCP tools, and environment variables](reference.md)
+- [Look up CLI/package commands, compatibility MCP tools, and environment variables](reference.md)
 - [Check supported and tested environments](compatibility.md)
 - [Read the project direction](project.md)
 - [Browse the Rust API](https://docs.rs/oy-cli)

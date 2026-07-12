@@ -10,9 +10,13 @@ set -eu
 #   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases
 #   OY_INSTALL_SIGHTHOUND        set to 1/true to source-build optional pinned Sighthound
 #   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
+#   OY_RESET_SETUP               set to 0/false to update setup without first removing generated files
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
-opencode_tool="npm:@opencode-ai/cli@0.0.0-next-15323"
+oy_version="0.13.0"
+oy_tool="cargo:oy-cli@$oy_version"
+opencode_version="0.0.0-next-15353"
+opencode_tool="npm:@opencode-ai/cli@$opencode_version"
 sighthound_tool="cargo:https://github.com/Corgea/Sighthound[bin=sighthound,locked=true]@rev:c4608eb2b6ca256daf4dbd1e74aadc3570343685"
 
 log() {
@@ -69,7 +73,7 @@ log "Installing/upgrading oy toolchain with mise (minimum release age: $minimum_
 "$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" cargo-binstall
 
 "$mise_bin" use --global --yes --minimum-release-age "$minimum_release_age" \
-  cargo:oy-cli \
+  "$oy_tool" \
   "$opencode_tool" \
   cargo:tokei \
   github:universal-ctags/ctags
@@ -114,8 +118,19 @@ fi
 
 "$mise_bin" reshim
 
-"$mise_bin" exec -- opencode2 --version >/dev/null 2>&1 \
+installed_oy_version=$("$mise_bin" exec -- oy --version 2>/dev/null) \
+  || die "oy installed, but oy --version failed"
+case "$installed_oy_version" in
+*"$oy_version"*) ;;
+*) die "expected oy $oy_version after install, got: $installed_oy_version" ;;
+esac
+
+installed_opencode_version=$("$mise_bin" exec -- opencode2 --version 2>/dev/null) \
   || die "OpenCode 2 installed, but opencode2 --version failed"
+case "$installed_opencode_version" in
+*"$opencode_version"*) ;;
+*) die "expected OpenCode $opencode_version after install, got: $installed_opencode_version" ;;
+esac
 
 case "${OY_INSTALL_SIGHTHOUND:-}" in
 1 | true | TRUE | yes | YES)
@@ -124,12 +139,33 @@ case "${OY_INSTALL_SIGHTHOUND:-}" in
   ;;
 esac
 
+log "Stopping any older OpenCode background service..."
+if ! "$mise_bin" exec -- opencode2 service stop >/dev/null 2>&1; then
+  log "No running OpenCode service needed stopping."
+fi
+
+log "Pruning unreferenced old oy and OpenCode versions..."
+if ! "$mise_bin" prune --yes --tools cargo:oy-cli "npm:@opencode-ai/cli"; then
+  log "Warning: mise could not prune old versions; the newly installed versions remain active."
+fi
+
 case "${OY_SKIP_SETUP:-}" in
 1 | true | TRUE | yes | YES)
   log "Skipping oy setup because OY_SKIP_SETUP is set."
   ;;
 *)
-  log "Installing/updating opencode integration with oy setup..."
+  case "${OY_RESET_SETUP:-1}" in
+  0 | false | FALSE | no | NO)
+    log "Updating OpenCode integration without a clean reset because OY_RESET_SETUP is disabled."
+    ;;
+  *)
+    log "Removing generated files and config from older oy versions..."
+    if ! "$mise_bin" exec -- oy setup --remove; then
+      log "Warning: old integration cleanup was incomplete; oy setup will preserve or reject modified user-owned files."
+    fi
+    ;;
+  esac
+  log "Installing the fresh OpenCode integration with oy setup..."
   "$mise_bin" exec -- oy setup
   ;;
 esac

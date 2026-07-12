@@ -44,7 +44,9 @@ pub(crate) struct WorkflowContext {
     pub max_chunks: usize,
     pub model: Option<String>,
     pub session_id: Option<String>,
-    pub mode: Option<crate::config::SafetyMode>,
+    /// Accepted only so recovery can read leases created by oy 0.12 safety modes.
+    #[serde(default, rename = "mode", skip_serializing)]
+    pub legacy_mode: Option<String>,
     pub output_before: Option<u64>,
 }
 
@@ -349,7 +351,7 @@ mod tests {
             max_chunks: 5,
             model: None,
             session_id: None,
-            mode: None,
+            legacy_mode: None,
             output_before: None,
         };
         let lease = WorkflowLease::acquire(&context).unwrap();
@@ -359,5 +361,29 @@ mod tests {
         drop(resumed_lease);
         lease.complete();
         assert!(retained(root.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_mode_is_accepted_but_not_reencoded() {
+        let root = tempfile::tempdir().unwrap();
+        let context: WorkflowContext = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "run_id": "b".repeat(48),
+            "kind": "enhance",
+            "workspace": root.path(),
+            "scope": { "type": "workspace", "path": "." },
+            "focus": [],
+            "output": "REVIEW.md",
+            "format": "auto-approve",
+            "max_chunks": 5,
+            "model": null,
+            "session_id": null,
+            "mode": "auto-approve",
+            "output_before": null
+        }))
+        .unwrap();
+
+        assert_eq!(context.legacy_mode.as_deref(), Some("auto-approve"));
+        assert!(!context.encode().unwrap().contains("\"mode\""));
     }
 }

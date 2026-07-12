@@ -1,19 +1,19 @@
 //! # oy
 //!
-//! `oy` adds repeatable repository audit and review workflows to
-//! [OpenCode 2](https://opencode.ai/). Its local MCP server provides deterministic repository
-//! collection, ordered chunks, target-diff input, and normalized Markdown/SARIF reports.
-//! OpenCode remains responsible for model execution, providers, authenticated sessions,
-//! permissions, and general coding tools. oy invokes OpenCode's noninteractive runner and its
-//! model-list API through the OpenCode CLI, and does not store provider credentials.
+//! `oy` adds one concise autonomous agent and repeatable repository audit/review workflows to
+//! [OpenCode 2](https://opencode.ai/). Its current local MCP adapter provides deterministic
+//! repository collection, ordered chunks, target-diff input, and normalized Markdown/SARIF
+//! reports while the project moves toward file-backed CLI evidence. OpenCode remains responsible
+//! for model execution, providers, authenticated sessions, permissions, and general coding tools.
+//! oy does not store provider credentials.
 //!
 //! ## Start with the CLI
 //!
 //! The command-line interface is the supported automation surface:
 //!
 //! ```text
-//! oy setup --dry-run       # preview generated opencode integration
-//! oy setup                 # install the global integration
+//! oy setup --dry-run       # preview the generated agent/skill integration
+//! oy setup                 # install the current OpenCode integration
 //! oy audit                 # write ISSUES.md
 //! oy review main           # write REVIEW.md for git diff main
 //! oy enhance <finding-id>  # remediate one reported finding
@@ -48,6 +48,7 @@
 
 #![recursion_limit = "256"]
 
+mod artifacts;
 mod audit;
 mod cli;
 mod mcp;

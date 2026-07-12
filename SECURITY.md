@@ -2,19 +2,20 @@
 
 ## Threat Model
 
-`oy` is not a sandbox. It launches opencode with a local MCP server for deterministic repository analysis helpers.
+`oy` is not a sandbox. It provides one autonomous OpenCode agent and file-backed deterministic repository evidence/report helpers. A local MCP server remains available only as a compatibility adapter.
 
-opencode owns model traffic, chat UI, sessions, permissions, edits, shell commands, web fetches, and other high-risk tools. Configure those surfaces there and review its security guidance for provider credentials and tool permissions.
+opencode owns model traffic, chat UI, sessions, permissions, edits, shell commands, web fetches, and other high-risk tools. The generated `oy` agent intentionally has no permission overrides. Configure those surfaces in OpenCode and review its security guidance for provider credentials and tool permissions.
 
 Native `oy` can:
 
 - write global integration files during explicit setup/upgrade, or `.opencode` files with `oy setup --workspace`,
 - launch OpenCode runner, TUI, `mini`, and managed-API processes with `OY_ROOT` as their working directory,
-- read workspace files for MCP manifests/chunks/SLOC/outlines and optional Sighthound scans,
+- read workspace files for prepared manifests/chunks, compatibility MCP operations, and optional analysis helpers,
 - run read-only `git` commands for diff input,
-- write generated audit/review reports inside the workspace.
+- write `.oy/runs` evidence/candidate paths and generated audit/review reports inside the workspace,
+- write private prepared-run metadata with artifact hashes in the platform user state directory.
 
-Repository text returned by `oy mcp` can be sent to the configured model provider. Treat selected workspace content as disclosed to that provider.
+Repository text read from prepared artifacts or returned by `oy mcp` can be sent to the configured model provider. Treat selected workspace content as disclosed to that provider.
 
 Sighthound runs only when its MCP tool is called; the generated auditor calls it only for explicit Sighthound/SAST focus. Sighthound uses independent gitignore-aware file discovery and its own size limit rather than oy's manifest/chunk collector exclusions, so it can return snippets from supported hidden or larger source files. Treat a requested Sighthound scope as disclosed to the provider.
 
@@ -44,7 +45,7 @@ Avoid mounting the host Docker socket into AI-assisted containers. Docker socket
 
 `oy setup` writes generated files under `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; `oy setup --workspace` writes under `.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Launch/model/workflow commands validate setup but never rewrite it. Use `oy setup --dry-run` before first setup and `oy setup --remove` to remove the current oy integration.
 
-Generated agent and skill files refuse to overwrite non-generated files at generated paths. The config merge owns and replaces `mcp.servers.oy`, `commands.oy-audit`, `commands.oy-review`, `commands.oy-enhance`, and `tool_output.max_bytes`/`max_lines`; unknown sibling object keys are retained. Legacy command/MCP entries are migrated where behavior is exact; ambiguous legacy fields fail closed.
+Generated agent and skill files refuse to overwrite non-generated files at generated paths. Setup owns one `oy` agent, three skills, and `commands.oy-audit`, `commands.oy-review`, and `commands.oy-enhance`; unknown sibling object keys are retained. Exact transitional `mcp.servers.oy` and tool-output budget values are removed. Older generated mode and workflow-agent files are retired during setup.
 
 Setup/removal is a staged multi-file batch that restores already-mutated files if a later commit fails. It has no persistent journal and cannot promise recovery across a process or machine crash. JSONC comments and formatting are still lost during reserialization. Removal deletes oy's generated files and currently owned config values; it does not remember or restore historical pre-setup values. Back up hand-edited config before setup.
 
