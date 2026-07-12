@@ -1,35 +1,10 @@
 # Publishing the OpenCode npm package
 
-The OpenCode plugin is the public scoped package `@oy-cli/opencode` from `packages/opencode`. CI builds, tests, packs, installs, and uploads its tarball on every pull request and `main` push. Tagged releases can publish it with npm trusted publishing after the one-time bootstrap below.
+The OpenCode plugin is the public scoped package [`@oy-cli/opencode`](https://www.npmjs.com/package/@oy-cli/opencode) from `packages/opencode`. CI builds, tests, packs, installs, and uploads its tarball on every pull request and `main` push. Tagged releases publish it with npm trusted publishing.
 
-## 1. Own the npm scope
+## Trusted publisher
 
-Sign in at [npmjs.com](https://www.npmjs.com/) and create or join the `oy-cli` organization. The package name uses the `@oy-cli` scope, so an npm account named only `adonm` is not sufficient unless it owns or belongs to that organization.
-
-Authenticate locally and confirm the account:
-
-```bash
-npm login
-npm whoami
-```
-
-## 2. Publish the package once
-
-npm needs an existing package before its settings page can configure a trusted publisher. For the first release only:
-
-```bash
-cd packages/opencode
-npm ci --ignore-scripts
-npm run build
-npm test
-npm publish --access public
-```
-
-The package version must not already exist. This repository keeps the Cargo and npm package versions aligned with the release tag.
-
-## 3. Connect npm to GitHub Actions
-
-Open the package on npmjs.com, then select **Settings → Trusted publishing → GitHub Actions** and enter:
+The npm package is connected to GitHub Actions with these values:
 
 | Field | Value |
 |---|---|
@@ -37,26 +12,37 @@ Open the package on npmjs.com, then select **Settings → Trusted publishing →
 | Repository | `oy-cli` |
 | Workflow filename | `release.yml` |
 | Environment | `npm` |
-| Allowed action | `npm publish` |
 
-The repository workflow already uses a GitHub-hosted runner, Node 24, npm's registry URL, and `id-token: write`. No long-lived `NPM_TOKEN` is needed.
+The release workflow uses a GitHub-hosted runner, Node 24, an OIDC-capable npm version, the `npm` GitHub environment, and `id-token: write`. No long-lived `NPM_TOKEN` is stored.
 
-Enable the guarded release job after the trusted publisher is saved:
+## Release behavior
+
+Cargo and npm package versions must match the `v*` tag. On a tagged release, `.github/workflows/release.yml`:
+
+1. builds the platform binaries;
+2. installs locked npm dependencies and runs the plugin tests;
+3. publishes `@oy-cli/opencode` through npm OIDC, or skips an already-published version only when its `gitHead` matches the tagged commit;
+4. publishes the GitHub release only after npm succeeds;
+5. publishes the matching crate through crates.io trusted publishing.
+
+The curl installer and `oy setup` pin the npm plugin version matching the binary, so never publish only one half of a release.
+
+## npm controls
+
+Keep the npm package's trusted publisher restricted to `release.yml` and the `npm` environment. In npm package **Settings → Publishing access**, require two-factor authentication and disallow traditional tokens after trusted publishing has been verified. Restrict GitHub environment and tag administration to maintainers.
+
+To inspect package state without authenticating:
 
 ```bash
-gh variable set NPM_PUBLISH_ENABLED --body true --repo adonm/oy-cli
+npm view @oy-cli/opencode version dist.integrity
 ```
 
-Future `v*` tags will then run the `publish-npm` job in `.github/workflows/release.yml`. The job requires the npm version to exactly match the Git tag, runs the locked build/tests, and publishes with automatic npm provenance.
-
-## 4. Lock publishing down
-
-After one trusted publish succeeds, use npm package **Settings → Publishing access** to require two-factor authentication and disallow traditional tokens. Keep the GitHub `npm` environment and tag protection restricted to maintainers.
-
-To disable npm publishing without changing the workflow:
+To test a release candidate locally without publishing:
 
 ```bash
-gh variable delete NPM_PUBLISH_ENABLED --repo adonm/oy-cli
+cd packages/opencode
+npm ci --ignore-scripts
+npm run build
+npm test
+npm pack --dry-run
 ```
-
-The release job is intentionally skipped while that variable is absent or not `true`, so tags remain safe before npm bootstrap is complete.

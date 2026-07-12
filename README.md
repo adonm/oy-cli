@@ -21,7 +21,7 @@ The **inputs, ordering, limits, and report rendering** are deterministic. Model 
 
 ## Quick start
 
-Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.13.0 no longer supports OpenCode 1.
+Requirements: OpenCode 2 with a configured provider, plus `git` for diff reviews. oy 0.13.1 no longer supports OpenCode 1.
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
@@ -30,12 +30,12 @@ oy doctor
 oy audit
 ```
 
-The installer uses [`mise`](https://mise.jdx.dev/) to install pinned oy 0.13.0, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies both primary versions, stops stale OpenCode services, prunes unreferenced old mise versions, and resets generated integration files before running `oy setup`. Set `OY_RESET_SETUP=0` to preserve the generated setup in place or `OY_SKIP_SETUP=1` to skip setup. Source-built Sighthound is opt-in with `OY_INSTALL_SIGHTHOUND=1`.
+The installer uses [`mise`](https://mise.jdx.dev/) to install pinned oy 0.13.1, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies both primary versions, stops stale OpenCode services, prunes unreferenced old mise versions, and resets the integration before `oy setup` registers `@oy-cli/opencode@0.13.1`. OpenCode installs the package into its isolated cache and the installer verifies that plugin ID `oy` loaded. Set `OY_RESET_SETUP=0` to preserve the generated setup in place or `OY_SKIP_SETUP=1` to skip setup. Source-built Sighthound is opt-in with `OY_INSTALL_SIGHTHOUND=1`.
 
 For a minimal manual install:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.0 npm:@opencode-ai/cli@0.0.0-next-15353
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.1 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy doctor
 ```
@@ -114,15 +114,15 @@ Sighthound remains optional and source-built. The install pins immutable commit 
 
 ## Agent, package, and setup
 
-The OpenCode V2 package lives at `packages/opencode` and publishes as `@oy-cli/opencode`. It registers one `oy` primary agent, the three canonical skills, and their slash commands without permission overrides. Add `"@oy-cli/opencode@0.13.0"` to OpenCode's `plugins` array after installing the `oy` binary.
+The OpenCode V2 package lives at `packages/opencode` and publishes as `@oy-cli/opencode`. It registers one `oy` primary agent, the three canonical skills, and their slash commands without permission overrides. `oy setup` pins the package version matching the binary in OpenCode's `plugins` array and removes superseded direct-file copies.
 
-`oy setup` remains the direct-file installer: it writes the same agent and skills plus thin skill commands, but does not register MCP or change OpenCode's tool-output budget. Global setup uses `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup uses `.opencode/`. Use `--dry-run` to preview or `--remove` to remove generated files and owned config entries.
+`oy setup` is package-first: it adds the exact `@oy-cli/opencode` version matching the binary and removes exact legacy agent, skill, command, MCP, and output-budget entries. Global setup uses `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup uses `.opencode/`. Use `--dry-run` to preview or `--remove` to remove the owned plugin entry and legacy generated files.
 
 The `oy` agent has no permission overrides. Its short system prompt carries the useful OpenCode 2 defaults that a custom prompt would otherwise replace: inspect before editing, follow repository conventions, make the smallest correct change, persist through verification, preserve unrelated worktree changes, avoid destructive Git operations, and report concisely. OpenCode and the user remain authoritative for permissions and approvals.
 
 Setup and removal stage one multi-file batch and roll back mutations already committed if a later mutation fails. This is in-process rollback, not crash journaling or durable recovery. JSON and JSONC are still pretty-reserialized, so comments and formatting are not preserved. Removal deletes owned current values; it does not restore values that existed before setup.
 
-Launch, model, and workflow commands only validate that a complete global or workspace integration exists; they never auto-refresh it. Run `oy setup` explicitly after generated assets change (`oy upgrade` does this as an explicit post-upgrade step). All selected OpenCode runner and managed-API processes use `OY_ROOT` as their working directory.
+Launch, model, and workflow commands only validate that a complete global or workspace integration exists; they never auto-refresh it. Run `oy setup` explicitly after upgrading (`oy upgrade` does this as an explicit post-upgrade step). All selected OpenCode runner and managed-API processes use `OY_ROOT` as their working directory.
 
 oy defaults to the `opencode2` executable. This release supports exactly beta `0.0.0-next-15353` and tagged OpenCode 2.x; other prereleases and major versions fail closed until tested. `OY_OPENCODE` remains an executable override. `oy run`, `audit`, `review`, and `enhance` use the single `oy` agent. `oy run --auto` asks OpenCode to approve pending requests once while preserving explicit denies; without it, the user's normal policy applies. Set `OY_OPENCODE_MODEL=provider/model#variant` to override the noninteractive workflow model.
 

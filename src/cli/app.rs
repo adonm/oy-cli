@@ -43,7 +43,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Install integration files globally, or in this workspace with --workspace.
+    /// Register the version-matched npm plugin globally, or locally with --workspace.
     Setup(SetupArgs),
     /// Launch OpenCode with the oy integration.
     Open(OpenArgs),
@@ -75,19 +75,19 @@ struct SetupArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Install project-local .opencode files instead of global config"
+        help = "Register the plugin in project-local .opencode config instead of global config"
     )]
     workspace: bool,
     #[arg(
         long,
         default_value_t = false,
-        help = "Preview generated integration files without writing"
+        help = "Preview plugin/config migration actions without writing"
     )]
     dry_run: bool,
     #[arg(
         long,
         default_value_t = false,
-        help = "Remove generated oy integration files and owned config entries"
+        help = "Remove the oy plugin, legacy generated files, and owned config entries"
     )]
     remove: bool,
 }

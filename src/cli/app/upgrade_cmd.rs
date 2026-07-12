@@ -71,8 +71,8 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
         return Ok(doctor_status.code().unwrap_or(1));
     }
 
-    // Refresh generated integration files through the active mise shim, not this
-    // still-running old process, so newly upgraded embedded agents are installed.
+    // Apply the new version-matched plugin pin through the active mise shim, not
+    // this still-running old process.
     let setup_status = Command::new("mise")
         .args(["exec", "--", "oy", "setup"])
         .status()

@@ -20,7 +20,7 @@ prepare deterministic evidence
 | Core | Gitignore-aware evidence, ordered chunks, diff preparation, stable findings, Markdown/SARIF normalization, safe report writes |
 | OpenCode integration | One concise `oy` agent and three canonical skills: audit, review, enhance |
 | User/OpenCode | Models, providers, permissions, approvals, edits, shell, web, sessions, UI, project instructions |
-| Transitional compatibility | MCP transport, generated commands, setup/config merging, launcher/API wrappers |
+| Transitional compatibility | MCP transport and launcher/API wrappers |
 
 ## Principles
 
@@ -55,13 +55,13 @@ Prompt changes require comparison against a tagged OpenCode 2 default and live e
 
 The current release exposes deterministic collection and report finalization through file-backed CLI commands. The local MCP server remains callable as a compatibility adapter but is not registered by default.
 
-Current setup installs:
+Current setup pins `@oy-cli/opencode` to the matching binary version. The package installs:
 
 - one `oy` primary agent without permission overrides;
 - `oy-audit`, `oy-review`, and `oy-enhance` skills;
 - three thin commands selecting `oy`.
 
-The `@oy-cli/opencode` package registers the same agent, skills, and commands through the OpenCode V2 plugin API.
+OpenCode resolves the package into its isolated cache and registers its agent, skills, and commands through the OpenCode V2 plugin API.
 
 ## File-backed contract
 
@@ -76,7 +76,7 @@ oy review finalize --run <id> --json
 
 Preparation writes an index, manifest, prior report, and bounded evidence chunks under a workspace-local run directory. OpenCode reads those artifacts and writes separate candidate Markdown and findings JSON with native tools. Finalization verifies the bound evidence and canonicalizes the report. Authoritative state remains private in the platform user state directory.
 
-Default setup no longer registers MCP or rewrites the global tool-output budget. Further work can retire direct command config mutation in favor of the package alone.
+Default setup no longer registers MCP, rewrites the global tool-output budget, or installs direct command/agent/skill files.
 
 ## Keep
 

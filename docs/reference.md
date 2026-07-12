@@ -14,8 +14,8 @@
 | `oy recover` | Resume the retained OpenCode session/context for an interrupted bound workflow. |
 | `oy setup` | Write global opencode integration. |
 | `oy setup --workspace` | Write integration under the current workspace's `.opencode/`. |
-| `oy setup --dry-run` | Preview generated integration actions without writing. |
-| `oy setup --remove` | Remove generated files and current oy-owned global config values; combine with `--workspace` for local setup. |
+| `oy setup --dry-run` | Preview package/config migration actions without writing. |
+| `oy setup --remove` | Remove the versioned plugin entry, legacy generated files, and current oy-owned global config values; combine with `--workspace` for local setup. |
 | `oy doctor` | Show OpenCode contract, config paths, and deterministic helper status. |
 | `oy doctor --check` | Validate effective service version, `oy` agent, commands, skills, and model/provider/plugin availability. |
 | `oy` / `oy open ...` / `oy chat` | Validate integration and launch/pass arguments to the OpenCode 2 TUI. |
@@ -41,16 +41,17 @@ Audit, review, and enhance all execute locally through `oy`; there are no dedica
 
 ## Setup Ownership
 
-Global setup writes `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup writes `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Setup creates one `oy` agent and three canonical workflow skills, merges thin skill commands, and removes the retired generated agents and owned MCP/output-budget entries.
+Global setup writes `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; workspace setup writes `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Setup pins `@oy-cli/opencode` to the binary version and removes superseded direct-file agents, skills, commands, MCP, and output-budget entries.
 
 oy owns and replaces:
 
-- `commands.oy-audit`, `commands.oy-review`, and `commands.oy-enhance`;
-- generated agent/skill files containing the oy marker.
+- string-form `@oy-cli/opencode` entries in `plugins`;
+- exact legacy `commands.oy-audit`, `commands.oy-review`, and `commands.oy-enhance` values;
+- exact legacy generated agent/skill files containing the oy marker.
 
-Unknown sibling object keys are retained. The JSON/JSONC config is pretty-serialized, which removes comments and original formatting. Non-generated files at generated Markdown paths are not overwritten.
+Unknown sibling entries are retained. The JSON/JSONC config is pretty-serialized, which removes comments and original formatting. Non-generated files at legacy Markdown paths are retained. Object-form oy plugin entries with custom options are rejected rather than overwritten.
 
-Setup writes native OpenCode 2 `commands` but no MCP server or agent permission overrides. The published `@oy-cli/opencode` package provides the same agent, skills, and commands through the OpenCode V2 plugin API.
+The published `@oy-cli/opencode` package provides the agent, skills, and commands through the OpenCode V2 plugin API without MCP wiring or permission overrides.
 
 Setup and removal use one staged batch and roll back already-committed mutations if a later mutation fails. There is no crash journal or durable persisted recovery. `--remove` removes current owned entries, not historical values that setup previously replaced.
 
@@ -111,7 +112,7 @@ Sighthound is optional and source-built at immutable commit `c4608eb2b6ca256daf4
 | `OY_COLOR` | `auto`, `always`, or `never` color behavior. |
 | `NO_COLOR` | Disable color output. |
 | `OY_SKIP_SETUP` | Skip `oy setup` in `install.sh`. |
-| `OY_RESET_SETUP` | Set to `0`/`false` to update generated integration in place instead of removing and recreating it. |
+| `OY_RESET_SETUP` | Set to `0`/`false` to update the package/config integration in place instead of removing and recreating it. |
 | `OY_MISE_MINIMUM_RELEASE_AGE` | Override the installer's mise release-age filter. |
 | `OY_INSTALL_SIGHTHOUND` | Set to `1`/`true` to include the pinned Sighthound source build in `install.sh`. |
 

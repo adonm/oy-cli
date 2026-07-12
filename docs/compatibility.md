@@ -16,7 +16,7 @@ The curl installer requires a Unix-like POSIX shell. Rust 1.96 is the minimum so
 
 ## OpenCode host compatibility
 
-oy 0.13.0 integrates with OpenCode 2 through its noninteractive runner, managed model API, native JSON/Markdown configuration, and local stdio MCP. It defaults to the `opencode2` executable; `OY_OPENCODE` can override the executable but not the required contract.
+oy 0.13.1 integrates with OpenCode 2 through its noninteractive runner, managed model API, version-matched npm plugin, and temporary local stdio MCP adapter. It defaults to the `opencode2` executable; `OY_OPENCODE` can override the executable but not the required contract.
 
 | Host line | Status |
 |---|---|

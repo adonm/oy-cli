@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1] - 2026-07-12
+
+### Changed
+- Made `oy setup` package-first: it now pins the matching `@oy-cli/opencode` version and removes superseded direct agent, skill, and command files/configuration.
+- Updated the curl installer to start OpenCode after setup and verify that plugin ID `oy` loaded from the version-matched npm package.
+- Made npm trusted publishing mandatory for tagged releases, idempotent on workflow reruns, and a prerequisite for publishing the GitHub release.
+
 ## [0.13.0] - 2026-07-12
 
 ### Added

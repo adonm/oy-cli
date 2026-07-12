@@ -34,7 +34,7 @@ opencode
 | `src/main.rs` | Tokio process entrypoint and exit code handling |
 | `src/lib.rs` | Small public facade exposing `run` and diagnostics |
 | `src/cli/app.rs` | CLI parsing and dispatch |
-| `src/opencode.rs` | `oy setup`, launch, generated agents/skills/commands, and OpenCode workflow orchestration |
+| `src/opencode.rs` | Package-first `oy setup`, launch, legacy integration cleanup, and OpenCode workflow orchestration |
 | `src/opencode/host.rs` | OpenCode executable selection, version probing, and v2 contract gate |
 | `src/opencode/api.rs` | Bounded adapter for OpenCode 2 model, session, and runtime-health API calls |
 | `src/workflow.rs` | Typed inherited run/session/model/scope/output/format/chunk context |
@@ -53,33 +53,25 @@ Deleted legacy modules include `src/agent/`, `src/llm/`, native chat/session han
 
 ## Setup
 
-`oy setup` writes global files under `~/.config/opencode/` by default:
+`oy setup` updates global OpenCode configuration under `~/.config/opencode/` by default:
 
 ```text
 ~/.config/opencode/opencode.json
-~/.config/opencode/agents/oy.md
-~/.config/opencode/skills/oy-audit/SKILL.md
-~/.config/opencode/skills/oy-review/SKILL.md
-~/.config/opencode/skills/oy-enhance/SKILL.md
 ```
 
-`oy setup --workspace` writes the same generated files under `.opencode/` for project-local overrides:
+`oy setup --workspace` writes project-local configuration instead:
 
 ```text
 .opencode/opencode.json
-.opencode/agents/oy.md
-.opencode/skills/oy-audit/SKILL.md
-.opencode/skills/oy-review/SKILL.md
-.opencode/skills/oy-enhance/SKILL.md
 ```
 
-Global setup honors `OPENCODE_CONFIG_DIR`; workspace setup remains rooted at `OY_ROOT/.opencode`. In either directory, setup updates an existing `opencode.jsonc` in preference to `opencode.json`. The config registers transitional `oy mcp` wiring and audit, review, and enhance commands. Every command selects the single `oy` agent and loads the corresponding canonical skill. The agent has no permission overrides; the user's OpenCode policy applies.
+Global setup honors `OPENCODE_CONFIG_DIR`; workspace setup remains rooted at `OY_ROOT/.opencode`. In either directory, setup updates an existing `opencode.jsonc` in preference to `opencode.json`. The config pins the `@oy-cli/opencode` npm package to the binary version. OpenCode installs that package into its isolated cache; the package registers the single agent, three skills, and commands without permission overrides.
 
-Setup writes native OpenCode 2 `commands`, `mcp.servers`, and timeout objects. It removes retired generated mode/workflow agents, migrates legacy command/MCP entries when exact, and fails closed on ambiguous legacy fields.
+Setup removes exact direct-file integrations from earlier releases, migrates legacy command/MCP entries when safe, and fails closed on modified owned entries or ambiguous legacy fields.
 
-Setup and `--remove` stage all writes/deletes before committing them and restore mutations already committed if a later operation fails. This rollback exists only in the running operation; there is no crash journal or persisted recovery transaction. The config merge replaces oy-owned `commands.oy-*` and removes exact transitional `mcp.servers.oy` and tool-output budget values. JSONC comments/formatting are lost on reserialization, and removal deletes current owned values rather than restoring historical before-values.
+Setup and `--remove` stage all writes/deletes before committing them and restore mutations already committed if a later operation fails. This rollback exists only in the running operation; there is no crash journal or persisted recovery transaction. The config merge replaces string-form oy package entries and removes exact transitional commands, `mcp.servers.oy`, and tool-output budget values. JSONC comments/formatting are lost on reserialization, and removal deletes current owned values rather than restoring historical before-values.
 
-Launch, model, and workflow commands only validate that a complete global or workspace integration exists. They never auto-refresh generated files. Running sessions must be restarted after an explicit setup change because OpenCode loads config at startup.
+Launch, model, and workflow commands only validate that a complete global or workspace integration exists. They never auto-refresh the package pin. Running sessions must be restarted after an explicit setup change because OpenCode loads package configuration at startup.
 
 ## Workflow Binding
 

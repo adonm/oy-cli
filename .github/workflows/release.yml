@@ -65,7 +65,7 @@ jobs:
 
   publish-release:
     if: github.repository_owner == 'adonm'
-    needs: release
+    needs: [release, publish-npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -181,7 +181,7 @@ jobs:
           fi
 
   publish-npm:
-    if: github.repository_owner == 'adonm' && vars.NPM_PUBLISH_ENABLED == 'true'
+    if: github.repository_owner == 'adonm'
     needs: release
     runs-on: ubuntu-latest
     environment: npm
@@ -214,4 +214,18 @@ jobs:
           npm run build
           npm test
       - name: Publish public package with npm trusted publishing
-        run: npm publish --access public
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          package=$(node -p 'require("./package.json").name')
+          version=$(node -p 'require("./package.json").version')
+          if npm view "$package@$version" version >/dev/null 2>&1; then
+            published_sha=$(npm view "$package@$version" gitHead)
+            if [ "$published_sha" != "$EXPECTED_SHA" ]; then
+              echo "::error::$package@$version already exists from unexpected commit $published_sha"
+              exit 1
+            fi
+            echo "::notice::$package@$version is already published from $published_sha; skipping"
+          else
+            npm publish --access public
+          fi

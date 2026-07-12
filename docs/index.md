@@ -25,12 +25,12 @@ oy doctor
 oy audit
 ```
 
-The full installer uses [mise](https://mise.jdx.dev/) to install pinned oy 0.13.0, OpenCode 2 beta `0.0.0-next-15353`, and local evidence helpers; it verifies versions, prunes unreferenced old installs, and resets generated integration before global setup. [Review the installer](install.sh) before piping it to a shell.
+The full installer uses [mise](https://mise.jdx.dev/) to install pinned oy 0.13.1, OpenCode 2 beta `0.0.0-next-15353`, and local evidence helpers; it verifies versions, prunes unreferenced old installs, registers the matching npm plugin, and verifies that OpenCode loaded it. [Review the installer](install.sh) before piping it to a shell.
 
 For a minimal manual install:
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.0 npm:@opencode-ai/cli@0.0.0-next-15353
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.1 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy audit
 ```

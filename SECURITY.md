@@ -43,11 +43,11 @@ Avoid mounting the host Docker socket into AI-assisted containers. Docker socket
 
 ## Local Files
 
-`oy setup` writes generated files under `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; `oy setup --workspace` writes under `.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Launch/model/workflow commands validate setup but never rewrite it. Use `oy setup --dry-run` before first setup and `oy setup --remove` to remove the current oy integration.
+`oy setup` writes a versioned `@oy-cli/opencode` plugin entry under `OPENCODE_CONFIG_DIR` when set, otherwise `~/.config/opencode/`; `oy setup --workspace` writes under `.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`. Launch/model/workflow commands validate setup but never rewrite it. Use `oy setup --dry-run` before first setup and `oy setup --remove` to remove the current oy integration.
 
-Generated agent and skill files refuse to overwrite non-generated files at generated paths. Setup owns one `oy` agent, three skills, and `commands.oy-audit`, `commands.oy-review`, and `commands.oy-enhance`; unknown sibling object keys are retained. Exact transitional `mcp.servers.oy` and tool-output budget values are removed. Older generated mode and workflow-agent files are retired during setup.
+Setup owns string-form `@oy-cli/opencode` package entries. It removes exact legacy generated agent/skill files and command, MCP, and output-budget values while retaining unrelated entries. Modified generated files and object-form oy plugin entries with custom options fail closed rather than being deleted or overwritten.
 
-Setup/removal is a staged multi-file batch that restores already-mutated files if a later commit fails. It has no persistent journal and cannot promise recovery across a process or machine crash. JSONC comments and formatting are still lost during reserialization. Removal deletes oy's generated files and currently owned config values; it does not remember or restore historical pre-setup values. Back up hand-edited config before setup.
+Setup/removal is a staged file batch that restores already-mutated files if a later commit fails. It has no persistent journal and cannot promise recovery across a process or machine crash. JSONC comments and formatting are still lost during reserialization. Removal deletes the current package entry, exact legacy generated files, and currently owned config values; it does not remember or restore historical pre-setup values. Back up hand-edited config before setup.
 
 opencode owns its own local state. Treat sessions, logs, and config as sensitive because they may contain prompts, source snippets, command output, or provider metadata.
 

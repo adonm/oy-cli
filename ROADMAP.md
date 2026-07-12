@@ -10,12 +10,12 @@ _Updated July 2026. Ordered by outcome, not promised release date._
 
 **Core loop:** prepare deterministic evidence → let OpenCode reason and edit under the user's permissions → validate a durable report → rerun to confirm.
 
-The intended integration is CLI-first and skill-led. MCP, generated commands, config merging, and host wrappers are transitional compatibility surfaces, not the destination.
+The intended integration is CLI-first, package-delivered, and skill-led. MCP and host wrappers are transitional compatibility surfaces, not the destination.
 
 ## Product principles
 
 1. **OpenCode owns execution policy.** Users configure models, agents, permissions, edits, shell, web, sessions, and approvals in OpenCode. Oy does not maintain parallel plan/edit/auto permission modes.
-2. **Keep one useful agent.** The generated `oy` agent is a concise autonomous system prompt. It adds completion discipline and engineering defaults without overriding the user's permissions.
+2. **Keep one useful agent.** The packaged `oy` agent is a concise autonomous system prompt. It adds completion discipline and engineering defaults without overriding the user's permissions.
 3. **Own the evidence boundary, not the model.** Oy owns collection, ordering, limits, evidence identity, and report normalization; OpenCode owns inference and general tools.
 4. **Skills are the integration contract.** Audit, review, and one-finding remediation protocols should be usable from normal OpenCode sessions and should not require dedicated permission-adapter agents.
 5. **Prefer files over large tool responses.** Prepare immutable workspace-local evidence artifacts, return small structured descriptors, and let OpenCode read them with native tools.
@@ -36,6 +36,7 @@ Completed in the current development cycle:
 - Added `oy audit|review prepare` and `finalize` with workspace-local evidence, private state, SHA-256 artifact binding, changed-input/output rejection, and strict candidate findings.
 - Rewrote audit/review skills around native OpenCode reads and edits.
 - Added the `@oy-cli/opencode` V2 package for the agent, skills, and commands.
+- Made setup package-first and removed direct agent/skill/command installation.
 - Stopped registering MCP and global tool-output overrides in default setup.
 
 ## Completed — make the CLI the deterministic boundary

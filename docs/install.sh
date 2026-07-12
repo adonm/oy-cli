@@ -10,10 +10,10 @@ set -eu
 #   OY_MISE_MINIMUM_RELEASE_AGE  mise age filter; default 0 for freshest releases
 #   OY_INSTALL_SIGHTHOUND        set to 1/true to source-build optional pinned Sighthound
 #   OY_SKIP_SETUP                set to 1/true to skip `oy setup`
-#   OY_RESET_SETUP               set to 0/false to update setup without first removing generated files
+#   OY_RESET_SETUP               set to 0/false to update setup without first removing owned entries
 
 minimum_release_age="${OY_MISE_MINIMUM_RELEASE_AGE:-0}"
-oy_version="0.13.0"
+oy_version="0.13.1"
 oy_tool="cargo:oy-cli@$oy_version"
 opencode_version="0.0.0-next-15353"
 opencode_tool="npm:@opencode-ai/cli@$opencode_version"
@@ -159,7 +159,7 @@ case "${OY_SKIP_SETUP:-}" in
     log "Updating OpenCode integration without a clean reset because OY_RESET_SETUP is disabled."
     ;;
   *)
-    log "Removing generated files and config from older oy versions..."
+    log "Removing package/config entries and generated files from older oy versions..."
     if ! "$mise_bin" exec -- oy setup --remove; then
       log "Warning: old integration cleanup was incomplete; oy setup will preserve or reject modified user-owned files."
     fi
@@ -167,6 +167,24 @@ case "${OY_SKIP_SETUP:-}" in
   esac
   log "Installing the fresh OpenCode integration with oy setup..."
   "$mise_bin" exec -- oy setup
+  log "Starting OpenCode so it can install the version-matched oy plugin..."
+  "$mise_bin" exec -- opencode2 service start >/dev/null \
+    || die "OpenCode could not start after oy setup"
+  workspace=$(pwd)
+  "$mise_bin" exec -- opencode2 api v2.plugin.list \
+    --param "location[directory]=$workspace" >/dev/null \
+    || die "OpenCode could not initialize the current workspace"
+  loaded_plugins=$("$mise_bin" exec -- opencode2 api v2.plugin.list \
+    --param "location[directory]=$workspace") \
+    || die "OpenCode could not list loaded plugins"
+  case "$loaded_plugins" in
+  *'"id":"oy"'* | *'"id": "oy"'*)
+    log "Verified OpenCode loaded the oy plugin."
+    ;;
+  *)
+    die "OpenCode started, but the oy plugin did not load; run 'oy doctor --check' for details"
+    ;;
+  esac
   ;;
 esac
 

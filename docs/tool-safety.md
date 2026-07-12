@@ -73,7 +73,7 @@ Sighthound does not use that collected file list. It has independent gitignore-a
 
 ## Permission Boundary
 
-The host handles user approval for its own tools. `oy mcp` report-writing tools are exposed as MCP tools, so permission behavior follows the host MCP/tool configuration. Keep generated agents explicit about when they call report renderers.
+The host handles user approval for its own tools. `oy mcp` report-writing tools are exposed as MCP tools, so permission behavior follows the host MCP/tool configuration. Keep packaged agents explicit about when they call report renderers.
 
 For CLI-bound workflows, coverage does not rely on instructions alone. MCP currently replaces caller-supplied scope/model/chunk sizing with inherited context, checks the maximum chunk count and evidence digest, requires ordered complete chunk reads, and binds render output/metadata. The three skills define the canonical workflow and commands select `oy`; OpenCode owns tool permissions. MCP remains a transitional adapter until file-backed CLI preparation/finalization reaches parity.
 
@@ -91,5 +91,5 @@ Checklist:
 - bounded external-process runtime and output,
 - workspace path validation near entry,
 - clear JSON schema in `src/mcp.rs`,
-- generated agents/skills updated if the tool should be used by workflows,
+- packaged agents/skills updated if the tool should be used by workflows,
 - tests or smoke coverage for `tools/list` and `tools/call` behavior.

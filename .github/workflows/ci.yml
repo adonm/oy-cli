@@ -65,8 +65,20 @@ jobs:
           cargo build --locked
           export PATH="$PWD/target/debug:$PATH"
           oy setup
-          grep -F '"commands"' "$HOME/.config/opencode/opencode.json"
-          python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy" not in config.get("mcp", {}).get("servers", {}); assert "tool_output" not in config'
+          grep -F '"@oy-cli/opencode@0.13.1"' "$HOME/.config/opencode/opencode.json"
+          python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy-audit" not in config.get("commands", {}); assert "oy" not in config.get("mcp", {}).get("servers", {}); assert "tool_output" not in config'
+          # The release version does not exist in npm until the tag publishes it.
+          # Load this checkout directly for the pre-publish runtime smoke instead.
+          npm ci --prefix packages/opencode --ignore-scripts
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path.home() / ".config/opencode/opencode.json"
+          config = json.loads(path.read_text())
+          config["plugins"] = [str(Path("packages/opencode/src/index.js").resolve())]
+          path.write_text(json.dumps(config, indent=2) + "\n")
+          PY
           opencode2 service start
           # The first location-scoped query boots and caches project services.
           opencode2 api v2.agent.list --param "location[directory]=$PWD" > /dev/null

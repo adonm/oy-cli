@@ -12,8 +12,8 @@
 //! The command-line interface is the supported automation surface:
 //!
 //! ```text
-//! oy setup --dry-run       # preview the generated agent/skill integration
-//! oy setup                 # install the current OpenCode integration
+//! oy setup --dry-run       # preview package/config migration
+//! oy setup                 # register the version-matched OpenCode package
 //! oy audit                 # write ISSUES.md
 //! oy review main           # write REVIEW.md for git diff main
 //! oy enhance <finding-id>  # remediate one reported finding
@@ -76,7 +76,7 @@ pub(crate) fn decode_utf8(raw: Vec<u8>) -> Result<String, TextDecodeError> {
 ///
 /// Normal command and delegated opencode exit statuses are returned as `Ok(code)`. Setup,
 /// filesystem, process-launch, and protocol failures are returned as errors. This function may
-/// update opencode integration files or launch child processes depending on the arguments.
+/// update opencode integration config or launch child processes depending on the arguments.
 ///
 /// Prefer invoking the `oy` executable when process isolation or concurrent invocations matter;
 /// CLI output configuration is process-global.

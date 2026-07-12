@@ -18,14 +18,14 @@ oy does not store provider credentials. Follow OpenCode's [provider setup](https
 curl -fsSL https://oy.adonm.dev/install.sh | sh
 ```
 
-The POSIX shell installer installs pinned oy 0.13.0, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies versions, stops stale OpenCode services, safely prunes unreferenced old mise versions, removes generated integration from older oy releases, and runs a fresh `oy setup`. Set `OY_RESET_SETUP=0` to update generated setup in place or `OY_SKIP_SETUP=1` to skip setup. It configures bash, zsh, or fish activation through mise's bootstrap support; restart your shell when it finishes.
+The POSIX shell installer installs pinned oy 0.13.1, `@opencode-ai/cli@0.0.0-next-15353`, `tokei`, and Universal Ctags. It verifies versions, stops stale OpenCode services, safely prunes unreferenced old mise versions, removes generated integration from older oy releases, and runs a fresh `oy setup`. Setup registers the matching `@oy-cli/opencode@0.13.1` package; OpenCode installs it into its isolated cache, and the installer verifies plugin ID `oy` loaded. Set `OY_RESET_SETUP=0` to update setup in place or `OY_SKIP_SETUP=1` to skip setup. It configures bash, zsh, or fish activation through mise's bootstrap support; restart your shell when it finishes.
 
 Review [`install.sh`](install.sh) before piping it to a shell. Set `OY_SKIP_SETUP=1` to skip integration writes or `OY_MISE_MINIMUM_RELEASE_AGE` to change mise's release-age filter. Set `OY_INSTALL_SIGHTHOUND=1` for the optional pinned source build; the installer provisions Rust 1.96, uses `--locked`, and builds only `bin=sighthound`.
 
 ### Minimal manual install
 
 ```bash
-mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.0 npm:@opencode-ai/cli@0.0.0-next-15353
+mise use --global node@24 cargo-binstall cargo:oy-cli@0.13.1 npm:@opencode-ai/cli@0.0.0-next-15353
 oy setup
 oy doctor
 ```
@@ -49,11 +49,11 @@ oy setup --remove         # remove global oy integration
 
 Global setup is convenient for personal use and honors `OPENCODE_CONFIG_DIR`. Workspace setup is useful when one repository needs local overrides. Existing `opencode.jsonc` wins over `opencode.json`. Setup/removal commits one rollback-capable batch, but does not maintain a persistent crash-recovery journal. Restart running OpenCode sessions after setup changes.
 
-As a package-first alternative, add `@oy-cli/opencode@0.13.0` to OpenCode's `plugins` array after installing the `oy` binary. The package registers the same agent, skills, and commands through the OpenCode V2 plugin API and does not define permissions.
+`oy setup` adds `@oy-cli/opencode@0.13.1` to OpenCode's `plugins` array after installing the `oy` binary. The package registers the agent, skills, and commands through the OpenCode V2 plugin API and does not define permissions.
 
 > **Native v2 setup:** setup writes one permission-neutral `oy` agent, three skills, and thin `commands`. It removes exact old oy MCP/output-budget entries but does not register MCP. JSON/JSONC is still pretty-reserialized, and `--remove` removes owned current values rather than restoring pre-setup values. Back up hand-edited config and preview first.
 
-Normal launch, model, and workflow commands validate setup and never auto-refresh it. Rerun `oy setup` explicitly after changing versions or generated integration files.
+Normal launch, model, and workflow commands validate setup and never auto-refresh it. Rerun `oy setup` explicitly after changing versions so the package pin is refreshed.
 
 ## Create a first report
 

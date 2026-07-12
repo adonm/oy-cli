@@ -43,7 +43,7 @@ Keep `Cargo.lock` in sync with `Cargo.toml` after dependency changes.
 ## Prompt And Agent Changes
 
 Prompt quality is live-model behavior, not a deterministic unit-test problem.
-Before changing generated agents or skills, read `docs/evaluation.md` and use a
+Before changing packaged agents or skills, read `docs/evaluation.md` and use a
 pinned public-repository corpus when possible. Keep raw model outputs under
 `.tmp/eval/`; do not commit generated `ISSUES.md`, `REVIEW.md`, or SARIF files
 from local runs.
@@ -58,7 +58,7 @@ python3 scripts/eval_runner.py run --dry-run
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
-- Keep the three generated skills canonical for audit, review, and enhance protocols. They execute under the user's OpenCode permissions through the single `oy` agent.
+- Keep the three packaged skills canonical for audit, review, and enhance protocols. They execute under the user's OpenCode permissions through the single `oy` agent.
 - Keep `oy` concise but compare it with tagged OpenCode 2 Build behavior: inspect first, preserve unrelated changes, implement end-to-end, verify, and avoid destructive or unrequested Git operations.
 - Do not add oy-owned plan/edit/auto permission modes. OpenCode policy is authoritative.
 - Put immutable workflow-input, ordering, limit, and render enforcement in typed Rust boundaries rather than relying on prompt text.
