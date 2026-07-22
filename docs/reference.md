@@ -50,7 +50,7 @@ These are OpenCode prompt commands, not shell subcommands. They use the same `oy
 | `oy doctor` | Show selected paths, host version, setup state, and optional tools. |
 | `oy doctor --check` | Validate the effective service, API, plugin, agent, skills, commands, and models. |
 | `oy doctor --install-missing` | Install missing OpenCode/context helpers with mise. |
-| `oy upgrade [--check|--dry-run]` | Manage oy and OpenCode when both are active mise tools. |
+| `oy upgrade [--check|--dry-run]` | Upgrade a mise-installed oy, latest Node.js, and the OpenCode 2 npm package. |
 
 See [Compatibility](compatibility.md) for the OpenCode versions accepted by this release.
 

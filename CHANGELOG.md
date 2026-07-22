@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-07-22
+
+### Changed
+- Simplified the curl installer around mise's official shell-specific bootstrap, prebuilt oy/context-helper artifacts, latest Node.js, and OpenCode 2's documented global npm install.
+- Updated `oy doctor --install-missing` to use the same binary-only helper references and documented OpenCode npm install path.
+- Reworked `oy upgrade` to refresh binary-installed oy and latest Node.js, update OpenCode through npm, migrate older cargo/npm mise entries, rerun setup, and restart the OpenCode service.
+
 ## [0.13.6] - 2026-07-13
 
 ### Changed

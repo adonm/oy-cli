@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use crate::config;
 
-const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli@next";
-const OPENCODE_NODE_TOOL: &str = "node@24";
-const TOKEI_MISE_TOOL: &str = "cargo:tokei";
-const CTAGS_MISE_TOOL: &str = "github:universal-ctags/ctags";
+const OPENCODE_NPM_PACKAGE: &str = "@opencode-ai/cli@next";
+const OPENCODE_NODE_TOOL: &str = "node@latest";
+const TOKEI_MISE_TOOL: &str = "aqua:XAMPPRocky/tokei@12.1.2";
+const CTAGS_MISE_TOOL: &str =
+    "github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]";
 const MISE_MINIMUM_RELEASE_AGE: &str = "0";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_OUTPUT_LIMIT: usize = 256 * 1024;
@@ -285,7 +286,7 @@ fn recommended_next_step(
 fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
     let mut tools = Vec::new();
     if !opencode_ok {
-        tools.extend([OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL]);
+        tools.push(OPENCODE_NODE_TOOL);
     }
     if !tokei_ok {
         tools.push(TOKEI_MISE_TOOL);
@@ -336,15 +337,21 @@ fn maybe_install_missing_with_mise(
         "Installing and activating missing tools with mise: {}",
         tools.join(" ")
     ));
-    for batch in mise_install_batches(&tools) {
-        run_mise_use(&mise, &batch)?;
+    run_mise_use(&mise, &tools)?;
+    if !opencode_ok {
+        run_opencode_npm_install(&mise)?;
     }
     let status = std::process::Command::new(&mise).arg("reshim").status()?;
     if !status.success() {
         bail!("tools installed, but `mise reshim` failed");
     }
-    if !opencode_ok && !command_ok("mise", &["exec", "--", "opencode2", "--version"]) {
-        bail!("OpenCode 2 installed, but `mise exec -- opencode2 --version` failed");
+    if !opencode_ok
+        && !command_ok(
+            "mise",
+            &["exec", OPENCODE_NODE_TOOL, "--", "opencode2", "--version"],
+        )
+    {
+        bail!("OpenCode 2 installed, but `mise exec node@latest -- opencode2 --version` failed");
     }
     if !tokei_ok && !command_ok("mise", &["exec", "--", "tokei", "--version"]) {
         bail!("tokei installed, but `mise exec -- tokei --version` failed");
@@ -361,18 +368,6 @@ fn maybe_install_missing_with_mise(
     Ok(())
 }
 
-fn mise_install_batches<'a>(tools: &[&'a str]) -> Vec<Vec<&'a str>> {
-    if !tools.contains(&OPENCODE_NODE_TOOL) {
-        return vec![tools.to_vec()];
-    }
-    let remaining = tools
-        .iter()
-        .copied()
-        .filter(|tool| *tool != OPENCODE_NODE_TOOL)
-        .collect::<Vec<_>>();
-    vec![vec![OPENCODE_NODE_TOOL], remaining]
-}
-
 fn run_mise_use(mise: &Path, tools: &[&str]) -> Result<()> {
     if tools.is_empty() {
         return Ok(());
@@ -385,6 +380,27 @@ fn run_mise_use(mise: &Path, tools: &[&str]) -> Result<()> {
     }
     bail!(
         "mise use --global failed with exit code {}",
+        status.code().unwrap_or(1)
+    )
+}
+
+fn run_opencode_npm_install(mise: &Path) -> Result<()> {
+    let status = std::process::Command::new(mise)
+        .args([
+            "exec",
+            OPENCODE_NODE_TOOL,
+            "--",
+            "npm",
+            "install",
+            "-g",
+            OPENCODE_NPM_PACKAGE,
+        ])
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    bail!(
+        "OpenCode install failed with exit code {}",
         status.code().unwrap_or(1)
     )
 }
@@ -431,7 +447,7 @@ mod tests {
     fn mise_tool_list_tracks_missing_tools() {
         assert_eq!(
             missing_mise_tools(false, false, true),
-            vec![OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL, TOKEI_MISE_TOOL]
+            vec![OPENCODE_NODE_TOOL, TOKEI_MISE_TOOL]
         );
         assert_eq!(missing_mise_tools(true, true, false), vec![CTAGS_MISE_TOOL]);
         assert!(missing_mise_tools(true, true, true).is_empty());
@@ -449,13 +465,6 @@ mod tests {
                 "0",
                 TOKEI_MISE_TOOL,
                 CTAGS_MISE_TOOL
-            ]
-        );
-        assert_eq!(
-            mise_install_batches(&[OPENCODE_NODE_TOOL, OPENCODE_MISE_TOOL, TOKEI_MISE_TOOL]),
-            vec![
-                vec![OPENCODE_NODE_TOOL],
-                vec![OPENCODE_MISE_TOOL, TOKEI_MISE_TOOL]
             ]
         );
     }

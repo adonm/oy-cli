@@ -29,7 +29,7 @@ cd your-repository
 oy audit
 ```
 
-The installer uses [mise](https://mise.jdx.dev/) to install compatible versions of oy and OpenCode, register the `@oy-cli/opencode` plugin, and install optional `tokei`/Universal Ctags context helpers. [Review the installer](https://oy.adonm.dev/install.sh) before piping it to a shell.
+The installer uses [mise](https://mise.jdx.dev/) to install prebuilt oy and context-helper binaries, provisions the latest Node.js, installs OpenCode 2 with its documented npm command, and registers the `@oy-cli/opencode` plugin. If mise is missing, its official shell-specific bootstrap also configures activation. [Review the installer](https://oy.adonm.dev/install.sh) before piping it to a shell.
 
 Prefer a manual install or project-local setup? See [Getting started](https://oy.adonm.dev/getting-started.html).
 

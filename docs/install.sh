@@ -9,9 +9,12 @@ set -eu
 # Environment knobs:
 #   OY_SKIP_SETUP  set to 1/true to skip `oy setup`
 
-oy_version="0.13.6"
-oy_tool="cargo:oy-cli@$oy_version"
-opencode_tool="npm:@opencode-ai/cli@next"
+oy_version="0.13.7"
+oy_tool="github:adonm/oy-cli@$oy_version"
+node_tool="node@latest"
+opencode_package="@opencode-ai/cli@next"
+tokei_tool="aqua:XAMPPRocky/tokei@12.1.2"
+ctags_tool="github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -30,54 +33,14 @@ esac
 find_mise() {
   if command -v mise >/dev/null 2>&1; then
     command -v mise
+  elif [ -n "${MISE_INSTALL_PATH:-}" ] && [ -x "$MISE_INSTALL_PATH" ]; then
+    printf '%s\n' "$MISE_INSTALL_PATH"
   elif [ -x "$HOME/.local/bin/mise" ]; then
     printf '%s\n' "$HOME/.local/bin/mise"
   else
     return 1
   fi
 }
-
-install_mise() {
-  log "Installing mise..."
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL https://mise.run | sh
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO- https://mise.run | sh
-  else
-    die "mise is not installed and neither curl nor wget is available"
-  fi
-}
-
-mise_bin="$(find_mise || true)"
-if [ -z "$mise_bin" ]; then
-  install_mise
-  mise_bin="$(find_mise || true)"
-fi
-[ -n "$mise_bin" ] || die "mise installed, but no mise executable was found on PATH or at ~/.local/bin/mise"
-
-log "Updating mise itself when supported..."
-if "$mise_bin" self-update --yes; then
-  mise_bin="$(find_mise || true)"
-  [ -n "$mise_bin" ] || die "mise self-update completed, but no mise executable was found"
-else
-  log "Skipping mise self-update; this is normal for package-manager installs."
-fi
-
-log "Installing/upgrading oy toolchain with mise..."
-
-# OpenCode's beta package uses npm; oy and tokei use Cargo.
-"$mise_bin" use --global --yes node@24 rust@1.96
-
-# Install cargo-binstall first so cargo-backed tools can use prebuilt binaries when available.
-"$mise_bin" use --global --yes --minimum-release-age 0 cargo-binstall
-
-"$mise_bin" use --global --yes --minimum-release-age 0 \
-  "$oy_tool" \
-  "$opencode_tool"
-
-"$mise_bin" use --global --yes \
-  cargo:tokei \
-  github:universal-ctags/ctags
 
 case "${SHELL:-}" in
 */bash | bash) shell_target=bash ;;
@@ -86,36 +49,73 @@ case "${SHELL:-}" in
 *) shell_target= ;;
 esac
 
-if [ -n "$shell_target" ]; then
-  if [ -n "${MISE_GLOBAL_CONFIG_FILE:-}" ]; then
-    mise_global_config_file=$MISE_GLOBAL_CONFIG_FILE
-  elif [ -n "${MISE_CONFIG_DIR:-}" ]; then
-    mise_global_config_file=$MISE_CONFIG_DIR/config.toml
-  elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
-    mise_global_config_file=$XDG_CONFIG_HOME/mise/config.toml
+install_mise() {
+  if [ -n "$shell_target" ]; then
+    mise_url="https://mise.run/$shell_target"
+    log "Installing mise and configuring $shell_target activation..."
   else
-    mise_global_config_file=$HOME/.config/mise/config.toml
+    mise_url="https://mise.run"
+    log "Installing mise (shell activation skipped because SHELL=${SHELL:-unset})..."
   fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$mise_url" | sh
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$mise_url" | sh
+  else
+    die "mise is not installed and neither curl nor wget is available"
+  fi
+}
 
-  log "Configuring $shell_target activation with mise bootstrap..."
-  "$mise_bin" config set --cd "$HOME" --file "$mise_global_config_file" --type bool \
-    "bootstrap.mise_shell_activate.$shell_target" true
-  MISE_GLOBAL_CONFIG_FILE="$mise_global_config_file" \
-    "$mise_bin" bootstrap mise-shell-activate apply --cd "$HOME" --yes
-else
-  log "Skipping shell activation: mise bootstrap supports bash, zsh, and fish; SHELL=${SHELL:-unset}."
+mise_bin="$(find_mise || true)"
+installed_mise=0
+if [ -z "$mise_bin" ]; then
+  install_mise
+  installed_mise=1
+  mise_bin="$(find_mise || true)"
+fi
+[ -n "$mise_bin" ] || die "mise installed, but no mise executable was found on PATH, at MISE_INSTALL_PATH, or at ~/.local/bin/mise"
+
+if [ "$installed_mise" -eq 0 ]; then
+  log "Updating mise itself when supported..."
+  if "$mise_bin" self-update --yes; then
+    mise_bin="$(find_mise || true)"
+    [ -n "$mise_bin" ] || die "mise self-update completed, but no mise executable was found"
+  else
+    log "Skipping mise self-update; this is normal for package-manager installs."
+  fi
 fi
 
+log "Installing/upgrading oy toolchain with mise..."
+"$mise_bin" use --global --yes --minimum-release-age 0 \
+  "$oy_tool" \
+  "$node_tool"
+
+log "Installing OpenCode 2 with npm as documented upstream..."
+"$mise_bin" exec "$node_tool" -- npm install -g "$opencode_package"
+
+log "Installing optional prebuilt context helpers..."
+if ! "$mise_bin" use --global --yes --minimum-release-age 0 \
+  "$tokei_tool" \
+  "$ctags_tool"; then
+  log "Warning: optional context helpers could not be installed; rerun 'oy doctor --install-missing' later."
+fi
+
+log "Removing superseded source/package-manager tool entries..."
+"$mise_bin" unuse --global --yes --no-prune \
+  cargo:oy-cli \
+  "npm:@opencode-ai/cli" \
+  cargo:tokei \
+  github:universal-ctags/ctags
 "$mise_bin" reshim
 
-installed_oy_version=$("$mise_bin" exec -- oy --version 2>/dev/null) \
+installed_oy_version=$("$mise_bin" exec "$oy_tool" -- oy --version 2>/dev/null) \
   || die "oy installed, but oy --version failed"
 case "$installed_oy_version" in
 *"$oy_version"*) ;;
 *) die "expected oy $oy_version after install, got: $installed_oy_version" ;;
 esac
 
-installed_opencode_version=$("$mise_bin" exec -- opencode2 --version 2>/dev/null) \
+installed_opencode_version=$("$mise_bin" exec "$node_tool" -- opencode2 --version 2>/dev/null) \
   || die "OpenCode 2 installed, but opencode2 --version failed"
 case "$installed_opencode_version" in
 *"0.0.0-next-"[0-9]*) ;;
@@ -123,12 +123,17 @@ case "$installed_opencode_version" in
 esac
 
 log "Stopping any older OpenCode background service..."
-if ! "$mise_bin" exec -- opencode2 service stop >/dev/null 2>&1; then
+if ! "$mise_bin" exec "$node_tool" -- opencode2 service stop >/dev/null 2>&1; then
   log "No running OpenCode service needed stopping."
 fi
 
-log "Pruning unreferenced old oy and OpenCode versions..."
-if ! "$mise_bin" prune --yes --tools cargo:oy-cli "npm:@opencode-ai/cli"; then
+log "Pruning unreferenced old tool versions..."
+if ! "$mise_bin" prune --yes --tools \
+  github:adonm/oy-cli \
+  cargo:oy-cli \
+  "npm:@opencode-ai/cli" \
+  cargo:tokei \
+  github:universal-ctags/ctags; then
   log "Warning: mise could not prune old versions; the newly installed versions remain active."
 fi
 
@@ -138,16 +143,16 @@ case "${OY_SKIP_SETUP:-}" in
   ;;
 *)
   log "Installing the OpenCode integration with oy setup..."
-  "$mise_bin" exec -- oy setup
+  "$mise_bin" exec "$oy_tool" "$node_tool" -- oy setup
   log "Starting OpenCode so it can install the version-matched oy plugin..."
-  "$mise_bin" exec -- opencode2 service start >/dev/null \
+  "$mise_bin" exec "$node_tool" -- opencode2 service start >/dev/null \
     || die "OpenCode could not start after oy setup"
   workspace=$(pwd)
   log "Waiting for OpenCode to resolve and load the oy plugin..."
   plugin_loaded=0
   attempts=0
   while [ "$attempts" -lt 60 ]; do
-    loaded_plugins=$("$mise_bin" exec -- opencode2 api v2.plugin.list \
+    loaded_plugins=$("$mise_bin" exec "$node_tool" -- opencode2 api v2.plugin.list \
       --param "location[directory]=$workspace" 2>/dev/null || true)
     case "$loaded_plugins" in
     *'"id":"oy"'* | *'"id": "oy"'*)
@@ -165,5 +170,7 @@ case "${OY_SKIP_SETUP:-}" in
 esac
 
 log "Done."
-log "Restart your shell to load the mise activation configured by mise bootstrap."
+if [ "$installed_mise" -eq 1 ] && [ -n "$shell_target" ]; then
+  log "Restart your shell to load the mise activation configured by https://mise.run/$shell_target."
+fi
 log "Then run: oy doctor"

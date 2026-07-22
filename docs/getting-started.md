@@ -23,10 +23,12 @@ curl -fsSL https://oy.adonm.dev/install.sh | sh
 
 The installer:
 
-1. installs compatible versions of oy and OpenCode with [mise](https://mise.jdx.dev/);
-2. registers the matching `@oy-cli/opencode` plugin;
-3. installs optional `tokei` and Universal Ctags context helpers;
-4. checks that OpenCode loaded the plugin.
+1. installs and activates [mise](https://mise.jdx.dev/) with its official bootstrap for bash, zsh, or fish when mise is missing;
+2. installs a prebuilt oy release and the latest Node.js with mise;
+3. installs OpenCode 2 with the exact npm package and channel documented upstream;
+4. registers the matching `@oy-cli/opencode` plugin;
+5. installs prebuilt `tokei` and Universal Ctags context helpers;
+6. checks that OpenCode loaded the plugin.
 
 Review [`install.sh`](install.sh) before running it. Set `OY_SKIP_SETUP=1` to install without changing OpenCode configuration.
 
@@ -35,8 +37,9 @@ Review [`install.sh`](install.sh) before running it. Set `OY_SKIP_SETUP=1` to in
 With mise:
 
 ```bash
-mise use --global --yes --minimum-release-age 0 node@24 cargo-binstall cargo:oy-cli@0.13.6 npm:@opencode-ai/cli@next
-oy setup
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.13.7 node@latest
+mise exec node@latest -- npm install -g @opencode-ai/cli@next
+mise exec github:adonm/oy-cli@0.13.7 node@latest -- oy setup
 ```
 
 Or install only the Rust CLI from crates.io, then provide a compatible OpenCode installation yourself:
@@ -47,6 +50,8 @@ oy setup
 ```
 
 Rust 1.96+ is required only when building from source.
+
+The installer and `oy doctor --install-missing` use `aqua:XAMPPRocky/tokei@12.1.2`, the newest stable official tokei release that provides binaries, and the release-only archives from `github:universal-ctags/ctags-nightly-build`. They do not install a Rust build toolchain.
 
 ## 2. Check OpenCode
 

@@ -11,11 +11,11 @@
 | Windows | Use WSL2; native Windows is unsupported |
 | Other operating systems | Unsupported at build time |
 
-The installer requires a POSIX shell. Building from source requires Rust 1.96+. The npm plugin declares Linux and macOS support.
+The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy release supports the three release-archive targets above; other Linux/macOS targets require a source build. Building from source requires Rust 1.96+. The npm plugin declares Linux and macOS support.
 
 ## OpenCode
 
-oy 0.13.6 accepts:
+oy 0.13.7 accepts:
 
 | OpenCode host | Status |
 |---|---|
@@ -26,7 +26,7 @@ oy 0.13.6 accepts:
 
 The default executable is `opencode2`. `OY_OPENCODE` can select another executable, but it must report a supported version.
 
-During the V2 beta, installation resolves `@opencode-ai/cli@next` and the plugin SDK from the same moving `next` channel. This keeps new installs current but means an upstream beta change can break compatibility between oy releases. The package lock records the build tested at release time. Restart OpenCode after either package changes.
+During the V2 beta, installation runs the upstream-documented `npm install -g @opencode-ai/cli@next` under mise's latest Node.js. The plugin SDK resolves from the same moving `next` channel. This keeps new installs current but means an upstream beta change can break compatibility between oy releases. The package lock records the build tested at release time. Restart OpenCode after either package changes.
 
 Once OpenCode 2 is stable, oy will switch these references to the stable `latest` channel and remove the beta-specific compatibility path in a follow-up release.
 
@@ -53,6 +53,8 @@ Setup preserves unrelated configuration and backs up changed oy-owned entries. S
 ```bash
 oy doctor --install-missing
 ```
+
+The helper installs prebuilt artifacts only: tokei 12.1.2 through mise's Aqua backend and Universal Ctags release archives from the official nightly-build repository.
 
 ## Reporting a compatibility problem
 
