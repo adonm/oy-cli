@@ -15,7 +15,7 @@ The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy rele
 
 ## OpenCode
 
-oy 0.13.7 accepts:
+oy 0.14.0 accepts:
 
 | OpenCode host | Status |
 |---|---|
@@ -30,6 +30,14 @@ During the V2 beta, installation runs the upstream-documented `npm install -g @o
 
 Once OpenCode 2 is stable, oy will switch these references to the stable `latest` channel and remove the beta-specific compatibility path in a follow-up release.
 
+## Cursor
+
+`oy setup --cursor` uses Cursor's native rule, subagent, and Agent Skill file formats. The integration does not install a Cursor extension or MCP server. Skills invoke the local `oy audit|review prepare` and `finalize` commands through Cursor's existing terminal tools and permissions.
+
+Cursor does not support a file-defined replacement for its primary Agent. Oy therefore installs an always-applied `oy` rule for primary behavior and a separate `oy` subagent for explicit delegation.
+
+`install.sh --cursor` installs the standalone `agent` CLI with Cursor's supported `https://cursor.com/install` installer on Linux, macOS, and WSL. Cursor has no official mise registry entry, npm package, documented release index, or stable artifact URL suitable for a maintained mise backend. Oy deliberately does not use the unversioned third-party asdf/mise plugin.
+
 ## What `doctor --check` covers
 
 ```bash
@@ -40,9 +48,11 @@ This checks the effective service version, API, location, plugin, `oy` agent, th
 
 ## Setup locations
 
-- Global: `OPENCODE_CONFIG_DIR`, or the platform OpenCode config directory
-- Workspace: `OY_ROOT/.opencode/`
-- Preferred config file: existing `opencode.jsonc`, otherwise `opencode.json`
+- OpenCode global: `OPENCODE_CONFIG_DIR`, or the platform OpenCode config directory
+- OpenCode workspace: `OY_ROOT/.opencode/`
+- OpenCode preferred config file: existing `opencode.jsonc`, otherwise `opencode.json`
+- Cursor global: `~/.cursor/`
+- Cursor workspace: `OY_ROOT/.cursor/`
 
 Setup preserves unrelated configuration and backs up changed oy-owned entries. See [Setup ownership and backups](reference.md#setup-ownership-and-backups).
 
@@ -55,6 +65,8 @@ oy doctor --install-missing
 ```
 
 The helper installs prebuilt artifacts only: tokei 12.1.2 through mise's Aqua backend and Universal Ctags release archives from the official nightly-build repository.
+
+On a Cursor-only workstation, install these optional binaries separately if wanted; `doctor --install-missing` also provisions the supported OpenCode runtime.
 
 ## Reporting a compatibility problem
 

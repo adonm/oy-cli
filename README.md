@@ -3,24 +3,25 @@
 [![Crates.io](https://img.shields.io/crates/v/oy-cli.svg)](https://crates.io/crates/oy-cli)
 [![docs.rs](https://docs.rs/oy-cli/badge.svg)](https://docs.rs/oy-cli)
 
-**A focused OpenCode coding agent with repeatable audits, code reviews, and one-finding fixes.**
+**Focused OpenCode and Cursor integrations with repeatable audits, code reviews, and one-finding fixes.**
 
-`oy` helps OpenCode review a repository without quietly choosing a small sample. It prepares an ordered, reviewable set of files, lets the model analyze them under your existing OpenCode permissions, and verifies the report before writing it.
+`oy` helps OpenCode or Cursor review a repository without quietly choosing a small sample. It prepares an ordered, reviewable set of files, lets the model analyze them under the host's existing permissions, and verifies the report before writing it.
 
 ## What you get
 
 - `oy audit` for security-focused repository audits (`ISSUES.md` or SARIF)
 - `oy review` for whole-workspace or target-diff code reviews (`REVIEW.md`)
 - `oy enhance` for fixing one reported finding at a time
-- one concise `oy` coding agent plus `/oy-audit`, `/oy-review`, and `/oy-enhance` inside OpenCode
+- one concise `oy` coding agent plus `/oy-audit`, `/oy-review`, and `/oy-enhance` inside OpenCode or Cursor
 
-OpenCode still owns models, credentials, permissions, sessions, edits, shell commands, and web access. `oy` adds the evidence and report workflow; it is not a second agent runtime or permission system.
+OpenCode or Cursor still owns models, credentials, permissions, sessions, edits, shell commands, and web access. `oy` adds the evidence and report workflow; it is not a second agent runtime or permission system.
 
 ## Quick start
 
-Requirements: Linux or macOS (WSL2 on Windows), a supported OpenCode 2 installation, and a configured model provider.
+Requirements: Linux or macOS (WSL2 on Windows), `oy` on `PATH`, and either a supported OpenCode 2 or Cursor installation with a configured model provider.
 
 ```bash
+# OpenCode 2 (default)
 curl -fsSL https://oy.adonm.dev/install.sh | sh
 # Restart your shell if the installer asks you to.
 oy doctor --check
@@ -29,7 +30,15 @@ cd your-repository
 oy audit
 ```
 
-The installer uses [mise](https://mise.jdx.dev/) to install prebuilt oy and context-helper binaries, provisions the latest Node.js, installs OpenCode 2 with its documented npm command, and registers the `@oy-cli/opencode` plugin. If mise is missing, its official shell-specific bootstrap also configures activation. [Review the installer](https://oy.adonm.dev/install.sh) before piping it to a shell.
+```bash
+# Cursor CLI plus the global oy Cursor integration
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --cursor
+
+# Or install both hosts and integrations
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --both
+```
+
+The installer uses [mise](https://mise.jdx.dev/) for prebuilt oy and context helpers. The OpenCode target provisions Node.js and OpenCode's documented npm package; the Cursor target uses Cursor's official CLI installer because Cursor has no official mise package. [Review the installer](https://oy.adonm.dev/install.sh) before piping it to a shell.
 
 Prefer a manual install or project-local setup? See [Getting started](https://oy.adonm.dev/getting-started.html).
 
@@ -66,12 +75,12 @@ oy review main
 
 Reports include stable finding IDs. `oy enhance` confirms the cited source, makes one focused fix, and runs the narrowest available verification.
 
-You can run the same workflows inside OpenCode with `/oy-audit`, `/oy-review`, and `/oy-enhance`.
+You can run the same workflows inside OpenCode or Cursor with `/oy-audit`, `/oy-review`, and `/oy-enhance`.
 
 ## How repeatable review works
 
 1. **Prepare:** oy collects eligible repository text or a Git diff into ordered files under `.oy/runs/`.
-2. **Review:** the OpenCode agent reads every prepared chunk and writes a candidate report.
+2. **Review:** the selected agent host reads every prepared chunk and writes a candidate report.
 3. **Verify:** oy rejects changed inputs, modified evidence, concurrent report changes, or malformed findings.
 4. **Finalize:** oy writes normalized Markdown or SARIF with stable finding metadata.
 
@@ -81,7 +90,7 @@ You can run the same workflows inside OpenCode with `/oy-audit`, `/oy-review`, a
 
 ## Safety
 
-`oy` is not a sandbox. Prepared source may be sent to your configured model provider, and the `oy` agent uses your effective OpenCode permissions. Use a disposable environment for untrusted repositories and read [SECURITY.md](SECURITY.md).
+`oy` is not a sandbox. Prepared source may be sent to your configured model provider, and the `oy` agent uses your effective host permissions. Use a disposable environment for untrusted repositories and read [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
@@ -89,7 +98,7 @@ You can run the same workflows inside OpenCode with `/oy-audit`, `/oy-review`, a
 - [Workflow guide](https://oy.adonm.dev/workflows.html) — scopes, findings, remediation, and limits
 - [Examples and CI](https://oy.adonm.dev/examples.html) — report examples and SARIF upload
 - [CLI reference](https://oy.adonm.dev/reference.html) — commands, environment variables, and setup ownership
-- [Compatibility](https://oy.adonm.dev/compatibility.html) — supported platforms and OpenCode versions
+- [Compatibility](https://oy.adonm.dev/compatibility.html) — supported platforms and agent hosts
 - [Architecture](https://oy.adonm.dev/architecture.html) and [contributing](CONTRIBUTING.md) — maintainer documentation
 
 Run `oy <command> --help` for the installed version's exact flags.

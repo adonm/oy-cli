@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-23
+
+### Added
+- Added `oy setup --cursor` with global and workspace scopes, dry-run/removal support, private backups, and native Cursor assets: an always-applied oy rule, an oy subagent, and `oy-audit`, `oy-review`, and `oy-enhance` Agent Skills.
+- Added `install.sh --cursor` and `--both` targets, using mise for oy/helpers and Cursor's official CLI installer for the `agent` binary.
+
 ## [0.13.7] - 2026-07-22
 
 ### Changed
