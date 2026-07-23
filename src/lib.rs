@@ -1,11 +1,11 @@
 //! # oy
 //!
-//! `oy` adds one focused coding agent and repeatable repository audit/review workflows to
-//! [OpenCode 2](https://v2.opencode.ai/). File-backed CLI preparation and finalization provide
-//! deterministic repository collection, ordered chunks, target-diff input, and normalized
-//! Markdown/SARIF reports. OpenCode remains responsible for model execution, providers,
-//! authenticated sessions, permissions, and general coding tools. oy does not store provider
-//! credentials.
+//! `oy` adds one focused coding-agent behavior and repeatable repository audit/review workflows
+//! to [OpenCode 2](https://v2.opencode.ai/) and Cursor. File-backed CLI preparation and
+//! finalization provide deterministic repository collection, ordered chunks, target-diff input,
+//! and normalized Markdown/SARIF reports. The selected host remains responsible for model
+//! execution, providers, authenticated sessions, permissions, and general coding tools. oy does
+//! not store provider credentials.
 //! The native CLI supports Linux and macOS; Windows users should run it in WSL2.
 //!
 //! ## Start with the CLI
@@ -15,6 +15,7 @@
 //! ```text
 //! oy setup --dry-run       # preview package/config migration
 //! oy setup                 # register the version-matched OpenCode package
+//! oy setup --cursor        # install Cursor rule, subagent, and skills
 //! oy audit                 # write ISSUES.md
 //! oy review main           # write REVIEW.md for git diff main
 //! oy enhance <finding-id>  # remediate one reported finding
@@ -52,6 +53,7 @@
 mod artifacts;
 mod audit;
 mod cli;
+mod cursor;
 mod opencode;
 mod review;
 mod tools;

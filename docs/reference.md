@@ -27,9 +27,9 @@ Common options:
 
 Unknown oy commands are errors. Use `opencode2` directly for native OpenCode commands.
 
-## OpenCode slash commands
+## Agent-host slash commands
 
-The plugin registers:
+The OpenCode plugin and Cursor skills expose:
 
 | Command | Action |
 |---|---|
@@ -37,7 +37,7 @@ The plugin registers:
 | `/oy-review` | Load the code-review skill and review all prepared evidence. |
 | `/oy-enhance` | Fix one finding from a generated report. |
 
-These are OpenCode prompt commands, not shell subcommands. They use the same `oy` agent and your effective OpenCode permissions.
+These are agent-host prompt commands, not shell subcommands. They use the host's existing tools and your effective permissions.
 
 ## Setup and maintenance
 
@@ -45,6 +45,8 @@ These are OpenCode prompt commands, not shell subcommands. They use the same `oy
 |---|---|
 | `oy setup` | Back up prior oy entries and register the matching npm plugin globally. |
 | `oy setup --workspace` | Register the plugin in `OY_ROOT/.opencode/`. |
+| `oy setup --cursor` | Install the oy rule, subagent, and skills under `~/.cursor/`. |
+| `oy setup --cursor --workspace` | Install Cursor assets under `OY_ROOT/.cursor/`. |
 | `oy setup --dry-run` | Preview setup or removal. |
 | `oy setup --remove` | Back up and remove oy-owned entries. |
 | `oy doctor` | Show selected paths, host version, setup state, and optional tools. |
@@ -56,7 +58,7 @@ See [Compatibility](compatibility.md) for the OpenCode versions accepted by this
 
 ## Setup ownership and backups
 
-Global setup uses `OPENCODE_CONFIG_DIR` when set; otherwise it uses the platform OpenCode config directory (normally `~/.config/opencode/` on Linux). Workspace setup uses `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`.
+OpenCode global setup uses `OPENCODE_CONFIG_DIR` when set; otherwise it uses the platform OpenCode config directory (normally `~/.config/opencode/` on Linux). OpenCode workspace setup uses `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`.
 
 Setup owns:
 
@@ -65,6 +67,26 @@ Setup owns:
 - obsolete oy command/MCP config entries from earlier releases.
 
 Before changing existing owned entries, setup creates a mode-`0700` backup under the platform state directory (or local-data fallback). It snapshots changed config bytes and moves namespaced files. Unrelated settings remain in place. JSON/JSONC comments and formatting are preserved in the backup, while the active config is pretty-reserialized.
+
+Cursor global setup uses `~/.cursor/`; workspace setup uses `OY_ROOT/.cursor/`. It owns exactly:
+
+- `rules/oy.mdc`;
+- `agents/oy.md`;
+- `skills/oy-audit/SKILL.md`;
+- `skills/oy-review/SKILL.md`;
+- `skills/oy-enhance/SKILL.md`.
+
+Cursor setup copies changed owned files to the same private backup area before replacing or removing them. It leaves unrelated Cursor files untouched and rejects symlinked owned paths or namespaces.
+
+## Curl installer targets
+
+```bash
+curl -fsSL https://oy.adonm.dev/install.sh | sh                    # OpenCode
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --cursor    # Cursor CLI
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --both      # both
+```
+
+`--opencode` makes the default explicit. `--cursor` installs oy and optional helpers through mise, installs Cursor CLI through Cursor's official installer, and runs `oy setup --cursor`. `--both` performs both host paths. Cursor is not installed through mise because neither Cursor nor mise publishes an official Cursor package reference.
 
 ## Environment variables
 
@@ -76,7 +98,8 @@ Before changing existing owned entries, setup creates a mode-`0700` backup under
 | `OY_OPENCODE_MODEL` | Select a workflow model as `provider/model#variant`. |
 | `OY_COLOR` | Set `auto`, `always`, or `never`. |
 | `NO_COLOR` | Disable color output. |
-| `OY_SKIP_SETUP` | Skip setup in `install.sh`. |
+| `OY_INSTALL_TARGET` | Select `opencode`, `cursor`, or `both` in `install.sh`; an explicit installer flag wins. |
+| `OY_SKIP_SETUP` | Skip integration setup and runtime load checks in `install.sh`. |
 
 ## Files written by oy
 

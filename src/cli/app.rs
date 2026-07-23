@@ -25,7 +25,7 @@ use upgrade_cmd::UpgradeArgs;
     name = "oy",
     version,
     about = "A focused OpenCode agent with repeatable audits, code reviews, and one-finding fixes.",
-    after_help = "Examples:\n  oy run --auto <task>            (autonomous task with the oy agent)\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview integration changes)\n  oy setup --workspace\n  oy doctor --check\n  oy                              (launch the OpenCode 2 TUI)\n\noy prepares and verifies review inputs and reports. OpenCode and the user own models, permissions, and tools; findings remain model-dependent."
+    after_help = "Examples:\n  oy run --auto <task>            (autonomous task with the oy agent)\n  oy audit                        (write ISSUES.md)\n  oy review main                  (write REVIEW.md for git diff main)\n  oy enhance <finding-id>         (fix one reported finding)\n  oy setup --dry-run              (preview OpenCode integration changes)\n  oy setup --cursor --workspace   (install Cursor project integration)\n  oy doctor --check\n  oy                              (launch the OpenCode 2 TUI)\n\noy prepares and verifies review inputs and reports. The agent host and the user own models, permissions, and tools; findings remain model-dependent."
 )]
 struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["verbose", "json"], help = "Select quiet output where supported")]
@@ -40,7 +40,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Register the version-matched npm plugin globally, or locally with --workspace.
+    /// Install the OpenCode integration, or Cursor assets with --cursor.
     Setup(SetupArgs),
     /// Run one task through OpenCode 2; prompt can be args or stdin.
     Run(RunArgs),
@@ -63,19 +63,25 @@ struct SetupArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Register the plugin in project-local .opencode config instead of global config"
+        help = "Install Cursor rule, subagent, and skills instead of the OpenCode plugin"
+    )]
+    cursor: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Install in project-local .opencode or .cursor paths instead of global config"
     )]
     workspace: bool,
     #[arg(
         long,
         default_value_t = false,
-        help = "Preview plugin/config migration actions without writing"
+        help = "Preview integration setup or removal actions without writing"
     )]
     dry_run: bool,
     #[arg(
         long,
         default_value_t = false,
-        help = "Back up and remove oy-namespaced files and config entries"
+        help = "Back up and remove oy-owned integration files and config entries"
     )]
     remove: bool,
 }
@@ -87,6 +93,9 @@ pub fn run(argv: Vec<String>) -> Result<i32> {
     };
     crate::ui::init_output_mode(cli_output_mode(&cli));
     match cli.command {
+        Some(Command::Setup(args)) if args.cursor => {
+            crate::cursor::setup_command(args.workspace, args.dry_run, args.remove)
+        }
         Some(Command::Setup(args)) => {
             crate::opencode::setup_command(args.workspace, args.dry_run, args.remove)
         }
@@ -341,10 +350,11 @@ mod audit_tests {
 
     #[test]
     fn setup_accepts_dry_run_flag() {
-        let cli = parse_cli_for_test(&["oy", "setup", "--workspace", "--dry-run"]);
+        let cli = parse_cli_for_test(&["oy", "setup", "--cursor", "--workspace", "--dry-run"]);
         let Some(Command::Setup(args)) = cli.command else {
             panic!("expected setup command");
         };
+        assert!(args.cursor);
         assert!(args.workspace);
         assert!(args.dry_run);
     }

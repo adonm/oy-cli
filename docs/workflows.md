@@ -9,7 +9,7 @@ Start with the task you want to perform. The lower-level evidence protocol is au
 | Review current work against a ref | `oy review main` | `REVIEW.md` |
 | Fix one finding | `oy enhance <finding-id>` | source changes |
 
-The same workflows are available inside OpenCode as `/oy-audit`, `/oy-review`, and `/oy-enhance`.
+The same workflows are available inside OpenCode or Cursor as `/oy-audit`, `/oy-review`, and `/oy-enhance`.
 
 ## Choose what to review
 
@@ -80,7 +80,7 @@ The new report replaces the old generated report, carries forward findings that 
 Audit and review follow four stages:
 
 1. **Prepare** — collect eligible workspace files or a target diff into ordered chunks under `.oy/runs/<run-id>/`.
-2. **Review** — OpenCode reads every prepared chunk under your current model and permissions.
+2. **Review** — the agent host reads every prepared chunk under your current model and permissions.
 3. **Verify** — reject changed inputs, modified evidence, concurrent output changes, or malformed finding data.
 4. **Finalize** — write normalized Markdown or SARIF.
 
@@ -101,7 +101,7 @@ The workspace collector excludes:
 
 These exclusions reduce accidental disclosure and context waste, but they also limit completeness. In particular, an oy audit is not a complete supply-chain audit because lockfiles are excluded.
 
-Eligible large files and diffs are split into bounded chunks. Prepared source may be sent to the model provider configured in OpenCode.
+Eligible large files and diffs are split into bounded chunks. Prepared source may be sent to the model provider configured in the selected agent host.
 
 ## Practical guidance
 

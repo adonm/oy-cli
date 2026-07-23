@@ -461,7 +461,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oy-cli"
-version = "0.13.7"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -1,6 +1,6 @@
 # Contributing
 
-Keep `oy` focused. Its product is one concise autonomous OpenCode agent plus the audit → review → remediate loop. OpenCode owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Setup and launcher/API wrappers stay narrow.
+Keep `oy` focused. Its product is one concise coding-agent behavior plus the audit → review → remediate loop for OpenCode and Cursor. The host owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Setup and launcher/API wrappers stay narrow.
 
 Native development and builds are supported on Linux and macOS. Use WSL2 rather than native Windows.
 
@@ -59,9 +59,9 @@ python3 scripts/eval_runner.py run --dry-run
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
-- Keep the three packaged skills canonical for audit, review, and enhance protocols. They execute under the user's OpenCode permissions through the single `oy` agent.
+- Keep the OpenCode and Cursor skill variants aligned on the canonical audit, review, and enhance protocols. They execute under the user's host permissions through the `oy` behavior.
 - Keep `oy` concise but compare it with tagged OpenCode 2 Build behavior: inspect first, preserve unrelated changes, implement end-to-end, verify, and keep checkpoint commits focused without rewriting or publishing history.
-- Do not add oy-owned plan/edit/auto permission modes. OpenCode policy is authoritative.
+- Do not add oy-owned plan/edit/auto permission modes. Agent-host policy is authoritative.
 - Put immutable workflow-input, ordering, limit, and render enforcement in typed Rust boundaries rather than relying on prompt text.
 - Describe model-backed outcomes as nondeterministic even when their inputs and report rendering are deterministic.
 - Do not duplicate built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
@@ -73,6 +73,8 @@ python3 scripts/eval_runner.py run --dry-run
 
 | Path | Role |
 |---|---|
+| `src/cursor.rs`, `src/cursor/setup.rs` | Cursor asset contracts and direct setup/removal |
+| `assets/cursor/` | Cursor rule, subagent, and workflow skills |
 | `src/opencode.rs` | Thin OpenCode integration facade and package-asset contract tests |
 | `src/opencode/setup.rs` | Setup orchestration, namespace migration, locking, and prompting |
 | `src/opencode/setup/backup.rs` | Persistent setup backups and move/restore mechanics |

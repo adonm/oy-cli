@@ -133,9 +133,9 @@ steps:
 
   - name: Install oy and OpenCode
     run: |
-      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.13.7 node@latest
+      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.0 node@latest
       mise exec node@latest -- npm install -g @opencode-ai/cli@next
-      mise exec github:adonm/oy-cli@0.13.7 node@latest -- oy setup
+      mise exec github:adonm/oy-cli@0.14.0 node@latest -- oy setup
 
   - name: Run audit
     env:

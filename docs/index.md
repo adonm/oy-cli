@@ -1,6 +1,6 @@
-# Audits and code reviews for OpenCode
+# Audits and code reviews for OpenCode and Cursor
 
-`oy` adds a focused coding agent and a repeatable review workflow to [OpenCode 2](https://v2.opencode.ai/).
+`oy` adds a focused coding agent and a repeatable review workflow to [OpenCode 2](https://v2.opencode.ai/) and Cursor.
 
 Use it to:
 
@@ -12,7 +12,7 @@ Use it to:
 
 ```text
 oy selects and freezes the review input
-  → OpenCode analyzes it with your model and permissions
+  → your agent host analyzes it with your model and permissions
   → oy validates and writes the report
 ```
 
@@ -21,12 +21,20 @@ This prevents silent model-selected sampling and makes the reviewed input visibl
 ## Start here
 
 ```bash
+# OpenCode 2 (default)
 curl -fsSL https://oy.adonm.dev/install.sh | sh
 # Restart your shell if requested.
 oy doctor --check
 
 cd your-repository
 oy audit
+```
+
+For Cursor CLI and its oy integration:
+
+```bash
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --cursor
+agent
 ```
 
 Then try:
@@ -45,14 +53,14 @@ See [Getting started](getting-started.md) for manual installation, provider setu
 - changed-input and artifact-integrity checks;
 - normalized Markdown/SARIF reports with stable finding IDs.
 
-## What OpenCode owns
+## What the agent host owns
 
 - models and provider credentials;
 - permissions and approvals;
 - shell, edit, web, and other tools;
 - sessions, the TUI, and model execution.
 
-`oy` does not broaden your OpenCode permissions and is not a sandbox.
+`oy` does not broaden your OpenCode or Cursor permissions and is not a sandbox.
 
 ## Choose your next page
 
@@ -60,5 +68,5 @@ See [Getting started](getting-started.md) for manual installation, provider setu
 - [Workflow guide](workflows.md) — choose scope, understand findings, and remediate
 - [Examples and CI](examples.md) — inspect reports and upload SARIF
 - [CLI reference](reference.md) — exact commands, setup behavior, and environment variables
-- [Compatibility](compatibility.md) — supported platforms and OpenCode versions
+- [Compatibility](compatibility.md) — supported platforms and agent hosts
 - [Security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) — trust and disclosure boundaries
