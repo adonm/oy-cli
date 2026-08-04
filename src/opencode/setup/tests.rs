@@ -67,8 +67,34 @@ fn backup_dirs(_config_dir: &Path) -> Vec<PathBuf> {
     backups
 }
 
+fn assert_plugin_installed(dir: &Path) {
+    assert!(dir.join("plugins/oy/index.js").exists());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("plugins/oy/package.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["name"], "@oy-cli/opencode");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["main"], "index.js");
+    assert_eq!(manifest["type"], "module");
+    assert_eq!(
+        fs::read_to_string(dir.join("plugins/oy/assets/agents/oy.md")).unwrap(),
+        OY_AGENT
+    );
+    for (relative, content) in [
+        ("assets/skills/oy-audit/SKILL.md", OY_AUDIT_SKILL),
+        ("assets/skills/oy-review/SKILL.md", OY_REVIEW_SKILL),
+        ("assets/skills/oy-enhance/SKILL.md", OY_ENHANCE_SKILL),
+    ] {
+        assert_eq!(
+            fs::read_to_string(dir.join("plugins/oy").join(relative)).unwrap(),
+            content
+        );
+    }
+    assert!(integration_complete(dir));
+}
+
 #[test]
-fn setup_defaults_to_global_opencode_config() {
+fn setup_defaults_to_global_opencode_plugin_files() {
     let _lock = ENV_LOCK.lock().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -80,11 +106,10 @@ fn setup_defaults_to_global_opencode_config() {
     setup_command(false, false, false).unwrap();
 
     let global = config_home.path().join("opencode");
-    assert!(global.join("opencode.json").exists());
-    assert!(!global.join("agents/oy.md").exists());
-    assert!(!global.join("agents/oy-plan.md").exists());
-    assert!(config_has_all_oy_entries(&global.join("opencode.json")));
-    assert!(!workspace.path().join(".opencode/opencode.json").exists());
+    assert_plugin_installed(&global);
+    assert!(!global.join("opencode.json").exists());
+    assert!(!global.join("agents").exists());
+    assert!(!workspace.path().join(".opencode").exists());
 }
 
 #[test]
@@ -99,12 +124,9 @@ fn workspace_setup_is_explicit() {
 
     setup_command(true, false, false).unwrap();
 
-    assert!(workspace.path().join(".opencode/opencode.json").exists());
-    assert!(!workspace.path().join(".opencode/agents/oy.md").exists());
-    assert!(config_has_all_oy_entries(
-        &workspace.path().join(".opencode/opencode.json")
-    ));
-    assert!(!config_home.path().join("opencode/opencode.json").exists());
+    assert_plugin_installed(&workspace.path().join(".opencode"));
+    assert!(!workspace.path().join(".opencode/opencode.json").exists());
+    assert!(!config_home.path().join("opencode").exists());
 }
 
 #[test]
@@ -120,40 +142,16 @@ fn setup_dry_run_does_not_write_files() {
     setup_command(false, true, false).unwrap();
 
     assert!(!config_home.path().join("opencode/opencode.json").exists());
-    assert!(!config_home.path().join("opencode/agents/oy.md").exists());
+    assert!(
+        !config_home
+            .path()
+            .join("opencode/plugins/oy/index.js")
+            .exists()
+    );
 }
 
 #[test]
-fn setup_preserves_user_config_and_merges_oy_entries() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("opencode.json");
-    fs::write(
-        &path,
-        r#"{
-  "$schema": "https://opencode.ai/config.json",
-  "model": "test/model",
-  "command": { "keep": { "template": "keep me" } },
-  "mcp": { "other": { "type": "local", "command": ["other"] } }
-}
-"#,
-    )
-    .unwrap();
-
-    update_config(&path).unwrap();
-
-    let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(updated["model"], "test/model");
-    assert_eq!(updated["command"]["keep"]["template"], "keep me");
-    assert_eq!(updated["plugins"], json!([opencode_plugin_spec()]));
-    assert_eq!(updated["mcp"]["other"]["command"][0], "other");
-    assert!(updated.pointer("/mcp/servers/oy").is_none());
-    assert!(updated.pointer("/mcp/oy").is_none());
-    assert!(updated.get("tool_output").is_none());
-    assert!(updated.get("default_agent").is_none());
-}
-
-#[test]
-fn setup_is_idempotent_after_namespace_cleanup() {
+fn setup_preserves_user_config_without_rewriting_it() {
     let _lock = ENV_LOCK.lock().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -163,40 +161,42 @@ fn setup_is_idempotent_after_namespace_cleanup() {
     let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
     let dir = config_home.path().join("opencode");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("opencode.json"),
-        r#"{
+    let path = dir.join("opencode.json");
+    let original = r#"{
   "$schema": "https://opencode.ai/config.json",
   "model": "test/model",
   "command": { "keep": { "template": "keep me" } },
-  "mcp": { "other": { "type": "local", "command": ["other"] } },
-  "tool_output": { "extra_user_key": true }
+  "mcp": { "other": { "type": "local", "command": ["other"] } }
 }
-"#,
-    )
-    .unwrap();
+"#;
+    fs::write(&path, original).unwrap();
 
     setup_command(false, false, false).unwrap();
-    let owned_paths = [dir.join("opencode.json")];
-    let first = owned_paths
-        .iter()
-        .map(|path| fs::read(path).unwrap())
-        .collect::<Vec<_>>();
+
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_plugin_installed(&dir);
+    assert!(backup_dirs(&dir).is_empty());
+}
+
+#[test]
+fn setup_is_idempotent_without_churn() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+    let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
+    let _root = EnvGuard::set("OY_ROOT", workspace.path());
+    let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
+    let dir = config_home.path().join("opencode");
 
     setup_command(false, false, false).unwrap();
-    let second = owned_paths
-        .iter()
-        .map(|path| fs::read(path).unwrap())
-        .collect::<Vec<_>>();
+    let first = fs::read(dir.join("plugins/oy/index.js")).unwrap();
+
+    setup_command(false, false, false).unwrap();
+    let second = fs::read(dir.join("plugins/oy/index.js")).unwrap();
 
     assert_eq!(second, first);
-    let updated: Value = serde_json::from_slice(second.last().expect("config bytes")).unwrap();
-    assert_eq!(updated["model"], "test/model");
-    assert_eq!(updated["command"]["keep"]["template"], "keep me");
-    assert_eq!(updated["mcp"]["other"]["command"][0], "other");
-    assert_eq!(updated["tool_output"]["extra_user_key"], true);
-    assert_eq!(updated["plugins"], json!([opencode_plugin_spec()]));
-    assert_eq!(backup_dirs(&dir).len(), 1);
+    assert!(backup_dirs(&dir).is_empty());
 }
 
 #[test]
@@ -208,53 +208,44 @@ fn setup_moves_modified_oy_files_to_backup() {
     let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
     let _root = EnvGuard::set("OY_ROOT", workspace.path());
     let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
-    let agent = config_home.path().join("opencode/agents/oy.md");
+    let dir = config_home.path().join("opencode");
+    let agent = dir.join("agents/oy.md");
     fs::create_dir_all(agent.parent().unwrap()).unwrap();
     fs::write(&agent, "user-owned agent\n").unwrap();
 
     setup_command(false, false, false).unwrap();
 
     assert!(!agent.exists());
-    let backups = backup_dirs(&config_home.path().join("opencode"));
+    let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert_eq!(
         fs::read_to_string(backups[0].join("agents/oy.md")).unwrap(),
         "user-owned agent\n"
     );
-    assert!(config_has_all_oy_entries(
-        &config_home.path().join("opencode/opencode.json")
-    ));
+    assert_plugin_installed(&dir);
 }
 
 #[test]
 fn setup_preserves_generic_tool_output_settings() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.json");
-    fs::write(
-        &path,
-        r#"{
+    let original = r#"{
   "$schema": "https://opencode.ai/config.json",
   "tool_output": { "max_bytes": 262144, "max_lines": 20000, "extra_user_key": true }
 }
-"#,
-    )
-    .unwrap();
+"#;
+    fs::write(&path, original).unwrap();
 
     update_config(&path).unwrap();
 
-    let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(updated["tool_output"]["max_bytes"], 262_144);
-    assert_eq!(updated["tool_output"]["max_lines"], 20_000);
-    assert_eq!(updated["tool_output"]["extra_user_key"], true);
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
 }
 
 #[test]
-fn setup_accepts_opencode_jsonc() {
+fn setup_accepts_opencode_jsonc_without_rewriting_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.json");
-    fs::write(
-        &path,
-        r#"{
+    let original = r#"{
   // opencode allows comments and trailing commas.
   "$schema": "https://opencode.ai/config.json",
   "model": "test/model",
@@ -262,19 +253,12 @@ fn setup_accepts_opencode_jsonc() {
     "keep": { "template": "https://example.com//not-a-comment" },
   },
 }
-"#,
-    )
-    .unwrap();
+"#;
+    fs::write(&path, original).unwrap();
 
     update_config(&path).unwrap();
 
-    let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(updated["model"], "test/model");
-    assert_eq!(
-        updated["command"]["keep"]["template"],
-        "https://example.com//not-a-comment"
-    );
-    assert!(updated.pointer("/mcp/servers/oy").is_none());
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
 }
 
 #[test]
@@ -293,23 +277,25 @@ fn setup_cleans_oy_entries_from_both_config_files() {
         r#"{ "model": "lower", "commands": { "oy-modified": { "custom": true } } }"#,
     )
     .unwrap();
-    fs::write(dir.join("opencode.jsonc"), r#"{ "model": "upper" }"#).unwrap();
+    let jsonc = r#"{ "model": "upper" }"#;
+    fs::write(dir.join("opencode.jsonc"), jsonc).unwrap();
 
     setup_command(false, false, false).unwrap();
 
     let lower: Value =
         serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();
-    let upper: Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
     assert_eq!(lower["model"], "lower");
     assert!(lower.get("commands").is_none());
     assert!(lower.get("plugins").is_none());
-    assert_eq!(upper["model"], "upper");
-    assert_eq!(upper["plugins"], json!([opencode_plugin_spec()]));
+    assert_eq!(
+        fs::read_to_string(dir.join("opencode.jsonc")).unwrap(),
+        jsonc
+    );
     let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert!(backups[0].join("opencode.json").exists());
-    assert!(backups[0].join("opencode.jsonc").exists());
+    assert!(!backups[0].join("opencode.jsonc").exists());
+    assert_plugin_installed(&dir);
 }
 
 #[test]
@@ -327,10 +313,11 @@ fn setup_accepts_native_v2_config_and_preserves_entries() {
     .unwrap();
 
     update_config(&path).unwrap();
+
     let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(updated["commands"]["keep"]["template"], "keep me");
     assert!(updated["commands"].get("oy-audit").is_none());
-    assert_eq!(updated["plugins"], json!([opencode_plugin_spec()]));
+    assert!(updated.get("plugins").is_none());
     assert!(updated.pointer("/mcp/servers/oy").is_none());
 }
 
@@ -338,17 +325,13 @@ fn setup_accepts_native_v2_config_and_preserves_entries() {
 fn setup_leaves_unrelated_legacy_fields_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.json");
-    fs::write(
-        &path,
-        r#"{ "permission": { "edit": "ask" }, "experimental": { "mcp_timeout": 30000 } }"#,
-    )
-    .unwrap();
+    let original =
+        r#"{ "permission": { "edit": "ask" }, "experimental": { "mcp_timeout": 30000 } }"#;
+    fs::write(&path, original).unwrap();
 
     update_config(&path).unwrap();
 
-    let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(updated["permission"]["edit"], "ask");
-    assert_eq!(updated["experimental"]["mcp_timeout"], 30_000);
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
 }
 
 #[test]
@@ -362,10 +345,11 @@ fn explicit_setup_backs_up_all_oy_named_agents() {
     let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
 
     setup_command(true, false, false).unwrap();
-    let agent = workspace.path().join(".opencode/agents/oy.md");
+    let dir = workspace.path().join(".opencode");
+    let agent = dir.join("agents/oy.md");
     fs::create_dir_all(agent.parent().unwrap()).unwrap();
     fs::write(&agent, OY_AGENT).unwrap();
-    let reviewer = workspace.path().join(".opencode/agents/oy-reviewer.md");
+    let reviewer = dir.join("agents/oy-reviewer.md");
     fs::write(
         &reviewer,
         "<!-- Generated by oy setup -->\nold generated reviewer\n",
@@ -376,21 +360,19 @@ fn explicit_setup_backs_up_all_oy_named_agents() {
 
     assert!(!reviewer.exists());
     assert!(!agent.exists());
-    let backups = backup_dirs(&workspace.path().join(".opencode"));
+    let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert_eq!(
         fs::read_to_string(backups[0].join("agents/oy.md")).unwrap(),
         OY_AGENT
     );
     assert!(backups[0].join("agents/oy-reviewer.md").exists());
-    assert!(config_has_all_oy_entries(
-        &workspace.path().join(".opencode/opencode.json")
-    ));
-    assert!(!config_home.path().join("opencode/opencode.json").exists());
+    assert!(integration_complete(&dir));
+    assert!(!config_home.path().join("opencode").exists());
 }
 
 #[test]
-fn setup_migrates_direct_assets_and_commands_to_versioned_plugin() {
+fn setup_migrates_legacy_assets_commands_and_config_entries() {
     let _lock = ENV_LOCK.lock().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -429,10 +411,7 @@ fn setup_migrates_direct_assets_and_commands_to_versioned_plugin() {
         serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();
     assert_eq!(updated["model"], "test/model");
     assert!(updated.get("commands").is_none());
-    assert_eq!(
-        updated["plugins"],
-        json!(["keep-plugin", opencode_plugin_spec()])
-    );
+    assert_eq!(updated["plugins"], json!(["keep-plugin"]));
     assert!(!agent.exists());
     assert!(!skill.exists());
     assert_eq!(fs::read_to_string(unrelated).unwrap(), "keep\n");
@@ -458,6 +437,67 @@ fn setup_migrates_direct_assets_and_commands_to_versioned_plugin() {
         serde_json::from_str(&fs::read_to_string(backups[0].join("opencode.json")).unwrap())
             .unwrap();
     assert_eq!(previous["commands"]["oy-audit"]["modified"], true);
+    assert_plugin_installed(&dir);
+}
+
+#[test]
+fn setup_backs_up_modified_plugin_files_and_reinstalls() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+    let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
+    let _root = EnvGuard::set("OY_ROOT", workspace.path());
+    let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
+    let dir = config_home.path().join("opencode");
+
+    setup_command(false, false, false).unwrap();
+    let plugin = dir.join("plugins/oy");
+    fs::write(plugin.join("index.js"), "modified plugin\n").unwrap();
+    let manifest = fs::read_to_string(plugin.join("package.json")).unwrap();
+
+    setup_command(false, false, false).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(plugin.join("index.js")).unwrap(),
+        OPENCODE_PLUGIN_JS
+    );
+    let backups = backup_dirs(&dir);
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        fs::read_to_string(backups[0].join("plugins/oy/index.js")).unwrap(),
+        "modified plugin\n"
+    );
+    assert_eq!(
+        fs::read_to_string(backups[0].join("plugins/oy/package.json")).unwrap(),
+        manifest
+    );
+    assert!(integration_complete(&dir));
+}
+
+#[test]
+fn integration_complete_is_false_when_plugin_version_mismatches() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+    let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
+    let _root = EnvGuard::set("OY_ROOT", workspace.path());
+    let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
+    let dir = config_home.path().join("opencode");
+
+    setup_command(false, false, false).unwrap();
+    let manifest = dir.join("plugins/oy/package.json");
+    let outdated = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace(env!("CARGO_PKG_VERSION"), "0.1.0");
+    fs::write(&manifest, outdated).unwrap();
+
+    assert!(integration_present(&dir).unwrap());
+    assert!(!integration_complete(&dir));
+
+    setup_command(false, false, false).unwrap();
+    assert!(integration_complete(&dir));
 }
 
 #[test]
@@ -585,19 +625,19 @@ fn config_update_rejects_symlinked_file() {
 }
 
 #[test]
-fn config_replaces_object_form_oy_plugin() {
+fn setup_strips_object_form_oy_plugin_entries() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.json");
     fs::write(
         &path,
-        r#"{ "plugins": [{ "package": "@oy-cli/opencode", "options": { "custom": true } }] }"#,
+        r#"{ "plugins": [{ "package": "@oy-cli/opencode", "options": { "custom": true } }, "keep-plugin"] }"#,
     )
     .unwrap();
 
     update_config(&path).unwrap();
 
     let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(updated["plugins"], json!([opencode_plugin_spec()]));
+    assert_eq!(updated["plugins"], json!(["keep-plugin"]));
 }
 
 #[test]
@@ -612,6 +652,8 @@ fn missing_integration_check_does_not_create_files() {
 
     assert!(!integration_complete(&config_home.path().join("opencode")));
     assert!(!integration_complete(&workspace.path().join(".opencode")));
+    assert!(!integration_present(&config_home.path().join("opencode")).unwrap());
+    assert!(!integration_present(&workspace.path().join(".opencode")).unwrap());
 
     assert!(!config_home.path().join("opencode/opencode.json").exists());
     assert!(!workspace.path().join(".opencode/opencode.json").exists());
@@ -647,7 +689,35 @@ fn setup_remove_round_trip_preserves_unrelated_config() {
     assert_eq!(config["model"], "test/model");
     assert!(config.pointer("/mcp/servers/oy").is_none());
     assert!(config.get("plugins").is_none());
-    assert!(!dir.join("agents/oy.md").exists());
+    assert!(!dir.join("plugins/oy").exists());
+    assert!(!dir.join("agents").exists());
+    assert!(!integration_present(&dir).unwrap());
+}
+
+#[test]
+fn setup_remove_moves_plugin_directory_to_backup() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+    let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
+    let _root = EnvGuard::set("OY_ROOT", workspace.path());
+    let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
+    let dir = config_home.path().join("opencode");
+
+    setup_command(false, false, false).unwrap();
+    setup_command(false, false, true).unwrap();
+
+    let backups = backup_dirs(&dir);
+    assert_eq!(backups.len(), 1);
+    assert!(backups[0].join("plugins/oy/index.js").exists());
+    assert!(backups[0].join("plugins/oy/package.json").exists());
+    assert!(backups[0].join("plugins/oy/assets/agents/oy.md").exists());
+    assert!(
+        backups[0]
+            .join("plugins/oy/assets/skills/oy-audit/SKILL.md")
+            .exists()
+    );
 }
 
 #[test]

@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.14.1] - 2026-08-05
+
+### Changed
+- Reworked `oy setup` to install dependency-free plugin files under OpenCode's discovered `plugins/oy/` directory instead of rewriting `opencode.json(c)`; clean installs no longer touch user config files, and unmodified configs stay byte-for-byte unchanged.
+- Removed the `@opencode-ai/plugin` dependency from `@oy-cli/opencode`; the plugin is now a plain `{ id, setup }` module with no runtime imports beyond Node built-ins, so the npm package and setup-installed copy are identical.
 
 ## [0.14.0] - 2026-07-23
 

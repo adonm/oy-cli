@@ -37,6 +37,7 @@ Completed in the current development cycle:
 - Rewrote audit/review skills around native OpenCode reads and edits.
 - Added the `@oy-cli/opencode` V2 package for the agent, skills, and commands.
 - Made setup package-first and removed direct agent/skill/command installation.
+- Made `oy setup` install dependency-free plugin files under OpenCode's discovered `plugins/` directory without rewriting user config files.
 - Removed the obsolete MCP adapter, MCP-only wrappers, and Sighthound integration after file-backed workflows reached parity.
 - Stopped writing global tool-output overrides in default setup.
 
@@ -70,7 +71,7 @@ After the CLI and skills cover the deterministic contract:
 
 - [x] Remove `oy mcp`, MCP-only wrappers, and Sighthound integration.
 - [x] Stop writing global `tool_output` overrides.
-- Reduce setup to installing/removing the `oy` agent and canonical skills, ideally without rewriting OpenCode JSON/JSONC.
+- [x] Reduce setup to installing/removing the `oy` agent and canonical skills, ideally without rewriting OpenCode JSON/JSONC.
 - [x] Remove `oy model`, `oy open`, `oy chat`, and implicit passthrough of unknown arguments; keep bare `oy` as the integration-aware TUI launcher.
 - Demote or remove exact beta version gates, session recovery wrappers, and coupled oy/OpenCode upgrades.
 - When OpenCode 2 leaves beta, replace the moving `next` dependencies with the stable `latest` channel and remove beta-specific host handling.

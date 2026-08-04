@@ -13,16 +13,16 @@ cargo install oy-cli --locked
 oy setup
 ```
 
-To configure the package manually, add it to an OpenCode JSON/JSONC file:
+`oy setup` copies a dependency-free copy of this plugin into OpenCode's discovered `plugins/` directory, so it needs no npm package installation. To configure the package manually instead, add it to an OpenCode JSON/JSONC file:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@oy-cli/opencode@0.14.0"]
+  "plugins": ["@oy-cli/opencode@0.14.1"]
 }
 ```
 
-Restart OpenCode after changing the package version. OpenCode installs package dependencies into its isolated plugin cache.
+Restart OpenCode after changing the package version. The plugin has no runtime dependencies beyond Node built-ins.
 
 ## What it registers
 

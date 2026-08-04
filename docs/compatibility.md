@@ -15,7 +15,7 @@ The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy rele
 
 ## OpenCode
 
-oy 0.14.0 accepts:
+oy 0.14.1 accepts:
 
 | OpenCode host | Status |
 |---|---|
@@ -26,7 +26,7 @@ oy 0.14.0 accepts:
 
 The default executable is `opencode2`. `OY_OPENCODE` can select another executable, but it must report a supported version.
 
-During the V2 beta, installation runs the upstream-documented `npm install -g @opencode-ai/cli@next` under mise's latest Node.js. The plugin SDK resolves from the same moving `next` channel. This keeps new installs current but means an upstream beta change can break compatibility between oy releases. The package lock records the build tested at release time. Restart OpenCode after either package changes.
+During the V2 beta, installation runs the upstream-documented `npm install -g @opencode-ai/cli@next` under mise's latest Node.js. The `@oy-cli/opencode` plugin is dependency-free and uses only the documented plugin context, so it does not track a moving SDK channel. This keeps new installs current but means an upstream beta change can break compatibility between oy releases. Restart OpenCode after either package changes.
 
 Once OpenCode 2 is stable, oy will switch these references to the stable `latest` channel and remove the beta-specific compatibility path in a follow-up release.
 

@@ -1,12 +1,11 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { Plugin } from "@opencode-ai/plugin/v2"
 
 const assets = fileURLToPath(new URL("../assets", import.meta.url))
 const agent = readFileSync(new URL("../assets/agents/oy.md", import.meta.url), "utf8")
 const system = agent.split("---", 3)[2].trim()
 
-export default Plugin.define({
+export default {
   id: "oy",
   setup: async (ctx) => {
     await ctx.skill.transform((skills) => {
@@ -41,4 +40,4 @@ export default Plugin.define({
       })
     })
   },
-})
+}

@@ -7,23 +7,18 @@ use std::path::Path;
 
 const OPENCODE_PLUGIN_PACKAGE: &str = "@oy-cli/opencode";
 
-pub(super) fn remove_owned_config(path: &Path) -> Result<String> {
+/// Strip oy-owned entries from an OpenCode config, returning `None` when the
+/// file is unchanged so unmodified configs are never rewritten.
+pub(super) fn strip_owned_config(path: &Path) -> Result<Option<String>> {
     let mut root = read_config(path)?;
+    if !config_has_oy_entries(&root) {
+        return Ok(None);
+    }
     let object = root
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("{} must contain a JSON object", path.display()))?;
     remove_oy_config_entries(object)?;
-    format_json(&root)
-}
-
-pub(super) fn config_body(path: &Path) -> Result<String> {
-    let mut root = read_config(path)?;
-    let object = root
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("{} must contain a JSON object", path.display()))?;
-    remove_oy_config_entries(object)?;
-    merge_plugin(object)?;
-    format_json(&root)
+    format_json(&root).map(Some)
 }
 
 fn read_config(path: &Path) -> Result<Value> {
@@ -48,7 +43,9 @@ fn read_config(path: &Path) -> Result<Value> {
 
 #[cfg(test)]
 pub(super) fn update_config(path: &Path) -> Result<()> {
-    let body = config_body(path)?;
+    let Some(body) = strip_owned_config(path)? else {
+        return Ok(());
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -89,8 +86,8 @@ fn is_oy_name(name: &str) -> bool {
     name == "oy" || name.starts_with("oy-")
 }
 
-pub(super) fn opencode_plugin_spec() -> String {
-    format!("{OPENCODE_PLUGIN_PACKAGE}@{}", env!("CARGO_PKG_VERSION"))
+pub(super) fn opencode_plugin_package() -> &'static str {
+    OPENCODE_PLUGIN_PACKAGE
 }
 
 fn is_oy_plugin_spec(value: &str) -> bool {
@@ -122,18 +119,6 @@ fn remove_owned_plugins(object: &mut Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
-fn merge_plugin(object: &mut Map<String, Value>) -> Result<()> {
-    remove_owned_plugins(object)?;
-    let plugins = object
-        .entry("plugins")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    let Some(plugins) = plugins.as_array_mut() else {
-        bail!("native OpenCode `plugins` must be an array");
-    };
-    plugins.push(Value::String(opencode_plugin_spec()));
-    Ok(())
-}
-
 pub(super) fn config_has_oy_entries(config: &Value) -> bool {
     config
         .get("plugins")
@@ -155,23 +140,6 @@ pub(super) fn config_has_oy_entries(config: &Value) -> bool {
                         .and_then(Value::as_object)
                         .is_some_and(|servers| servers.contains_key("oy"))
             })
-}
-
-pub(super) fn config_has_all_oy_entries(path: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(config) = parse_opencode_config(&text) else {
-        return false;
-    };
-    config
-        .get("plugins")
-        .and_then(Value::as_array)
-        .is_some_and(|plugins| {
-            plugins
-                .iter()
-                .any(|plugin| plugin.as_str() == Some(opencode_plugin_spec().as_str()))
-        })
 }
 
 pub(super) fn format_json(value: &Value) -> Result<String> {

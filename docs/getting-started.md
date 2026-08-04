@@ -34,7 +34,7 @@ Every target:
 2. installs a prebuilt oy release with mise;
 3. installs prebuilt `tokei` and Universal Ctags context helpers.
 
-The default OpenCode target also provisions the latest Node.js, installs OpenCode 2 with the exact npm package and channel documented upstream, registers the matching `@oy-cli/opencode` plugin, and checks that it loaded. The Cursor target runs Cursor's official CLI installer, verifies `agent --version`, and installs the global Cursor oy assets. `--both` performs both paths.
+The default OpenCode target also provisions the latest Node.js, installs OpenCode 2 with the exact npm package and channel documented upstream, installs the matching oy plugin files, and checks that they loaded. The Cursor target runs Cursor's official CLI installer, verifies `agent --version`, and installs the global Cursor oy assets. `--both` performs both paths.
 
 Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_TARGET=cursor|both` as an alternative to flags. Set `OY_SKIP_SETUP=1` to install binaries without changing host integration files.
 
@@ -43,9 +43,9 @@ Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_TARGET=curs
 With mise:
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.0 node@latest
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.1 node@latest
 mise exec node@latest -- npm install -g @opencode-ai/cli@next
-mise exec github:adonm/oy-cli@0.14.0 node@latest -- oy setup
+mise exec github:adonm/oy-cli@0.14.1 node@latest -- oy setup
 ```
 
 Or install only the Rust CLI from crates.io, then provide a compatible OpenCode installation yourself:

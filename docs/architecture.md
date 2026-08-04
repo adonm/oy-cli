@@ -57,9 +57,9 @@ Integration assets are stored outside the Rust modules and embedded into their p
 
 ## Setup
 
-Global setup updates an existing `opencode.jsonc` or `opencode.json` under `OPENCODE_CONFIG_DIR` or the platform config directory's `opencode` child. Workspace setup does the same under `OY_ROOT/.opencode/`. It adds the version-matched `@oy-cli/opencode` package to `plugins`.
+Global setup installs the plugin files under `plugins/oy/` in `OPENCODE_CONFIG_DIR` or the platform config directory's `opencode` child. Workspace setup does the same under `OY_ROOT/.opencode/plugins/`. OpenCode discovers the directory automatically, so setup writes no config file on clean installs.
 
-When existing config or oy-namespaced files will change, setup first creates a persistent mode-`0700` backup in the platform state location, falling back to the local-data directory when no dedicated state directory exists. It snapshots changed configs and moves direct `oy`, `oy-*`, and `oy.*` agent/command/skill entries out of OpenCode's discovery paths. It also removes superseded oy config entries. Unrelated config remains in place.
+When existing config or oy-namespaced files will change, setup first creates a persistent mode-`0700` backup in the platform state location, falling back to the local-data directory when no dedicated state directory exists. It snapshots changed configs and moves direct `oy`, `oy-*`, and `oy.*` agent/command/skill entries plus any superseded plugin directory out of OpenCode's discovery paths. It also strips obsolete oy plugin, command, and MCP config entries. Unmodified configs remain byte-for-byte untouched; unrelated config remains in place.
 
 Config writes are a staged rollback-capable batch. If the batch fails, moved files are restored. On success, the backup remains the recovery copy, including original JSONC comments and formatting.
 

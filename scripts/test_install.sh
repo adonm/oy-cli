@@ -10,7 +10,7 @@ cat >"$tmp/mise-mock" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$OY_INSTALL_TEST_LOG"
 case "$*" in
-*"-- oy --version") printf '%s\n' 'oy-cli 0.14.0' ;;
+*"-- oy --version") printf '%s\n' 'oy-cli 0.14.1' ;;
 *"-- opencode2 api v2.plugin.list"*)
   count=$(cat "$OY_INSTALL_TEST_PLUGIN_COUNT")
   count=$((count + 1))
@@ -144,9 +144,9 @@ run_install() {
 default_log="$tmp/default.log"
 run_install "$default_log" 1 1 "$tmp/home-default"
 default=$(cat "$default_log")
-assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.0 node@latest"
+assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.1 node@latest"
 assert_contains "$default" "exec node@latest -- npm install -g @opencode-ai/cli@next"
-assert_contains "$default" "exec github:adonm/oy-cli@0.14.0 -- oy --version"
+assert_contains "$default" "exec github:adonm/oy-cli@0.14.1 -- oy --version"
 assert_contains "$default" "exec node@latest -- opencode2 --version"
 assert_contains "$default" "unuse --global --yes --no-prune cargo:oy-cli npm:@opencode-ai/cli cargo:tokei github:universal-ctags/ctags"
 assert_contains "$default" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli npm:@opencode-ai/cli cargo:tokei github:universal-ctags/ctags"
@@ -161,7 +161,7 @@ setup_log="$tmp/setup.log"
 run_install "$setup_log" 0 1 "$tmp/home-setup"
 setup=$(cat "$setup_log")
 assert_not_contains "$setup" "exec -- oy setup --remove"
-assert_contains "$setup" "exec github:adonm/oy-cli@0.14.0 node@latest -- oy setup"
+assert_contains "$setup" "exec github:adonm/oy-cli@0.14.1 node@latest -- oy setup"
 assert_contains "$setup" "exec node@latest -- opencode2 service start"
 assert_contains "$setup" "exec node@latest -- opencode2 api v2.plugin.list"
 
@@ -169,11 +169,11 @@ cursor_log="$tmp/cursor.log"
 run_install "$cursor_log" 0 1 "$tmp/home-cursor" --cursor
 cursor=$(cat "$cursor_log")
 cursor_curl=$(cat "$cursor_log.curl")
-assert_contains "$cursor" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.0"
+assert_contains "$cursor" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.1"
 assert_not_contains "$cursor" "node@latest"
 assert_not_contains "$cursor" "@opencode-ai/cli"
 assert_not_contains "$cursor" "opencode2"
-assert_contains "$cursor" "exec github:adonm/oy-cli@0.14.0 -- oy setup --cursor"
+assert_contains "$cursor" "exec github:adonm/oy-cli@0.14.1 -- oy setup --cursor"
 assert_contains "$cursor" "unuse --global --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_contains "$cursor" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_contains "$cursor_curl" "https://cursor.com/install"
@@ -187,8 +187,8 @@ run_install "$both_log" 0 1 "$tmp/home-both" --both
 both=$(cat "$both_log")
 both_curl=$(cat "$both_log.curl")
 assert_contains "$both" "exec node@latest -- npm install -g @opencode-ai/cli@next"
-assert_contains "$both" "exec github:adonm/oy-cli@0.14.0 node@latest -- oy setup"
-assert_contains "$both" "exec github:adonm/oy-cli@0.14.0 -- oy setup --cursor"
+assert_contains "$both" "exec github:adonm/oy-cli@0.14.1 node@latest -- oy setup"
+assert_contains "$both" "exec github:adonm/oy-cli@0.14.1 -- oy setup --cursor"
 assert_contains "$both_curl" "https://cursor.com/install"
 
 bootstrap_log="$tmp/bootstrap.log"

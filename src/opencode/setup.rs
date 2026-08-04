@@ -3,14 +3,11 @@
 mod backup;
 mod config_file;
 
-#[cfg(test)]
-use super::OY_AGENT;
 use super::{OpenCodeHost, api};
 use anyhow::{Context, Result, bail};
 use backup::{create_backup_dir, move_path, restore_moved_paths};
 use config_file::{
-    config_body, config_has_all_oy_entries, config_has_oy_entries, opencode_plugin_spec,
-    parse_opencode_config, remove_owned_config,
+    config_has_oy_entries, opencode_plugin_package, parse_opencode_config, strip_owned_config,
 };
 use serde_json::json;
 use std::fs;
@@ -18,6 +15,10 @@ use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::{config, ui};
+
+use super::{OPENCODE_PLUGIN_JS, OY_AGENT, OY_AUDIT_SKILL, OY_ENHANCE_SKILL, OY_REVIEW_SKILL};
+
+const OPENCODE_PLUGIN_NAMESPACE: &str = "plugins/oy";
 
 #[derive(Debug)]
 struct SetupOutcome {
@@ -126,10 +127,11 @@ fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32>
         return preview_setup(scope, &dir);
     }
     let _lock = SetupLock::acquire(&dir)?;
-    let files = legacy_oy_paths(&dir)?;
-    let updates = setup_config_updates(&dir)?;
-    let changed = !files.is_empty() || updates.iter().any(ConfigUpdate::changed);
-    let backup = apply_integration_update(&dir, &files, &updates)?;
+    let old_paths = setup_owned_paths(&dir)?;
+    let updates = strip_oy_config_updates(&dir)?;
+    let changed = !old_paths.is_empty() || updates.iter().any(ConfigUpdate::changed);
+    let backup = apply_integration_update(&dir, &old_paths, &updates)?;
+    install_plugin_files(&dir)?;
     if changed && let Ok(root) = config::oy_root() {
         let host = OpenCodeHost::selected_in(&root);
         if host.supported() {
@@ -157,17 +159,17 @@ fn remove_opencode(scope: SetupScope, dry_run: bool) -> Result<i32> {
     } else {
         Some(SetupLock::acquire(&dir)?)
     };
-    let files = legacy_oy_paths(&dir)?;
-    let updates = removal_config_updates(&dir)?;
+    let old_paths = remove_owned_paths(&dir)?;
+    let updates = strip_oy_config_updates(&dir)?;
     if dry_run {
         ui::section(format!("{} oy integration removal dry run", scope.label()).as_str());
-        for path in &files {
+        for path in &old_paths {
             ui::kv("move", path.display());
         }
         preview_config_updates(&updates);
         return Ok(0);
     }
-    let backup = apply_integration_update(&dir, &files, &updates)?;
+    let backup = apply_integration_update(&dir, &old_paths, &updates)?;
     report_setup(
         "removed",
         scope,
@@ -177,6 +179,27 @@ fn remove_opencode(scope: SetupScope, dry_run: bool) -> Result<i32> {
         },
     )?;
     Ok(0)
+}
+
+/// Paths owned by the current oy integration: legacy namespace files, plus the
+/// plugin directory when its content no longer matches this build.
+fn setup_owned_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = legacy_oy_paths(dir)?;
+    let plugin_dir = dir.join(OPENCODE_PLUGIN_NAMESPACE);
+    if plugin_dir.exists() && !plugin_files_match(dir)? {
+        paths.push(plugin_dir);
+    }
+    Ok(paths)
+}
+
+/// Everything the integration owns, including a current plugin directory.
+fn remove_owned_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = legacy_oy_paths(dir)?;
+    let plugin_dir = dir.join(OPENCODE_PLUGIN_NAMESPACE);
+    if plugin_dir.exists() {
+        paths.push(plugin_dir);
+    }
+    Ok(paths)
 }
 
 fn report_setup(status: &str, scope: SetupScope, outcome: &SetupOutcome) -> Result<()> {
@@ -198,8 +221,8 @@ fn report_setup(status: &str, scope: SetupScope, outcome: &SetupOutcome) -> Resu
     }
     if status == "installed" {
         ui::line(format_args!(
-            "Restart opencode for {} to install and load.",
-            opencode_plugin_spec()
+            "Restart opencode to load the {} plugin.",
+            opencode_plugin_package()
         ));
     }
     Ok(())
@@ -268,36 +291,29 @@ impl Drop for SetupLock {
 
 fn preview_setup(scope: SetupScope, dir: &Path) -> Result<i32> {
     ui::section(format!("{} oy integration dry run", scope.label()).as_str());
-    for path in legacy_oy_paths(dir)? {
+    for path in setup_owned_paths(dir)? {
         ui::kv("move", path.display());
     }
-    preview_config_updates(&setup_config_updates(dir)?);
+    let plugin_dir = dir.join(OPENCODE_PLUGIN_NAMESPACE);
+    if !plugin_dir.exists() && !plugin_files_match(dir)? {
+        ui::kv("create", plugin_dir.display());
+    }
+    preview_config_updates(&strip_oy_config_updates(dir)?);
     Ok(0)
 }
 
-fn setup_config_updates(dir: &Path) -> Result<Vec<ConfigUpdate>> {
-    let primary = config_path_in(dir);
-    let mut updates = vec![ConfigUpdate::new(primary.clone(), config_body(&primary)?)?];
+fn strip_oy_config_updates(dir: &Path) -> Result<Vec<ConfigUpdate>> {
+    let mut updates = Vec::new();
     for path in config_paths_in(dir) {
-        if path != primary && path.exists() {
-            updates.push(ConfigUpdate::new(
-                path.clone(),
-                remove_owned_config(&path)?,
-            )?);
+        if !path.exists() {
+            continue;
         }
+        let Some(body) = strip_owned_config(&path)? else {
+            continue;
+        };
+        updates.push(ConfigUpdate::new(path, body)?);
     }
     Ok(updates)
-}
-
-fn removal_config_updates(dir: &Path) -> Result<Vec<ConfigUpdate>> {
-    config_paths_in(dir)
-        .into_iter()
-        .filter(|path| path.exists())
-        .map(|path| {
-            let body = remove_owned_config(&path)?;
-            ConfigUpdate::new(path, body)
-        })
-        .collect()
 }
 
 fn config_paths_in(dir: &Path) -> [PathBuf; 2] {
@@ -463,10 +479,68 @@ fn apply_integration_update(
         return Err(error);
     }
 
-    for namespace in ["agents", "commands", "skills"] {
+    for namespace in ["agents", "commands", "plugins", "skills"] {
         let _ = fs::remove_dir(dir.join(namespace));
     }
     Ok(backup)
+}
+
+/// Plugin files shipped by this build, relative to the plugin directory.
+fn plugin_assets() -> [(&'static str, &'static str); 5] {
+    [
+        ("assets/agents/oy.md", OY_AGENT),
+        ("assets/skills/oy-audit/SKILL.md", OY_AUDIT_SKILL),
+        ("assets/skills/oy-review/SKILL.md", OY_REVIEW_SKILL),
+        ("assets/skills/oy-enhance/SKILL.md", OY_ENHANCE_SKILL),
+        ("index.js", OPENCODE_PLUGIN_JS),
+    ]
+}
+
+fn plugin_package_json() -> Vec<u8> {
+    let mut body = serde_json::to_string_pretty(&json!({
+        "name": opencode_plugin_package(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "main": "index.js",
+        "type": "module",
+    }))
+    .expect("plugin manifest serializes");
+    body.push('\n');
+    body.into_bytes()
+}
+
+/// Whether the installed plugin directory matches this build exactly.
+fn plugin_files_match(dir: &Path) -> Result<bool> {
+    let plugin_dir = dir.join(OPENCODE_PLUGIN_NAMESPACE);
+    let matches = plugin_assets().into_iter().all(|(relative, content)| {
+        fs::read_to_string(plugin_dir.join(relative)).is_ok_and(|installed| installed == content)
+    }) && fs::read(plugin_dir.join("package.json"))
+        .is_ok_and(|installed| installed == plugin_package_json());
+    Ok(matches)
+}
+
+/// Write the plugin files, skipping when they already match this build.
+fn install_plugin_files(dir: &Path) -> Result<()> {
+    if plugin_files_match(dir)? {
+        return Ok(());
+    }
+    let plugin_dir = dir.join(OPENCODE_PLUGIN_NAMESPACE);
+    let package_json = plugin_package_json();
+    let mut files = plugin_assets()
+        .into_iter()
+        .map(|(relative, content)| (plugin_dir.join(relative), content))
+        .collect::<Vec<_>>();
+    files.push((
+        plugin_dir.join("package.json"),
+        std::str::from_utf8(&package_json).unwrap(),
+    ));
+    let mutations = files
+        .iter()
+        .map(|(path, content)| config::FileMutation::Write {
+            path,
+            bytes: content.as_bytes(),
+        })
+        .collect::<Vec<_>>();
+    config::apply_file_batch_in(dir, &mutations)
 }
 
 fn config_path_in(dir: &Path) -> PathBuf {
@@ -524,7 +598,7 @@ fn setup_answer_is_yes(answer: &str) -> bool {
 }
 
 fn integration_present(dir: &Path) -> Result<bool> {
-    if !legacy_oy_paths(dir)?.is_empty() {
+    if !legacy_oy_paths(dir)?.is_empty() || dir.join(OPENCODE_PLUGIN_NAMESPACE).exists() {
         return Ok(true);
     }
     Ok(config_paths_in(dir).iter().any(|path| {
@@ -536,7 +610,7 @@ fn integration_present(dir: &Path) -> Result<bool> {
 }
 
 fn integration_complete(dir: &Path) -> bool {
-    config_has_all_oy_entries(&config_path_in(dir))
+    plugin_files_match(dir).unwrap_or(false)
 }
 
 #[cfg(test)]

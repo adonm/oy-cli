@@ -1,6 +1,6 @@
 [package]
 name = "oy-cli"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 rust-version = "1.96"
 description = "Focused coding agent integrations with repeatable audits, reviews, and one-finding fixes"

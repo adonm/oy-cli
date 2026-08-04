@@ -26,7 +26,7 @@ Cargo and npm package versions must match before tagging. On a tagged release, `
 
 The crate and npm jobs run independently after the binaries, while the GitHub release waits for both. CI, rather than the release job, checks Cargo/npm version alignment.
 
-The curl installer and `oy setup` pin the npm plugin version matching the binary, so never publish only one half of a release.
+`oy setup` embeds the plugin files from the same release, and the npm package is the manual-install alternative, so keep the npm version aligned with the crate version and never publish only one half of a release.
 
 ## npm controls
 

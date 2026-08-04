@@ -18,6 +18,7 @@ const OY_AUDIT_SKILL: &str = include_str!("../packages/opencode/assets/skills/oy
 const OY_REVIEW_SKILL: &str = include_str!("../packages/opencode/assets/skills/oy-review/SKILL.md");
 const OY_ENHANCE_SKILL: &str =
     include_str!("../packages/opencode/assets/skills/oy-enhance/SKILL.md");
+const OPENCODE_PLUGIN_JS: &str = include_str!("../packages/opencode/src/index.js");
 
 #[cfg(test)]
 mod tests {

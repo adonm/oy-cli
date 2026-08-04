@@ -43,12 +43,12 @@ These are agent-host prompt commands, not shell subcommands. They use the host's
 
 | Command | Purpose |
 |---|---|
-| `oy setup` | Back up prior oy entries and register the matching npm plugin globally. |
-| `oy setup --workspace` | Register the plugin in `OY_ROOT/.opencode/`. |
+| `oy setup` | Install the oy plugin files under the global OpenCode config directory; back up prior oy entries and strip legacy oy config. |
+| `oy setup --workspace` | Install the plugin files under `OY_ROOT/.opencode/plugins/`. |
 | `oy setup --cursor` | Install the oy rule, subagent, and skills under `~/.cursor/`. |
 | `oy setup --cursor --workspace` | Install Cursor assets under `OY_ROOT/.cursor/`. |
 | `oy setup --dry-run` | Preview setup or removal. |
-| `oy setup --remove` | Back up and remove oy-owned entries. |
+| `oy setup --remove` | Back up and remove the oy plugin files and legacy oy-owned entries. |
 | `oy doctor` | Show selected paths, host version, setup state, and optional tools. |
 | `oy doctor --check` | Validate the effective service, API, plugin, agent, skills, commands, and models. |
 | `oy doctor --install-missing` | Install missing OpenCode/context helpers with mise. |
@@ -60,13 +60,15 @@ See [Compatibility](compatibility.md) for the OpenCode versions accepted by this
 
 OpenCode global setup uses `OPENCODE_CONFIG_DIR` when set; otherwise it uses the platform OpenCode config directory (normally `~/.config/opencode/` on Linux). OpenCode workspace setup uses `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`.
 
+Setup installs a dependency-free copy of the plugin under `plugins/oy/` (plus `assets/agents/oy.md`, `assets/skills/*/SKILL.md`, and a versioned `package.json`). OpenCode discovers the plugin automatically in the `plugins/` directory, so setup does not rewrite user config files.
+
 Setup owns:
 
-- the matching `@oy-cli/opencode` plugin entry;
+- the `plugins/oy/` directory installed by setup;
 - old direct files named `oy`, `oy-*`, or `oy.*` under `agents`, `commands`, and `skills`;
-- obsolete oy command/MCP config entries from earlier releases.
+- obsolete oy plugin, command, and MCP config entries from earlier releases.
 
-Before changing existing owned entries, setup creates a mode-`0700` backup under the platform state directory (or local-data fallback). It snapshots changed config bytes and moves namespaced files. Unrelated settings remain in place. JSON/JSONC comments and formatting are preserved in the backup, while the active config is pretty-reserialized.
+Before changing existing owned entries, setup creates a mode-`0700` backup under the platform state directory (or local-data fallback). It moves namespaced files, snapshots changed config bytes, and leaves unmodified configs byte-for-byte untouched. Unrelated settings remain in place. JSON/JSONC comments and formatting are preserved in the backup, while configs with owned entries are pretty-reserialized.
 
 Cursor global setup uses `~/.cursor/`; workspace setup uses `OY_ROOT/.cursor/`. It owns exactly:
 

@@ -12,7 +12,7 @@ set -eu
 #   OY_SKIP_SETUP  set to 1/true to skip `oy setup`
 #   OY_INSTALL_TARGET  opencode (default), cursor, or both; a flag overrides it
 
-oy_version="0.14.0"
+oy_version="0.14.1"
 oy_tool="github:adonm/oy-cli@$oy_version"
 node_tool="node@latest"
 opencode_package="@opencode-ai/cli@next"
