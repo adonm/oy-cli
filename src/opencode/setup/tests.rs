@@ -68,16 +68,12 @@ fn backup_dirs(_config_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn assert_plugin_installed(dir: &Path) {
-    assert!(dir.join("plugins/oy/index.js").exists());
-    let manifest: Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("plugins/oy/package.json")).unwrap())
-            .unwrap();
-    assert_eq!(manifest["name"], "@oy-cli/opencode");
-    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(manifest["main"], "index.js");
-    assert_eq!(manifest["type"], "module");
     assert_eq!(
-        fs::read_to_string(dir.join("plugins/oy/assets/agents/oy.md")).unwrap(),
+        fs::read_to_string(dir.join("plugins/oy.js")).unwrap(),
+        OPENCODE_PLUGIN_JS
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("plugins/assets/agents/oy.md")).unwrap(),
         OY_AGENT
     );
     for (relative, content) in [
@@ -86,7 +82,7 @@ fn assert_plugin_installed(dir: &Path) {
         ("assets/skills/oy-enhance/SKILL.md", OY_ENHANCE_SKILL),
     ] {
         assert_eq!(
-            fs::read_to_string(dir.join("plugins/oy").join(relative)).unwrap(),
+            fs::read_to_string(dir.join("plugins").join(relative)).unwrap(),
             content
         );
     }
@@ -142,12 +138,7 @@ fn setup_dry_run_does_not_write_files() {
     setup_command(false, true, false).unwrap();
 
     assert!(!config_home.path().join("opencode/opencode.json").exists());
-    assert!(
-        !config_home
-            .path()
-            .join("opencode/plugins/oy/index.js")
-            .exists()
-    );
+    assert!(!config_home.path().join("opencode/plugins/oy.js").exists());
 }
 
 #[test]
@@ -190,10 +181,10 @@ fn setup_is_idempotent_without_churn() {
     let dir = config_home.path().join("opencode");
 
     setup_command(false, false, false).unwrap();
-    let first = fs::read(dir.join("plugins/oy/index.js")).unwrap();
+    let first = fs::read(dir.join("plugins/oy.js")).unwrap();
 
     setup_command(false, false, false).unwrap();
-    let second = fs::read(dir.join("plugins/oy/index.js")).unwrap();
+    let second = fs::read(dir.join("plugins/oy.js")).unwrap();
 
     assert_eq!(second, first);
     assert!(backup_dirs(&dir).is_empty());
@@ -452,31 +443,33 @@ fn setup_backs_up_modified_plugin_files_and_reinstalls() {
     let dir = config_home.path().join("opencode");
 
     setup_command(false, false, false).unwrap();
-    let plugin = dir.join("plugins/oy");
-    fs::write(plugin.join("index.js"), "modified plugin\n").unwrap();
-    let manifest = fs::read_to_string(plugin.join("package.json")).unwrap();
+    let plugin = dir.join("plugins");
+    fs::write(plugin.join("oy.js"), "modified plugin\n").unwrap();
+    let agent = plugin.join("assets/agents/oy.md");
+    fs::write(&agent, "modified agent\n").unwrap();
 
     setup_command(false, false, false).unwrap();
 
     assert_eq!(
-        fs::read_to_string(plugin.join("index.js")).unwrap(),
+        fs::read_to_string(plugin.join("oy.js")).unwrap(),
         OPENCODE_PLUGIN_JS
     );
+    assert_eq!(fs::read_to_string(&agent).unwrap(), OY_AGENT);
     let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert_eq!(
-        fs::read_to_string(backups[0].join("plugins/oy/index.js")).unwrap(),
+        fs::read_to_string(backups[0].join("plugins/oy.js")).unwrap(),
         "modified plugin\n"
     );
     assert_eq!(
-        fs::read_to_string(backups[0].join("plugins/oy/package.json")).unwrap(),
-        manifest
+        fs::read_to_string(backups[0].join("plugins/assets/agents/oy.md")).unwrap(),
+        "modified agent\n"
     );
     assert!(integration_complete(&dir));
 }
 
 #[test]
-fn integration_complete_is_false_when_plugin_version_mismatches() {
+fn integration_complete_is_false_when_plugin_content_stales() {
     let _lock = ENV_LOCK.lock().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -487,11 +480,7 @@ fn integration_complete_is_false_when_plugin_version_mismatches() {
     let dir = config_home.path().join("opencode");
 
     setup_command(false, false, false).unwrap();
-    let manifest = dir.join("plugins/oy/package.json");
-    let outdated = fs::read_to_string(&manifest)
-        .unwrap()
-        .replace(env!("CARGO_PKG_VERSION"), "0.1.0");
-    fs::write(&manifest, outdated).unwrap();
+    fs::write(dir.join("plugins/oy.js"), "stale plugin\n").unwrap();
 
     assert!(integration_present(&dir).unwrap());
     assert!(!integration_complete(&dir));
@@ -695,7 +684,7 @@ fn setup_remove_round_trip_preserves_unrelated_config() {
 }
 
 #[test]
-fn setup_remove_moves_plugin_directory_to_backup() {
+fn setup_remove_moves_plugin_files_to_backup() {
     let _lock = ENV_LOCK.lock().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -710,12 +699,11 @@ fn setup_remove_moves_plugin_directory_to_backup() {
 
     let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
-    assert!(backups[0].join("plugins/oy/index.js").exists());
-    assert!(backups[0].join("plugins/oy/package.json").exists());
-    assert!(backups[0].join("plugins/oy/assets/agents/oy.md").exists());
+    assert!(backups[0].join("plugins/oy.js").exists());
+    assert!(backups[0].join("plugins/assets/agents/oy.md").exists());
     assert!(
         backups[0]
-            .join("plugins/oy/assets/skills/oy-audit/SKILL.md")
+            .join("plugins/assets/skills/oy-audit/SKILL.md")
             .exists()
     );
 }

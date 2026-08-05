@@ -1,7 +1,11 @@
 import assert from "node:assert/strict"
+import { cp, mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
+import { pathToFileURL } from "node:url"
 
-import plugin from "../src/index.js"
+import plugin from "../index.js"
 
 test("registers the oy agent, skills, and commands", async () => {
   const sources = []
@@ -34,4 +38,17 @@ test("registers the oy agent, skills, and commands", async () => {
   assert.match(agents.get("oy").system, /OpenCode and the user own permissions/)
   assert.deepEqual([...commands.keys()], ["oy-audit", "oy-review", "oy-enhance"])
   assert.equal(commands.get("oy-audit").agent, "oy")
+})
+
+test("installed plugin layout resolves its assets", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "oy-plugin-layout-"))
+  try {
+    const pluginsDir = join(dir, "plugins")
+    await cp("assets", join(pluginsDir, "assets"), { recursive: true })
+    await cp("index.js", join(pluginsDir, "oy.js"))
+    const installed = await import(pathToFileURL(join(pluginsDir, "oy.js")))
+    assert.equal(installed.default.id, "oy")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

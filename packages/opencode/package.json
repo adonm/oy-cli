@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@oy-cli/opencode",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "OpenCode agent and skills for repeatable audits, code reviews, and focused fixes",
   "keywords": [
     "opencode",
@@ -18,14 +18,14 @@
     "url": "git+https://github.com/adonm/oy-cli.git",
     "directory": "packages/opencode"
   },
-  "exports": "./src/index.js",
+  "exports": "./index.js",
   "files": [
-    "src",
+    "index.js",
     "assets",
     "README.md"
   ],
   "scripts": {
-    "build": "node --check src/index.js",
+    "build": "node --check index.js",
     "test": "node --test"
   },
   "publishConfig": {

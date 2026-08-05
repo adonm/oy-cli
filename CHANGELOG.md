@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.14.2] - 2026-08-05
+
+### Fixed
+- Fixed `oy setup` installing a plugin layout that OpenCode could not load: the plugin entrypoint is now a direct `plugins/oy.js` child (with assets under `plugins/assets/`), mirroring the npm package layout, so the installed plugin registers the `oy` agent and skills. OpenCode auto-discovery only loads direct `.js`/`.ts` children of the `plugins/` directory, so the previous `plugins/oy/` directory layout was never discovered and the integration silently went missing after 0.14.1 upgrades.
+
 ## [0.14.1] - 2026-08-05
 
 ### Changed

@@ -72,7 +72,7 @@ jobs:
 
           path = Path.home() / ".config/opencode/opencode.json"
           config = json.loads(path.read_text())
-          config["plugins"] = [str(Path("packages/opencode/src/index.js").resolve())]
+          config["plugins"] = [str(Path("packages/opencode/index.js").resolve())]
           path.write_text(json.dumps(config, indent=2) + "\n")
           PY
           opencode2 service start

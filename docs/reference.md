@@ -60,11 +60,11 @@ See [Compatibility](compatibility.md) for the OpenCode versions accepted by this
 
 OpenCode global setup uses `OPENCODE_CONFIG_DIR` when set; otherwise it uses the platform OpenCode config directory (normally `~/.config/opencode/` on Linux). OpenCode workspace setup uses `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`.
 
-Setup installs a dependency-free copy of the plugin under `plugins/oy/` (plus `assets/agents/oy.md`, `assets/skills/*/SKILL.md`, and a versioned `package.json`). OpenCode discovers the plugin automatically in the `plugins/` directory, so setup does not rewrite user config files.
+Setup installs a dependency-free copy of the plugin as `plugins/oy.js` (plus `plugins/assets/agents/oy.md` and `plugins/assets/skills/*/SKILL.md`). OpenCode discovers the plugin automatically in the `plugins/` directory, so setup does not rewrite user config files.
 
 Setup owns:
 
-- the `plugins/oy/` directory installed by setup;
+- the `plugins/oy.js` entrypoint and `plugins/assets/` assets directory installed by setup;
 - old direct files named `oy`, `oy-*`, or `oy.*` under `agents`, `commands`, and `skills`;
 - obsolete oy plugin, command, and MCP config entries from earlier releases.
 

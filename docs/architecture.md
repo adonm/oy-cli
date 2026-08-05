@@ -48,7 +48,7 @@ Integration assets are stored outside the Rust modules and embedded into their p
 
 | Path | Responsibility |
 |---|---|
-| `packages/opencode/src/index.js` | Registers the agent, skills directory, and three slash commands through the V2 plugin API |
+| `packages/opencode/index.js` | Registers the agent, skills directory, and three slash commands through the V2 plugin API |
 | `packages/opencode/assets/agents/oy.md` | Primary agent definition and system prompt |
 | `packages/opencode/assets/skills/*/SKILL.md` | Canonical audit, review, and enhancement protocols |
 | `assets/cursor/rules/oy.mdc` | Always-applied Cursor behavior |
@@ -57,9 +57,9 @@ Integration assets are stored outside the Rust modules and embedded into their p
 
 ## Setup
 
-Global setup installs the plugin files under `plugins/oy/` in `OPENCODE_CONFIG_DIR` or the platform config directory's `opencode` child. Workspace setup does the same under `OY_ROOT/.opencode/plugins/`. OpenCode discovers the directory automatically, so setup writes no config file on clean installs.
+Global setup installs the plugin entrypoint as `plugins/oy.js` with assets under `plugins/assets/` in `OPENCODE_CONFIG_DIR` or the platform config directory's `opencode` child. Workspace setup does the same under `OY_ROOT/.opencode/plugins/`. OpenCode auto-discovers direct `.js` children of the `plugins/` directory, so setup writes no config file on clean installs.
 
-When existing config or oy-namespaced files will change, setup first creates a persistent mode-`0700` backup in the platform state location, falling back to the local-data directory when no dedicated state directory exists. It snapshots changed configs and moves direct `oy`, `oy-*`, and `oy.*` agent/command/skill entries plus any superseded plugin directory out of OpenCode's discovery paths. It also strips obsolete oy plugin, command, and MCP config entries. Unmodified configs remain byte-for-byte untouched; unrelated config remains in place.
+When existing config or oy-namespaced files will change, setup first creates a persistent mode-`0700` backup in the platform state location, falling back to the local-data directory when no dedicated state directory exists. It snapshots changed configs and moves direct `oy`, `oy-*`, and `oy.*` agent/command/skill entries plus any superseded plugin entrypoint and assets out of OpenCode's discovery paths. It also strips obsolete oy plugin, command, and MCP config entries. Unmodified configs remain byte-for-byte untouched; unrelated config remains in place.
 
 Config writes are a staged rollback-capable batch. If the batch fails, moved files are restored. On success, the backup remains the recovery copy, including original JSONC comments and formatting.
 
