@@ -41,9 +41,9 @@ Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_SCOPE=globa
 With mise:
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.3 node@latest
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.4 node@latest
 mise exec node@latest -- npm install -g @opencode-ai/cli@next
-mise exec github:adonm/oy-cli@0.14.3 node@latest -- oy setup
+mise exec github:adonm/oy-cli@0.14.4 node@latest -- oy setup
 ```
 
 Or install only the Rust CLI from crates.io, then provide a compatible OpenCode installation yourself:

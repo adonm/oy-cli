@@ -1,8 +1,10 @@
 import { readFileSync, rmSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { join } from "node:path"
 import { createCursor } from "@stablekernel/opencode-cursor"
 import { applyCursorCatalog, fallbackCursorModels } from "./cursor-catalog.js"
+import { startCursorBridge } from "./cursor-bridge.js"
+import { safeWorkspacePath } from "./cursor-paths.js"
+import { removeBundledCursorSkills, writeBundledCursorSkills } from "./cursor-skills.js"
 
 const assets = fileURLToPath(new URL("./assets", import.meta.url))
 const agent = readFileSync(new URL("./assets/agents/oy.md", import.meta.url), "utf8")
@@ -30,7 +32,7 @@ export const isGeneratedCursorRule = (content) => {
 
 export const removeGeneratedCursorRule = (directory) => {
   try {
-    const path = join(directory, ".cursor", "rules", "opencode.mdc")
+    const path = safeWorkspacePath(directory, ".cursor", "rules", "opencode.mdc")
     if (isGeneratedCursorRule(readFileSync(path, "utf8"))) rmSync(path)
   } catch {
     // The provider may not have written a rule in this location.
@@ -48,6 +50,7 @@ const defaultDependencies = {
     const detail = error instanceof Error ? `: ${error.message}` : ""
     console.warn(`[oy] ${operation}${detail}`)
   },
+  startCursorBridge,
 }
 
 export const createPlugin = (overrides = {}) => {
@@ -55,16 +58,16 @@ export const createPlugin = (overrides = {}) => {
   return {
     id: "oy",
     setup: async (ctx) => {
-      let location
-      try {
-        location = await ctx.catalog.model.list()
-      } catch (error) {
-        dependencies.reportError("failed to resolve the OpenCode workspace; using the current directory", error)
-      }
-      const directory = location?.location?.directory ?? process.cwd()
+      const directory =
+        (typeof ctx.options?.cwd === "string" && ctx.options.cwd) ||
+        dependencies.environment.OY_ROOT ||
+        process.cwd()
+      applyCursorEnvironmentDefaults(dependencies.environment)
       let cursorModels = fallbackCursorModels
       let disposed = false
       let refreshing
+      let catalogReady = false
+      let bridge
 
       await ctx.skill.transform((skills) => {
         skills.source({ type: "directory", path: `${assets}/skills` })
@@ -113,13 +116,8 @@ export const createPlugin = (overrides = {}) => {
       })
 
       await ctx.catalog.transform((catalog) => {
-        applyCursorCatalog(catalog, directory, cursorModels)
-      })
-
-      await ctx.aisdk.hook("sdk", (event) => {
-        if (event.package !== "@stablekernel/opencode-cursor") return
-        applyCursorEnvironmentDefaults(dependencies.environment)
-        event.sdk = dependencies.createCursor(event.options)
+        applyCursorCatalog(catalog, directory, cursorModels, bridge)
+        catalogReady = true
       })
 
       const refreshCursorModels = () => {
@@ -144,21 +142,42 @@ export const createPlugin = (overrides = {}) => {
         return refreshing
       }
 
-      const controller = new AbortController()
-      const events = (async () => {
-        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          if (
-            event.type === "integration.connection.updated" &&
-            event.data.integrationID === "cursor"
-          ) {
-            void refreshCursorModels()
-          }
-        }
-      })().catch((error) => {
-        if (!disposed && error?.name !== "AbortError") {
-          dependencies.reportError("Cursor connection event subscription failed", error)
-        }
+      bridge = await dependencies.startCursorBridge({
+        directory,
+        createCursor: dependencies.createCursor,
+        listCursorModels: dependencies.listCursorModels,
+        onModels: async (models) => {
+          if (models.length === 0 || disposed) return
+          cursorModels = models
+          if (catalogReady) await ctx.catalog.reload()
+        },
+        onDirectory: (cwd) =>
+          writeBundledCursorSkills(cwd, assets, (message) => dependencies.reportError(message)),
+        onIdle: (cwd) => {
+          removeGeneratedCursorRule(cwd)
+          removeBundledCursorSkills(cwd)
+        },
+        reportError: dependencies.reportError,
       })
+      if (catalogReady) await ctx.catalog.reload()
+
+      const controller = new AbortController()
+      const events = ctx.event?.subscribe
+        ? (async () => {
+            for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+              if (
+                event.type === "integration.connection.updated" &&
+                event.data.integrationID === "cursor"
+              ) {
+                void refreshCursorModels()
+              }
+            }
+          })().catch((error) => {
+            if (!disposed && error?.name !== "AbortError") {
+              dependencies.reportError("Cursor connection event subscription failed", error)
+            }
+          })
+        : Promise.resolve()
       void refreshCursorModels()
 
       return async () => {
@@ -167,6 +186,8 @@ export const createPlugin = (overrides = {}) => {
         await events
         await refreshing
         removeGeneratedCursorRule(directory)
+        removeBundledCursorSkills(directory)
+        await bridge?.close()
       }
     },
   }

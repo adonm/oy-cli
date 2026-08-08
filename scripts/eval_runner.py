@@ -106,6 +106,20 @@ def main() -> int:
     run_parser.add_argument("--skip-build", action="store_true", help="Do not run cargo build before eval")
     run_parser.add_argument("--strict-quality", action="store_true", help="Exit non-zero when quality checks fail")
 
+    matrix_parser = sub.add_parser("matrix", help="Run the same tasks across multiple OpenCode models")
+    matrix_parser.add_argument("--task", action="append", default=[], help="Task id to run; repeatable")
+    matrix_parser.add_argument("--all", action="store_true", help="Run disabled tasks too")
+    matrix_parser.add_argument(
+        "--model",
+        action="append",
+        required=True,
+        help="Matrix lane as label=provider/model#variant; repeatable",
+    )
+    matrix_parser.add_argument("--matrix-id", default="", help="Stable matrix id; defaults to UTC timestamp")
+    matrix_parser.add_argument("--dry-run", action="store_true", help="Print every lane without cloning or running opencode")
+    matrix_parser.add_argument("--skip-build", action="store_true", help="Do not run cargo build before the matrix")
+    matrix_parser.add_argument("--strict-quality", action="store_true", help="Exit non-zero when quality checks fail")
+
     compare_parser = sub.add_parser("compare", help="Compare two completed run summary.json files")
     compare_parser.add_argument("baseline", type=Path)
     compare_parser.add_argument("candidate", type=Path)
@@ -124,6 +138,9 @@ def main() -> int:
     if args.command == "run":
         selected = select_tasks(tasks, args.task, include_disabled=args.all)
         return run_tasks(selected, args)
+    if args.command == "matrix":
+        selected = select_tasks(tasks, args.task, include_disabled=args.all)
+        return run_matrix(selected, args)
     raise AssertionError(args.command)
 
 
@@ -202,6 +219,73 @@ def run_tasks(tasks: list[Task], args: argparse.Namespace) -> int:
     if protocol_failed or (args.strict_quality and quality_failed):
         return 1
     return 0
+
+
+def run_matrix(tasks: list[Task], args: argparse.Namespace) -> int:
+    lanes = [parse_matrix_model(value) for value in args.model]
+    matrix_id = args.matrix_id or utc_stamp()
+    matrix_dir = EVAL_ROOT / "matrices" / matrix_id
+    results = []
+    failed = False
+    for index, (label, model) in enumerate(lanes):
+        run_id = f"{matrix_id}-{slug(label)}"
+        lane_args = argparse.Namespace(
+            run_id=run_id,
+            model_slug=label,
+            opencode_model=model,
+            dry_run=args.dry_run,
+            skip_build=args.skip_build or index > 0,
+            strict_quality=args.strict_quality,
+        )
+        status = run_tasks(tasks, lane_args)
+        failed = failed or status != 0
+        summary_path = EVAL_ROOT / "runs" / run_id / "summary.json"
+        completed = None if args.dry_run else json.loads(summary_path.read_text(encoding="utf-8"))
+        results.append(
+            {
+                "label": label,
+                "model": model,
+                "run_id": run_id,
+                "summary": str(summary_path.relative_to(REPO_ROOT)),
+                "results": [] if completed is None else completed["results"],
+            }
+        )
+    if not args.dry_run:
+        matrix_dir.mkdir(parents=True, exist_ok=True)
+        summary = {"matrix_id": matrix_id, "lanes": results}
+        (matrix_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        (matrix_dir / "summary.md").write_text(markdown_matrix(summary), encoding="utf-8")
+        print(f"wrote matrix: {matrix_dir / 'summary.json'}")
+    return 1 if failed else 0
+
+
+def parse_matrix_model(value: str) -> tuple[str, str]:
+    label, separator, model = value.partition("=")
+    if not separator or not label.strip() or "/" not in model:
+        raise ValueError(f"matrix model must be label=provider/model#variant: {value!r}")
+    return label.strip(), model.strip()
+
+
+def markdown_matrix(summary: dict[str, Any]) -> str:
+    lines = [f"# oy eval matrix {summary['matrix_id']}", "", "| Lane | OpenCode model | Summary |", "|---|---|---|"]
+    for lane in summary["lanes"]:
+        lines.append(f"| {lane['label']} | `{lane['model']}` | `{lane['summary']}` |")
+    tasks = sorted({result["id"] for lane in summary["lanes"] for result in lane["results"]})
+    if tasks:
+        lines.extend(["", "| Task | Lane | Protocol | Quality | Findings | Elapsed |", "|---|---|---:|---:|---:|---:|"])
+        for task in tasks:
+            for lane in summary["lanes"]:
+                result = next((result for result in lane["results"] if result["id"] == task), None)
+                if result is None:
+                    continue
+                lines.append(
+                    f"| {task} | {lane['label']} | "
+                    f"{'✅' if result['protocol_ok'] else '❌'} | "
+                    f"{'✅' if result['quality_ok'] else '⚠️'} | "
+                    f"{result.get('findings_count', 0)} | {result['elapsed_seconds']}s |"
+                )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def run_one_task(task: Task, repos_dir: Path, run_dir: Path, env: dict[str, str]) -> dict[str, Any]:

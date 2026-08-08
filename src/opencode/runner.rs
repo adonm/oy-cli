@@ -9,7 +9,7 @@ use std::io::{IsTerminal as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{audit, config, ui};
+use crate::{artifacts, audit, config, ui};
 
 pub(crate) fn launch_command() -> Result<i32> {
     let root = config::oy_root()?;
@@ -75,9 +75,30 @@ pub(crate) fn audit_workflow_command(
         None => Some(api.default_model(&root)?),
     };
     let (scope, focus) = crate::workflow::resolve_scope(&root, &focus)?;
+    let path = match &scope {
+        crate::workflow::WorkflowScope::Workspace { path } => path.clone(),
+        crate::workflow::WorkflowScope::GitDiff { .. } => {
+            unreachable!("audit scope cannot be a git diff")
+        }
+    };
+    let prepared = artifacts::prepare(
+        &root,
+        artifacts::PrepareRequest {
+            kind: artifacts::Kind::Audit,
+            path,
+            target: None,
+            output: out.clone(),
+            format: format.name().to_string(),
+            focus: focus.clone(),
+            max_chunks,
+            model: model.clone(),
+        },
+    )?;
+    let artifact_run_id = prepared_run_id(&prepared)?;
     let context = crate::workflow::WorkflowContext {
         schema_version: 1,
         run_id: crate::workflow::new_run_id()?,
+        artifact_run_id: Some(artifact_run_id.clone()),
         kind: crate::workflow::WorkflowKind::Audit,
         workspace: root.clone(),
         scope,
@@ -90,10 +111,8 @@ pub(crate) fn audit_workflow_command(
         legacy_mode: None,
         output_before: crate::workflow::output_digest(&root, &out)?,
     };
-    let message = format!(
-        "Load the `oy-audit` skill and execute it locally. Bound workflow request: {}",
-        context.encode()?
-    );
+    let descriptor = artifacts::describe_prepared(&root, &artifact_run_id)?;
+    let message = prepared_workflow_message("oy-audit", &descriptor, &context)?;
     run_agent_workflow(&host, &root, "oy", message, &context)
 }
 
@@ -117,14 +136,34 @@ pub(crate) fn review_workflow_command(
         Some(model) => Some(model),
         None => Some(api.default_model(&root)?),
     };
-    let (scope, focus) = if let Some(target) = target.filter(|target| !target.trim().is_empty()) {
-        (crate::workflow::resolve_diff_scope(&root, &target)?, focus)
+    let target = target.filter(|target| !target.trim().is_empty());
+    let (scope, focus) = if let Some(target) = target.as_deref() {
+        (crate::workflow::resolve_diff_scope(&root, target)?, focus)
     } else {
         crate::workflow::resolve_scope(&root, &focus)?
     };
+    let path = match &scope {
+        crate::workflow::WorkflowScope::Workspace { path } => path.clone(),
+        crate::workflow::WorkflowScope::GitDiff { .. } => ".".to_string(),
+    };
+    let prepared = artifacts::prepare(
+        &root,
+        artifacts::PrepareRequest {
+            kind: artifacts::Kind::Review,
+            path,
+            target,
+            output: out.clone(),
+            format: "markdown".to_string(),
+            focus: focus.clone(),
+            max_chunks,
+            model: model.clone(),
+        },
+    )?;
+    let artifact_run_id = prepared_run_id(&prepared)?;
     let context = crate::workflow::WorkflowContext {
         schema_version: 1,
         run_id: crate::workflow::new_run_id()?,
+        artifact_run_id: Some(artifact_run_id.clone()),
         kind: crate::workflow::WorkflowKind::Review,
         workspace: root.clone(),
         scope,
@@ -137,10 +176,8 @@ pub(crate) fn review_workflow_command(
         legacy_mode: None,
         output_before: crate::workflow::output_digest(&root, &out)?,
     };
-    let message = format!(
-        "Load the `oy-review` skill and execute it locally. Bound workflow request: {}",
-        context.encode()?
-    );
+    let descriptor = artifacts::describe_prepared(&root, &artifact_run_id)?;
+    let message = prepared_workflow_message("oy-review", &descriptor, &context)?;
     run_agent_workflow(&host, &root, "oy", message, &context)
 }
 
@@ -168,6 +205,7 @@ pub(crate) fn enhance_workflow_command(
     let context = crate::workflow::WorkflowContext {
         schema_version: 1,
         run_id: crate::workflow::new_run_id()?,
+        artifact_run_id: None,
         kind: crate::workflow::WorkflowKind::Enhance,
         workspace: root.clone(),
         scope,
@@ -226,10 +264,22 @@ pub(crate) fn recover_workflow_command() -> Result<i32> {
     let mut context = retained;
     context.session_id = Some(session);
     let agent = "oy";
-    let message = format!(
-        "Resume the bound oy workflow from its retained session and context. Bound workflow request: {}",
-        context.encode()?
-    );
+    let message = if let Some(run_id) = context.artifact_run_id.as_deref() {
+        let descriptor = artifacts::describe_prepared(&root, run_id)?;
+        let skill = match context.kind {
+            crate::workflow::WorkflowKind::Audit => "oy-audit",
+            crate::workflow::WorkflowKind::Review => "oy-review",
+            crate::workflow::WorkflowKind::Enhance => {
+                unreachable!("enhance has no prepared artifact")
+            }
+        };
+        prepared_workflow_message(skill, &descriptor, &context)?
+    } else {
+        format!(
+            "Resume the bound oy workflow from its retained session and context. Bound workflow request: {}",
+            context.encode()?
+        )
+    };
     run_agent_workflow(&host, &root, agent, message, &context)
 }
 
@@ -239,6 +289,37 @@ fn require_supported_host(host: &OpenCodeHost) -> Result<()> {
 
 pub(crate) fn runtime_health(host: &OpenCodeHost, root: &Path) -> Result<RuntimeHealth> {
     api::OpenCodeApi::new(host).runtime_health(root)
+}
+
+fn prepared_run_id(prepared: &serde_json::Value) -> Result<String> {
+    prepared
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("artifact preparation did not return a run id"))
+}
+
+fn prepared_workflow_message(
+    skill: &str,
+    descriptor: &serde_json::Value,
+    context: &crate::workflow::WorkflowContext,
+) -> Result<String> {
+    Ok(format!(
+        "Load the `{skill}` skill and execute it locally. Oy has already prepared the immutable evidence below. Do not run prepare or finalize. Read the exact index and every listed chunk, then write only candidate_report and candidate_findings. The outer oy process will validate and finalize them.\nPrepared artifact request: {}\nBound workflow request: {}",
+        serde_json::to_string(descriptor)?,
+        context.encode()?
+    ))
+}
+
+fn finalize_bound_artifact(
+    root: &Path,
+    context: &crate::workflow::WorkflowContext,
+) -> Result<Option<serde_json::Value>> {
+    context
+        .artifact_run_id
+        .as_deref()
+        .map(|run_id| artifacts::finalize(root, run_id))
+        .transpose()
 }
 
 fn run_agent_workflow(
@@ -273,7 +354,19 @@ fn run_agent_workflow(
             return Err(error);
         }
     };
-    let output_ok = bound.kind == crate::workflow::WorkflowKind::Enhance
+    let finalization = match finalize_bound_artifact(root, &bound) {
+        Ok(finalization) => finalization,
+        Err(error) => {
+            ui::err_line(format_args!(
+                "workflow {} produced invalid candidates; recovery context retained at {}",
+                bound.run_id,
+                lease.path().display()
+            ));
+            return Err(error).context("failed finalizing prepared artifact workflow");
+        }
+    };
+    let output_ok = finalization.is_some()
+        || bound.kind == crate::workflow::WorkflowKind::Enhance
         || crate::workflow::output_digest(root, &bound.output)? != bound.output_before;
     if !output_ok {
         ui::err_line(format_args!(
@@ -291,6 +384,7 @@ fn run_agent_workflow(
             "admitted": result.admitted,
             "assistant": result.assistant,
             "text": result.text,
+            "finalization": finalization,
         }))?);
     } else if !result.text.trim().is_empty() {
         ui::line(result.text);
@@ -342,7 +436,19 @@ fn run_opencode(
     if let Some(lease) = lease {
         if status.success() {
             let context = context.expect("workflow lease requires context");
-            let output_ok = context.kind == crate::workflow::WorkflowKind::Enhance
+            let finalization = match finalize_bound_artifact(root, context) {
+                Ok(finalization) => finalization,
+                Err(error) => {
+                    ui::err_line(format_args!(
+                        "workflow {} produced invalid candidates; recovery context retained at {}",
+                        context.run_id,
+                        lease.path().display()
+                    ));
+                    return Err(error).context("failed finalizing prepared artifact workflow");
+                }
+            };
+            let output_ok = finalization.is_some()
+                || context.kind == crate::workflow::WorkflowKind::Enhance
                 || crate::workflow::output_digest(root, &context.output)? != context.output_before;
             if output_ok {
                 lease.complete();
@@ -393,5 +499,74 @@ mod tests {
         let mut resumed = Vec::new();
         push_session_args(&mut resumed, false, "ses_123");
         assert_eq!(resumed, vec!["--session", "ses_123"]);
+    }
+
+    #[test]
+    fn bound_artifact_finalization_rejects_direct_report_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("lib.rs"), "fn checked() {}\n").unwrap();
+        let prepared = artifacts::prepare(
+            root.path(),
+            artifacts::PrepareRequest {
+                kind: artifacts::Kind::Audit,
+                path: ".".to_string(),
+                target: None,
+                output: PathBuf::from("ISSUES.md"),
+                format: "markdown".to_string(),
+                focus: Vec::new(),
+                max_chunks: 10,
+                model: None,
+            },
+        )
+        .unwrap();
+        let artifact_run_id = prepared_run_id(&prepared).unwrap();
+        std::fs::write(
+            root.path()
+                .join(prepared["candidate_report"].as_str().unwrap()),
+            "# Audit Issues\n\n## Findings summary\n\nNo concrete findings.\n\n## Detailed findings\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path()
+                .join(prepared["candidate_findings"].as_str().unwrap()),
+            "[]\n",
+        )
+        .unwrap();
+        let context = crate::workflow::WorkflowContext {
+            schema_version: 1,
+            run_id: crate::workflow::new_run_id().unwrap(),
+            artifact_run_id: Some(artifact_run_id),
+            kind: crate::workflow::WorkflowKind::Audit,
+            workspace: root.path().to_path_buf(),
+            scope: crate::workflow::WorkflowScope::Workspace {
+                path: ".".to_string(),
+            },
+            focus: Vec::new(),
+            output: PathBuf::from("ISSUES.md"),
+            format: "markdown".to_string(),
+            max_chunks: 10,
+            model: None,
+            session_id: None,
+            legacy_mode: None,
+            output_before: None,
+        };
+
+        std::fs::write(root.path().join("ISSUES.md"), "unvalidated mutation\n").unwrap();
+        let error = finalize_bound_artifact(root.path(), &context).unwrap_err();
+        assert!(error.to_string().contains("output_changed"));
+
+        std::fs::remove_file(root.path().join("ISSUES.md")).unwrap();
+        let receipt = finalize_bound_artifact(root.path(), &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt["run_id"],
+            context.artifact_run_id.as_deref().unwrap()
+        );
+        assert!(
+            std::fs::read_to_string(root.path().join("ISSUES.md"))
+                .unwrap()
+                .contains("oy evidence: schema")
+        );
     }
 }

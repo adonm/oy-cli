@@ -30,6 +30,8 @@ pub(crate) enum WorkflowScope {
 pub(crate) struct WorkflowContext {
     pub schema_version: u16,
     pub run_id: String,
+    #[serde(default)]
+    pub artifact_run_id: Option<String>,
     pub kind: WorkflowKind,
     pub workspace: PathBuf,
     pub scope: WorkflowScope,
@@ -234,6 +236,7 @@ mod tests {
         let context = WorkflowContext {
             schema_version: 1,
             run_id: "a".repeat(48),
+            artifact_run_id: None,
             kind: WorkflowKind::Audit,
             workspace: root.path().to_path_buf(),
             scope: WorkflowScope::Workspace {

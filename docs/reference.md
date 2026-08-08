@@ -96,7 +96,11 @@ The installer uses mise for oy, Node.js, OpenCode, and optional context helpers.
 
 ## Cursor models in OpenCode
 
-The default OpenCode plugin registers a **Cursor** provider. Use `/connect` and paste a Cursor API key; the account's live catalog appears as `cursor/*`. Configuration under `providers.cursor.settings` is passed to `@stablekernel/opencode-cursor`, for example `sandbox`, `mode`, `settingSources`, or `systemPrompt`. Oy raises the provider's idle-stream watchdog default from 120,000 ms to 1,200,000 ms; an explicit `OPENCODE_CURSOR_STALL_MS` value wins.
+The default OpenCode plugin registers a **Cursor** provider. Use `/connect` and paste a Cursor API key; the account's live catalog replaces the fallback list after first use. OpenCode 2 talks to the official Cursor local-agent runtime through an authenticated `127.0.0.1` bridge. The bridge preserves Cursor sessions, token/cache usage, native tool activity, bundled oy skills, and named Cursor subagents. Select a model's `plan` variant for Cursor plan mode.
+
+Configuration under `providers.cursor.request.body` is forwarded to the Cursor agent. Supported settings include `sandbox`, `autoReview`, `settingSources`, `agents`, `mcpServers`, `session`, `systemPrompt`, `toolDisplay`, and `transport`. Oy raises the provider's idle-stream watchdog default from 120,000 ms to 1,200,000 ms; an explicit `OPENCODE_CURSOR_STALL_MS` value wins. OpenCode's live MCP state and per-tool permission prompts are not forwarded because the current V2 plugin API does not expose that request context.
+
+For a checkout smoke test, use `CURSOR_API_KEY=... just opencode-dev`, select a `cursor/*` model, and start with a no-edit read request. `OPENCODE_CURSOR_DEBUG=1` enables provider diagnostics without printing the API key.
 
 `cursor/*` uses Cursor tools outside OpenCode permissions. Oy preserves the provider's sandbox default; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 

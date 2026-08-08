@@ -77,6 +77,10 @@ python3 scripts/eval_runner.py run --opencode-model openai/gpt-5.5 \
 python3 scripts/eval_runner.py compare \
   .tmp/eval/runs/<baseline>/summary.json \
   .tmp/eval/runs/<candidate>/summary.json
+python3 scripts/eval_runner.py matrix \
+  --model go=opencode/gpt-5.5 \
+  --model cursor=cursor/gpt-5.5#high \
+  --task sedona-geoparquet-aws-allowlist-audit
 ```
 
 The runner:
@@ -84,8 +88,8 @@ The runner:
 - reads `docs/eval-corpus.toml`
 - clones/fetches pinned public refs under `.tmp/eval/repos/`
 - builds the local `oy` binary unless `--skip-build` is passed
-- prepends `target/debug` to `PATH` so the packaged skills invoke the candidate
-  binary for `prepare` and `finalize`
+- prepends `target/debug` to `PATH` so the candidate binary owns evidence
+  preparation and finalization around the model turn
 - runs `oy setup --workspace`, then the configured `oy audit` or `oy review`
   through oy's managed OpenCode workflow
 - maps `--opencode-model provider/model#variant` to `OY_OPENCODE_MODEL` for
@@ -93,15 +97,17 @@ The runner:
 - copies reports and writes `summary.json`/`summary.md` under `.tmp/eval/runs/`
 - checks report shape, `oy-findings` JSON, keyword/path scorecard hints, and
   unexpected source mutations outside `.opencode/`, `.oy/runs/`, and `.oy-eval/`
+- runs an identical task set across repeatable model lanes with `matrix`, writing
+  a manifest under `.tmp/eval/matrices/` for Zen/Go-versus-Cursor comparisons
 
 Full runs require opencode and a configured model provider. They are deliberately
 not part of default CI.
 
 ## Manual Run Protocol
 
-Evaluate the candidate `oy` binary that contains the prompt changes. Packaged
-skills resolve `oy audit|review prepare/finalize` from `PATH`, so put the local
-build first or install the candidate binary before running evals.
+Evaluate the candidate `oy` binary that contains the prompt changes. Put the
+local build first or install the candidate binary before running evals so it
+owns the prepared run and finalizes the model-written candidates.
 
 ```bash
 cargo build --locked

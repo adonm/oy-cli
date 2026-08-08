@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import test from "node:test"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -11,6 +11,13 @@ import plugin, {
   isGeneratedCursorRule,
   removeGeneratedCursorRule,
 } from "../index.js"
+
+const fakeBridge = async ({ onModels }) => ({
+  url: "http://127.0.0.1:12345/v1",
+  token: "test-token",
+  current: { onModels },
+  close() {},
+})
 
 const createEventStream = () => {
   const queued = []
@@ -114,6 +121,7 @@ const createHarness = ({ onReload } = {}) => {
       },
     },
     aisdk: {
+      sdk: async (hook) => hooks.set("sdk", hook),
       hook: async (name, hook) => hooks.set(name, hook),
     },
   }
@@ -137,13 +145,13 @@ const createHarness = ({ onReload } = {}) => {
 }
 
 test("registers the oy agent, skills, commands, and Cursor provider", async () => {
-  const fakeSdk = { id: "fake-cursor-sdk" }
   const harness = createHarness()
   const environment = {}
   const deterministicPlugin = createPlugin({
-    createCursor: () => fakeSdk,
+    createCursor: () => ({ languageModel: () => ({}) }),
     environment,
     reportError: assert.fail,
+    startCursorBridge: fakeBridge,
   })
   const cleanup = await deterministicPlugin.setup(harness.ctx)
 
@@ -167,25 +175,23 @@ test("registers the oy agent, skills, commands, and Cursor provider", async () =
     harness.methods.map((entry) => entry.integrationID),
     ["cursor", "cursor"],
   )
-  assert.equal(
-    harness.providers.get("cursor").package,
-    "aisdk:@stablekernel/opencode-cursor",
-  )
-  assert.equal(
-    harness.models.get("cursor/composer-2.5").package,
-    "aisdk:@stablekernel/opencode-cursor",
-  )
+  assert.deepEqual(harness.providers.get("cursor").api, {
+    type: "aisdk",
+    package: "@ai-sdk/openai",
+    url: "http://127.0.0.1:12345/v1",
+  })
+  assert.equal(harness.providers.get("cursor").settings.baseURL, "http://127.0.0.1:12345/v1")
+  assert.equal(harness.providers.get("cursor").settings.headers["x-oy-cursor-bridge"], "test-token")
+  assert.deepEqual(harness.models.get("cursor/composer-2.5").api, {
+    id: "composer-2.5",
+    type: "aisdk",
+    package: "@ai-sdk/openai",
+    url: "http://127.0.0.1:12345/v1",
+  })
   assert.deepEqual(
     harness.models.get("cursor/composer-2.5").variants.map((variant) => variant.id),
-    ["off", "on"],
+    ["off", "on", "plan"],
   )
-  assert.equal(typeof harness.hooks.get("sdk"), "function")
-  const other = { package: "other", sdk: "unchanged" }
-  harness.hooks.get("sdk")(other)
-  assert.equal(other.sdk, "unchanged")
-  const event = { package: "@stablekernel/opencode-cursor", options: { apiKey: "test-key" } }
-  harness.hooks.get("sdk")(event)
-  assert.equal(event.sdk, fakeSdk)
   assert.equal(environment.OPENCODE_CURSOR_STALL_MS, String(defaultCursorStallMs))
   await cleanup()
 })
@@ -204,12 +210,13 @@ test("refreshes fallback models after a Cursor connection update", async () => {
   const harness = createHarness({ onReload: resolveReload })
   const apiKeys = []
   const deterministicPlugin = createPlugin({
-    createCursor: () => ({}),
+    createCursor: () => ({ languageModel: () => ({}) }),
     listCursorModels: async (apiKey) => {
       apiKeys.push(apiKey)
       return [{ id: "live-model", displayName: "Live Cursor model" }]
     },
     reportError: assert.fail,
+    startCursorBridge: fakeBridge,
   })
   const cleanup = await deterministicPlugin.setup(harness.ctx)
   assert.equal(harness.models.has("cursor/composer-2.5"), true)
@@ -222,10 +229,28 @@ test("refreshes fallback models after a Cursor connection update", async () => {
   })
   await reloaded
 
+  for (let attempt = 0; attempt < 20 && apiKeys.length === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
   assert.deepEqual(apiKeys, ["secret"])
-  assert.equal(harness.reloads(), 1)
+  assert.equal(harness.reloads(), 2)
   assert.equal(harness.models.has("cursor/composer-2.5"), false)
   assert.equal(harness.models.get("cursor/live-model").name, "Live Cursor model")
+  await cleanup()
+})
+
+test("loads without the legacy event subscription surface", async () => {
+  const harness = createHarness()
+  delete harness.ctx.event
+  const deterministicPlugin = createPlugin({
+    createCursor: () => ({ languageModel: () => ({}) }),
+    reportError: assert.fail,
+    startCursorBridge: fakeBridge,
+  })
+
+  const cleanup = await deterministicPlugin.setup(harness.ctx)
+
+  assert.equal(harness.models.has("cursor/composer-2.5"), true)
   await cleanup()
 })
 
@@ -250,6 +275,48 @@ test("removes only Cursor's generated rule", () => {
   }
 })
 
+test("refuses symlinked Cursor rule ancestors during cleanup", () => {
+  const generated = "---\nalwaysApply: true\ngenerated: opencode-cursor\n---\n\nGenerated\n"
+  const cases = [
+    { link: [".cursor"], escaped: ["rules", "opencode.mdc"] },
+    { link: [".cursor", "rules"], escaped: ["opencode.mdc"] },
+  ]
+  for (const scenario of cases) {
+    const directory = mkdtempSync(join(process.cwd(), ".cursor-rule-boundary-test-"))
+    const outside = mkdtempSync(join(process.cwd(), ".cursor-rule-outside-test-"))
+    const link = join(directory, ...scenario.link)
+    const escaped = join(outside, ...scenario.escaped)
+    mkdirSync(dirname(link), { recursive: true })
+    mkdirSync(dirname(escaped), { recursive: true })
+    writeFileSync(escaped, generated)
+    symlinkSync(outside, link, "dir")
+    try {
+      removeGeneratedCursorRule(directory)
+      assert.equal(readFileSync(escaped, "utf8"), generated)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  }
+})
+
+test("refuses a symlinked generated Cursor rule", () => {
+  const directory = mkdtempSync(join(process.cwd(), ".cursor-rule-link-test-"))
+  const outside = mkdtempSync(join(process.cwd(), ".cursor-rule-link-outside-test-"))
+  const path = join(directory, ".cursor", "rules", "opencode.mdc")
+  const escaped = join(outside, "opencode.mdc")
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(escaped, "---\ngenerated: opencode-cursor\n---\n")
+  symlinkSync(escaped, path)
+  try {
+    removeGeneratedCursorRule(directory)
+    assert.equal(existsSync(path), true)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
+})
+
 test("installed plugin layout resolves packaged assets and modules", async () => {
   const packageDirectory = fileURLToPath(new URL("../", import.meta.url))
   const directory = mkdtempSync(join(packageDirectory, ".plugin-layout-test-"))
@@ -257,6 +324,10 @@ test("installed plugin layout resolves packaged assets and modules", async () =>
     cpSync(join(packageDirectory, "assets"), join(directory, "assets"), { recursive: true })
     cpSync(join(packageDirectory, "index.js"), join(directory, "index.js"))
     cpSync(join(packageDirectory, "cursor-catalog.js"), join(directory, "cursor-catalog.js"))
+    cpSync(join(packageDirectory, "cursor-bridge.js"), join(directory, "cursor-bridge.js"))
+    cpSync(join(packageDirectory, "cursor-paths.js"), join(directory, "cursor-paths.js"))
+    cpSync(join(packageDirectory, "cursor-provider.js"), join(directory, "cursor-provider.js"))
+    cpSync(join(packageDirectory, "cursor-skills.js"), join(directory, "cursor-skills.js"))
     const installed = await import(`${pathToFileURL(join(directory, "index.js")).href}?test=${Date.now()}`)
 
     assert.equal(installed.default.id, "oy")

@@ -242,6 +242,28 @@ pub(crate) fn prepare(root: &Path, request: PrepareRequest) -> Result<Value> {
     }))
 }
 
+pub(crate) fn describe_prepared(root: &Path, run_id: &str) -> Result<Value> {
+    validate_run_id(run_id)?;
+    let state = read_state(run_id)?;
+    if state.workspace != root.canonicalize()? {
+        bail!("workflow workspace does not match the active workspace");
+    }
+    if state.schema_version != SCHEMA_VERSION {
+        bail!("unsupported artifact workflow schema");
+    }
+    let artifact_dir = PathBuf::from(format!(".oy/runs/{run_id}"));
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "kind": state.kind,
+        "index": artifact_dir.join("index.json"),
+        "candidate_report": state.candidate_report,
+        "candidate_findings": state.candidate_findings,
+        "output": state.output,
+        "finalization": "owned_by_oy_orchestrator",
+    }))
+}
+
 pub(crate) fn finalize(root: &Path, run_id: &str) -> Result<Value> {
     validate_run_id(run_id)?;
     let state = read_state(run_id)?;

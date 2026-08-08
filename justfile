@@ -68,12 +68,16 @@ opencode-dev *args:
       fi; \
       opencode_bin=$(MISE_CONFIG_FILE=/dev/null MISE_CONFIG_DIR=/dev/null MISE_GLOBAL_CONFIG_FILE=/dev/null mise exec node@latest -- sh -c 'command -v opencode2'); \
     fi; \
-    export HOME="$root/home" OPENCODE_CONFIG_DIR="$root/config" XDG_CONFIG_HOME="$root/config-home" XDG_CACHE_HOME="$root/cache" XDG_DATA_HOME="$root/data" XDG_STATE_HOME="$root/state"; \
-    "$opencode_bin" --standalone {{args}}
+    export HOME="$root/home" OPENCODE_CONFIG_DIR="$root/config" XDG_CONFIG_HOME="$root/config-home" XDG_CACHE_HOME="$root/cache" XDG_DATA_HOME="$root/data" XDG_STATE_HOME="$root/state" OY_ROOT="$(pwd)"; \
+    "$opencode_bin" {{args}} --standalone
 
 # Compare two completed eval runs. Example: just eval-compare .tmp/eval/runs/base .tmp/eval/runs/new
 eval-compare baseline candidate:
     python3 scripts/eval_runner.py compare {{baseline}} {{candidate}}
+
+# Run the same tasks across model lanes. Repeat --model label=provider/model#variant.
+eval-matrix *args:
+    python3 scripts/eval_runner.py matrix {{args}}
 
 # === Individual checks (available as standalone targets) ===
 

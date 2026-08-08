@@ -5,17 +5,17 @@ import { applyCursorCatalog, cursorModelLimits, cursorVariants } from "../cursor
 
 test("uses Cursor model-specific limits and suppresses host auto-compaction", () => {
   assert.deepEqual(cursorModelLimits("gpt-5.6-sol"), {
-    context: 272_000,
+    context: 1_000_000_000,
     input: 1_000_000_000,
     output: 64_000,
   })
   assert.deepEqual(cursorModelLimits("claude-opus-4-8-thinking"), {
-    context: 300_000,
+    context: 1_000_000_000,
     input: 1_000_000_000,
     output: 64_000,
   })
   assert.deepEqual(cursorModelLimits("future-model"), {
-    context: 200_000,
+    context: 1_000_000_000,
     input: 1_000_000_000,
     output: 32_000,
   })
@@ -33,7 +33,7 @@ test("applies the provider auto-compaction setting to catalog models", () => {
   const catalog = {
     provider: {
       update(_id, apply) {
-        apply({ settings: { autoCompaction: true } })
+        apply({ request: { headers: {}, body: { autoCompaction: true } } })
       },
     },
     model: {
@@ -47,6 +47,9 @@ test("applies the provider auto-compaction setting to catalog models", () => {
   applyCursorCatalog(catalog, "/workspace", [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" }])
 
   assert.deepEqual(configuredModel.limit, { context: 272_000, output: 64_000 })
+  assert.deepEqual(configuredModel.cost, [
+    { input: 5, output: 30, cache: { read: 0.5, write: 6.25 } },
+  ])
 })
 
 test("builds off and on variants for Cursor thinking controls", () => {
@@ -57,9 +60,9 @@ test("builds off and on variants for Cursor thinking controls", () => {
   assert.deepEqual(controls.defaults, {})
   assert.deepEqual(
     controls.variants.map((variant) => variant.id),
-    ["off", "on"],
+    ["off", "on", "plan"],
   )
-  assert.deepEqual(controls.variants[0].settings.params, { thinking: "off" })
+  assert.deepEqual(controls.variants[0].body.params, { thinking: "off" })
 })
 
 test("builds defaults and reasoning variants using Cursor semantics", () => {
@@ -81,9 +84,9 @@ test("builds defaults and reasoning variants using Cursor semantics", () => {
   assert.deepEqual(controls.defaults, { fast: "false" })
   assert.deepEqual(
     controls.variants.map((variant) => variant.id),
-    ["fast", "low", "off", "xhigh"],
+    ["fast", "low", "off", "xhigh", "plan"],
   )
-  assert.deepEqual(controls.variants.at(-1).settings.params, {
+  assert.deepEqual(controls.variants.at(-2).body.params, {
     fast: "false",
     reasoning_effort: "extra-high",
   })
@@ -111,9 +114,9 @@ test("prefers labeled Cursor SDK presets", () => {
 
   assert.deepEqual(
     controls.variants.map((variant) => variant.id),
-    ["high-quality", "high-quality-2", "fast-mode"],
+    ["high-quality", "high-quality-2", "fast-mode", "plan"],
   )
-  assert.deepEqual(controls.variants[0].settings.params, {
+  assert.deepEqual(controls.variants[0].body.params, {
     fast: "false",
     thinking: "on",
   })

@@ -28,7 +28,7 @@ The default executable is `opencode2`. `OY_OPENCODE` can select another OpenCode
 
 During the V2 beta, installation runs the upstream-documented `npm install -g @opencode-ai/cli@next` under mise's latest Node.js. The version-matched `@oy-cli/opencode` package uses the documented V2 plugin context and includes pinned Cursor provider/SDK dependencies. New installs follow the moving OpenCode beta, so an upstream V2 contract change can still require a compatible oy release. Restart OpenCode after either package changes.
 
-The bundled Cursor provider adapter pins `@stablekernel/opencode-cursor` 0.7.1 and `@cursor/sdk` 1.0.27. It registers API-key and `CURSOR_API_KEY` connections and refreshes the model catalog after connection. `cursor/*` uses Cursor tools outside OpenCode permissions; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
+The bundled Cursor provider adapter pins `@stablekernel/opencode-cursor` 0.7.1 and `@cursor/sdk` 1.0.27. It registers API-key and `CURSOR_API_KEY` connections, exposes Cursor through an authenticated loopback OpenAI Responses route accepted by OpenCode V2, and refreshes the model catalog after first authenticated use. `cursor/*` uses Cursor tools outside OpenCode permissions; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 
 Once OpenCode 2 is stable, oy will switch these references to the stable `latest` channel and remove the beta-specific compatibility path in a follow-up release.
 

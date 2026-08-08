@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@oy-cli/opencode",
-  "version": "0.14.3",
+  "version": "0.14.4",
   "description": "OpenCode agent and skills for repeatable audits, code reviews, and focused fixes",
   "keywords": [
     "opencode",
@@ -22,11 +22,15 @@
   "files": [
     "index.js",
     "cursor-catalog.js",
+    "cursor-bridge.js",
+    "cursor-paths.js",
+    "cursor-provider.js",
+    "cursor-skills.js",
     "assets",
     "README.md"
   ],
   "scripts": {
-    "build": "node --check index.js && node --check cursor-catalog.js",
+    "build": "node --check index.js && node --check cursor-catalog.js && node --check cursor-bridge.js && node --check cursor-paths.js && node --check cursor-provider.js && node --check cursor-skills.js",
     "test": "node --test"
   },
   "publishConfig": {

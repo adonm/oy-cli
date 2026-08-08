@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.14.4] - 2026-08-08
+
+### Added
+- Routed Cursor through an authenticated loopback OpenAI Responses bridge compatible with OpenCode 2's native session runner, preserving Cursor session reuse, native tools, usage reporting, bundled skills, named subagents, plan mode, and live model discovery.
+- Added a repeatable evaluation matrix for comparing the same pinned oy tasks across OpenCode Zen/Go and Cursor models.
+
+### Changed
+- Kept contributor setup aligned with the moving OpenCode 2 beta policy by provisioning latest Node.js through mise while installs continue following `@opencode-ai/cli@next`.
+- Updated pinned GitHub Actions dependencies to the current Dependabot revisions.
+
+### Fixed
+- Rendered Cursor-executed tools as named, non-executable summaries instead of misclassifying every read, edit, search, and MCP result as a local shell call.
+- Made reused Cursor bridges reference-counted and await final listener shutdown.
+- Made the original `oy audit` or `oy review` process prepare and finalize its exact artifact run; model output alone can no longer complete recovery state.
+- Excluded local `.oy` evidence from Git and crate archives.
+
+### Security
+- Rejected symlinked ancestors before mirroring or removing generated Cursor skills and rules.
+
 ## [0.14.3] - 2026-08-08
 
 ### Added

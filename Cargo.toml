@@ -1,6 +1,6 @@
 [package]
 name = "oy-cli"
-version = "0.14.3"
+version = "0.14.4"
 edition = "2024"
 rust-version = "1.96"
 description = "Focused coding agent integrations with repeatable audits, reviews, and one-finding fixes"
@@ -11,6 +11,7 @@ homepage = "https://oy.adonm.dev/"
 documentation = "https://docs.rs/oy-cli"
 keywords = ["opencode", "cursor", "code-review", "security-audit", "coding-agent"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = ["/.oy/"]
 
 [lib]
 name = "oy"

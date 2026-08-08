@@ -46,6 +46,7 @@ Thumbs.db
 .config/oy-rust/
 
 # Local audit/review artifacts
+/.oy/
 /ISSUES.md
 /REVIEW.md
 /oy.sarif

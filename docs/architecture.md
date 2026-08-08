@@ -7,14 +7,13 @@
 ```text
 oy audit / oy review
   → validate the OpenCode host and installed package
+  → Rust writes bounded evidence under .oy/runs/<run-id>/
   → create a bound workflow session
   → run the oy agent with the matching packaged skill
-  → skill calls oy audit|review prepare
-  → Rust writes bounded evidence under .oy/runs/<run-id>/
   → OpenCode reads the index, previous report when present, and every indexed chunk
   → OpenCode writes candidate report + findings JSON
-  → skill calls oy audit|review finalize
-  → Rust verifies bindings and writes ISSUES.md, REVIEW.md, or SARIF
+  → the original Rust process verifies the exact prepared run
+  → Rust writes ISSUES.md, REVIEW.md, or SARIF and completes recovery state
 ```
 
 `oy enhance` runs the packaged enhancement skill against one report finding. Bare `oy` launches the TUI, and `oy run` runs a general task with the `oy` agent.

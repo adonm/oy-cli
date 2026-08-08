@@ -13,10 +13,10 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - name: Check release version alignment
         run: python3 scripts/check_versions.py
       - name: Install Rust components
@@ -104,6 +104,20 @@ jobs:
           ! grep -F '"id":"oy-auto"' /tmp/opencode-agents.json
           grep -F '"agent":"oy"' /tmp/opencode-commands.json
           grep -F '"providerID":"cursor"' /tmp/opencode-models.json
+          python3 - <<'PY'
+          import json
+
+          models = json.load(open("/tmp/opencode-models.json"))["data"]
+          cursor = [model for model in models if model["providerID"] == "cursor"]
+          assert cursor
+          def package(model):
+              return model.get("api", {}).get("package", model.get("package", "")).removeprefix("aisdk:")
+          def base_url(model):
+              return model.get("api", {}).get("url") or model.get("settings", {}).get("baseURL", "")
+          assert all(package(model) == "@ai-sdk/openai" for model in cursor)
+          assert all(base_url(model).startswith("http://127.0.0.1:") for model in cursor)
+          assert all(any(variant["id"] == "plan" for variant in model["variants"]) for model in cursor)
+          PY
           oy doctor --check --json | tee /tmp/oy-doctor.json
           python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True'
           opencode2 service stop
@@ -113,7 +127,15 @@ jobs:
       - name: Installer smoke
         run: sh scripts/test_install.sh
       - name: Package crate
-        run: cargo package --locked
+        run: |
+          mkdir -p .oy/runs/package-sentinel
+          printf 'private evidence\n' > .oy/runs/package-sentinel/chunk.txt
+          cargo package --locked --allow-dirty --list > /tmp/oy-package-files.txt
+          python3 - <<'PY'
+          files = open("/tmp/oy-package-files.txt", encoding="utf-8").read().splitlines()
+          assert not any(path == ".oy" or path.startswith(".oy/") for path in files)
+          PY
+          cargo package --locked
 
   opencode-package:
     name: OpenCode npm package
@@ -122,10 +144,10 @@ jobs:
       run:
         working-directory: packages/opencode
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           package-manager-cache: false

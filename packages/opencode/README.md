@@ -18,7 +18,7 @@ oy setup
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@oy-cli/opencode@0.14.3"]
+  "plugins": ["@oy-cli/opencode@0.14.4"]
 }
 ```
 
@@ -38,6 +38,12 @@ Connect. Run `npm audit --omit=dev` after dependency changes.
 Run `/connect`, choose **Cursor**, and paste an API key from the Cursor dashboard. The live models available to that key then replace the fallback Cursor catalog.
 
 Oy defaults the provider's idle-stream watchdog to 1,200,000 ms (20 minutes). Set `OPENCODE_CURSOR_STALL_MS` explicitly to override it, or to `0` to disable it.
+
+OpenCode 2 accepts Cursor through an authenticated loopback OpenAI Responses bridge. The bridge binds only to `127.0.0.1`, uses a random per-process token, and forwards each request into the official Cursor local-agent runtime. It preserves one Cursor agent per OpenCode session, carries Cursor token/cache usage back to OpenCode, mirrors the three bundled oy skills into the active workspace, and exposes Cursor-native `explore`, `general`, and `reviewer` subagents. Select the `plan` model variant to use Cursor plan mode.
+
+For a live smoke test against this checkout, run `CURSOR_API_KEY=... just opencode-dev`, connect Cursor if prompted, select a `cursor/*` model, and ask it to read a file without editing. Set `OPENCODE_CURSOR_DEBUG=1` to inspect provider retry/session diagnostics; never paste the key into a config file or report output.
+
+Cursor-specific settings under `providers.cursor.request.body` are forwarded to the local agent. Supported settings include `sandbox`, `autoReview`, `settingSources`, `agents`, `mcpServers`, `session`, `systemPrompt`, `toolDisplay`, and `transport`. Static MCP launch specifications are supported; OpenCode's live MCP connection state and permission prompts cannot cross the Cursor boundary in the current V2 plugin API.
 
 The plugin defines no permission rules. `cursor/*` uses Cursor tools outside OpenCode permissions; read the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) before selecting one.
 
