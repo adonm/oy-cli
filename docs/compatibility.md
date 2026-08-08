@@ -13,9 +13,9 @@
 
 The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy release supports the three release-archive targets above; other Linux/macOS targets require a source build. Building from source requires Rust 1.96+. The npm plugin declares Linux and macOS support.
 
-## OpenCode
+## OpenCode and Cursor models
 
-oy 0.14.1 accepts:
+This release accepts:
 
 | OpenCode host | Status |
 |---|---|
@@ -24,19 +24,13 @@ oy 0.14.1 accepts:
 | Other prerelease channels | Rejected |
 | OpenCode 1, major versions above 2, or unknown versions | Rejected |
 
-The default executable is `opencode2`. `OY_OPENCODE` can select another executable, but it must report a supported version.
+The default executable is `opencode2`. `OY_OPENCODE` can select another OpenCode executable, but it must report a supported version.
 
-During the V2 beta, installation runs the upstream-documented `npm install -g @opencode-ai/cli@next` under mise's latest Node.js. The `@oy-cli/opencode` plugin is dependency-free and uses only the documented plugin context, so it does not track a moving SDK channel. This keeps new installs current but means an upstream beta change can break compatibility between oy releases. Restart OpenCode after either package changes.
+During the V2 beta, installation runs the upstream-documented `npm install -g @opencode-ai/cli@next` under mise's latest Node.js. The version-matched `@oy-cli/opencode` package uses the documented V2 plugin context and includes pinned Cursor provider/SDK dependencies. New installs follow the moving OpenCode beta, so an upstream V2 contract change can still require a compatible oy release. Restart OpenCode after either package changes.
+
+The bundled Cursor provider adapter pins `@stablekernel/opencode-cursor` 0.7.1 and `@cursor/sdk` 1.0.27. It registers API-key and `CURSOR_API_KEY` connections and refreshes the model catalog after connection. `cursor/*` uses Cursor tools outside OpenCode permissions; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 
 Once OpenCode 2 is stable, oy will switch these references to the stable `latest` channel and remove the beta-specific compatibility path in a follow-up release.
-
-## Cursor
-
-`oy setup --cursor` uses Cursor's native rule, subagent, and Agent Skill file formats. The integration does not install a Cursor extension or MCP server. Skills invoke the local `oy audit|review prepare` and `finalize` commands through Cursor's existing terminal tools and permissions.
-
-Cursor does not support a file-defined replacement for its primary Agent. Oy therefore installs an always-applied `oy` rule for primary behavior and a separate `oy` subagent for explicit delegation.
-
-`install.sh --cursor` installs the standalone `agent` CLI with Cursor's supported `https://cursor.com/install` installer on Linux, macOS, and WSL. Cursor has no official mise registry entry, npm package, documented release index, or stable artifact URL suitable for a maintained mise backend. Oy deliberately does not use the unversioned third-party asdf/mise plugin.
 
 ## What `doctor --check` covers
 
@@ -51,8 +45,6 @@ This checks the effective service version, API, location, plugin, `oy` agent, th
 - OpenCode global: `OPENCODE_CONFIG_DIR`, or the platform OpenCode config directory
 - OpenCode workspace: `OY_ROOT/.opencode/`
 - OpenCode preferred config file: existing `opencode.jsonc`, otherwise `opencode.json`
-- Cursor global: `~/.cursor/`
-- Cursor workspace: `OY_ROOT/.cursor/`
 
 Setup preserves unrelated configuration and backs up changed oy-owned entries. See [Setup ownership and backups](reference.md#setup-ownership-and-backups).
 
@@ -66,7 +58,7 @@ oy doctor --install-missing
 
 The helper installs prebuilt artifacts only: tokei 12.1.2 through mise's Aqua backend and Universal Ctags release archives from the official nightly-build repository.
 
-On a Cursor-only workstation, install these optional binaries separately if wanted; `doctor --install-missing` also provisions the supported OpenCode runtime.
+The optional helpers are independent of the selected Cursor model provider.
 
 ## Reporting a compatibility problem
 

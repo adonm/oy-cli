@@ -17,6 +17,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Check release version alignment
+        run: python3 scripts/check_versions.py
       - name: Install Rust components
         run: rustup component add rustfmt clippy
       - name: Install cargo-nextest
@@ -36,7 +38,11 @@ jobs:
       - name: Rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
       - name: mdBook
-        run: mdbook build
+        run: |
+          mdbook build
+          cp docs/install.sh book/install.sh
+          sh -n book/install.sh
+          test -f book/index.html
       - name: CLI help smoke
         run: |
           cargo run --locked -- --help
@@ -61,7 +67,8 @@ jobs:
           cargo build --locked
           export PATH="$PWD/target/debug:$PATH"
           oy setup
-          grep -F '"@oy-cli/opencode@0.14.0"' "$HOME/.config/opencode/opencode.json"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          grep -F "\"@oy-cli/opencode@$version\"" "$HOME/.config/opencode/opencode.json"
           python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy-audit" not in config.get("commands", {}); assert "tool_output" not in config'
           # The release version does not exist in npm until the tag publishes it.
           # Load this checkout directly for the pre-publish runtime smoke instead.
@@ -76,14 +83,27 @@ jobs:
           path.write_text(json.dumps(config, indent=2) + "\n")
           PY
           opencode2 service start
-          # The first location-scoped query boots and caches project services.
-          opencode2 api v2.agent.list --param "location[directory]=$PWD" > /dev/null
+          # The first location-scoped query boots project services asynchronously.
+          opencode2 api v2.command.list --param "location[directory]=$PWD" > /dev/null
+          commands_loaded=0
+          attempts=0
+          while [ "$attempts" -lt 60 ]; do
+            opencode2 api v2.command.list --param "location[directory]=$PWD" > /tmp/opencode-commands.json
+            if grep -F '"name":"oy-audit"' /tmp/opencode-commands.json; then
+              commands_loaded=1
+              break
+            fi
+            attempts=$((attempts + 1))
+            sleep 2
+          done
+          test "$commands_loaded" -eq 1
           opencode2 api v2.agent.list --param "location[directory]=$PWD" > /tmp/opencode-agents.json
-          opencode2 api v2.command.list --param "location[directory]=$PWD" > /tmp/opencode-commands.json
+          opencode2 api v2.integration.connect.key --param "location[directory]=$PWD" --param "integrationID=cursor" --data '{"key":"ci-probe-key","label":"CI probe"}'
+          opencode2 api v2.model.list --param "location[directory]=$PWD" > /tmp/opencode-models.json
           grep -F '"id":"oy"' /tmp/opencode-agents.json
           ! grep -F '"id":"oy-auto"' /tmp/opencode-agents.json
-          grep -F '"name":"oy-audit"' /tmp/opencode-commands.json
           grep -F '"agent":"oy"' /tmp/opencode-commands.json
+          grep -F '"providerID":"cursor"' /tmp/opencode-models.json
           oy doctor --check --json | tee /tmp/oy-doctor.json
           python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True'
           opencode2 service stop
@@ -109,24 +129,13 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
-      - name: Check Cargo and npm version alignment
-        working-directory: .
-        run: |
-          python3 - <<'PY'
-          import json
-          import tomllib
-          from pathlib import Path
-
-          cargo = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
-          npm = json.loads(Path("packages/opencode/package.json").read_text())["version"]
-          assert cargo == npm, f"Cargo version {cargo} != npm version {npm}"
-          PY
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
       - name: Build and test
         run: |
           npm run build
           npm test
+          npm audit --omit=dev
       - name: Pack publishable tarball
         run: |
           mkdir -p ../../.tmp/npm-package

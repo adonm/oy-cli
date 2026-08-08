@@ -161,6 +161,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Require release versions to match tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 scripts/check_versions.py
+          test "v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')" = "$REF_NAME"
       - name: Verify crate package
         run: cargo package --locked
       - name: Authenticate with crates.io
@@ -204,15 +210,31 @@ jobs:
           package-manager-cache: false
       - name: Install OIDC-capable npm
         run: npm install --global npm@12.0.1
-      - name: Require package version to match tag
+      - name: Require release versions to match tag
+        working-directory: .
         env:
           REF_NAME: ${{ github.ref_name }}
-        run: test "v$(node -p 'require("./package.json").version')" = "$REF_NAME"
-      - name: Install, build, and test
+        run: |
+          python3 scripts/check_versions.py
+          test "v$(node -p 'require("./packages/opencode/package.json").version')" = "$REF_NAME"
+      - name: Install, build, test, and audit
         run: |
           npm ci --ignore-scripts
           npm run build
           npm test
+          npm audit --omit=dev
+      - name: Pack publishable tarball
+        run: |
+          mkdir -p ../../.tmp/npm-package
+          npm pack --pack-destination ../../.tmp/npm-package
+      - name: Verify the packed package installs
+        working-directory: .
+        run: |
+          mkdir -p .tmp/npm-smoke
+          cd .tmp/npm-smoke
+          npm init --yes >/dev/null
+          npm install --ignore-scripts ../npm-package/*.tgz
+          node --input-type=module -e 'import("@oy-cli/opencode").then(({default: plugin}) => { if (plugin.id !== "oy") process.exit(1) })'
       - name: Publish public package with npm trusted publishing
         env:
           EXPECTED_SHA: ${{ github.sha }}

@@ -3,7 +3,7 @@
 mod atomic_write;
 mod paths;
 
-pub(crate) use atomic_write::{FileMutation, apply_file_batch_in};
+pub(crate) use atomic_write::{FileMutation, apply_file_batch_in_roots};
 pub use paths::{oy_root, resolve_workspace_output_path, write_workspace_file};
 
 #[cfg(test)]

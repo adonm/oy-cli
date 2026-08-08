@@ -27,9 +27,9 @@ Common options:
 
 Unknown oy commands are errors. Use `opencode2` directly for native OpenCode commands.
 
-## Agent-host slash commands
+## OpenCode slash commands
 
-The OpenCode plugin and Cursor skills expose:
+The OpenCode plugin exposes:
 
 | Command | Action |
 |---|---|
@@ -37,18 +37,16 @@ The OpenCode plugin and Cursor skills expose:
 | `/oy-review` | Load the code-review skill and review all prepared evidence. |
 | `/oy-enhance` | Fix one finding from a generated report. |
 
-These are agent-host prompt commands, not shell subcommands. They use the host's existing tools and your effective permissions.
+These are OpenCode slash commands, not shell subcommands. They use OpenCode tools and your effective permissions.
 
 ## Setup and maintenance
 
 | Command | Purpose |
 |---|---|
-| `oy setup` | Install the oy plugin files under the global OpenCode config directory; back up prior oy entries and strip legacy oy config. |
-| `oy setup --workspace` | Install the plugin files under `OY_ROOT/.opencode/plugins/`. |
-| `oy setup --cursor` | Install the oy rule, subagent, and skills under `~/.cursor/`. |
-| `oy setup --cursor --workspace` | Install Cursor assets under `OY_ROOT/.cursor/`. |
+| `oy setup` | Register the version-matched oy plugin package in global OpenCode config and default Cursor commit/PR attribution off. |
+| `oy setup --workspace` | Register the package under `OY_ROOT/.opencode/opencode.json(c)` and apply the same global Cursor attribution defaults. |
 | `oy setup --dry-run` | Preview setup or removal. |
-| `oy setup --remove` | Back up and remove the oy plugin files and legacy oy-owned entries. |
+| `oy setup --remove` | Back up and remove the oy package entry and legacy oy-owned files/config entries. |
 | `oy doctor` | Show selected paths, host version, setup state, and optional tools. |
 | `oy doctor --check` | Validate the effective service, API, plugin, agent, skills, commands, and models. |
 | `oy doctor --install-missing` | Install missing OpenCode/context helpers with mise. |
@@ -60,35 +58,26 @@ See [Compatibility](compatibility.md) for the OpenCode versions accepted by this
 
 OpenCode global setup uses `OPENCODE_CONFIG_DIR` when set; otherwise it uses the platform OpenCode config directory (normally `~/.config/opencode/` on Linux). OpenCode workspace setup uses `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`.
 
-Setup installs a dependency-free copy of the plugin as `plugins/oy.js` (plus `plugins/assets/agents/oy.md` and `plugins/assets/skills/*/SKILL.md`). OpenCode discovers the plugin automatically in the `plugins/` directory, so setup does not rewrite user config files.
+Setup registers `@oy-cli/opencode@<matching-oy-version>` in `opencode.json(c)`. OpenCode installs the package and its production dependencies, including the Cursor provider and official Cursor SDK. Setup also sets missing `attribution.attributeCommitsToAgent` and `attribution.attributePRsToAgent` preferences to `false` in Cursor's global `cli-config.json`. Explicit attribution values and unrelated Cursor settings are preserved; `--remove` leaves these user preferences in place.
 
 Setup owns:
 
-- the `plugins/oy.js` entrypoint and `plugins/assets/` assets directory installed by setup;
+- the version-matched `@oy-cli/opencode` entry in `plugins`;
+- superseded `plugins/oy.js` and `plugins/assets/` files from direct-file releases;
 - old direct files named `oy`, `oy-*`, or `oy.*` under `agents`, `commands`, and `skills`;
 - obsolete oy plugin, command, and MCP config entries from earlier releases.
 
-Before changing existing owned entries, setup creates a mode-`0700` backup under the platform state directory (or local-data fallback). It moves namespaced files, snapshots changed config bytes, and leaves unmodified configs byte-for-byte untouched. Unrelated settings remain in place. JSON/JSONC comments and formatting are preserved in the backup, while configs with owned entries are pretty-reserialized.
+Before changing existing owned entries or adding Cursor attribution defaults, setup creates a mode-`0700` backup under the platform state directory (or local-data fallback). It moves namespaced files, snapshots changed config bytes, and leaves unmodified configs byte-for-byte untouched. Unrelated settings remain in place. JSON/JSONC comments and formatting are preserved in the backup, while changed configs are pretty-reserialized.
 
-Cursor global setup uses `~/.cursor/`; workspace setup uses `OY_ROOT/.cursor/`. It owns exactly:
-
-- `rules/oy.mdc`;
-- `agents/oy.md`;
-- `skills/oy-audit/SKILL.md`;
-- `skills/oy-review/SKILL.md`;
-- `skills/oy-enhance/SKILL.md`.
-
-Cursor setup copies changed owned files to the same private backup area before replacing or removing them. It leaves unrelated Cursor files untouched and rejects symlinked owned paths or namespaces.
-
-## Curl installer targets
+## Curl installer
 
 ```bash
-curl -fsSL https://oy.adonm.dev/install.sh | sh                    # OpenCode
-curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --cursor    # Cursor CLI
-curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --both      # both
+curl -fsSL https://oy.adonm.dev/install.sh | sh                    # prompt for mise scope
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --global    # global mise config
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --workspace # current mise.toml
 ```
 
-`--opencode` makes the default explicit. `--cursor` installs oy and optional helpers through mise, installs Cursor CLI through Cursor's official installer, and runs `oy setup --cursor`. `--both` performs both host paths. Cursor is not installed through mise because neither Cursor nor mise publishes an official Cursor package reference.
+The installer uses mise for oy, Node.js, OpenCode, and optional context helpers. The default is interactive: choose global config or the current workspace’s `mise.toml`. Noninteractive installs default to global.
 
 ## Environment variables
 
@@ -100,8 +89,16 @@ curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --both      # both
 | `OY_OPENCODE_MODEL` | Select a workflow model as `provider/model#variant`. |
 | `OY_COLOR` | Set `auto`, `always`, or `never`. |
 | `NO_COLOR` | Disable color output. |
-| `OY_INSTALL_TARGET` | Select `opencode`, `cursor`, or `both` in `install.sh`; an explicit installer flag wins. |
+| `OY_INSTALL_SCOPE` | Select `global` or `workspace` in `install.sh`; an explicit installer flag wins. |
 | `OY_SKIP_SETUP` | Skip integration setup and runtime load checks in `install.sh`. |
+| `CURSOR_API_KEY` | Supply the Cursor provider key without using OpenCode `/connect`. |
+| `OPENCODE_CURSOR_STALL_MS` | Override oy's 1,200,000 ms Cursor idle-stream watchdog default; set `0` to disable it. |
+
+## Cursor models in OpenCode
+
+The default OpenCode plugin registers a **Cursor** provider. Use `/connect` and paste a Cursor API key; the account's live catalog appears as `cursor/*`. Configuration under `providers.cursor.settings` is passed to `@stablekernel/opencode-cursor`, for example `sandbox`, `mode`, `settingSources`, or `systemPrompt`. Oy raises the provider's idle-stream watchdog default from 120,000 ms to 1,200,000 ms; an explicit `OPENCODE_CURSOR_STALL_MS` value wins.
+
+`cursor/*` uses Cursor tools outside OpenCode permissions. Oy preserves the provider's sandbox default; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 
 ## Files written by oy
 
@@ -111,6 +108,7 @@ curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --both      # both
 | `REVIEW.md` | Default code-quality report. |
 | `oy.sarif` | Default SARIF audit output. |
 | `.oy/runs/<run-id>/` | Prepared evidence and model-written candidates. |
+| Cursor global `cli-config.json` | Missing commit/PR attribution preferences, defaulted to `false` by setup. |
 | platform state/data directory | Private backup and prepared-run metadata. |
 
 Report output paths must be workspace-relative and may not escape through parent traversal or symlinks.

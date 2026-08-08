@@ -1,23 +1,36 @@
 use super::*;
 use super::{
     backup::{TEST_BACKUP_STATE_DIR, backup_state_dir, copy_path},
-    config_file::{format_json, remove_oy_config_entries, update_config},
+    config_file::{
+        config_has_current_package_only, format_json, install_owned_config,
+        remove_oy_config_entries, update_config,
+    },
 };
+use crate::opencode::OY_AGENT;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EnvGuard {
     key: &'static str,
-    previous: Option<String>,
+    previous: Option<OsString>,
 }
 
 impl EnvGuard {
     fn set(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var(key).ok();
+        let previous = std::env::var_os(key);
         unsafe {
             std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::remove_var(key);
         }
         Self { key, previous }
     }
@@ -68,30 +81,37 @@ fn backup_dirs(_config_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn assert_plugin_installed(dir: &Path) {
-    assert_eq!(
-        fs::read_to_string(dir.join("plugins/oy.js")).unwrap(),
-        OPENCODE_PLUGIN_JS
+    let path = config_path_in(dir);
+    let config: Value = parse_opencode_config(&fs::read_to_string(path).unwrap()).unwrap();
+    let expected = format!("@oy-cli/opencode@{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        config["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.as_str() == Some(&expected))
     );
-    assert_eq!(
-        fs::read_to_string(dir.join("plugins/assets/agents/oy.md")).unwrap(),
-        OY_AGENT
-    );
-    for (relative, content) in [
-        ("assets/skills/oy-audit/SKILL.md", OY_AUDIT_SKILL),
-        ("assets/skills/oy-review/SKILL.md", OY_REVIEW_SKILL),
-        ("assets/skills/oy-enhance/SKILL.md", OY_ENHANCE_SKILL),
-    ] {
-        assert_eq!(
-            fs::read_to_string(dir.join("plugins").join(relative)).unwrap(),
-            content
-        );
-    }
+    assert!(!dir.join("plugins/oy.js").exists());
     assert!(integration_complete(dir));
+}
+
+fn assert_cursor_attribution_disabled(config_home: &Path) {
+    let path = config_home.join("cursor/cli-config.json");
+    let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+        config["attribution"]["attributeCommitsToAgent"],
+        Value::Bool(false)
+    );
+    assert_eq!(
+        config["attribution"]["attributePRsToAgent"],
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn setup_defaults_to_global_opencode_plugin_files() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -103,14 +123,16 @@ fn setup_defaults_to_global_opencode_plugin_files() {
 
     let global = config_home.path().join("opencode");
     assert_plugin_installed(&global);
-    assert!(!global.join("opencode.json").exists());
+    assert!(global.join("opencode.json").exists());
     assert!(!global.join("agents").exists());
     assert!(!workspace.path().join(".opencode").exists());
+    assert_cursor_attribution_disabled(config_home.path());
 }
 
 #[test]
 fn workspace_setup_is_explicit() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -121,13 +143,33 @@ fn workspace_setup_is_explicit() {
     setup_command(true, false, false).unwrap();
 
     assert_plugin_installed(&workspace.path().join(".opencode"));
-    assert!(!workspace.path().join(".opencode/opencode.json").exists());
+    assert!(workspace.path().join(".opencode/opencode.json").exists());
+    assert!(!config_home.path().join("opencode").exists());
+    assert_cursor_attribution_disabled(config_home.path());
+}
+
+#[test]
+fn setup_honors_opencode_config_dir_override() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+    let _config_dir = EnvGuard::set("OPENCODE_CONFIG_DIR", config_dir.path());
+    let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
+    let _root = EnvGuard::set("OY_ROOT", workspace.path());
+    let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
+
+    setup_command(false, false, false).unwrap();
+
+    assert_plugin_installed(config_dir.path());
     assert!(!config_home.path().join("opencode").exists());
 }
 
 #[test]
 fn setup_dry_run_does_not_write_files() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -139,11 +181,57 @@ fn setup_dry_run_does_not_write_files() {
 
     assert!(!config_home.path().join("opencode/opencode.json").exists());
     assert!(!config_home.path().join("opencode/plugins/oy.js").exists());
+    assert!(!config_home.path().join("cursor/cli-config.json").exists());
 }
 
 #[test]
-fn setup_preserves_user_config_without_rewriting_it() {
+fn setup_preserves_cursor_config_and_explicit_attribution_choices() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
+    let config_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+    let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
+    let _root = EnvGuard::set("OY_ROOT", workspace.path());
+    let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
+    let cursor = config_home.path().join("cursor/cli-config.json");
+    fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    let original = r#"{
+  "version": 1,
+  "editor": { "vimMode": true },
+  "permissions": { "allow": ["Shell(ls)"], "deny": [] },
+  "attribution": { "attributeCommitsToAgent": true },
+  "hints": false
+}
+"#;
+    fs::write(&cursor, original).unwrap();
+
+    setup_command(false, false, false).unwrap();
+
+    let updated: Value = serde_json::from_str(&fs::read_to_string(&cursor).unwrap()).unwrap();
+    assert_eq!(
+        updated["attribution"]["attributeCommitsToAgent"],
+        Value::Bool(true)
+    );
+    assert_eq!(
+        updated["attribution"]["attributePRsToAgent"],
+        Value::Bool(false)
+    );
+    assert_eq!(updated["editor"]["vimMode"], Value::Bool(true));
+    assert_eq!(updated["permissions"]["allow"], json!(["Shell(ls)"]));
+    assert_eq!(updated["hints"], Value::Bool(false));
+    let backups = backup_dirs(config_home.path());
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        fs::read_to_string(backups[0].join("cursor/cli-config.json")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn setup_preserves_user_config_while_registering_the_package() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -164,14 +252,18 @@ fn setup_preserves_user_config_without_rewriting_it() {
 
     setup_command(false, false, false).unwrap();
 
-    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    let config: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(config["model"], "test/model");
+    assert_eq!(config["command"]["keep"]["template"], "keep me");
+    assert_eq!(config["mcp"]["other"]["command"], json!(["other"]));
     assert_plugin_installed(&dir);
-    assert!(backup_dirs(&dir).is_empty());
+    assert_eq!(backup_dirs(&dir).len(), 1);
 }
 
 #[test]
 fn setup_is_idempotent_without_churn() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -181,18 +273,87 @@ fn setup_is_idempotent_without_churn() {
     let dir = config_home.path().join("opencode");
 
     setup_command(false, false, false).unwrap();
-    let first = fs::read(dir.join("plugins/oy.js")).unwrap();
+    let first = fs::read(dir.join("opencode.json")).unwrap();
 
     setup_command(false, false, false).unwrap();
-    let second = fs::read(dir.join("plugins/oy.js")).unwrap();
+    let second = fs::read(dir.join("opencode.json")).unwrap();
 
     assert_eq!(second, first);
     assert!(backup_dirs(&dir).is_empty());
 }
 
 #[test]
+fn setup_keeps_matching_user_config_byte_for_byte() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
+    let config_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+    let _backup_state = BackupStateGuard::set(config_home.path().join("state"));
+    let _root = EnvGuard::set("OY_ROOT", workspace.path());
+    let _host = EnvGuard::set("OY_OPENCODE", &workspace.path().join("missing-opencode"));
+    let dir = config_home.path().join("opencode");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("opencode.jsonc");
+    let original = format!(
+        "{{\n  // preserve this comment\n  \"plugins\": [\"@oy-cli/opencode@{}\"],\n  \"model\": \"test/model\",\n}}\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    fs::write(&path, &original).unwrap();
+
+    setup_command(false, false, false).unwrap();
+
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+    assert!(backup_dirs(&dir).is_empty());
+}
+
+#[test]
+fn setup_keeps_matching_object_form_plugin_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("opencode.jsonc");
+    let original = format!(
+        "{{\n  // preserve this comment\n  \"plugins\": [{{ \"package\": \"@oy-cli/opencode@{}\", \"options\": {{ \"keep\": true }} }}],\n}}\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    fs::write(&path, &original).unwrap();
+
+    let config = parse_opencode_config(&original).unwrap();
+    assert!(config_has_current_package_only(&config));
+    assert!(install_owned_config(&path).unwrap().is_none());
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+    assert!(integration_complete(dir.path()));
+}
+
+#[test]
+fn setup_updates_object_form_plugin_without_dropping_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("opencode.json");
+    fs::write(
+        &path,
+        r#"{
+  "plugins": [
+    { "package": "@oy-cli/opencode@0.1.0", "options": { "keep": true } }
+  ],
+  "commands": { "oy-review": {} }
+}"#,
+    )
+    .unwrap();
+
+    let updated = install_owned_config(&path).unwrap().unwrap();
+    let config = parse_opencode_config(&updated).unwrap();
+
+    assert_eq!(
+        config["plugins"][0]["package"],
+        format!("@oy-cli/opencode@{}", env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(config["plugins"][0]["options"]["keep"], true);
+    assert!(config.get("commands").is_none());
+}
+
+#[test]
 fn setup_moves_modified_oy_files_to_backup() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -255,6 +416,7 @@ fn setup_accepts_opencode_jsonc_without_rewriting_it() {
 #[test]
 fn setup_cleans_oy_entries_from_both_config_files() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -278,14 +440,16 @@ fn setup_cleans_oy_entries_from_both_config_files() {
     assert_eq!(lower["model"], "lower");
     assert!(lower.get("commands").is_none());
     assert!(lower.get("plugins").is_none());
+    let upper: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
     assert_eq!(
-        fs::read_to_string(dir.join("opencode.jsonc")).unwrap(),
-        jsonc
+        upper["plugins"],
+        json!([format!("@oy-cli/opencode@{}", env!("CARGO_PKG_VERSION"))])
     );
     let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert!(backups[0].join("opencode.json").exists());
-    assert!(!backups[0].join("opencode.jsonc").exists());
+    assert!(backups[0].join("opencode.jsonc").exists());
     assert_plugin_installed(&dir);
 }
 
@@ -328,6 +492,7 @@ fn setup_leaves_unrelated_legacy_fields_untouched() {
 #[test]
 fn explicit_setup_backs_up_all_oy_named_agents() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -365,6 +530,7 @@ fn explicit_setup_backs_up_all_oy_named_agents() {
 #[test]
 fn setup_migrates_legacy_assets_commands_and_config_entries() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -390,11 +556,14 @@ fn setup_migrates_legacy_assets_commands_and_config_entries() {
     let agent = dir.join("agents/oy-local.md");
     let skill = dir.join("skills/oy-custom/SKILL.md");
     let unrelated = dir.join("agents/keep.md");
+    let custom_plugin = dir.join("plugins/custom.js");
     fs::create_dir_all(agent.parent().unwrap()).unwrap();
     fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    fs::create_dir_all(custom_plugin.parent().unwrap()).unwrap();
     fs::write(&agent, "locally modified agent\n").unwrap();
     fs::write(&skill, "locally modified skill\n").unwrap();
     fs::write(&unrelated, "keep\n").unwrap();
+    fs::write(&custom_plugin, "export default {}\n").unwrap();
 
     setup_command(false, false, false).unwrap();
 
@@ -402,10 +571,20 @@ fn setup_migrates_legacy_assets_commands_and_config_entries() {
         serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();
     assert_eq!(updated["model"], "test/model");
     assert!(updated.get("commands").is_none());
-    assert_eq!(updated["plugins"], json!(["keep-plugin"]));
+    assert_eq!(
+        updated["plugins"],
+        json!([
+            "keep-plugin",
+            format!("@oy-cli/opencode@{}", env!("CARGO_PKG_VERSION"))
+        ])
+    );
     assert!(!agent.exists());
     assert!(!skill.exists());
     assert_eq!(fs::read_to_string(unrelated).unwrap(), "keep\n");
+    assert_eq!(
+        fs::read_to_string(custom_plugin).unwrap(),
+        "export default {}\n"
+    );
     let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert!(backups[0].starts_with(config_home.path().join("state/oy/backups")));
@@ -434,6 +613,7 @@ fn setup_migrates_legacy_assets_commands_and_config_entries() {
 #[test]
 fn setup_backs_up_modified_plugin_files_and_reinstalls() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -444,17 +624,15 @@ fn setup_backs_up_modified_plugin_files_and_reinstalls() {
 
     setup_command(false, false, false).unwrap();
     let plugin = dir.join("plugins");
-    fs::write(plugin.join("oy.js"), "modified plugin\n").unwrap();
     let agent = plugin.join("assets/agents/oy.md");
+    fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    fs::write(plugin.join("oy.js"), "modified plugin\n").unwrap();
     fs::write(&agent, "modified agent\n").unwrap();
 
     setup_command(false, false, false).unwrap();
 
-    assert_eq!(
-        fs::read_to_string(plugin.join("oy.js")).unwrap(),
-        OPENCODE_PLUGIN_JS
-    );
-    assert_eq!(fs::read_to_string(&agent).unwrap(), OY_AGENT);
+    assert!(!plugin.join("oy.js").exists());
+    assert!(!agent.exists());
     let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert_eq!(
@@ -469,8 +647,9 @@ fn setup_backs_up_modified_plugin_files_and_reinstalls() {
 }
 
 #[test]
-fn integration_complete_is_false_when_plugin_content_stales() {
+fn integration_complete_requires_the_matching_package_version() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -480,13 +659,101 @@ fn integration_complete_is_false_when_plugin_content_stales() {
     let dir = config_home.path().join("opencode");
 
     setup_command(false, false, false).unwrap();
-    fs::write(dir.join("plugins/oy.js"), "stale plugin\n").unwrap();
+    fs::write(
+        dir.join("opencode.json"),
+        r#"{ "plugins": ["@oy-cli/opencode@0.0.0"] }"#,
+    )
+    .unwrap();
 
     assert!(integration_present(&dir).unwrap());
     assert!(!integration_complete(&dir));
 
     setup_command(false, false, false).unwrap();
     assert!(integration_complete(&dir));
+}
+
+#[test]
+fn integration_complete_rejects_legacy_entries_and_dirty_lower_precedence_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = format!("@oy-cli/opencode@{}", env!("CARGO_PKG_VERSION"));
+    fs::write(dir.path().join("opencode.json"), r#"{ "model": "lower" }"#).unwrap();
+    fs::write(
+        dir.path().join("opencode.jsonc"),
+        format!(r#"{{ "plugins": ["{expected}"], "commands": {{ "oy-review": {{}} }} }}"#),
+    )
+    .unwrap();
+    assert!(!integration_complete(dir.path()));
+
+    fs::write(
+        dir.path().join("opencode.jsonc"),
+        format!(r#"{{ "plugins": ["{expected}"] }}"#),
+    )
+    .unwrap();
+    assert!(integration_complete(dir.path()));
+
+    fs::write(
+        dir.path().join("opencode.json"),
+        r#"{ "commands": { "oy-audit": {} } }"#,
+    )
+    .unwrap();
+    assert!(!integration_complete(dir.path()));
+}
+
+#[test]
+fn setup_rejects_invalid_lower_precedence_config_without_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = dir.path().join("opencode.json");
+    let jsonc = dir.path().join("opencode.jsonc");
+    let invalid = "{ invalid\n";
+    let selected = format!(
+        "{{\n  \"plugins\": [\"@oy-cli/opencode@{}\"]\n}}\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    fs::write(&json, invalid).unwrap();
+    fs::write(&jsonc, &selected).unwrap();
+
+    assert!(!integration_complete(dir.path()));
+    let error = install_oy_config_updates(dir.path())
+        .err()
+        .expect("invalid lower-precedence config must fail setup");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must be valid opencode JSON/JSONC")
+    );
+    assert_eq!(fs::read_to_string(json).unwrap(), invalid);
+    assert_eq!(fs::read_to_string(jsonc).unwrap(), selected);
+}
+
+#[test]
+fn removal_strips_oy_entries_from_both_config_files() {
+    let config = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let _backup_state = BackupStateGuard::set(state.path().to_path_buf());
+    fs::write(
+        config.path().join("opencode.json"),
+        r#"{ "model": "keep/lower", "plugins": ["@oy-cli/opencode@0.1.0"] }"#,
+    )
+    .unwrap();
+    fs::write(
+        config.path().join("opencode.jsonc"),
+        r#"{ "model": "keep/upper", "commands": { "oy-audit": {} } }"#,
+    )
+    .unwrap();
+
+    let updates = strip_oy_config_updates(config.path()).unwrap();
+    apply_integration_update(config.path(), &[], &updates).unwrap();
+
+    for (name, model) in [
+        ("opencode.json", "keep/lower"),
+        ("opencode.jsonc", "keep/upper"),
+    ] {
+        let body = fs::read_to_string(config.path().join(name)).unwrap();
+        let updated = parse_opencode_config(&body).unwrap();
+        assert_eq!(updated["model"], model);
+        assert!(!config_has_oy_entries(&updated));
+    }
 }
 
 #[test]
@@ -632,6 +899,7 @@ fn setup_strips_object_form_oy_plugin_entries() {
 #[test]
 fn missing_integration_check_does_not_create_files() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -660,6 +928,7 @@ fn setup_prompt_defaults_to_yes_and_accepts_explicit_yes() {
 #[test]
 fn setup_remove_round_trip_preserves_unrelated_config() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -686,6 +955,7 @@ fn setup_remove_round_trip_preserves_unrelated_config() {
 #[test]
 fn setup_remove_moves_plugin_files_to_backup() {
     let _lock = ENV_LOCK.lock().unwrap();
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
     let config_home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
@@ -695,17 +965,17 @@ fn setup_remove_moves_plugin_files_to_backup() {
     let dir = config_home.path().join("opencode");
 
     setup_command(false, false, false).unwrap();
+    let plugin = dir.join("plugins/oy.js");
+    let agent = dir.join("plugins/assets/agents/oy.md");
+    fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    fs::write(&plugin, "legacy plugin\n").unwrap();
+    fs::write(&agent, OY_AGENT).unwrap();
     setup_command(false, false, true).unwrap();
 
     let backups = backup_dirs(&dir);
     assert_eq!(backups.len(), 1);
     assert!(backups[0].join("plugins/oy.js").exists());
     assert!(backups[0].join("plugins/assets/agents/oy.md").exists());
-    assert!(
-        backups[0]
-            .join("plugins/assets/skills/oy-audit/SKILL.md")
-            .exists()
-    );
 }
 
 #[test]

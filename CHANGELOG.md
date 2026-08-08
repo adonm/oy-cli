@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.14.3] - 2026-08-08
+
+### Added
+- Integrated `@stablekernel/opencode-cursor` into the default OpenCode plugin through a native OpenCode 2 adapter. `/connect` now offers Cursor API-key authentication and exposes the connected account's models as `cursor/*` in OpenCode.
+
+### Changed
+- `oy setup` again registers the version-matched `@oy-cli/opencode` npm package so OpenCode installs the Cursor SDK/provider dependencies. Setup migrates and backs up the superseded direct plugin files.
+- Raised oy's default Cursor idle-stream watchdog from 2 minutes to 20 minutes while preserving explicit `OPENCODE_CURSOR_STALL_MS` overrides.
+- `oy setup` now defaults Cursor CLI commit and PR attribution to disabled when those preferences are absent, preserving explicit choices and unrelated Cursor settings.
+
+### Security
+- Documented that `cursor/*` models run Cursor's own local agent tools outside OpenCode's permission system. The integration preserves upstream's unsandboxed default and does not force Cursor sandboxing.
+
+### Removed
+- Removed the separate Cursor CLI/assets host integration. Cursor is now available through OpenCode's provider catalog only.
+- The installer now has one OpenCode path and prompts whether mise should write global config or the current workspace's `mise.toml`.
+
 ## [0.14.2] - 2026-08-05
 
 ### Fixed

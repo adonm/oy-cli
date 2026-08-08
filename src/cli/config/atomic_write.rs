@@ -28,26 +28,35 @@ pub(crate) enum FileMutation<'a> {
 }
 
 fn apply_file_batch(mutations: &[FileMutation<'_>]) -> Result<()> {
-    apply_file_batch_with_root(mutations, None)
+    apply_file_batch_with_roots(mutations, &[])
 }
 
 /// Apply setup mutations beneath an explicitly selected configuration root.
 ///
 /// Symlinks at or above `root` are part of the caller-selected location (for
 /// example, Bazzite's `/home -> /var/home`). Symlinks below it remain rejected.
-pub(crate) fn apply_file_batch_in(root: &Path, mutations: &[FileMutation<'_>]) -> Result<()> {
-    apply_file_batch_with_root(mutations, Some(root))
+#[cfg(test)]
+fn apply_file_batch_in(root: &Path, mutations: &[FileMutation<'_>]) -> Result<()> {
+    apply_file_batch_with_roots(mutations, &[root])
 }
 
-fn apply_file_batch_with_root(
+/// Apply setup mutations beneath any of the explicitly selected roots.
+pub(crate) fn apply_file_batch_in_roots(
+    roots: &[&Path],
     mutations: &[FileMutation<'_>],
-    trusted_root: Option<&Path>,
+) -> Result<()> {
+    apply_file_batch_with_roots(mutations, roots)
+}
+
+fn apply_file_batch_with_roots(
+    mutations: &[FileMutation<'_>],
+    trusted_roots: &[&Path],
 ) -> Result<()> {
     if mutations.is_empty() {
         return Ok(());
     }
     for mutation in mutations {
-        prevalidate_mutation(mutation, trusted_root)?;
+        prevalidate_mutation(mutation, trusted_roots)?;
     }
     let created_dirs = create_missing_parent_dirs(mutations)?;
 
@@ -186,16 +195,18 @@ fn restore_workspace_backups(committed: Vec<CommittedWorkspaceWrite>) -> Result<
     Ok(())
 }
 
-fn prevalidate_mutation(mutation: &FileMutation<'_>, trusted_root: Option<&Path>) -> Result<()> {
+fn prevalidate_mutation(mutation: &FileMutation<'_>, trusted_roots: &[&Path]) -> Result<()> {
     let path = match mutation {
         FileMutation::Write { path, .. } => *path,
     };
-    if let Some(root) = trusted_root
-        && (path == root || !path.starts_with(root))
-    {
+    let trusted_root = trusted_roots
+        .iter()
+        .copied()
+        .filter(|root| path != *root && path.starts_with(root))
+        .max_by_key(|root| root.components().count());
+    if !trusted_roots.is_empty() && trusted_root.is_none() {
         anyhow::bail!(
-            "refusing to mutate path outside setup root {}: {}",
-            root.display(),
+            "refusing to mutate path outside setup roots: {}",
             path.display()
         );
     }

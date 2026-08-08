@@ -21,6 +21,64 @@ pub(super) fn strip_owned_config(path: &Path) -> Result<Option<String>> {
     format_json(&root).map(Some)
 }
 
+/// Install the version-matched oy package, preserving unrelated config.
+pub(super) fn install_owned_config(path: &Path) -> Result<Option<String>> {
+    let mut root = read_config(path)?;
+    if config_has_current_package_only(&root) {
+        return Ok(None);
+    }
+    let plugin = updated_oy_plugin(&root);
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} must contain a JSON object", path.display()))?;
+    remove_oy_config_entries(object)?;
+    let plugins = object
+        .entry("plugins")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("native OpenCode `plugins` must be an array"))?;
+    plugins.push(plugin);
+    let body = format_json(&root)?;
+    Ok(Some(body))
+}
+
+pub(super) fn config_has_current_package_only(root: &Value) -> bool {
+    let Some(object) = root.as_object() else {
+        return false;
+    };
+    let expected = opencode_plugin_spec();
+    let plugins = object
+        .get("plugins")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let owned = plugins
+        .iter()
+        .filter(|plugin| is_oy_plugin_value(plugin))
+        .collect::<Vec<_>>();
+    if owned.len() != 1 || !plugin_matches_spec(owned[0], &expected) {
+        return false;
+    }
+    if ["command", "commands"].iter().any(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_object)
+            .is_some_and(|entries| entries.keys().any(|name| is_oy_name(name)))
+    }) {
+        return false;
+    }
+    !object
+        .get("mcp")
+        .and_then(Value::as_object)
+        .is_some_and(|mcp| {
+            mcp.contains_key("oy")
+                || mcp
+                    .get("servers")
+                    .and_then(Value::as_object)
+                    .is_some_and(|servers| servers.contains_key("oy"))
+        })
+}
+
 fn read_config(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
@@ -90,6 +148,10 @@ pub(super) fn opencode_plugin_package() -> &'static str {
     OPENCODE_PLUGIN_PACKAGE
 }
 
+fn opencode_plugin_spec() -> String {
+    format!("{OPENCODE_PLUGIN_PACKAGE}@{}", env!("CARGO_PKG_VERSION"))
+}
+
 fn is_oy_plugin_spec(value: &str) -> bool {
     value == OPENCODE_PLUGIN_PACKAGE
         || value
@@ -103,6 +165,30 @@ fn is_oy_plugin_value(value: &Value) -> bool {
             .get("package")
             .and_then(Value::as_str)
             .is_some_and(is_oy_plugin_spec)
+}
+
+fn plugin_matches_spec(value: &Value, expected: &str) -> bool {
+    value.as_str() == Some(expected)
+        || value.get("package").and_then(Value::as_str) == Some(expected)
+}
+
+fn updated_oy_plugin(root: &Value) -> Value {
+    let expected = opencode_plugin_spec();
+    let Some(plugins) = root.get("plugins").and_then(Value::as_array) else {
+        return json!(expected);
+    };
+    let mut owned = plugins.iter().filter(|plugin| is_oy_plugin_value(plugin));
+    let Some(plugin) = owned.next() else {
+        return json!(expected);
+    };
+    if owned.next().is_some() {
+        return json!(expected);
+    }
+    let Some(mut plugin) = plugin.as_object().cloned() else {
+        return json!(expected);
+    };
+    plugin.insert("package".to_string(), json!(expected));
+    Value::Object(plugin)
 }
 
 fn remove_owned_plugins(object: &mut Map<String, Value>) -> Result<()> {

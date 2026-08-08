@@ -13,24 +13,33 @@ cargo install oy-cli --locked
 oy setup
 ```
 
-`oy setup` copies a dependency-free copy of this plugin into OpenCode's discovered `plugins/` directory, so it needs no npm package installation. To configure the package manually instead, add it to an OpenCode JSON/JSONC file:
+`oy setup` registers the matching package version in OpenCode config so OpenCode installs the plugin and its Cursor SDK dependencies. To configure the package manually instead, add it to an OpenCode JSON/JSONC file:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@oy-cli/opencode@0.14.1"]
+  "plugins": ["@oy-cli/opencode@0.14.3"]
 }
 ```
 
-Restart OpenCode after changing the package version. The plugin has no runtime dependencies beyond Node built-ins.
+Restart OpenCode after changing the package version.
+
+The package pins `undici@6.28.0` through npm overrides because the current
+Cursor SDK release still requests the vulnerable 5.x line indirectly through
+Connect. Run `npm audit --omit=dev` after dependency changes.
 
 ## What it registers
 
 - one primary agent: `oy`;
 - skills: `oy-audit`, `oy-review`, and `oy-enhance`;
-- slash commands: `/oy-audit`, `/oy-review`, and `/oy-enhance`.
+- slash commands: `/oy-audit`, `/oy-review`, and `/oy-enhance`;
+- a Cursor provider and `cursor/*` models backed by `@stablekernel/opencode-cursor` and the official Cursor SDK.
 
-The plugin defines no permission rules. Models, credentials, permissions, and tools remain controlled by OpenCode and the user.
+Run `/connect`, choose **Cursor**, and paste an API key from the Cursor dashboard. The live models available to that key then replace the fallback Cursor catalog.
+
+Oy defaults the provider's idle-stream watchdog to 1,200,000 ms (20 minutes). Set `OPENCODE_CURSOR_STALL_MS` explicitly to override it, or to `0` to disable it.
+
+The plugin defines no permission rules. `cursor/*` uses Cursor tools outside OpenCode permissions; read the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) before selecting one.
 
 Audit and review prepare ordered workspace-local evidence, require the agent to read every prepared chunk, and verify the final report. Model conclusions remain nondeterministic.
 

@@ -1,14 +1,14 @@
 # Getting started
 
-This guide installs oy, configures an OpenCode or Cursor integration, and creates a first report.
+This guide installs oy, configures OpenCode, and creates a first report.
 
 ## Before you begin
 
 You need:
 
 - Linux or macOS; use WSL2 on Windows;
-- a supported OpenCode 2 release or Cursor installation;
-- a model provider configured in the selected host;
+- a supported OpenCode 2 release;
+- a model provider configured in OpenCode;
 - `git` only for target-diff reviews such as `oy review main`.
 
 See [Compatibility](compatibility.md) for exact tested versions and platforms.
@@ -18,34 +18,32 @@ See [Compatibility](compatibility.md) for exact tested versions and platforms.
 ### Recommended: mise installer
 
 ```bash
-# OpenCode 2 (default)
 curl -fsSL https://oy.adonm.dev/install.sh | sh
 
-# Cursor CLI and Cursor integration
-curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --cursor
-
-# Both hosts and integrations
-curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --both
+# Or choose a scope without prompting.
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --global
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --workspace
 ```
 
-Every target:
+The installer:
 
 1. installs and activates [mise](https://mise.jdx.dev/) with its official bootstrap for bash, zsh, or fish when mise is missing;
 2. installs a prebuilt oy release with mise;
-3. installs prebuilt `tokei` and Universal Ctags context helpers.
+3. installs prebuilt `tokei` and Universal Ctags context helpers in the selected mise scope;
+4. installs OpenCode 2, registers the version-matched oy plugin, and checks that it loaded.
 
-The default OpenCode target also provisions the latest Node.js, installs OpenCode 2 with the exact npm package and channel documented upstream, installs the matching oy plugin files, and checks that they loaded. The Cursor target runs Cursor's official CLI installer, verifies `agent --version`, and installs the global Cursor oy assets. `--both` performs both paths.
+The default interactive installer asks whether to write mise's global config or `mise.toml` in the current workspace. Noninteractive use defaults to global unless `--workspace` or `OY_INSTALL_SCOPE=workspace` is supplied.
 
-Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_TARGET=cursor|both` as an alternative to flags. Set `OY_SKIP_SETUP=1` to install binaries without changing host integration files.
+Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_SCOPE=global|workspace` as an alternative to flags. Set `OY_SKIP_SETUP=1` to install binaries without changing OpenCode integration files.
 
 ### Manual install
 
 With mise:
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.1 node@latest
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.3 node@latest
 mise exec node@latest -- npm install -g @opencode-ai/cli@next
-mise exec github:adonm/oy-cli@0.14.1 node@latest -- oy setup
+mise exec github:adonm/oy-cli@0.14.3 node@latest -- oy setup
 ```
 
 Or install only the Rust CLI from crates.io, then provide a compatible OpenCode installation yourself:
@@ -56,15 +54,6 @@ oy setup
 ```
 
 Rust 1.96+ is required only when building from source.
-
-Cursor does not publish an official mise package or stable version-index API. For a manual Cursor-only installation, use its supported installer, install oy separately, then set up the assets:
-
-```bash
-curl https://cursor.com/install -fsS | bash
-cargo install oy-cli --locked
-oy setup --cursor
-agent --version
-```
 
 The installer and `oy doctor --install-missing` use `aqua:XAMPPRocky/tokei@12.1.2`, the newest stable official tokei release that provides binaries, and the release-only archives from `github:universal-ctags/ctags-nightly-build`. They do not install a Rust build toolchain.
 
@@ -77,9 +66,11 @@ opencode2
 oy doctor --check
 ```
 
-`oy doctor --check` validates the OpenCode service, plugin, agent, skills, commands, and model/provider discovery. It does not test or change your permission policy.
+To use Cursor models through OpenCode, run `/connect` in OpenCode, choose **Cursor**, and paste an API key from the Cursor dashboard. Models available to that key appear as `cursor/<id>` in the model picker. `CURSOR_API_KEY` is also recognized.
 
-For Cursor, run `agent --version` and `oy setup --cursor --dry-run` to inspect the selected paths. Cursor discovers the installed rule, subagent, and skills when you start a new Agent chat; `doctor --check` remains specific to the OpenCode runtime integration.
+> `cursor/*` uses Cursor tools outside OpenCode permissions; read the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) before using it in an untrusted repository.
+
+`oy doctor --check` validates the OpenCode service, plugin, agent, skills, commands, and model/provider discovery. It does not test or change your permission policy.
 
 If optional context helpers are missing:
 
@@ -89,23 +80,22 @@ oy doctor --install-missing
 
 ## 3. Choose setup scope
 
-The installer runs global setup by default. You can preview or change the scope later:
+OpenCode setup runs globally by default. You can preview or change the OpenCode config scope later:
 
 ```bash
 oy setup --dry-run        # preview global setup
 oy setup                  # global OpenCode config
 oy setup --workspace      # this repository's .opencode config
 oy setup --remove         # back up and remove global oy entries
-oy setup --cursor          # global ~/.cursor assets
-oy setup --cursor --workspace
-oy setup --cursor --remove
 ```
 
-Use global setup for your own workstation. Use `--workspace` when only one repository should load oy. Cursor setup installs an always-applied rule, an `oy` subagent, and `oy-audit`, `oy-review`, and `oy-enhance` skills. Cursor exposes installed skills as slash commands.
+Use global setup for your own workstation. Use `--workspace` when only one repository should load oy. The installer’s `--workspace` flag is separate: it controls where mise writes its tool versions.
 
-Before changing existing oy entries, setup creates a private backup and reports its path. It preserves unrelated OpenCode settings, but JSON/JSONC formatting and comments remain only in the backup because the active file is reserialized. See [Setup ownership and backups](reference.md#setup-ownership-and-backups).
+Setup defaults Cursor CLI commit and PR attribution to disabled in its global `cli-config.json` when those preferences are absent. Explicit values and unrelated Cursor settings are preserved. This global preference update also applies with `oy setup --workspace`.
 
-Restart OpenCode after changing a plugin version or setup scope. Start a new Cursor Agent chat after changing Cursor assets.
+Before changing existing oy entries, setup creates a private backup and reports its path. Unchanged config stays byte-for-byte intact. When an oy-owned entry changes, setup preserves unrelated settings but reserializes the active file; the backup retains its original formatting and comments. See [Setup ownership and backups](reference.md#setup-ownership-and-backups).
+
+Restart OpenCode after changing a plugin version or setup scope.
 
 ## 4. Create a first report
 

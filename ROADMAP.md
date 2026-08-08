@@ -10,7 +10,7 @@ _Updated July 2026. Ordered by outcome, not promised release date._
 
 **Core loop:** prepare deterministic evidence → let OpenCode reason and edit under the user's permissions → validate a durable report → rerun to confirm.
 
-The integration is CLI-first, package-delivered, and skill-led. Host wrappers remain only where the workflow needs them.
+The integration is CLI-first, package-delivered, and skill-led. OpenCode wrappers remain only where the workflow needs them.
 
 ## Product principles
 
@@ -21,7 +21,7 @@ The integration is CLI-first, package-delivered, and skill-led. Host wrappers re
 5. **Prefer files over large tool responses.** Prepare immutable workspace-local evidence artifacts, return small structured descriptors, and let OpenCode read them with native tools.
 6. **Fail closed rather than sample silently.** Coverage limits, exclusions, changed evidence, malformed reports, and incomplete runs must be visible.
 7. **Reports are handoff artifacts.** Stable IDs, statuses, SARIF, and rerun semantics matter more than chat or launcher conveniences.
-8. **Keep host coupling narrow.** Do not install, configure, version-gate, or upgrade more of OpenCode than the workflow requires.
+8. **Keep OpenCode coupling narrow.** Do not install, configure, version-gate, or upgrade more of OpenCode than the workflow requires.
 
 ## Current transition
 
@@ -37,7 +37,7 @@ Completed in the current development cycle:
 - Rewrote audit/review skills around native OpenCode reads and edits.
 - Added the `@oy-cli/opencode` V2 package for the agent, skills, and commands.
 - Made setup package-first and removed direct agent/skill/command installation.
-- Made `oy setup` install dependency-free plugin files under OpenCode's discovered `plugins/` directory without rewriting user config files.
+- Removed the separate Cursor CLI/assets stack; Cursor remains available only as an OpenCode provider.
 - Removed the obsolete MCP adapter, MCP-only wrappers, and Sighthound integration after file-backed workflows reached parity.
 - Stopped writing global tool-output overrides in default setup.
 
@@ -65,13 +65,13 @@ Completed in the current development cycle:
 - [x] Keep `oy run --auto` as a thin convenience over the single `oy` agent; explicit OpenCode denies remain authoritative.
 - Evaluate protocol compliance from session traces, while documenting that a file-based CLI cannot cryptographically prove the model read the index, previous report, and every indexed chunk.
 
-## Next — remove transitional host machinery
+## Next — remove transitional OpenCode machinery
 
 After the CLI and skills cover the deterministic contract:
 
 - [x] Remove `oy mcp`, MCP-only wrappers, and Sighthound integration.
 - [x] Stop writing global `tool_output` overrides.
-- [x] Reduce setup to installing/removing the `oy` agent and canonical skills, ideally without rewriting OpenCode JSON/JSONC.
+- [x] Reduce setup to registering/removing the version-matched plugin package while preserving unrelated OpenCode JSON/JSONC.
 - [x] Remove `oy model`, `oy open`, `oy chat`, and implicit passthrough of unknown arguments; keep bare `oy` as the integration-aware TUI launcher.
 - Demote or remove exact beta version gates, session recovery wrappers, and coupled oy/OpenCode upgrades.
 - When OpenCode 2 leaves beta, replace the moving `next` dependencies with the stable `latest` channel and remove beta-specific host handling.
@@ -95,7 +95,7 @@ Do not copy provider-specific frontend preferences, formatting rules, tool names
 ## Success signals
 
 - A normal OpenCode user can install oy, select the `oy` agent or load an oy skill, and keep their existing permission policy.
-- Setup owns one agent and three skills, then eventually only the minimum files needed for discovery.
+- Setup owns only version-matched package registration and migration of legacy oy entries.
 - Evidence preparation returns a small stable JSON descriptor and workspace-local artifacts with explicit coverage.
 - Unchanged evidence and explicit metadata produce byte-stable canonical reports.
 - A finding ID can drive one focused fix and disappear or change status on rerun.

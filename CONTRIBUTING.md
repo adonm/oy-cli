@@ -1,6 +1,6 @@
 # Contributing
 
-Keep `oy` focused. Its product is one concise coding-agent behavior plus the audit → review → remediate loop for OpenCode and Cursor. The host owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Setup and launcher/API wrappers stay narrow.
+Keep `oy` focused. Its product is one concise OpenCode coding-agent behavior plus the audit → review → remediate loop. OpenCode owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries. Cursor models are a provider inside OpenCode, not a second host integration.
 
 Native development and builds are supported on Linux and macOS. Use WSL2 rather than native Windows.
 
@@ -8,27 +8,30 @@ Native development and builds are supported on Linux and macOS. Use WSL2 rather 
 
 ```bash
 mise install
+just opencode-dev
 just check
 just run -- --help
 ```
 
 If you do not use [`mise`](https://mise.jdx.dev/), install Rust 1.96+ and [`just`](https://github.com/casey/just) yourself.
 
+`just opencode-dev` launches a private OpenCode instance using the checkout's
+`packages/opencode/index.js`. It keeps config, cache, state, and service data
+under an ignored `.tmp/opencode-dev.*` directory. Pass OpenCode arguments
+directly, for example `just opencode-dev models`. If `opencode2` is missing
+from `node@latest`, the recipe installs `@opencode-ai/cli@next` there.
+
 ## Local Checks
 
 Run these before opening a PR:
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --all-targets --locked
-cargo test --doc --locked
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
-mdbook build
-cargo run --locked -- --help
+just check
+# Optional extended suite; requires cargo-nextest and nightly Miri.
+just ci
 ```
 
-`just check` runs the standard local suite, including the mdBook site build. `just ci` adds nextest and Miri parity checks when those tools are installed.
+`just check` covers formatting, clippy, Rust tests/docs, CLI help, the installer, the mdBook site, release-version alignment, and the OpenCode npm package. `just ci` uses CI's nextest and Miri runners.
 
 Keep `Cargo.lock` in sync with `Cargo.toml` after dependency changes.
 
@@ -59,9 +62,9 @@ python3 scripts/eval_runner.py run --dry-run
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.
-- Keep the OpenCode and Cursor skill variants aligned on the canonical audit, review, and enhance protocols. They execute under the user's host permissions through the `oy` behavior.
+- Keep the three OpenCode skills aligned on the canonical audit, review, and enhance protocols. Preserve and document the separate Cursor tool boundary when changing `cursor/*` support.
 - Keep `oy` concise but compare it with tagged OpenCode 2 Build behavior: inspect first, preserve unrelated changes, implement end-to-end, verify, and keep checkpoint commits focused without rewriting or publishing history.
-- Do not add oy-owned plan/edit/auto permission modes. Agent-host policy is authoritative.
+- Do not add oy-owned plan/edit/auto permission modes. OpenCode policy is authoritative.
 - Put immutable workflow-input, ordering, limit, and render enforcement in typed Rust boundaries rather than relying on prompt text.
 - Describe model-backed outcomes as nondeterministic even when their inputs and report rendering are deterministic.
 - Do not duplicate built-in tools such as edit, bash, webfetch, repo clone, todo, task, grep, or glob.
@@ -73,8 +76,6 @@ python3 scripts/eval_runner.py run --dry-run
 
 | Path | Role |
 |---|---|
-| `src/cursor.rs`, `src/cursor/setup.rs` | Cursor asset contracts and direct setup/removal |
-| `assets/cursor/` | Cursor rule, subagent, and workflow skills |
 | `src/opencode.rs` | Thin OpenCode integration facade and package-asset contract tests |
 | `src/opencode/setup.rs` | Setup orchestration, namespace migration, locking, and prompting |
 | `src/opencode/setup/backup.rs` | Persistent setup backups and move/restore mechanics |
@@ -101,4 +102,4 @@ See also:
 
 ## Release Notes
 
-Update `CHANGELOG.md` for user-visible behavior changes. Keep historical release notes factual and current docs focused on the file-backed architecture.
+Update `CHANGELOG.md` for user-visible behavior changes. Before tagging, update release pins and run `python3 scripts/check_versions.py`; it checks Cargo, npm metadata, the installer, and versioned examples. Keep historical release notes factual and current docs focused on the file-backed architecture.

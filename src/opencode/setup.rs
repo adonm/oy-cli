@@ -2,13 +2,16 @@
 
 mod backup;
 mod config_file;
+mod cursor_config;
 
 use super::{OpenCodeHost, api};
 use anyhow::{Context, Result, bail};
 use backup::{create_backup_dir, move_path, restore_moved_paths};
 use config_file::{
-    config_has_oy_entries, opencode_plugin_package, parse_opencode_config, strip_owned_config,
+    config_has_current_package_only, config_has_oy_entries, install_owned_config,
+    opencode_plugin_package, parse_opencode_config, strip_owned_config,
 };
+use cursor_config::{config_path as cursor_config_path, install_attribution_defaults};
 use serde_json::json;
 use std::fs;
 use std::io::{IsTerminal as _, Write as _};
@@ -16,25 +19,10 @@ use std::path::{Path, PathBuf};
 
 use crate::{config, ui};
 
-use super::{OPENCODE_PLUGIN_JS, OY_AGENT, OY_AUDIT_SKILL, OY_ENHANCE_SKILL, OY_REVIEW_SKILL};
-
-/// OpenCode 2 auto-discovery loads only direct `.js`/`.ts` children of the
-/// global `plugins/` directory, so the plugin is a single entrypoint file
-/// with assets in a sibling directory, mirroring the npm package layout.
-const PLUGIN_ENTRYPOINT: &str = "plugins/oy.js";
-const PLUGIN_ASSETS: [(&str, &str); 4] = [
-    ("plugins/assets/agents/oy.md", OY_AGENT),
-    ("plugins/assets/skills/oy-audit/SKILL.md", OY_AUDIT_SKILL),
-    ("plugins/assets/skills/oy-review/SKILL.md", OY_REVIEW_SKILL),
-    (
-        "plugins/assets/skills/oy-enhance/SKILL.md",
-        OY_ENHANCE_SKILL,
-    ),
-];
-
 #[derive(Debug)]
 struct SetupOutcome {
     config_path: PathBuf,
+    cursor_config_path: Option<PathBuf>,
     backup: Option<PathBuf>,
 }
 
@@ -140,10 +128,10 @@ fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32>
     }
     let _lock = SetupLock::acquire(&dir)?;
     let old_paths = setup_owned_paths(&dir)?;
-    let updates = strip_oy_config_updates(&dir)?;
+    let cursor_config = cursor_config_path()?;
+    let updates = install_setup_config_updates(&dir, &cursor_config)?;
     let changed = !old_paths.is_empty() || updates.iter().any(ConfigUpdate::changed);
     let backup = apply_integration_update(&dir, &old_paths, &updates)?;
-    install_plugin_files(&dir)?;
     if changed && let Ok(root) = config::oy_root() {
         let host = OpenCodeHost::selected_in(&root);
         if host.supported() {
@@ -157,6 +145,7 @@ fn setup_opencode(scope: SetupScope, report: bool, dry_run: bool) -> Result<i32>
             scope,
             &SetupOutcome {
                 config_path: config_path_in(&dir),
+                cursor_config_path: Some(cursor_config),
                 backup,
             },
         )?;
@@ -187,24 +176,25 @@ fn remove_opencode(scope: SetupScope, dry_run: bool) -> Result<i32> {
         scope,
         &SetupOutcome {
             config_path: config_path_in(&dir),
+            cursor_config_path: None,
             backup,
         },
     )?;
     Ok(0)
 }
 
-/// Paths owned by the current oy integration: legacy namespace files, plus the
-/// plugin entrypoint and assets when their content no longer matches this build.
+/// Paths owned by older direct-file integrations. Current setup migrates these
+/// to the version-matched npm package entry.
 fn setup_owned_paths(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = legacy_oy_paths(dir)?;
-    if !plugin_files_match(dir)? {
-        paths.extend(plugin_paths(dir).into_iter().filter(|path| path.exists()));
-    }
-    Ok(paths)
+    owned_paths(dir)
 }
 
 /// Everything the integration owns, including a current plugin installation.
 fn remove_owned_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    owned_paths(dir)
+}
+
+fn owned_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = legacy_oy_paths(dir)?;
     paths.extend(plugin_paths(dir).into_iter().filter(|path| path.exists()));
     Ok(paths)
@@ -216,6 +206,7 @@ fn report_setup(status: &str, scope: SetupScope, outcome: &SetupOutcome) -> Resu
             "status": status,
             "scope": scope.label(),
             "config": outcome.config_path,
+            "cursor_config": outcome.cursor_config_path,
             "backup": outcome.backup,
         }))?);
         return Ok(());
@@ -228,6 +219,12 @@ fn report_setup(status: &str, scope: SetupScope, outcome: &SetupOutcome) -> Resu
         ));
     }
     if status == "installed" {
+        if let Some(path) = &outcome.cursor_config_path {
+            ui::line(format_args!(
+                "Cursor commit and PR attribution defaults are configured in {}.",
+                path.display()
+            ));
+        }
         ui::line(format_args!(
             "Restart opencode to load the {} plugin.",
             opencode_plugin_package()
@@ -302,13 +299,43 @@ fn preview_setup(scope: SetupScope, dir: &Path) -> Result<i32> {
     for path in setup_owned_paths(dir)? {
         ui::kv("move", path.display());
     }
-    if !plugin_files_match(dir)? {
-        for path in plugin_paths(dir).into_iter().filter(|path| !path.exists()) {
-            ui::kv("create", path.display());
+    let cursor_config = cursor_config_path()?;
+    preview_config_updates(&install_setup_config_updates(dir, &cursor_config)?);
+    Ok(0)
+}
+
+fn install_setup_config_updates(
+    opencode_dir: &Path,
+    cursor_config: &Path,
+) -> Result<Vec<ConfigUpdate>> {
+    let mut updates = install_oy_config_updates(opencode_dir)?;
+    let body = match install_attribution_defaults(cursor_config)? {
+        Some(body) => body,
+        None => fs::read_to_string(cursor_config)
+            .with_context(|| format!("failed reading {}", cursor_config.display()))?,
+    };
+    updates.push(ConfigUpdate::new(cursor_config.to_path_buf(), body)?);
+    Ok(updates)
+}
+
+fn install_oy_config_updates(dir: &Path) -> Result<Vec<ConfigUpdate>> {
+    let selected = config_path_in(dir);
+    let mut updates = Vec::new();
+    for path in config_paths_in(dir) {
+        if path == selected {
+            let body = match install_owned_config(&path)? {
+                Some(body) => body,
+                None => fs::read_to_string(&path)
+                    .with_context(|| format!("failed reading {}", path.display()))?,
+            };
+            updates.push(ConfigUpdate::new(path, body)?);
+        } else if path.exists()
+            && let Some(body) = strip_owned_config(&path)?
+        {
+            updates.push(ConfigUpdate::new(path, body)?);
         }
     }
-    preview_config_updates(&strip_oy_config_updates(dir)?);
-    Ok(0)
+    Ok(updates)
 }
 
 fn strip_oy_config_updates(dir: &Path) -> Result<Vec<ConfigUpdate>> {
@@ -404,9 +431,16 @@ fn apply_integration_update(
     if let Some(backup) = &backup {
         let result = (|| -> Result<()> {
             for update in existing_configs {
-                let relative = update.path.strip_prefix(dir).with_context(|| {
-                    format!("{} is outside {}", update.path.display(), dir.display())
-                })?;
+                let relative = if let Ok(relative) = update.path.strip_prefix(dir) {
+                    relative.to_path_buf()
+                } else {
+                    PathBuf::from("cursor").join(
+                        update
+                            .path
+                            .file_name()
+                            .context("Cursor config path has no file name")?,
+                    )
+                };
                 let destination = backup.join(relative);
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)?;
@@ -469,7 +503,19 @@ fn apply_integration_update(
             bytes: update.body.as_bytes(),
         })
         .collect::<Vec<_>>();
-    if let Err(error) = crate::config::apply_file_batch_in(dir, &mutations) {
+    let mut roots = vec![dir];
+    for update in &changed {
+        if !update.path.starts_with(dir) {
+            let root = update
+                .path
+                .parent()
+                .context("Cursor config path has no parent directory")?;
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+    if let Err(error) = crate::config::apply_file_batch_in_roots(&roots, &mutations) {
         if let Err(rollback) = restore_moved_paths(&moved) {
             return Err(error).context(format!(
                 "setup rollback failed; backup retained at {}: {rollback:#}",
@@ -494,48 +540,19 @@ fn apply_integration_update(
     Ok(backup)
 }
 
-/// Plugin files shipped by this build, relative to the OpenCode config
-/// directory, paired with their content.
-fn plugin_files(dir: &Path) -> Vec<(PathBuf, &'static str)> {
-    let mut files = vec![(dir.join(PLUGIN_ENTRYPOINT), OPENCODE_PLUGIN_JS)];
-    files.extend(
-        PLUGIN_ASSETS
-            .iter()
-            .map(|(relative, content)| (dir.join(relative), *content)),
-    );
-    files
-}
-
-/// Plugin file paths shipped by this build, relative to the OpenCode config
-/// directory.
+/// Direct plugin file paths owned by older releases, relative to the OpenCode
+/// config directory.
 fn plugin_paths(dir: &Path) -> Vec<PathBuf> {
-    plugin_files(dir)
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect()
-}
-
-/// Whether the installed plugin matches this build exactly.
-fn plugin_files_match(dir: &Path) -> Result<bool> {
-    Ok(plugin_files(dir).iter().all(|(path, content)| {
-        fs::read_to_string(path).is_ok_and(|installed| installed == *content)
-    }))
-}
-
-/// Write the plugin files, skipping when they already match this build.
-fn install_plugin_files(dir: &Path) -> Result<()> {
-    if plugin_files_match(dir)? {
-        return Ok(());
-    }
-    let files = plugin_files(dir);
-    let mutations = files
-        .iter()
-        .map(|(path, content)| config::FileMutation::Write {
-            path,
-            bytes: content.as_bytes(),
-        })
-        .collect::<Vec<_>>();
-    config::apply_file_batch_in(dir, &mutations)
+    [
+        "plugins/oy.js",
+        "plugins/assets/agents/oy.md",
+        "plugins/assets/skills/oy-audit/SKILL.md",
+        "plugins/assets/skills/oy-review/SKILL.md",
+        "plugins/assets/skills/oy-enhance/SKILL.md",
+    ]
+    .into_iter()
+    .map(|relative| dir.join(relative))
+    .collect()
 }
 
 fn config_path_in(dir: &Path) -> PathBuf {
@@ -593,8 +610,7 @@ fn setup_answer_is_yes(answer: &str) -> bool {
 }
 
 fn integration_present(dir: &Path) -> Result<bool> {
-    if !legacy_oy_paths(dir)?.is_empty() || plugin_files(dir).iter().any(|(path, _)| path.exists())
-    {
+    if !legacy_oy_paths(dir)?.is_empty() || plugin_paths(dir).iter().any(|path| path.exists()) {
         return Ok(true);
     }
     Ok(config_paths_in(dir).iter().any(|path| {
@@ -606,7 +622,21 @@ fn integration_present(dir: &Path) -> Result<bool> {
 }
 
 fn integration_complete(dir: &Path) -> bool {
-    plugin_files_match(dir).unwrap_or(false)
+    let selected = config_path_in(dir);
+    let selected_complete = fs::read_to_string(&selected)
+        .ok()
+        .and_then(|text| parse_opencode_config(&text).ok())
+        .is_some_and(|config| config_has_current_package_only(&config));
+    selected_complete
+        && config_paths_in(dir)
+            .iter()
+            .filter(|path| **path != selected && path.exists())
+            .all(|path| {
+                fs::read_to_string(path)
+                    .ok()
+                    .and_then(|text| parse_opencode_config(&text).ok())
+                    .is_some_and(|config| !config_has_oy_entries(&config))
+            })
 }
 
 #[cfg(test)]

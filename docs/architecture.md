@@ -1,6 +1,6 @@
 # Architecture
 
-`oy` is a small evidence and workflow integration for OpenCode 2 and Cursor. The selected agent host owns model execution, providers, permissions, sessions, UI, and general tools. `oy` owns deterministic evidence preparation, report finalization, and setup glue.
+`oy` is a small evidence and workflow integration for OpenCode 2. OpenCode owns model execution, providers, permissions, sessions, UI, and general tools. `oy` owns deterministic evidence preparation, report finalization, and setup glue.
 
 ## OpenCode runtime flow
 
@@ -19,15 +19,11 @@ oy audit / oy review
 
 `oy enhance` runs the packaged enhancement skill against one report finding. Bare `oy` launches the TUI, and `oy run` runs a general task with the `oy` agent.
 
-In Cursor, `/oy-audit`, `/oy-review`, and `/oy-enhance` load native Agent Skills. Those skills call the same host-neutral `prepare` and `finalize` subcommands, while Cursor supplies file, edit, and terminal tools. The installed always-applied rule provides the primary oy behavior; the installed `oy` agent file is a separate Cursor subagent because Cursor does not support file-defined primary-agent replacement.
-
 ## Main modules
 
 | Path | Responsibility |
 |---|---|
 | `src/cli/app.rs` | CLI parsing and dispatch |
-| `src/cursor.rs` | Cursor asset facade and format contract tests |
-| `src/cursor/setup.rs` | Cursor rule/subagent/skill setup, removal, locking, and backups |
 | `src/opencode.rs` | Thin facade for OpenCode integration modules and package-asset contract tests |
 | `src/opencode/host.rs` | Executable selection, version probing, and OpenCode 2 contract gate |
 | `src/opencode/setup.rs` | Package setup/removal orchestration, namespace migration, locking, and prompting |
@@ -44,26 +40,22 @@ In Cursor, `/oy-audit`, `/oy-review`, and `/oy-enhance` load native Agent Skills
 | `src/cli/config/paths.rs` | Workspace and safe output-path handling |
 | `src/cli/config/atomic_write.rs` | Staged file batches with rollback |
 
-Integration assets are stored outside the Rust modules and embedded into their published package or binary:
+OpenCode integration assets are kept outside the Rust implementation and shipped with the npm package:
 
 | Path | Responsibility |
 |---|---|
-| `packages/opencode/index.js` | Registers the agent, skills directory, and three slash commands through the V2 plugin API |
+| `packages/opencode/index.js` | Registers the agent, skills, commands, Cursor connection, provider hook, and live model refresh |
+| `packages/opencode/cursor-catalog.js` | Converts Cursor model metadata into the OpenCode V2 catalog |
 | `packages/opencode/assets/agents/oy.md` | Primary agent definition and system prompt |
 | `packages/opencode/assets/skills/*/SKILL.md` | Canonical audit, review, and enhancement protocols |
-| `assets/cursor/rules/oy.mdc` | Always-applied Cursor behavior |
-| `assets/cursor/agents/oy.md` | Cursor `oy` subagent |
-| `assets/cursor/skills/*/SKILL.md` | Cursor-native audit, review, and enhancement protocols |
 
 ## Setup
 
-Global setup installs the plugin entrypoint as `plugins/oy.js` with assets under `plugins/assets/` in `OPENCODE_CONFIG_DIR` or the platform config directory's `opencode` child. Workspace setup does the same under `OY_ROOT/.opencode/plugins/`. OpenCode auto-discovers direct `.js` children of the `plugins/` directory, so setup writes no config file on clean installs.
+Global setup registers the version-matched `@oy-cli/opencode` package in `OPENCODE_CONFIG_DIR` or the platform config directory's `opencode.json(c)`. Workspace setup does the same under `OY_ROOT/.opencode/`. The package form is required so OpenCode installs the Cursor provider and official SDK dependencies.
 
 When existing config or oy-namespaced files will change, setup first creates a persistent mode-`0700` backup in the platform state location, falling back to the local-data directory when no dedicated state directory exists. It snapshots changed configs and moves direct `oy`, `oy-*`, and `oy.*` agent/command/skill entries plus any superseded plugin entrypoint and assets out of OpenCode's discovery paths. It also strips obsolete oy plugin, command, and MCP config entries. Unmodified configs remain byte-for-byte untouched; unrelated config remains in place.
 
 Config writes are a staged rollback-capable batch. If the batch fails, moved files are restored. On success, the backup remains the recovery copy, including original JSONC comments and formatting.
-
-`oy setup --cursor` writes five exact assets under `~/.cursor/`, or `OY_ROOT/.cursor/` with `--workspace`. It backs up changed owned files before replacement/removal, writes the installation as a staged batch, leaves unrelated Cursor files untouched, and rejects symlinked owned namespaces.
 
 ## Workflow binding
 
@@ -81,27 +73,27 @@ Finalization rejects a mismatched workspace, changed repository evidence, modifi
 
 Interrupted orchestrated workflows retain their run/session context for `oy recover`. Completed workflows remove that recovery lease.
 
-## Agent-host boundary
+## OpenCode boundary
 
-The selected host defaults to `opencode2` and always runs with `OY_ROOT` as its working directory. The runner uses OpenCode's noninteractive session API for bound workflows, `run` for general tasks, `mini` for interactive enhancement, and the TUI for bare launch. OpenCode stores credentials and sessions; oy passes only transient IDs and workflow metadata.
+The OpenCode executable defaults to `opencode2` and always runs with `OY_ROOT` as its working directory. The runner uses OpenCode's noninteractive session API for bound workflows, `run` for general tasks, `mini` for interactive enhancement, and the TUI for bare launch. OpenCode stores credentials and sessions; oy passes only transient IDs and workflow metadata.
 
-The package registers one permission-neutral primary agent, three skills, and three slash commands. It does not add tools or permission rules.
+The package registers one permission-neutral primary agent, three skills, three slash commands, and a Cursor provider adapter. It does not add OpenCode permission rules. After a Cursor key is connected, the adapter discovers live models and supplies Stable Kernel's AI SDK provider to OpenCode.
 
-The Cursor integration registers one always-applied rule, one permission-neutral subagent, and three skills that also appear as slash commands. It does not add MCP servers or modify Cursor permissions.
+The Cursor provider path is a distinct trust boundary: Stable Kernel invokes Cursor's local agent runtime, whose tools execute outside OpenCode's permission system. Oy preserves its unsandboxed default and documents the exception rather than presenting those calls as OpenCode-gated.
 
 ## Trust boundaries
 
 | Boundary | Owner | Posture |
 |---|---|---|
-| Models, provider traffic, credentials | OpenCode or Cursor | oy uses the selected host and never stores provider credentials |
-| Permissions, edits, shell, web, questions | Agent host/user | integrations define no permission overrides |
+| Models, provider traffic, credentials | OpenCode and the configured providers | oy uses OpenCode and never stores provider credentials |
+| Permissions, edits, shell, web, questions | OpenCode/user | normal OpenCode models use OpenCode permissions; `cursor/*` uses Cursor tools outside them |
 | Repository and diff collection | oy CLI | read inside the workspace, apply documented exclusions, and fail closed on limits |
-| Workflow artifacts and reports | oy CLI + agent host | paths remain inside the workspace; evidence is hash-checked and model-written candidates are validated before final output |
+| Workflow artifacts and reports | oy CLI + OpenCode | paths remain inside the workspace; evidence is hash-checked and model-written candidates are validated before final output |
 | Setup/removal | oy CLI | namespace-bounded backup-first changes with rollback on config failure |
 
 ## Design rules
 
-- Keep agent-host permissions authoritative.
+- Do not add permission overrides; document provider-specific boundaries such as Cursor tools running outside OpenCode permissions.
 - Keep each integration to one oy behavior definition and three workflow skills.
 - Put evidence identity, ordering, limits, and report validation in Rust.
 - Prefer file artifacts and native host reads over large tool responses.

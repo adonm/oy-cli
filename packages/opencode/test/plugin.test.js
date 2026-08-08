@@ -1,24 +1,84 @@
 import assert from "node:assert/strict"
-import { cp, mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import test from "node:test"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
-import plugin from "../index.js"
+import plugin, {
+  applyCursorEnvironmentDefaults,
+  createPlugin,
+  defaultCursorStallMs,
+  isGeneratedCursorRule,
+  removeGeneratedCursorRule,
+} from "../index.js"
 
-test("registers the oy agent, skills, and commands", async () => {
+const createEventStream = () => {
+  const queued = []
+  const waiting = []
+  let closed = false
+  return {
+    push(event) {
+      const resolve = waiting.shift()
+      if (resolve) resolve(event)
+      else queued.push(event)
+    },
+    subscribe({ signal }) {
+      return {
+        async *[Symbol.asyncIterator]() {
+          signal.addEventListener(
+            "abort",
+            () => {
+              closed = true
+              for (const resolve of waiting.splice(0)) resolve(undefined)
+            },
+            { once: true },
+          )
+          while (!closed && !signal.aborted) {
+            const event =
+              queued.shift() ??
+              (await new Promise((resolve) => {
+                waiting.push(resolve)
+              }))
+            if (event === undefined) return
+            yield event
+          }
+        },
+      }
+    },
+  }
+}
+
+const createHarness = ({ onReload } = {}) => {
   const sources = []
   const agents = new Map()
   const commands = new Map()
+  const integrations = new Map()
+  const methods = []
+  const providers = new Map()
+  const models = new Map()
+  const hooks = new Map()
+  const events = createEventStream()
+  let connection
+  let credential
+  let catalogTransform
+  let reloads = 0
   const update = (entries) => (name, apply) => {
     const draft = {}
     apply(draft)
     entries.set(name, draft)
   }
-
-  await plugin.setup({
+  const catalog = {
+    provider: { update: update(providers) },
+    model: { update: (provider, model, mutate) => update(models)(`${provider}/${model}`, mutate) },
+  }
+  const replayCatalog = async () => {
+    providers.clear()
+    models.clear()
+    await catalogTransform(catalog)
+  }
+  const ctx = {
     options: {},
+    event: { subscribe: events.subscribe },
     skill: {
       transform: async (apply) => apply({ source: (source) => sources.push(source) }),
     },
@@ -28,27 +88,179 @@ test("registers the oy agent, skills, and commands", async () => {
     command: {
       transform: async (apply) => apply({ update: update(commands) }),
     },
+    integration: {
+      transform: async (apply) =>
+        apply({
+          update: update(integrations),
+          method: { update: (method) => methods.push(method) },
+        }),
+      connection: {
+        active: async () => connection,
+        resolve: async () => credential,
+      },
+    },
+    catalog: {
+      model: {
+        list: async () => ({ location: { directory: process.cwd() }, data: [] }),
+      },
+      reload: async () => {
+        reloads += 1
+        await replayCatalog()
+        onReload?.()
+      },
+      transform: async (apply) => {
+        catalogTransform = apply
+        await replayCatalog()
+      },
+    },
+    aisdk: {
+      hook: async (name, hook) => hooks.set(name, hook),
+    },
+  }
+  return {
+    agents,
+    commands,
+    ctx,
+    events,
+    hooks,
+    integrations,
+    methods,
+    models,
+    providers,
+    reloads: () => reloads,
+    setConnection(value, resolved) {
+      connection = value
+      credential = resolved
+    },
+    sources,
+  }
+}
+
+test("registers the oy agent, skills, commands, and Cursor provider", async () => {
+  const fakeSdk = { id: "fake-cursor-sdk" }
+  const harness = createHarness()
+  const environment = {}
+  const deterministicPlugin = createPlugin({
+    createCursor: () => fakeSdk,
+    environment,
+    reportError: assert.fail,
   })
+  const cleanup = await deterministicPlugin.setup(harness.ctx)
 
   assert.equal(plugin.id, "oy")
-  assert.equal(sources.length, 1)
-  assert.equal(sources[0].type, "directory")
-  assert.match(sources[0].path, /assets[/\\]skills$/)
-  assert.equal(agents.get("oy").mode, "primary")
-  assert.match(agents.get("oy").system, /OpenCode and the user own permissions/)
-  assert.deepEqual([...commands.keys()], ["oy-audit", "oy-review", "oy-enhance"])
-  assert.equal(commands.get("oy-audit").agent, "oy")
+  assert.equal(harness.sources.length, 1)
+  assert.equal(harness.sources[0].type, "directory")
+  assert.match(harness.sources[0].path, /assets[/\\]skills$/)
+  assert.equal(harness.agents.get("oy").mode, "primary")
+  assert.match(harness.agents.get("oy").system, /OpenCode and the user own permissions/)
+  assert.deepEqual([...harness.commands.keys()], ["oy-audit", "oy-review", "oy-enhance"])
+  assert.equal(harness.commands.get("oy-audit").agent, "oy")
+  assert.equal(harness.integrations.get("cursor").name, "Cursor")
+  assert.deepEqual(
+    harness.methods.map((entry) => entry.method),
+    [
+      { type: "key", label: "Cursor API key" },
+      { type: "env", names: ["CURSOR_API_KEY"] },
+    ],
+  )
+  assert.deepEqual(
+    harness.methods.map((entry) => entry.integrationID),
+    ["cursor", "cursor"],
+  )
+  assert.equal(
+    harness.providers.get("cursor").package,
+    "aisdk:@stablekernel/opencode-cursor",
+  )
+  assert.equal(
+    harness.models.get("cursor/composer-2.5").package,
+    "aisdk:@stablekernel/opencode-cursor",
+  )
+  assert.deepEqual(
+    harness.models.get("cursor/composer-2.5").variants.map((variant) => variant.id),
+    ["off", "on"],
+  )
+  assert.equal(typeof harness.hooks.get("sdk"), "function")
+  const other = { package: "other", sdk: "unchanged" }
+  harness.hooks.get("sdk")(other)
+  assert.equal(other.sdk, "unchanged")
+  const event = { package: "@stablekernel/opencode-cursor", options: { apiKey: "test-key" } }
+  harness.hooks.get("sdk")(event)
+  assert.equal(event.sdk, fakeSdk)
+  assert.equal(environment.OPENCODE_CURSOR_STALL_MS, String(defaultCursorStallMs))
+  await cleanup()
 })
 
-test("installed plugin layout resolves its assets", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "oy-plugin-layout-"))
+test("preserves an explicit Cursor stall timeout", () => {
+  const environment = { OPENCODE_CURSOR_STALL_MS: "0" }
+  applyCursorEnvironmentDefaults(environment)
+  assert.equal(environment.OPENCODE_CURSOR_STALL_MS, "0")
+})
+
+test("refreshes fallback models after a Cursor connection update", async () => {
+  let resolveReload
+  const reloaded = new Promise((resolve) => {
+    resolveReload = resolve
+  })
+  const harness = createHarness({ onReload: resolveReload })
+  const apiKeys = []
+  const deterministicPlugin = createPlugin({
+    createCursor: () => ({}),
+    listCursorModels: async (apiKey) => {
+      apiKeys.push(apiKey)
+      return [{ id: "live-model", displayName: "Live Cursor model" }]
+    },
+    reportError: assert.fail,
+  })
+  const cleanup = await deterministicPlugin.setup(harness.ctx)
+  assert.equal(harness.models.has("cursor/composer-2.5"), true)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  harness.setConnection({ id: "cursor-connection" }, { type: "key", key: "secret" })
+  harness.events.push({
+    type: "integration.connection.updated",
+    data: { integrationID: "cursor" },
+  })
+  await reloaded
+
+  assert.deepEqual(apiKeys, ["secret"])
+  assert.equal(harness.reloads(), 1)
+  assert.equal(harness.models.has("cursor/composer-2.5"), false)
+  assert.equal(harness.models.get("cursor/live-model").name, "Live Cursor model")
+  await cleanup()
+})
+
+test("removes only Cursor's generated rule", () => {
+  const directory = mkdtempSync(join(process.cwd(), ".cursor-rule-test-"))
+  const path = join(directory, ".cursor", "rules", "opencode.mdc")
+  mkdirSync(dirname(path), { recursive: true })
   try {
-    const pluginsDir = join(dir, "plugins")
-    await cp("assets", join(pluginsDir, "assets"), { recursive: true })
-    await cp("index.js", join(pluginsDir, "oy.js"))
-    const installed = await import(pathToFileURL(join(pluginsDir, "oy.js")))
+    const generated = "---\nalwaysApply: true\ngenerated: opencode-cursor\n---\n\nGenerated\n"
+    writeFileSync(path, generated)
+    assert.equal(isGeneratedCursorRule(generated), true)
+    removeGeneratedCursorRule(directory)
+    assert.equal(existsSync(path), false)
+
+    const userRule = "---\nalwaysApply: true\n---\n\nMentions generated: opencode-cursor\n"
+    writeFileSync(path, userRule)
+    assert.equal(isGeneratedCursorRule(userRule), false)
+    removeGeneratedCursorRule(directory)
+    assert.equal(readFileSync(path, "utf8"), userRule)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("installed plugin layout resolves packaged assets and modules", async () => {
+  const packageDirectory = fileURLToPath(new URL("../", import.meta.url))
+  const directory = mkdtempSync(join(packageDirectory, ".plugin-layout-test-"))
+  try {
+    cpSync(join(packageDirectory, "assets"), join(directory, "assets"), { recursive: true })
+    cpSync(join(packageDirectory, "index.js"), join(directory, "index.js"))
+    cpSync(join(packageDirectory, "cursor-catalog.js"), join(directory, "cursor-catalog.js"))
+    const installed = await import(`${pathToFileURL(join(directory, "index.js")).href}?test=${Date.now()}`)
+
     assert.equal(installed.default.id, "oy")
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    rmSync(directory, { recursive: true, force: true })
   }
 })

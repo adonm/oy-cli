@@ -20,13 +20,14 @@ The release workflow uses a GitHub-hosted runner, Node 24, an OIDC-capable npm v
 Cargo and npm package versions must match before tagging. On a tagged release, `.github/workflows/release.yml`:
 
 1. builds the platform binaries;
-2. publishes the crate and npm package in separate jobs after the binaries succeed;
-3. tests the locked npm package before publishing it through OIDC, or skips an already-published version only when its `gitHead` matches the tagged commit;
-4. publishes the GitHub release only after the binaries and both package publications succeed.
+2. checks release-facing versions against the tag;
+3. packages the crate and builds, tests, audits, packs, and installs the locked npm package;
+4. publishes both packages, skipping an existing npm version only when its `gitHead` matches the tagged commit;
+5. publishes the GitHub release after both package jobs succeed.
 
-The crate and npm jobs run independently after the binaries, while the GitHub release waits for both. CI, rather than the release job, checks Cargo/npm version alignment.
+The crate and npm jobs run independently after the binaries, while the GitHub release waits for both. CI and the release jobs use `scripts/check_versions.py` for the same alignment check.
 
-`oy setup` embeds the plugin files from the same release, and the npm package is the manual-install alternative, so keep the npm version aligned with the crate version and never publish only one half of a release.
+`oy setup` registers the npm package version matching the CLI, so never publish only one half of a release.
 
 ## npm controls
 
@@ -45,5 +46,39 @@ cd packages/opencode
 npm ci --ignore-scripts
 npm run build
 npm test
+npm audit --omit=dev
 npm pack --dry-run
 ```
+
+To test the packed package and its production dependencies:
+
+```bash
+cd packages/opencode
+tmp=$(mktemp -d ../../.tmp/opencode-package.XXXXXX)
+npm pack --pack-destination "$tmp"
+cd "$tmp"
+npm init --yes >/dev/null
+npm install --ignore-scripts ./*.tgz
+node --input-type=module -e '
+  import("@oy-cli/opencode").then(({ default: plugin }) => {
+    if (plugin.id !== "oy") process.exit(1)
+    console.log(`loaded ${plugin.id}`)
+  })
+'
+```
+
+## Local OpenCode smoke
+
+Use the checkout plugin with an isolated OpenCode config:
+
+```bash
+just opencode-dev
+just opencode-dev models
+```
+
+The recipe uses the checkout plugin, a private OpenCode server, and ignored
+temporary state. If `opencode2` is missing from `node@latest`, it installs the
+documented `@opencode-ai/cli@next` package there. This verifies the plugin and
+Cursor integration without making a provider request. To test live model
+discovery, connect a key with `/connect`, choose Cursor, and inspect the model
+picker. Do not paste the key into a config file.
