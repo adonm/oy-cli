@@ -293,6 +293,10 @@ const streamCursor = async ({
       sendEvent(response, { type: "response.output_text.delta", item_id: part.id, delta: part.delta })
       continue
     }
+    if (part.type === "text-end") {
+      sendEvent(response, { type: "response.output_text.done", item_id: part.id })
+      continue
+    }
     if (part.type === "reasoning-start") {
       const outputIndex = nextOutputIndex
       nextOutputIndex += 1

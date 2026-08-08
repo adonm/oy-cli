@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-08-08
+
+### Fixed
+- Forwarded Cursor text-block completion events through the OpenAI Responses bridge so progress narration can be followed by tools and a final response without failing OpenCode's session drain.
+
 ## [0.14.4] - 2026-08-08
 
 ### Added

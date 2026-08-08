@@ -26,8 +26,11 @@ test("serves a Cursor turn as an OpenAI Responses stream", async () => {
               stream: stream([
                 { type: "stream-start", warnings: [] },
                 { type: "text-start", id: "text-0" },
-                { type: "text-delta", id: "text-0", delta: "done" },
+                { type: "text-delta", id: "text-0", delta: "working" },
                 { type: "text-end", id: "text-0" },
+                { type: "text-start", id: "text-1" },
+                { type: "text-delta", id: "text-1", delta: "done" },
+                { type: "text-end", id: "text-1" },
                 {
                   type: "finish",
                   finishReason: { unified: "stop" },
@@ -70,6 +73,18 @@ test("serves a Cursor turn as an OpenAI Responses stream", async () => {
     assert.match(body, /response\.output_text\.delta/)
     assert.match(body, /response\.completed/)
     assert.match(body, /"input_tokens":14/)
+    const textEvents = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)))
+      .filter((event) => event.type.startsWith("response.output_text."))
+      .map((event) => [event.type, event.item_id])
+    assert.deepEqual(textEvents, [
+      ["response.output_text.delta", "text-0"],
+      ["response.output_text.done", "text-0"],
+      ["response.output_text.delta", "text-1"],
+      ["response.output_text.done", "text-1"],
+    ])
     assert.equal(configured[0].apiKey, "cursor-key")
     assert.equal(calls[0].providerOptions.cursor.sessionID, "ses_test")
   } finally {
