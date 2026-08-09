@@ -18,7 +18,7 @@ oy setup
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@oy-cli/opencode@0.14.6"]
+  "plugins": ["@oy-cli/opencode@0.14.7"]
 }
 ```
 
