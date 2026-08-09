@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@cursor/sdk": "1.0.27",
-    "@oy-cli/opencode-cursor": "git+https://github.com/adonm/opencode-cursor.git#38cf85965687d382319f15a55f72e66a6666eb88"
+    "@oy-cli/opencode-cursor": "git+https://github.com/adonm/opencode-cursor.git#a0ae9d54875e391007dca6766e8eaf8a04d1ef25"
   },
   "overrides": {
     "undici": "6.28.0"

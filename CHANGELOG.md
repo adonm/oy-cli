@@ -31,9 +31,14 @@
   before emitting output, and removed failed agents from the persistent pool.
 - Applied watchdog protection to silent queued-message turns and surfaced
   Cursor SDK terminal error details plus update counts.
-- Stopped double-counting cached input tokens in Cursor usage and cost data.
+- Reported Cursor noncached, cache-read, cache-write, and reasoning usage
+  without dropping or double-counting token classes.
 - Retried transient model-discovery failures without blocking model turns and
   aborted active Cursor runs when OpenCode disconnects or unloads the plugin.
+- Serialized concurrent bridge startup, preserved final output-index order for
+  interleaved tools, and reran discovery when credentials changed mid-refresh.
+- Required `oy doctor --check` to see both a parsed loopback URL and the private
+  bridge header before reporting the Cursor bridge as configured.
 
 ## [0.14.5] - 2026-08-08
 

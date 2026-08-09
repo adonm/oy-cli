@@ -594,7 +594,7 @@ const streamCursor = async ({
         output_index: current.outputIndex,
         item,
       })
-      output.push(item)
+      output[current.outputIndex] = item
       continue
     }
     if (part.type === "reasoning-start") {
@@ -623,12 +623,12 @@ const streamCursor = async ({
       const current = requireOpen(reasoning, part.id, "reasoning")
       reasoning.delete(part.id)
       await finishReasoning(writer, part.id, current.outputIndex, current.text)
-      output.push({
+      output[current.outputIndex] = {
         type: "reasoning",
         id: part.id,
         summary: [{ type: "summary_text", text: current.text }],
         encrypted_content: null,
-      })
+      }
       continue
     }
     if (part.type === "tool-input-start") {
@@ -667,12 +667,12 @@ const streamCursor = async ({
       openTools.delete(part.toolCallId)
       rememberTool(toolHistory, part.toolCallId, call, part.result)
       const summary = await finishToolSummary(writer, call, part)
-      output.push({
+      output[call.outputIndex] = {
         type: "reasoning",
         id: call.id,
         summary: [{ type: "summary_text", text: summary }],
         encrypted_content: null,
-      })
+      }
       continue
     }
     if (part.type === "error") throw part.error
@@ -700,6 +700,9 @@ const streamCursor = async ({
   }
   if (openTools.size > 0) {
     throw new CursorBridgeProtocolError(`stream finished with ${openTools.size} open tool call(s)`)
+  }
+  if (output.filter(Boolean).length !== nextOutputIndex) {
+    throw new CursorBridgeProtocolError("stream finished without completing every output item")
   }
 
   const usage = finishUsage ?? usageFromFinish()
@@ -750,6 +753,22 @@ export const startCursorBridge = async ({
   }
   const existing = bridges.get(directory)
   if (existing) {
+    if (!existing.listening) await existing.ready
+    if (bridges.get(directory) !== existing) {
+      return startCursorBridge({
+        directory,
+        createCursor,
+        listCursorModels,
+        onModels,
+        onDirectory,
+        onIdle,
+        reportError,
+        reportDiagnostic,
+        heartbeatIntervalMs,
+        modelRefreshTimeoutMs,
+        modelRefreshRetryMs,
+      })
+    }
     return createBridgeLease(existing, handlers)
   }
 
@@ -759,11 +778,21 @@ export const startCursorBridge = async ({
   const toolHistories = new Map()
   const active = new Map()
   const activeRequests = new Set()
+  let resolveReady
+  let rejectReady
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  void ready.catch(() => {})
   const state = {
+    directory,
     current: handlers,
     owners: [],
     closing: undefined,
     activeRequests,
+    listening: false,
+    ready,
   }
   const shortHash = (value) => createHash("sha256").update(value).digest("hex").slice(0, 12)
   const refreshModels = (fingerprint, apiKey, context) => {
@@ -901,35 +930,45 @@ export const startCursorBridge = async ({
       response.end()
     }
   })
-  await new Promise((resolve, reject) => {
-    const failed = (error) => {
-      server.off("listening", listening)
-      reject(error)
-    }
-    const listening = () => {
-      server.off("error", failed)
-      resolve()
-    }
-    server.once("error", failed)
-    server.once("listening", listening)
-    server.listen(0, "127.0.0.1")
-  })
-  server.on("error", (error) => state.current.reportError("Cursor bridge server failed", error))
-  server.unref()
-  const address = server.address()
-  if (!address || typeof address === "string") throw new Error("Cursor bridge did not bind a TCP port")
-  Object.assign(state, {
-    directory,
-    url: `http://127.0.0.1:${address.port}/v1`,
-    token,
-    server,
-    clear: () => {
-      refreshedKeys.clear()
-      modelRefreshes.clear()
-      toolHistories.clear()
-    },
-  })
   bridges.set(directory, state)
+  try {
+    await new Promise((resolve, reject) => {
+      const failed = (error) => {
+        server.off("listening", listening)
+        reject(error)
+      }
+      const listening = () => {
+        server.off("error", failed)
+        resolve()
+      }
+      server.once("error", failed)
+      server.once("listening", listening)
+      server.listen(0, "127.0.0.1")
+    })
+    server.on("error", (error) => state.current.reportError("Cursor bridge server failed", error))
+    server.unref()
+    const address = server.address()
+    if (!address || typeof address === "string") {
+      throw new Error("Cursor bridge did not bind a TCP port")
+    }
+    Object.assign(state, {
+      listening: true,
+      url: `http://127.0.0.1:${address.port}/v1`,
+      token,
+      server,
+      clear: () => {
+        refreshedKeys.clear()
+        modelRefreshes.clear()
+        toolHistories.clear()
+      },
+    })
+    resolveReady()
+  } catch (error) {
+    if (bridges.get(directory) === state) bridges.delete(directory)
+    if (server.listening) server.close()
+    rejectReady(error)
+    throw error
+  }
   return createBridgeLease(state, handlers)
 }
 

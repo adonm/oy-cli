@@ -90,6 +90,7 @@ export const createPlugin = (overrides = {}) => {
       let cursorModels = fallbackCursorModels
       let disposed = false
       let refreshing
+      let refreshQueued = false
       let refreshAttempts = 0
       let refreshRetry
       let catalogReady = false
@@ -153,7 +154,10 @@ export const createPlugin = (overrides = {}) => {
       })
 
       const refreshCursorModels = () => {
-        if (refreshing) return refreshing
+        if (refreshing) {
+          refreshQueued = true
+          return refreshing
+        }
         refreshing = (async () => {
           const connection = await ctx.integration.connection.active("cursor")
           if (!connection || disposed) return
@@ -161,7 +165,7 @@ export const createPlugin = (overrides = {}) => {
           const apiKey = credential?.type === "key" ? credential.key : credential?.access
           if (!apiKey || disposed) return
           const models = await listCursorModels(apiKey)
-          if (models.length === 0 || disposed) return
+          if (models.length === 0 || disposed || refreshQueued) return
           cursorModels = models
           refreshAttempts = 0
           clearTimeout(refreshRetry)
@@ -184,6 +188,10 @@ export const createPlugin = (overrides = {}) => {
           })
           .finally(() => {
             refreshing = undefined
+            if (refreshQueued && !disposed) {
+              refreshQueued = false
+              void refreshCursorModels()
+            }
           })
         return refreshing
       }

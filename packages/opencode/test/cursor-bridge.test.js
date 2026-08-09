@@ -106,7 +106,6 @@ test("renders provider-executed tools as named non-shell summaries", async () =>
             stream: stream([
               { type: "stream-start", warnings: [] },
               { type: "tool-call", toolCallId: "read-1", toolName: "cursor_read", input: { path: "src/main.rs" } },
-              { type: "tool-result", toolCallId: "read-1", toolName: "cursor_read", result: "file contents" },
               { type: "tool-call", toolCallId: "mcp-1", toolName: "cursor_mcp", input: { server: "docs" } },
               {
                 type: "tool-result",
@@ -115,6 +114,7 @@ test("renders provider-executed tools as named non-shell summaries", async () =>
                 result: "service unavailable",
                 isError: true,
               },
+              { type: "tool-result", toolCallId: "read-1", toolName: "cursor_read", result: "file contents" },
               {
                 type: "finish",
                 finishReason: { unified: "stop" },
@@ -163,6 +163,11 @@ test("renders provider-executed tools as named non-shell summaries", async () =>
       events
         .filter((event) => ["response.output_item.added", "response.output_item.done"].includes(event.type))
         .every((event) => Number.isInteger(event.output_index)),
+    )
+    const completed = events.find((event) => event.type === "response.completed")
+    assert.deepEqual(
+      completed.response.output.map((item) => item.id),
+      ["cursor_tool_read-1", "cursor_tool_mcp-1"],
     )
     assert.equal(calls[0].prompt[1].content[0].toolName, "cursor_read")
   } finally {
@@ -310,8 +315,10 @@ test("reference-counts reused bridges and permits a fresh start after final clos
     onIdle: () => {},
     reportError: assert.fail,
   }
-  const first = await startCursorBridge(options)
-  const second = await startCursorBridge(options)
+  const [first, second] = await Promise.all([
+    startCursorBridge(options),
+    startCursorBridge(options),
+  ])
   assert.equal(first.url, second.url)
   assert.equal(first.token, second.token)
 
@@ -349,7 +356,7 @@ test("round-trips through OpenCode's and the latest OpenAI Responses parsers", a
               type: "finish",
               finishReason: { unified: "stop" },
               usage: {
-                inputTokens: { total: 10, cacheRead: 4, cacheWrite: 1 },
+                inputTokens: { total: 15, noCache: 10, cacheRead: 4, cacheWrite: 1 },
                 outputTokens: { total: 2, reasoning: 1 },
               },
             },
@@ -388,10 +395,11 @@ test("round-trips through OpenCode's and the latest OpenAI Responses parsers", a
       )
       const finish = parts.find((part) => part.type === "finish")
       assert.equal(finish.finishReason.unified, "stop")
-      assert.equal(finish.usage.inputTokens.total, 10)
+      assert.equal(finish.usage.inputTokens.total, 15)
       assert.equal(finish.usage.inputTokens.cacheRead, 4)
       assert.equal(finish.usage.inputTokens.cacheWrite, 1)
       assert.equal(finish.usage.outputTokens.total, 2)
+      assert.equal(finish.usage.outputTokens.reasoning, 1)
     }
   } finally {
     await bridge.close()

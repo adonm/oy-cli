@@ -240,6 +240,58 @@ test("refreshes fallback models after a Cursor connection update", async () => {
   await cleanup()
 })
 
+test("reruns model discovery with credentials updated during an active refresh", async () => {
+  let resolveOld
+  const oldModels = new Promise((resolve) => {
+    resolveOld = resolve
+  })
+  let resolveNewReload
+  const newReloaded = new Promise((resolve) => {
+    resolveNewReload = resolve
+  })
+  const harness = createHarness({
+    onReload: () => {
+      if (harness.models.has("cursor/new-model")) resolveNewReload()
+    },
+  })
+  const apiKeys = []
+  const deterministicPlugin = createPlugin({
+    createCursor: () => ({ languageModel: () => ({}) }),
+    listCursorModels: async (apiKey) => {
+      apiKeys.push(apiKey)
+      if (apiKey === "old-key") return oldModels
+      return [{ id: "new-model", displayName: "New credential model" }]
+    },
+    reportError: assert.fail,
+    startCursorBridge: fakeBridge,
+  })
+  const cleanup = await deterministicPlugin.setup(harness.ctx)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  harness.setConnection({ id: "cursor-connection" }, { type: "key", key: "old-key" })
+  harness.events.push({
+    type: "integration.connection.updated",
+    data: { integrationID: "cursor" },
+  })
+  for (let attempt = 0; attempt < 20 && apiKeys.length === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  harness.setConnection({ id: "cursor-connection" }, { type: "key", key: "new-key" })
+  harness.events.push({
+    type: "integration.connection.updated",
+    data: { integrationID: "cursor" },
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  resolveOld([{ id: "old-model", displayName: "Stale credential model" }])
+  await newReloaded
+
+  assert.deepEqual(apiKeys, ["old-key", "new-key"])
+  assert.equal(harness.models.has("cursor/old-model"), false)
+  assert.equal(harness.models.get("cursor/new-model").name, "New credential model")
+  await cleanup()
+})
+
 test("loads without the legacy event subscription surface", async () => {
   const harness = createHarness()
   delete harness.ctx.event

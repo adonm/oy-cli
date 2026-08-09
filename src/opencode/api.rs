@@ -656,7 +656,38 @@ fn cursor_bridge_model(model: &Value) -> bool {
         })
         .and_then(Value::as_str)
         .unwrap_or_default();
-    package == "@ai-sdk/openai" && base_url.starts_with("http://127.0.0.1:")
+    let bridge_token = ["settings", "request", "api"]
+        .into_iter()
+        .find_map(|section| {
+            model
+                .get(section)
+                .and_then(|value| value.get("headers"))
+                .and_then(|headers| headers.get("x-oy-cursor-bridge"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            model
+                .get("headers")
+                .and_then(|headers| headers.get("x-oy-cursor-bridge"))
+                .and_then(Value::as_str)
+        });
+    package == "@ai-sdk/openai"
+        && loopback_bridge_url(base_url)
+        && bridge_token.is_some_and(|token| !token.is_empty())
+}
+
+fn loopback_bridge_url(raw: &str) -> bool {
+    let Some(rest) = raw.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.contains('@') {
+        return false;
+    }
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    host == "127.0.0.1" && port.parse::<u16>().is_ok_and(|port| port > 0)
 }
 
 fn model_ref(model: &str) -> Result<Value> {
@@ -716,9 +747,20 @@ mod tests {
             "api": {
                 "package": "@ai-sdk/openai",
                 "url": "http://127.0.0.1:43210/v1"
+            },
+            "settings": {
+                "headers": { "x-oy-cursor-bridge": "bridge-token" }
             }
         })));
         assert!(cursor_bridge_model(&json!({
+            "providerID": "cursor",
+            "package": "aisdk:@ai-sdk/openai",
+            "settings": {
+                "baseURL": "http://127.0.0.1:43210/v1",
+                "headers": { "x-oy-cursor-bridge": "bridge-token" }
+            }
+        })));
+        assert!(!cursor_bridge_model(&json!({
             "providerID": "cursor",
             "package": "aisdk:@ai-sdk/openai",
             "settings": { "baseURL": "http://127.0.0.1:43210/v1" }
@@ -726,7 +768,18 @@ mod tests {
         assert!(!cursor_bridge_model(&json!({
             "providerID": "cursor",
             "package": "aisdk:@ai-sdk/openai",
-            "settings": { "baseURL": "https://example.com/v1" }
+            "settings": {
+                "baseURL": "http://127.0.0.1:@example.com/v1",
+                "headers": { "x-oy-cursor-bridge": "bridge-token" }
+            }
+        })));
+        assert!(!cursor_bridge_model(&json!({
+            "providerID": "cursor",
+            "package": "aisdk:@ai-sdk/openai",
+            "settings": {
+                "baseURL": "https://example.com/v1",
+                "headers": { "x-oy-cursor-bridge": "bridge-token" }
+            }
         })));
     }
 }
