@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.6] - 2026-08-09
+
 ### Changed
 - Replaced the general-purpose upstream Cursor plugin dependency with oy's
   OpenCode V2-focused provider fork, pinned to a verified commit and Cursor SDK
