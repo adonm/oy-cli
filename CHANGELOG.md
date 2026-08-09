@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.8] - 2026-08-09
+
 ### Fixed
 - Closed each Cursor tool progress summary before waiting for its result so
   parallel tools and long-running subagents cannot overlap OpenCode reasoning
