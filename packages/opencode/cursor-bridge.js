@@ -181,11 +181,14 @@ const promptFromResponses = (body, toolHistory) => {
       ]
     }
     if (item.type === "item_reference") {
+      const referencedToolID = item.id.startsWith("cursor_tool_result_")
+        ? item.id.slice("cursor_tool_result_".length)
+        : item.id.startsWith("cursor_tool_")
+          ? item.id.slice("cursor_tool_".length)
+          : item.id
       const previous =
         toolHistory.get(item.id) ??
-        (item.id.startsWith("cursor_tool_")
-          ? toolHistory.get(item.id.slice("cursor_tool_".length))
-          : undefined)
+        toolHistory.get(referencedToolID)
       if (!previous) return []
       return [
         {
@@ -408,6 +411,13 @@ const startReasoning = async (writer, id, outputIndex, initialText) => {
   }
 }
 
+const reasoningItem = (id, text) => ({
+  type: "reasoning",
+  id,
+  summary: [{ type: "summary_text", text }],
+  encrypted_content: null,
+})
+
 const finishReasoning = async (writer, id, outputIndex, text) => {
   await writer.event({
     type: "response.reasoning_summary_part.done",
@@ -418,35 +428,29 @@ const finishReasoning = async (writer, id, outputIndex, text) => {
   await writer.event({
     type: "response.output_item.done",
     output_index: outputIndex,
-    item: {
-      type: "reasoning",
-      id,
-      summary: [{ type: "summary_text", text }],
-      encrypted_content: null,
-    },
+    item: reasoningItem(id, text),
   })
+}
+
+const emitReasoning = async (writer, id, outputIndex, text) => {
+  await startReasoning(writer, id, outputIndex, text)
+  await finishReasoning(writer, id, outputIndex, text)
+  return reasoningItem(id, text)
 }
 
 const startToolSummary = async (writer, part, outputIndex) => {
   const id = `cursor_tool_${part.toolCallId}`
   const summary = `Cursor tool ${part.toolName} started\nInput: ${displayValue(part.input)}`
-  await startReasoning(writer, id, outputIndex, summary)
-  return { id, outputIndex, name: part.toolName, input: part.input, summary }
+  const item = await emitReasoning(writer, id, outputIndex, summary)
+  return { id, outputIndex, name: part.toolName, input: part.input, item }
 }
 
-const finishToolSummary = async (writer, call, part) => {
+const finishToolSummary = async (writer, call, part, outputIndex) => {
+  const id = `cursor_tool_result_${part.toolCallId}`
   const status = part.isError ? "failed" : "completed"
-  const suffix = `\nCursor tool ${call.name} ${status}\n${part.isError ? "Error" : "Result"}: ${displayValue(part.result)}`
-  await writer.event({
-    type: "response.reasoning_summary_text.delta",
-    item_id: call.id,
-    output_index: call.outputIndex,
-    summary_index: 0,
-    delta: suffix,
-  })
-  const summary = `${call.summary}${suffix}`
-  await finishReasoning(writer, call.id, call.outputIndex, summary)
-  return summary
+  const summary = `Cursor tool ${call.name} ${status}\n${part.isError ? "Error" : "Result"}: ${displayValue(part.result)}`
+  const item = await emitReasoning(writer, id, outputIndex, summary)
+  return { id, outputIndex, item }
 }
 
 const streamCursor = async ({
@@ -623,12 +627,7 @@ const streamCursor = async ({
       const current = requireOpen(reasoning, part.id, "reasoning")
       reasoning.delete(part.id)
       await finishReasoning(writer, part.id, current.outputIndex, current.text)
-      output[current.outputIndex] = {
-        type: "reasoning",
-        id: part.id,
-        summary: [{ type: "summary_text", text: current.text }],
-        encrypted_content: null,
-      }
+      output[current.outputIndex] = reasoningItem(part.id, current.text)
       continue
     }
     if (part.type === "tool-input-start") {
@@ -659,20 +658,17 @@ const streamCursor = async ({
       if (openToolInputs.has(part.toolCallId)) {
         throw new CursorBridgeProtocolError(`tool ${part.toolCallId} was called before its input ended`)
       }
-      openTools.set(part.toolCallId, await startToolSummary(writer, part, allocateOutput()))
+      const call = await startToolSummary(writer, part, allocateOutput())
+      openTools.set(part.toolCallId, call)
+      output[call.outputIndex] = call.item
       continue
     }
     if (part.type === "tool-result") {
       const call = requireOpen(openTools, part.toolCallId, "tool")
       openTools.delete(part.toolCallId)
       rememberTool(toolHistory, part.toolCallId, call, part.result)
-      const summary = await finishToolSummary(writer, call, part)
-      output[call.outputIndex] = {
-        type: "reasoning",
-        id: call.id,
-        summary: [{ type: "summary_text", text: summary }],
-        encrypted_content: null,
-      }
+      const result = await finishToolSummary(writer, call, part, allocateOutput())
+      output[result.outputIndex] = result.item
       continue
     }
     if (part.type === "error") throw part.error

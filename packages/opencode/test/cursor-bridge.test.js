@@ -164,11 +164,62 @@ test("renders provider-executed tools as named non-shell summaries", async () =>
         .filter((event) => ["response.output_item.added", "response.output_item.done"].includes(event.type))
         .every((event) => Number.isInteger(event.output_index)),
     )
+    assert.deepEqual(
+      events
+        .filter(
+          (event) =>
+            ["response.output_item.added", "response.output_item.done"].includes(event.type) &&
+            event.item.type === "reasoning",
+        )
+        .map((event) => [event.type, event.item.id]),
+      [
+        ["response.output_item.added", "cursor_tool_read-1"],
+        ["response.output_item.done", "cursor_tool_read-1"],
+        ["response.output_item.added", "cursor_tool_mcp-1"],
+        ["response.output_item.done", "cursor_tool_mcp-1"],
+        ["response.output_item.added", "cursor_tool_result_mcp-1"],
+        ["response.output_item.done", "cursor_tool_result_mcp-1"],
+        ["response.output_item.added", "cursor_tool_result_read-1"],
+        ["response.output_item.done", "cursor_tool_result_read-1"],
+      ],
+    )
     const completed = events.find((event) => event.type === "response.completed")
     assert.deepEqual(
       completed.response.output.map((item) => item.id),
-      ["cursor_tool_read-1", "cursor_tool_mcp-1"],
+      [
+        "cursor_tool_read-1",
+        "cursor_tool_mcp-1",
+        "cursor_tool_result_mcp-1",
+        "cursor_tool_result_read-1",
+      ],
     )
+    for (const factory of [createOpenAI, createLatestOpenAI]) {
+      const openai = factory({
+        apiKey: "cursor-key",
+        baseURL: bridge.url,
+        headers: { "x-oy-cursor-bridge": bridge.token },
+      })
+      const parsed = await openai.responses("composer-2.5").doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "work" }] }],
+      })
+      const parts = []
+      for await (const part of parsed.stream) parts.push(part)
+      assert.deepEqual(
+        parts
+          .filter((part) => ["reasoning-start", "reasoning-end"].includes(part.type))
+          .map((part) => part.type),
+        [
+          "reasoning-start",
+          "reasoning-end",
+          "reasoning-start",
+          "reasoning-end",
+          "reasoning-start",
+          "reasoning-end",
+          "reasoning-start",
+          "reasoning-end",
+        ],
+      )
+    }
     assert.equal(calls[0].prompt[1].content[0].toolName, "cursor_read")
   } finally {
     await bridge.close()
