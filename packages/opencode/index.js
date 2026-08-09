@@ -1,6 +1,6 @@
 import { readFileSync, rmSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { createCursor } from "@stablekernel/opencode-cursor"
+import { createCursor } from "@oy-cli/opencode-cursor"
 import { applyCursorCatalog, fallbackCursorModels } from "./cursor-catalog.js"
 import { startCursorBridge } from "./cursor-bridge.js"
 import { safeWorkspacePath } from "./cursor-paths.js"
@@ -12,7 +12,25 @@ const frontmatter = agent.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)([\s\S]*)$/
 if (!frontmatter) throw new Error("assets/agents/oy.md must contain YAML frontmatter")
 const system = frontmatter[1].trim()
 
-export const defaultCursorStallMs = 1_200_000
+export const defaultCursorStallMs = 120_000
+export const cursorModelRefreshMs = 15_000
+export const cursorLifecycleWaitMs = 5_000
+
+const withTimeout = async (promise, milliseconds, operation) => {
+  if (!promise) return
+  let timeout
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${operation} exceeded ${milliseconds} ms`)), milliseconds)
+        timeout.unref?.()
+      }),
+    ])
+  } finally {
+    clearTimeout(timeout)
+  }
+}
 
 export const applyCursorEnvironmentDefaults = (environment) => {
   if (environment.OPENCODE_CURSOR_STALL_MS === undefined) {
@@ -46,9 +64,15 @@ const defaultDependencies = {
     const { Cursor } = await import("@cursor/sdk")
     return Cursor.models.list({ apiKey })
   },
-  reportError: (operation, error) => {
+  reportError: (operation, error, context) => {
     const detail = error instanceof Error ? `: ${error.message}` : ""
-    console.warn(`[oy] ${operation}${detail}`)
+    const metadata = context ? ` ${JSON.stringify(context)}` : ""
+    console.warn(`[oy] ${operation}${detail}${metadata}`)
+  },
+  reportDiagnostic: (operation, context) => {
+    if (process.env.OPENCODE_CURSOR_DEBUG === "1") {
+      console.info(`[oy] ${operation} ${JSON.stringify(context)}`)
+    }
   },
   startCursorBridge,
 }
@@ -66,8 +90,16 @@ export const createPlugin = (overrides = {}) => {
       let cursorModels = fallbackCursorModels
       let disposed = false
       let refreshing
+      let refreshAttempts = 0
+      let refreshRetry
       let catalogReady = false
       let bridge
+      const listCursorModels = (apiKey) =>
+        withTimeout(
+          dependencies.listCursorModels(apiKey),
+          cursorModelRefreshMs,
+          "Cursor model discovery",
+        )
 
       await ctx.skill.transform((skills) => {
         skills.source({ type: "directory", path: `${assets}/skills` })
@@ -116,7 +148,7 @@ export const createPlugin = (overrides = {}) => {
       })
 
       await ctx.catalog.transform((catalog) => {
-        applyCursorCatalog(catalog, directory, cursorModels, bridge)
+        applyCursorCatalog(catalog, cursorModels, bridge)
         catalogReady = true
       })
 
@@ -128,13 +160,27 @@ export const createPlugin = (overrides = {}) => {
           const credential = await ctx.integration.connection.resolve(connection)
           const apiKey = credential?.type === "key" ? credential.key : credential?.access
           if (!apiKey || disposed) return
-          const models = await dependencies.listCursorModels(apiKey)
+          const models = await listCursorModels(apiKey)
           if (models.length === 0 || disposed) return
           cursorModels = models
+          refreshAttempts = 0
+          clearTimeout(refreshRetry)
+          refreshRetry = undefined
           await ctx.catalog.reload()
         })()
           .catch((error) => {
-            if (!disposed) dependencies.reportError("failed to refresh Cursor models", error)
+            if (disposed) return
+            refreshAttempts += 1
+            dependencies.reportError("failed to refresh Cursor models", error, {
+              attempt: refreshAttempts,
+            })
+            if (refreshAttempts < 3 && !refreshRetry) {
+              refreshRetry = setTimeout(() => {
+                refreshRetry = undefined
+                void refreshCursorModels()
+              }, 1_000 * 2 ** (refreshAttempts - 1))
+              refreshRetry.unref?.()
+            }
           })
           .finally(() => {
             refreshing = undefined
@@ -145,7 +191,7 @@ export const createPlugin = (overrides = {}) => {
       bridge = await dependencies.startCursorBridge({
         directory,
         createCursor: dependencies.createCursor,
-        listCursorModels: dependencies.listCursorModels,
+        listCursorModels,
         onModels: async (models) => {
           if (models.length === 0 || disposed) return
           cursorModels = models
@@ -158,6 +204,7 @@ export const createPlugin = (overrides = {}) => {
           removeBundledCursorSkills(cwd)
         },
         reportError: dependencies.reportError,
+        reportDiagnostic: dependencies.reportDiagnostic,
       })
       if (catalogReady) await ctx.catalog.reload()
 
@@ -182,12 +229,21 @@ export const createPlugin = (overrides = {}) => {
 
       return async () => {
         disposed = true
+        clearTimeout(refreshRetry)
         controller.abort()
-        await events
-        await refreshing
+        const closingBridge = bridge?.close()
+        const settled = await Promise.allSettled([
+          withTimeout(events, cursorLifecycleWaitMs, "Cursor event subscription shutdown"),
+          withTimeout(refreshing, cursorLifecycleWaitMs, "Cursor model refresh shutdown"),
+          closingBridge,
+        ])
+        for (const result of settled) {
+          if (result.status === "rejected") {
+            dependencies.reportError("Cursor integration shutdown did not complete cleanly", result.reason)
+          }
+        }
         removeGeneratedCursorRule(directory)
         removeBundledCursorSkills(directory)
-        await bridge?.close()
       }
     },
   }

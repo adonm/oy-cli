@@ -39,6 +39,7 @@ export const defaultCursorAgents = {
 const cursorBoundary = `Cursor provider boundary:
 - You are the Cursor local agent running inside OpenCode. Execute work directly with Cursor's native tools; do not wait for OpenCode to execute tool calls for you.
 - Cursor's shell, read, write, edit, delete, MCP, and subagent calls run outside OpenCode's permission prompts. Follow the user's stated limits, never broaden access, and fail closed when authorization is ambiguous.
+- An explicit absolute working directory from OpenCode is honored even when it is outside the initial workspace. This is intentional for multi-repository workflows; use an external container or VM when host filesystem isolation is required.
 - OpenCode tool names in the surrounding instructions mean the equivalent Cursor-native operation.
 - When a listed oy skill matches the task, read .cursor/skills/<id>/SKILL.md before starting it.`
 
@@ -69,7 +70,6 @@ const sessionHeader = (headers) => {
 const callOptions = (options, providerName) => {
   const existing = options.providerOptions?.[providerName] ?? {}
   const sessionID = existing.sessionID ?? sessionHeader(options.headers)
-  const ephemeral = existing.ephemeral ?? (!Array.isArray(options.tools) || options.tools.length === 0)
   return {
     ...options,
     prompt: [
@@ -81,7 +81,6 @@ const callOptions = (options, providerName) => {
       [providerName]: {
         ...existing,
         ...(sessionID ? { sessionID } : {}),
-        ...(ephemeral ? { ephemeral: true } : {}),
       },
     },
   }

@@ -83,7 +83,7 @@ The installer uses mise for oy, Node.js, OpenCode, and optional context helpers.
 
 | Variable | Purpose |
 |---|---|
-| `OY_ROOT` | Select the workspace root and path boundary. |
+| `OY_ROOT` | Select the oy CLI workspace root and evidence/report path boundary. |
 | `OPENCODE_CONFIG_DIR` | Override the global OpenCode config directory. |
 | `OY_OPENCODE` | Select the OpenCode executable; default `opencode2`. |
 | `OY_OPENCODE_MODEL` | Select a workflow model as `provider/model#variant`. |
@@ -92,17 +92,18 @@ The installer uses mise for oy, Node.js, OpenCode, and optional context helpers.
 | `OY_INSTALL_SCOPE` | Select `global` or `workspace` in `install.sh`; an explicit installer flag wins. |
 | `OY_SKIP_SETUP` | Skip integration setup and runtime load checks in `install.sh`. |
 | `CURSOR_API_KEY` | Supply the Cursor provider key without using OpenCode `/connect`. |
-| `OPENCODE_CURSOR_STALL_MS` | Override oy's 1,200,000 ms Cursor idle-stream watchdog default; set `0` to disable it. |
+| `OPENCODE_CURSOR_STALL_MS` | Override oy's 120,000 ms Cursor idle-stream watchdog default; set `0` to disable it. |
+| `OPENCODE_CURSOR_TOOL_STALL_MS` | Override the 600,000 ms watchdog used while a Cursor tool is running; set `0` to disable it. |
 
 ## Cursor models in OpenCode
 
-The default OpenCode plugin registers a **Cursor** provider. Use `/connect` and paste a Cursor API key; the account's live catalog replaces the fallback list after first use. OpenCode 2 talks to the official Cursor local-agent runtime through an authenticated `127.0.0.1` bridge. The bridge preserves Cursor sessions, token/cache usage, native tool activity, bundled oy skills, and named Cursor subagents. Select a model's `plan` variant for Cursor plan mode.
+The default OpenCode plugin registers a **Cursor** provider. Use `/connect` and paste a Cursor API key; the account's live catalog replaces the fallback list after first use. OpenCode 2 talks to the official Cursor local-agent runtime through an authenticated `127.0.0.1` bridge. The bridge preserves Cursor sessions, correct token/cache usage, native tool activity, bundled oy skills, and named Cursor subagents. It validates every streamed text, reasoning, tool, and finish transition before completing the response. Select a model's `plan` variant for Cursor plan mode.
 
-Configuration under `providers.cursor.request.body` is forwarded to the Cursor agent. Supported settings include `sandbox`, `autoReview`, `settingSources`, `agents`, `mcpServers`, `session`, `systemPrompt`, `toolDisplay`, and `transport`. Oy raises the provider's idle-stream watchdog default from 120,000 ms to 1,200,000 ms; an explicit `OPENCODE_CURSOR_STALL_MS` value wins. OpenCode's live MCP state and per-tool permission prompts are not forwarded because the current V2 plugin API does not expose that request context.
+Configuration under `providers.cursor.request.body` is forwarded to the Cursor agent. Supported settings include `cwd`, `sandbox`, `autoReview`, `settingSources`, `agents`, `mcpServers`, `session`, `systemPrompt`, `toolDisplay`, and `transport`. An explicit absolute `cwd` wins; otherwise the bridge follows the current absolute OpenCode working directory. Either may be outside `OY_ROOT`, which is intentional for multi-repository workflows. Use an external container or VM when host isolation is needed. Oy uses a 120,000 ms idle watchdog and a separate 600,000 ms tool-phase watchdog; explicit environment values win. OpenCode's live MCP state and per-tool permission prompts are not forwarded because the current V2 plugin API does not expose that request context.
 
 For a checkout smoke test, use `CURSOR_API_KEY=... just opencode-dev`, select a `cursor/*` model, and start with a no-edit read request. `OPENCODE_CURSOR_DEBUG=1` enables provider diagnostics without printing the API key.
 
-`cursor/*` uses Cursor tools outside OpenCode permissions. Oy preserves the provider's sandbox default; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
+`cursor/*` uses host-capable Cursor tools outside OpenCode permissions. Oy preserves the provider's sandbox default; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 
 ## Files written by oy
 

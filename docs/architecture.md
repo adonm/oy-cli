@@ -76,9 +76,9 @@ Interrupted orchestrated workflows retain their run/session context for `oy reco
 
 The OpenCode executable defaults to `opencode2` and always runs with `OY_ROOT` as its working directory. The runner uses OpenCode's noninteractive session API for bound workflows, `run` for general tasks, `mini` for interactive enhancement, and the TUI for bare launch. OpenCode stores credentials and sessions; oy passes only transient IDs and workflow metadata.
 
-The package registers one permission-neutral primary agent, three skills, three slash commands, and a Cursor provider adapter. It does not add OpenCode permission rules. After a Cursor key is connected, the adapter discovers live models and supplies Stable Kernel's AI SDK provider to OpenCode.
+The package registers one permission-neutral primary agent, three skills, three slash commands, and a Cursor provider adapter. It does not add OpenCode permission rules. After a Cursor key is connected, the adapter discovers live models and supplies oy's provider-only Cursor AI SDK runtime to OpenCode.
 
-The Cursor provider path is a distinct trust boundary: Stable Kernel invokes Cursor's local agent runtime, whose tools execute outside OpenCode's permission system. Oy preserves its unsandboxed default and documents the exception rather than presenting those calls as OpenCode-gated.
+The Cursor provider path is a distinct trust boundary: the fork invokes Cursor's local agent runtime, whose tools execute outside OpenCode's permission system. An explicit absolute request working directory wins; otherwise the bridge follows OpenCode's current absolute working directory. Either may leave the initial workspace so multi-repository workflows work as requested. Oy preserves the unsandboxed, host-capable default and directs isolation-sensitive use to an external container or VM.
 
 ## Trust boundaries
 

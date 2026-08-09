@@ -37,6 +37,8 @@ pub(crate) struct RuntimeHealth {
     pub skills: bool,
     pub models: bool,
     pub providers: bool,
+    pub cursor_provider: bool,
+    pub cursor_bridge: bool,
     pub plugins: bool,
 }
 
@@ -293,6 +295,8 @@ impl<'a> OpenCodeApi<'a> {
                 && current.skills
                 && current.models
                 && current.providers
+                && current.cursor_provider
+                && current.cursor_bridge
                 && current.plugins
                 && current.openapi
                 && current.location;
@@ -370,6 +374,14 @@ impl<'a> OpenCodeApi<'a> {
             .map_or(!models.is_empty(), |requested| {
                 models.iter().any(|model| model_matches(model, requested))
             });
+        let cursor_provider = providers.iter().any(|provider| {
+            provider
+                .get("id")
+                .or_else(|| provider.get("providerID"))
+                .and_then(Value::as_str)
+                == Some("cursor")
+        });
+        let cursor_bridge = models.iter().any(cursor_bridge_model);
         Ok(RuntimeHealth {
             healthy: health.get("healthy").and_then(Value::as_bool) == Some(true),
             service_version: health.get("version").and_then(Value::as_str)
@@ -386,6 +398,8 @@ impl<'a> OpenCodeApi<'a> {
                     .all(|name| skills.contains(name)),
             models: model_ok,
             providers: !providers.is_empty(),
+            cursor_provider,
+            cursor_bridge,
             plugins: plugin_response.get("data").is_some_and(Value::is_array),
         })
     }
@@ -621,6 +635,30 @@ fn model_matches(raw: &Value, requested: &str) -> bool {
     })
 }
 
+fn cursor_bridge_model(model: &Value) -> bool {
+    if model.get("providerID").and_then(Value::as_str) != Some("cursor") {
+        return false;
+    }
+    let raw_package = model
+        .get("api")
+        .and_then(|api| api.get("package"))
+        .or_else(|| model.get("package"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let package = raw_package.strip_prefix("aisdk:").unwrap_or(raw_package);
+    let base_url = model
+        .get("api")
+        .and_then(|api| api.get("url"))
+        .or_else(|| {
+            model
+                .get("settings")
+                .and_then(|settings| settings.get("baseURL"))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    package == "@ai-sdk/openai" && base_url.starts_with("http://127.0.0.1:")
+}
+
 fn model_ref(model: &str) -> Result<Value> {
     let (provider_id, model) = model
         .split_once('/')
@@ -669,5 +707,26 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn identifies_the_authenticated_loopback_cursor_bridge() {
+        assert!(cursor_bridge_model(&json!({
+            "providerID": "cursor",
+            "api": {
+                "package": "@ai-sdk/openai",
+                "url": "http://127.0.0.1:43210/v1"
+            }
+        })));
+        assert!(cursor_bridge_model(&json!({
+            "providerID": "cursor",
+            "package": "aisdk:@ai-sdk/openai",
+            "settings": { "baseURL": "http://127.0.0.1:43210/v1" }
+        })));
+        assert!(!cursor_bridge_model(&json!({
+            "providerID": "cursor",
+            "package": "aisdk:@ai-sdk/openai",
+            "settings": { "baseURL": "https://example.com/v1" }
+        })));
     }
 }

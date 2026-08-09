@@ -33,17 +33,34 @@ Connect. Run `npm audit --omit=dev` after dependency changes.
 - one primary agent: `oy`;
 - skills: `oy-audit`, `oy-review`, and `oy-enhance`;
 - slash commands: `/oy-audit`, `/oy-review`, and `/oy-enhance`;
-- a Cursor provider and `cursor/*` models backed by `@stablekernel/opencode-cursor` and the official Cursor SDK.
+- a Cursor provider and `cursor/*` models backed by oy's OpenCode V2-focused
+  [`opencode-cursor` fork](https://github.com/adonm/opencode-cursor) and the
+  official Cursor SDK.
 
 Run `/connect`, choose **Cursor**, and paste an API key from the Cursor dashboard. The live models available to that key then replace the fallback Cursor catalog.
 
-Oy defaults the provider's idle-stream watchdog to 1,200,000 ms (20 minutes). Set `OPENCODE_CURSOR_STALL_MS` explicitly to override it, or to `0` to disable it.
+Oy defaults the provider's idle-stream watchdog to 120,000 ms (2 minutes), with
+a separate 600,000 ms budget while a Cursor tool is running. Set
+`OPENCODE_CURSOR_STALL_MS` or `OPENCODE_CURSOR_TOOL_STALL_MS` explicitly to
+override those budgets, or to `0` to disable the corresponding bound.
 
-OpenCode 2 accepts Cursor through an authenticated loopback OpenAI Responses bridge. The bridge binds only to `127.0.0.1`, uses a random per-process token, and forwards each request into the official Cursor local-agent runtime. It preserves one Cursor agent per OpenCode session, carries Cursor token/cache usage back to OpenCode, mirrors the three bundled oy skills into the active workspace, and exposes Cursor-native `explore`, `general`, and `reviewer` subagents. Select the `plan` model variant to use Cursor plan mode.
+The provider retries a terminal failure once on a fresh agent only when no
+output has reached OpenCode, removes failed agents from the session pool, and
+includes Cursor SDK terminal error details and update counts in the final error.
+The bridge validates complete text/reasoning/tool lifecycles, sends SSE
+heartbeats, respects response backpressure, aborts active runs during shutdown,
+and bounds retained tool history by age, entry count, and bytes.
+
+OpenCode 2 accepts Cursor through an authenticated loopback OpenAI Responses bridge. The bridge binds only to `127.0.0.1`, uses a random per-process token, and forwards each request into the official Cursor local-agent runtime. It preserves one Cursor agent per OpenCode session, carries Cursor token/cache usage back to OpenCode without double-counting cached input, mirrors the three bundled oy skills into the active workspace, and exposes Cursor-native `explore`, `general`, and `reviewer` subagents. Select the `plan` model variant to use Cursor plan mode.
 
 For a live smoke test against this checkout, run `CURSOR_API_KEY=... just opencode-dev`, connect Cursor if prompted, select a `cursor/*` model, and ask it to read a file without editing. Set `OPENCODE_CURSOR_DEBUG=1` to inspect provider retry/session diagnostics; never paste the key into a config file or report output.
 
-Cursor-specific settings under `providers.cursor.request.body` are forwarded to the local agent. Supported settings include `sandbox`, `autoReview`, `settingSources`, `agents`, `mcpServers`, `session`, `systemPrompt`, `toolDisplay`, and `transport`. Static MCP launch specifications are supported; OpenCode's live MCP connection state and permission prompts cannot cross the Cursor boundary in the current V2 plugin API.
+Cursor-specific settings under `providers.cursor.request.body` are forwarded to the local agent. Supported settings include `cwd`, `sandbox`, `autoReview`, `settingSources`, `agents`, `mcpServers`, `session`, `systemPrompt`, `toolDisplay`, and `transport`. An explicit absolute `cwd` wins; otherwise the bridge follows the current absolute OpenCode working directory. Either may be outside the initial workspace so multi-repository workflows work as requested. Use an external container or VM when host isolation is required. Static MCP launch specifications are supported; OpenCode's live MCP connection state and permission prompts cannot cross the Cursor boundary in the current V2 plugin API.
+
+No-tool requests are no longer assumed to be disposable side calls. The
+provider's transcript classifier keeps normal tool-less conversations reusable;
+an integration can opt into an ephemeral call explicitly with Responses
+metadata `{ "oy_ephemeral": "true" }`.
 
 The plugin defines no permission rules. `cursor/*` uses Cursor tools outside OpenCode permissions; read the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) before selecting one.
 

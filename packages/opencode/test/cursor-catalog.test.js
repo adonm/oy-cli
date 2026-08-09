@@ -44,9 +44,10 @@ test("applies the provider auto-compaction setting to catalog models", () => {
     },
   }
 
-  applyCursorCatalog(catalog, "/workspace", [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" }])
+  applyCursorCatalog(catalog, [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" }])
 
   assert.deepEqual(configuredModel.limit, { context: 272_000, output: 64_000 })
+  assert.deepEqual(configuredModel.request.body, {})
   assert.deepEqual(configuredModel.cost, [
     { input: 5, output: 30, cache: { read: 0.5, write: 6.25 } },
   ])

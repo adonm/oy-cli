@@ -67,6 +67,8 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
             && runtime.skills
             && runtime.models
             && runtime.providers
+            && runtime.cursor_provider
+            && runtime.cursor_bridge
             && runtime.plugins
     });
     let check_ok = opencode_supported && configured && runtime_ok;
@@ -178,7 +180,7 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
                     .as_ref()
                     .map(|runtime| {
                         format!(
-                            "service={} openapi={} location={} agent={} commands={} skills={} models={} providers={} plugins={}",
+                            "service={} openapi={} location={} agent={} commands={} skills={} models={} providers={} cursor_provider={} cursor_bridge={} plugins={}",
                             runtime.service_version,
                             runtime.openapi,
                             runtime.location,
@@ -187,6 +189,8 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
                             runtime.skills,
                             runtime.models,
                             runtime.providers,
+                            runtime.cursor_provider,
+                            runtime.cursor_bridge,
                             runtime.plugins
                         )
                     })

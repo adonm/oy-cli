@@ -46,7 +46,7 @@ test("injects the OpenCode session id while preserving request controls", async 
   assert.deepEqual(calls[0].providerOptions.cursor.params, { thinking: "high" })
 })
 
-test("keeps no-tool side calls out of the pooled Cursor conversation", async () => {
+test("does not infer ephemeral side calls from an absent tool list", async () => {
   const calls = []
   const provider = createQualityCursor(createFake(calls, []), {})
 
@@ -56,5 +56,17 @@ test("keeps no-tool side calls out of the pooled Cursor conversation", async () 
   })
 
   assert.equal(calls[0].providerOptions.cursor.sessionID, "ses_title")
+  assert.equal(calls[0].providerOptions.cursor.ephemeral, undefined)
+})
+
+test("preserves an explicit ephemeral side-call marker", async () => {
+  const calls = []
+  const provider = createQualityCursor(createFake(calls, []), {})
+
+  await provider.languageModel("model").doGenerate({
+    prompt: [{ role: "user", content: [{ type: "text", text: "title" }] }],
+    providerOptions: { cursor: { ephemeral: true } },
+  })
+
   assert.equal(calls[0].providerOptions.cursor.ephemeral, true)
 })

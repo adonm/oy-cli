@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Changed
+- Replaced the general-purpose upstream Cursor plugin dependency with oy's
+  OpenCode V2-focused provider fork, pinned to a verified commit and Cursor SDK
+  1.0.27.
+- Restored the default idle-stream watchdog from 20 minutes to 2 minutes while
+  retaining a separate 10-minute budget for in-flight Cursor tools.
+- Preserved session reuse for normal tool-less conversations; callers can mark
+  a true side call explicitly with `metadata.oy_ephemeral`.
+- Raised the npm runtime floor to Node.js 24.15 and test current Node 24 and 26
+  releases.
+- Followed each request's current absolute OpenCode working directory unless an
+  explicit absolute Cursor `cwd` overrides it, including outside the initial
+  workspace; external containers or VMs remain the isolation boundary.
+
+### Added
+- Validated Cursor text, reasoning, tool-input, tool-result, and finish events
+  with a strict stream state machine tested against OpenCode's pinned
+  `@ai-sdk/openai` parser and the latest parser release.
+- Added SSE heartbeats, response backpressure, bounded model refresh and
+  shutdown waits, disconnect aborts, structured request diagnostics, and
+  Cursor-specific `oy doctor --check` health fields.
+- Bounded retained tool history by age, session count, entry count, total
+  bytes, and per-value bytes.
+
+### Fixed
+- Retried fresh and resumed Cursor turns once on a new agent when they fail
+  before emitting output, and removed failed agents from the persistent pool.
+- Applied watchdog protection to silent queued-message turns and surfaced
+  Cursor SDK terminal error details plus update counts.
+- Stopped double-counting cached input tokens in Cursor usage and cost data.
+- Retried transient model-discovery failures without blocking model turns and
+  aborted active Cursor runs when OpenCode disconnects or unloads the plugin.
+
 ## [0.14.5] - 2026-08-08
 
 ### Fixed

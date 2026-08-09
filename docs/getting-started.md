@@ -68,7 +68,10 @@ oy doctor --check
 
 To use Cursor models through OpenCode, run `/connect` in OpenCode, choose **Cursor**, and paste an API key from the Cursor dashboard. Models available to that key appear as `cursor/<id>` in the model picker. `CURSOR_API_KEY` is also recognized.
 
-> `cursor/*` uses Cursor tools outside OpenCode permissions; read the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) before using it in an untrusted repository.
+> `cursor/*` uses host-capable Cursor tools outside OpenCode permissions and
+> follows the requested working directory outside the initial workspace. Use an
+> external container or VM for isolation-sensitive work; see the
+> [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 
 `oy doctor --check` validates the OpenCode service, plugin, agent, skills, commands, and model/provider discovery. It does not test or change your permission policy.
 

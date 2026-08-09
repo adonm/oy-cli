@@ -1,11 +1,120 @@
 import { createHash, randomBytes } from "node:crypto"
 import { createServer } from "node:http"
-import { isAbsolute, relative, resolve } from "node:path"
+import { isAbsolute, resolve } from "node:path"
 
 import { createQualityCursor } from "./cursor-provider.js"
 
 const maxRequestBytes = 16 * 1024 * 1024
+export const cursorBridgeLimits = Object.freeze({
+  heartbeatMs: 15_000,
+  historyEntries: 256,
+  historyBytes: 2 * 1024 * 1024,
+  historyValueBytes: 64 * 1024,
+  histories: 64,
+  historyTtlMs: 60 * 60 * 1_000,
+  modelRefreshMs: 15_000,
+  modelRefreshRetryMs: 30_000,
+  shutdownForceMs: 250,
+  shutdownMs: 5_000,
+})
 const bridges = new Map()
+
+class CursorBridgeProtocolError extends Error {
+  constructor(message) {
+    super(`invalid Cursor stream: ${message}`)
+    this.name = "CursorBridgeProtocolError"
+    this.code = "cursor_stream_protocol_error"
+  }
+}
+
+const withTimeout = async (promise, milliseconds, operation) => {
+  let timeout
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`${operation} exceeded ${milliseconds} ms`))
+        }, milliseconds)
+        timeout.unref?.()
+      }),
+    ])
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+const truncateUtf8 = (value, bytes) => {
+  const encoded = Buffer.from(value)
+  if (encoded.length <= bytes) return value
+  let end = bytes
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1
+  return `${encoded.subarray(0, end).toString("utf8")}\n… [history value truncated]`
+}
+
+const boundedHistoryValue = (value) => {
+  let serialized
+  try {
+    serialized = typeof value === "string" ? value : JSON.stringify(value ?? null)
+  } catch {
+    serialized = String(value)
+  }
+  if (Buffer.byteLength(serialized) <= cursorBridgeLimits.historyValueBytes) return value ?? null
+  return {
+    truncated: true,
+    preview: truncateUtf8(serialized, cursorBridgeLimits.historyValueBytes),
+  }
+}
+
+const entryBytes = (entry) => {
+  try {
+    return Buffer.byteLength(JSON.stringify(entry))
+  } catch {
+    return cursorBridgeLimits.historyValueBytes
+  }
+}
+
+const createToolHistory = () => ({ items: new Map(), bytes: 0, touchedAt: Date.now() })
+
+const rememberTool = (history, id, call, result) => {
+  const entry = {
+    name: call.name,
+    input: boundedHistoryValue(call.input),
+    result: boundedHistoryValue(result),
+  }
+  const previous = history.items.get(id)
+  if (previous) history.bytes -= entryBytes(previous)
+  history.items.delete(id)
+  history.items.set(id, entry)
+  history.bytes += entryBytes(entry)
+  history.touchedAt = Date.now()
+  while (
+    history.items.size > cursorBridgeLimits.historyEntries ||
+    history.bytes > cursorBridgeLimits.historyBytes
+  ) {
+    const oldest = history.items.keys().next().value
+    if (oldest === undefined) break
+    const removed = history.items.get(oldest)
+    history.items.delete(oldest)
+    history.bytes -= entryBytes(removed)
+  }
+}
+
+const historyFor = (histories, key) => {
+  const now = Date.now()
+  for (const [candidate, history] of histories) {
+    if (now - history.touchedAt > cursorBridgeLimits.historyTtlMs) histories.delete(candidate)
+  }
+  let history = histories.get(key)
+  if (history) histories.delete(key)
+  else history = createToolHistory()
+  history.touchedAt = now
+  histories.set(key, history)
+  while (histories.size > cursorBridgeLimits.histories) {
+    histories.delete(histories.keys().next().value)
+  }
+  return history
+}
 
 const text = (content) => {
   if (typeof content === "string") return content
@@ -72,7 +181,11 @@ const promptFromResponses = (body, toolHistory) => {
       ]
     }
     if (item.type === "item_reference") {
-      const previous = toolHistory.get(item.id)
+      const previous =
+        toolHistory.get(item.id) ??
+        (item.id.startsWith("cursor_tool_")
+          ? toolHistory.get(item.id.slice("cursor_tool_".length))
+          : undefined)
       if (!previous) return []
       return [
         {
@@ -100,14 +213,12 @@ const promptFromResponses = (body, toolHistory) => {
 
 const requestDirectory = (body, fallback) => {
   if (typeof body.cwd === "string" && isAbsolute(body.cwd)) return resolve(body.cwd)
-  const system = (body.input ?? []).find((item) => item.role === "system")
-  const match = text(system?.content).match(/<env>\s*Working directory:\s*([^\r\n<]+)/)
-  const candidate = match?.[1]?.trim()
+  const candidate = (body.input ?? [])
+    .filter((item) => item.role === "system")
+    .map((item) => text(item.content).match(/(?:^|\n)\s*Working directory:\s*([^\r\n<]+)/)?.[1]?.trim())
+    .find((path) => path && isAbsolute(path))
   if (!candidate || !isAbsolute(candidate)) return fallback
-  const root = resolve(fallback)
-  const path = resolve(candidate)
-  const outside = relative(root, path).startsWith("..")
-  return outside ? fallback : path
+  return resolve(candidate)
 }
 
 const toolsFromResponses = (tools) =>
@@ -129,9 +240,10 @@ const toolChoiceFromResponses = (choice) => {
   if (choice?.type === "function") return { type: "tool", toolName: choice.name }
 }
 
-const providerOptions = (body, apiKey, directory) => ({
+const providerOptions = (body, apiKey, directory, logger) => ({
   apiKey,
   cwd: directory,
+  logger,
   ...(body.mode === "plan" ? { mode: "plan" } : {}),
   ...(body.params && typeof body.params === "object" ? { params: body.params } : {}),
   ...(Array.isArray(body.settingSources) ? { settingSources: body.settingSources } : {}),
@@ -149,20 +261,24 @@ const providerOptions = (body, apiKey, directory) => ({
     : {}),
 })
 
-const usageFromFinish = (usage) => ({
-  input_tokens:
-    (usage?.inputTokens?.total ?? 0) +
-    (usage?.inputTokens?.cacheRead ?? 0) +
-    (usage?.inputTokens?.cacheWrite ?? 0),
-  input_tokens_details: { cached_tokens: usage?.inputTokens?.cacheRead ?? 0 },
-  output_tokens: usage?.outputTokens?.total ?? 0,
-  output_tokens_details: { reasoning_tokens: usage?.outputTokens?.reasoning ?? 0 },
-  total_tokens:
-    (usage?.inputTokens?.total ?? 0) +
-    (usage?.inputTokens?.cacheRead ?? 0) +
-    (usage?.inputTokens?.cacheWrite ?? 0) +
-    (usage?.outputTokens?.total ?? 0),
-})
+const usageFromFinish = (usage) => {
+  const input =
+    usage?.inputTokens?.total ??
+    (usage?.inputTokens?.noCache ?? 0) +
+      (usage?.inputTokens?.cacheRead ?? 0) +
+      (usage?.inputTokens?.cacheWrite ?? 0)
+  const output = usage?.outputTokens?.total ?? 0
+  return {
+    input_tokens: input,
+    input_tokens_details: {
+      cached_tokens: usage?.inputTokens?.cacheRead ?? 0,
+      cache_write_tokens: usage?.inputTokens?.cacheWrite ?? 0,
+    },
+    output_tokens: output,
+    output_tokens_details: { reasoning_tokens: usage?.outputTokens?.reasoning ?? 0 },
+    total_tokens: input + output,
+  }
+}
 
 const readBody = (request) =>
   new Promise((resolve, reject) => {
@@ -197,7 +313,63 @@ const requestSession = (request) =>
     .map((name) => request.headers[name])
     .find((value) => typeof value === "string" && value.length > 0)
 
-const sendEvent = (response, event) => response.write(`data: ${JSON.stringify(event)}\n\n`)
+const waitForDrain = (response) =>
+  new Promise((resolve, reject) => {
+    const cleanup = () => {
+      response.off("drain", drained)
+      response.off("close", closed)
+      response.off("error", failed)
+    }
+    const drained = () => {
+      cleanup()
+      resolve()
+    }
+    const closed = () => {
+      cleanup()
+      const error = new Error("client disconnected")
+      error.name = "AbortError"
+      reject(error)
+    }
+    const failed = (error) => {
+      cleanup()
+      reject(error)
+    }
+    response.once("drain", drained)
+    response.once("close", closed)
+    response.once("error", failed)
+  })
+
+const createSseWriter = (response, heartbeatIntervalMs) => {
+  let pending = Promise.resolve()
+  const write = (chunk) => {
+    pending = pending.then(async () => {
+      if (response.destroyed || response.writableEnded) {
+        const error = new Error("client disconnected")
+        error.name = "AbortError"
+        throw error
+      }
+      if (!response.write(chunk)) await waitForDrain(response)
+    })
+    return pending
+  }
+  const heartbeat =
+    heartbeatIntervalMs > 0
+      ? setInterval(() => {
+          void write(": heartbeat\n\n").catch(() => {})
+        }, heartbeatIntervalMs)
+      : undefined
+  heartbeat?.unref?.()
+  const stop = () => clearInterval(heartbeat)
+  return {
+    event: (event) => write(`data: ${JSON.stringify(event)}\n\n`),
+    stop,
+    drain: () => pending,
+    close: async () => {
+      stop()
+      await pending
+    },
+  }
+}
 
 const displayValue = (value) => {
   let rendered
@@ -213,37 +385,68 @@ const displayValue = (value) => {
   return rendered.length <= limit ? rendered : `${rendered.slice(0, limit)}\n… [tool output truncated]`
 }
 
-const sendToolSummary = (response, call, part, outputIndex) => {
-  const id = `cursor_tool_${part.toolCallId}`
-  const status = part.isError ? "failed" : "completed"
-  const summary = [
-    `Cursor tool ${call.name} ${status}`,
-    `Input: ${displayValue(call.input)}`,
-    `${part.isError ? "Error" : "Result"}: ${displayValue(part.result)}`,
-  ].join("\n")
-  sendEvent(response, {
+const startReasoning = async (writer, id, outputIndex, initialText) => {
+  await writer.event({
     type: "response.output_item.added",
     output_index: outputIndex,
     item: { type: "reasoning", id, summary: [], encrypted_content: null },
   })
-  sendEvent(response, { type: "response.reasoning_summary_part.added", item_id: id, summary_index: 0 })
-  sendEvent(response, {
-    type: "response.reasoning_summary_text.delta",
+  await writer.event({
+    type: "response.reasoning_summary_part.added",
     item_id: id,
+    output_index: outputIndex,
     summary_index: 0,
-    delta: summary,
   })
-  sendEvent(response, { type: "response.reasoning_summary_part.done", item_id: id, summary_index: 0 })
-  sendEvent(response, {
+  if (initialText) {
+    await writer.event({
+      type: "response.reasoning_summary_text.delta",
+      item_id: id,
+      output_index: outputIndex,
+      summary_index: 0,
+      delta: initialText,
+    })
+  }
+}
+
+const finishReasoning = async (writer, id, outputIndex, text) => {
+  await writer.event({
+    type: "response.reasoning_summary_part.done",
+    item_id: id,
+    output_index: outputIndex,
+    summary_index: 0,
+  })
+  await writer.event({
     type: "response.output_item.done",
     output_index: outputIndex,
     item: {
       type: "reasoning",
       id,
-      summary: [{ type: "summary_text", text: summary }],
+      summary: [{ type: "summary_text", text }],
       encrypted_content: null,
     },
   })
+}
+
+const startToolSummary = async (writer, part, outputIndex) => {
+  const id = `cursor_tool_${part.toolCallId}`
+  const summary = `Cursor tool ${part.toolName} started\nInput: ${displayValue(part.input)}`
+  await startReasoning(writer, id, outputIndex, summary)
+  return { id, outputIndex, name: part.toolName, input: part.input, summary }
+}
+
+const finishToolSummary = async (writer, call, part) => {
+  const status = part.isError ? "failed" : "completed"
+  const suffix = `\nCursor tool ${call.name} ${status}\n${part.isError ? "Error" : "Result"}: ${displayValue(part.result)}`
+  await writer.event({
+    type: "response.reasoning_summary_text.delta",
+    item_id: call.id,
+    output_index: call.outputIndex,
+    summary_index: 0,
+    delta: suffix,
+  })
+  const summary = `${call.summary}${suffix}`
+  await finishReasoning(writer, call.id, call.outputIndex, summary)
+  return summary
 }
 
 const streamCursor = async ({
@@ -255,112 +458,272 @@ const streamCursor = async ({
   toolHistory,
   abortSignal,
   requestSessionID,
+  heartbeatIntervalMs,
+  providerLogger,
 }) => {
-  const sdk = createQualityCursor(createCursor, providerOptions(body, apiKey, directory))
+  const sdk = createQualityCursor(createCursor, providerOptions(body, apiKey, directory, providerLogger))
   const language = sdk.languageModel(body.model)
   const sessionID = body.prompt_cache_key ?? requestSessionID
+  const explicitEphemeral =
+    body.ephemeral === true ||
+    body.metadata?.oy_ephemeral === true ||
+    body.metadata?.oy_ephemeral === "true"
   const options = {
-    prompt: promptFromResponses(body, toolHistory),
+    prompt: promptFromResponses(body, toolHistory.items),
     tools: toolsFromResponses(body.tools),
     toolChoice: toolChoiceFromResponses(body.tool_choice),
     maxOutputTokens: body.max_output_tokens,
     temperature: body.temperature,
     topP: body.top_p,
-    providerOptions: { cursor: { ...(sessionID ? { sessionID } : {}) } },
+    providerOptions: {
+      cursor: {
+        ...(sessionID ? { sessionID } : {}),
+        ...(explicitEphemeral ? { ephemeral: true } : {}),
+      },
+    },
     abortSignal,
-  }
-  if (body.tool_choice === "none" || !Array.isArray(body.tools) || body.tools.length === 0) {
-    options.prompt.unshift({
-      role: "system",
-      content: "This is a text-only side call. Do not use tools, modify files, or run commands.",
-    })
-    options.providerOptions.cursor.ephemeral = true
   }
 
   response.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
     connection: "keep-alive",
+    "x-accel-buffering": "no",
   })
+  response.flushHeaders?.()
+  const writer = createSseWriter(response, heartbeatIntervalMs)
+  try {
+  const responseID = `resp_${randomBytes(12).toString("hex")}`
+  const createdAt = Math.floor(Date.now() / 1_000)
+  const responseMetadata = {
+    id: responseID,
+    object: "response",
+    created_at: createdAt,
+    model: body.model,
+  }
+  await writer.event({ type: "response.created", response: responseMetadata })
+  await writer.event({ type: "response.in_progress", response: responseMetadata })
+
   const result = await language.doStream(options)
   const openTools = new Map()
+  const openToolInputs = new Set()
+  const textParts = new Map()
   const reasoning = new Map()
+  const seenText = new Set()
+  const seenReasoning = new Set()
+  const seenToolInputs = new Set()
+  const seenTools = new Set()
+  const output = []
+  const eventCounts = new Map()
   let nextOutputIndex = 0
-  let responseID = `resp_${randomBytes(12).toString("hex")}`
   let finishUsage
+  let sawStreamStart = false
+  let sawFinish = false
+
+  const count = (type) => eventCounts.set(type, (eventCounts.get(type) ?? 0) + 1)
+  const allocateOutput = () => {
+    const outputIndex = nextOutputIndex
+    nextOutputIndex += 1
+    return outputIndex
+  }
+  const requireOpen = (collection, id, kind) => {
+    const current = collection.get(id)
+    if (!current) throw new CursorBridgeProtocolError(`${kind} ${id} was not started`)
+    return current
+  }
+
   for await (const part of result.stream) {
+    count(part.type)
+    if (!sawStreamStart) {
+      if (part.type !== "stream-start") {
+        throw new CursorBridgeProtocolError(`first event was ${part.type}, expected stream-start`)
+      }
+      sawStreamStart = true
+      continue
+    }
+    if (part.type === "stream-start") {
+      throw new CursorBridgeProtocolError("received more than one stream-start event")
+    }
+    if (sawFinish) {
+      throw new CursorBridgeProtocolError(`received ${part.type} after finish`)
+    }
+    if (part.type === "text-start") {
+      if (seenText.has(part.id)) {
+        throw new CursorBridgeProtocolError(`text ${part.id} started more than once`)
+      }
+      seenText.add(part.id)
+      const outputIndex = allocateOutput()
+      textParts.set(part.id, { outputIndex, text: "" })
+      await writer.event({
+        type: "response.output_item.added",
+        output_index: outputIndex,
+        item: { type: "message", id: part.id, phase: null, role: "assistant", content: [] },
+      })
+      continue
+    }
     if (part.type === "text-delta") {
-      sendEvent(response, { type: "response.output_text.delta", item_id: part.id, delta: part.delta })
+      const current = requireOpen(textParts, part.id, "text")
+      current.text += part.delta
+      await writer.event({
+        type: "response.output_text.delta",
+        item_id: part.id,
+        output_index: current.outputIndex,
+        delta: part.delta,
+      })
       continue
     }
     if (part.type === "text-end") {
-      sendEvent(response, { type: "response.output_text.done", item_id: part.id })
+      const current = requireOpen(textParts, part.id, "text")
+      textParts.delete(part.id)
+      const item = {
+        type: "message",
+        id: part.id,
+        phase: null,
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: current.text, annotations: [] }],
+      }
+      await writer.event({
+        type: "response.output_text.done",
+        item_id: part.id,
+        output_index: current.outputIndex,
+        text: current.text,
+      })
+      await writer.event({
+        type: "response.output_item.done",
+        output_index: current.outputIndex,
+        item,
+      })
+      output.push(item)
       continue
     }
     if (part.type === "reasoning-start") {
-      const outputIndex = nextOutputIndex
-      nextOutputIndex += 1
-      reasoning.set(part.id, outputIndex)
-      sendEvent(response, {
-        type: "response.output_item.added",
-        output_index: outputIndex,
-        item: { type: "reasoning", id: part.id, summary: [], encrypted_content: null },
-      })
-      sendEvent(response, { type: "response.reasoning_summary_part.added", item_id: part.id, summary_index: 0 })
+      if (seenReasoning.has(part.id)) {
+        throw new CursorBridgeProtocolError(`reasoning ${part.id} started more than once`)
+      }
+      seenReasoning.add(part.id)
+      const outputIndex = allocateOutput()
+      reasoning.set(part.id, { outputIndex, text: "" })
+      await startReasoning(writer, part.id, outputIndex, "")
       continue
     }
     if (part.type === "reasoning-delta") {
-      sendEvent(response, {
+      const current = requireOpen(reasoning, part.id, "reasoning")
+      current.text += part.delta
+      await writer.event({
         type: "response.reasoning_summary_text.delta",
         item_id: part.id,
+        output_index: current.outputIndex,
         summary_index: 0,
         delta: part.delta,
       })
       continue
     }
     if (part.type === "reasoning-end") {
-      const outputIndex = reasoning.get(part.id) ?? nextOutputIndex++
-      sendEvent(response, { type: "response.reasoning_summary_part.done", item_id: part.id, summary_index: 0 })
-      sendEvent(response, {
-        type: "response.output_item.done",
-        output_index: outputIndex,
-        item: { type: "reasoning", id: part.id, summary: [], encrypted_content: null },
-      })
+      const current = requireOpen(reasoning, part.id, "reasoning")
       reasoning.delete(part.id)
+      await finishReasoning(writer, part.id, current.outputIndex, current.text)
+      output.push({
+        type: "reasoning",
+        id: part.id,
+        summary: [{ type: "summary_text", text: current.text }],
+        encrypted_content: null,
+      })
+      continue
+    }
+    if (part.type === "tool-input-start") {
+      if (seenToolInputs.has(part.id)) {
+        throw new CursorBridgeProtocolError(`tool input ${part.id} started more than once`)
+      }
+      seenToolInputs.add(part.id)
+      openToolInputs.add(part.id)
+      continue
+    }
+    if (part.type === "tool-input-delta") {
+      if (!openToolInputs.has(part.id)) {
+        throw new CursorBridgeProtocolError(`tool input ${part.id} received a delta before start`)
+      }
+      continue
+    }
+    if (part.type === "tool-input-end") {
+      if (!openToolInputs.delete(part.id)) {
+        throw new CursorBridgeProtocolError(`tool input ${part.id} ended before start`)
+      }
       continue
     }
     if (part.type === "tool-call") {
-      openTools.set(part.toolCallId, { name: part.toolName, input: part.input })
+      if (seenTools.has(part.toolCallId)) {
+        throw new CursorBridgeProtocolError(`tool ${part.toolCallId} started more than once`)
+      }
+      seenTools.add(part.toolCallId)
+      if (openToolInputs.has(part.toolCallId)) {
+        throw new CursorBridgeProtocolError(`tool ${part.toolCallId} was called before its input ended`)
+      }
+      openTools.set(part.toolCallId, await startToolSummary(writer, part, allocateOutput()))
       continue
     }
     if (part.type === "tool-result") {
-      const call = openTools.get(part.toolCallId) ?? { name: part.toolName, input: {} }
+      const call = requireOpen(openTools, part.toolCallId, "tool")
       openTools.delete(part.toolCallId)
-      toolHistory.set(part.toolCallId, { name: call.name, input: call.input, result: part.result })
-      if (toolHistory.size > 2_000) toolHistory.delete(toolHistory.keys().next().value)
-      sendToolSummary(response, call, part, nextOutputIndex)
-      nextOutputIndex += 1
+      rememberTool(toolHistory, part.toolCallId, call, part.result)
+      const summary = await finishToolSummary(writer, call, part)
+      output.push({
+        type: "reasoning",
+        id: call.id,
+        summary: [{ type: "summary_text", text: summary }],
+        encrypted_content: null,
+      })
       continue
     }
     if (part.type === "error") throw part.error
     if (part.type === "finish") {
+      if (part.finishReason?.unified !== "stop") {
+        throw new CursorBridgeProtocolError(
+          `finish reason was ${part.finishReason?.unified ?? "missing"}, expected stop`,
+        )
+      }
       finishUsage = usageFromFinish(part.usage)
-      responseID = part.providerMetadata?.cursor?.responseId ?? responseID
+      sawFinish = true
+      continue
     }
+    throw new CursorBridgeProtocolError(`unsupported event ${part.type}`)
   }
-  for (const [id, outputIndex] of reasoning) {
-    sendEvent(response, { type: "response.reasoning_summary_part.done", item_id: id, summary_index: 0 })
-    sendEvent(response, {
-      type: "response.output_item.done",
-      output_index: outputIndex,
-      item: { type: "reasoning", id, summary: [], encrypted_content: null },
-    })
+  if (!sawFinish) throw new CursorBridgeProtocolError("stream ended without finish")
+  if (textParts.size > 0) {
+    throw new CursorBridgeProtocolError(`stream finished with ${textParts.size} open text item(s)`)
   }
-  sendEvent(response, {
+  if (reasoning.size > 0) {
+    throw new CursorBridgeProtocolError(`stream finished with ${reasoning.size} open reasoning item(s)`)
+  }
+  if (openToolInputs.size > 0) {
+    throw new CursorBridgeProtocolError(`stream finished with ${openToolInputs.size} open tool input(s)`)
+  }
+  if (openTools.size > 0) {
+    throw new CursorBridgeProtocolError(`stream finished with ${openTools.size} open tool call(s)`)
+  }
+
+  const usage = finishUsage ?? usageFromFinish()
+  await writer.event({
     type: "response.completed",
-    response: { id: responseID, usage: finishUsage ?? usageFromFinish() },
+    response: {
+      ...responseMetadata,
+      status: "completed",
+      output,
+      usage,
+    },
   })
+  await writer.close()
   response.end()
+  return {
+    responseID,
+    events: Object.fromEntries(eventCounts),
+    outputItems: output.length,
+    usage,
+  }
+  } finally {
+    writer.stop()
+    await writer.drain().catch(() => {})
+  }
 }
 
 export const startCursorBridge = async ({
@@ -371,8 +734,20 @@ export const startCursorBridge = async ({
   onDirectory,
   onIdle,
   reportError,
+  reportDiagnostic = () => {},
+  heartbeatIntervalMs = cursorBridgeLimits.heartbeatMs,
+  modelRefreshTimeoutMs = cursorBridgeLimits.modelRefreshMs,
+  modelRefreshRetryMs = cursorBridgeLimits.modelRefreshRetryMs,
 }) => {
-  const handlers = { createCursor, listCursorModels, onModels, onDirectory, onIdle, reportError }
+  const handlers = {
+    createCursor,
+    listCursorModels,
+    onModels,
+    onDirectory,
+    onIdle,
+    reportError,
+    reportDiagnostic,
+  }
   const existing = bridges.get(directory)
   if (existing) {
     return createBridgeLease(existing, handlers)
@@ -380,12 +755,50 @@ export const startCursorBridge = async ({
 
   const token = randomBytes(32).toString("base64url")
   const refreshedKeys = new Set()
+  const modelRefreshes = new Map()
   const toolHistories = new Map()
   const active = new Map()
+  const activeRequests = new Set()
   const state = {
     current: handlers,
     owners: [],
     closing: undefined,
+    activeRequests,
+  }
+  const shortHash = (value) => createHash("sha256").update(value).digest("hex").slice(0, 12)
+  const refreshModels = (fingerprint, apiKey, context) => {
+    if (refreshedKeys.has(fingerprint)) return
+    const refresh = modelRefreshes.get(fingerprint) ?? { retryAt: 0, running: undefined }
+    if (refresh.running || refresh.retryAt > Date.now()) return
+    refresh.running = (async () => {
+      const models = await withTimeout(
+        state.current.listCursorModels(apiKey),
+        modelRefreshTimeoutMs,
+        "Cursor model refresh",
+      )
+      await state.current.onModels(models)
+      refreshedKeys.add(fingerprint)
+      modelRefreshes.delete(fingerprint)
+    })()
+      .catch((error) => {
+        refresh.retryAt = Date.now() + modelRefreshRetryMs
+        state.current.reportError("failed to refresh Cursor models from bridge", error, context)
+      })
+      .finally(() => {
+        refresh.running = undefined
+      })
+    modelRefreshes.set(fingerprint, refresh)
+  }
+  const providerLogger = (level, message, extra) => {
+    if (level === "warn" || level === "error") {
+      state.current.reportError(
+        `Cursor provider ${level}`,
+        new Error(message),
+        extra,
+      )
+      return
+    }
+    state.current.reportDiagnostic("Cursor provider diagnostic", { level, message, ...extra })
   }
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || !request.url?.endsWith("/responses")) {
@@ -401,31 +814,33 @@ export const startCursorBridge = async ({
       response.writeHead(401).end()
       return
     }
+    const startedAt = Date.now()
+    const requestID = `bridge_${randomBytes(8).toString("hex")}`
+    let requestContext = { requestID }
     try {
       const body = await readBody(request)
       const cwd = requestDirectory(body, directory)
+      requestContext = {
+        requestID,
+        model: typeof body.model === "string" ? body.model : "unknown",
+        cwd: shortHash(cwd),
+      }
       state.current.onDirectory(cwd)
       active.set(cwd, (active.get(cwd) ?? 0) + 1)
       const fingerprint = createHash("sha256").update(apiKey).digest("hex")
       const session = body.prompt_cache_key ?? requestSession(request) ?? "ephemeral"
+      requestContext.session = shortHash(session)
       const historyKey = `${fingerprint}:${cwd}:${session}`
-      const toolHistory = toolHistories.get(historyKey) ?? new Map()
-      toolHistories.set(historyKey, toolHistory)
-      if (toolHistories.size > 128) toolHistories.delete(toolHistories.keys().next().value)
-      if (!refreshedKeys.has(fingerprint)) {
-        refreshedKeys.add(fingerprint)
-        void state.current
-          .listCursorModels(apiKey)
-          .then(state.current.onModels)
-          .catch((error) => state.current.reportError("failed to refresh Cursor models from bridge", error))
-      }
+      const toolHistory = historyFor(toolHistories, historyKey)
+      refreshModels(fingerprint, apiKey, requestContext)
       try {
         const abort = new AbortController()
+        activeRequests.add(abort)
         const abortRequest = () => abort.abort()
         request.once("aborted", abortRequest)
         response.once("close", abortRequest)
         try {
-          await streamCursor({
+          const result = await streamCursor({
             body,
             apiKey,
             directory: cwd,
@@ -434,8 +849,16 @@ export const startCursorBridge = async ({
             toolHistory,
             abortSignal: abort.signal,
             requestSessionID: requestSession(request),
+            heartbeatIntervalMs,
+            providerLogger,
+          })
+          state.current.reportDiagnostic("Cursor bridge request completed", {
+            ...requestContext,
+            durationMs: Date.now() - startedAt,
+            ...result,
           })
         } finally {
+          activeRequests.delete(abort)
           request.off("aborted", abortRequest)
           response.off("close", abortRequest)
         }
@@ -448,25 +871,50 @@ export const startCursorBridge = async ({
         }
       }
     } catch (error) {
-      state.current.reportError("Cursor bridge request failed", error)
+      const aborted = error?.name === "AbortError"
+      if (!aborted || !response.destroyed) {
+        state.current.reportError("Cursor bridge request failed", error, {
+          ...requestContext,
+          durationMs: Date.now() - startedAt,
+          code: error?.code,
+          status: error?.status,
+          updates: error?.updates,
+        })
+      }
       if (response.writableEnded) return
       if (!response.headersSent) {
         response.writeHead(400, { "content-type": "application/json" })
         response.end(JSON.stringify({ error: "Cursor bridge request failed" }))
         return
       }
-      sendEvent(response, {
-        type: "error",
-        code: "cursor_bridge_error",
-        message: error instanceof Error ? error.message : String(error),
-      })
+      if (!response.destroyed) {
+        response.write(
+          `data: ${JSON.stringify({
+            type: "error",
+            sequence_number: 0,
+            code: error?.code ?? "cursor_bridge_error",
+            message: error instanceof Error ? error.message : String(error),
+            param: null,
+          })}\n\n`,
+        )
+      }
       response.end()
     }
   })
   await new Promise((resolve, reject) => {
-    server.once("error", reject)
-    server.listen(0, "127.0.0.1", resolve)
+    const failed = (error) => {
+      server.off("listening", listening)
+      reject(error)
+    }
+    const listening = () => {
+      server.off("error", failed)
+      resolve()
+    }
+    server.once("error", failed)
+    server.once("listening", listening)
+    server.listen(0, "127.0.0.1")
   })
+  server.on("error", (error) => state.current.reportError("Cursor bridge server failed", error))
   server.unref()
   const address = server.address()
   if (!address || typeof address === "string") throw new Error("Cursor bridge did not bind a TCP port")
@@ -477,12 +925,39 @@ export const startCursorBridge = async ({
     server,
     clear: () => {
       refreshedKeys.clear()
+      modelRefreshes.clear()
       toolHistories.clear()
     },
   })
   bridges.set(directory, state)
   return createBridgeLease(state, handlers)
 }
+
+const closeBridgeServer = (state) =>
+  new Promise((resolve, reject) => {
+    let settled = false
+    let force
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(force)
+      clearTimeout(timeout)
+      if (error && error.code !== "ERR_SERVER_NOT_RUNNING") reject(error)
+      else resolve()
+    }
+    const timeout = setTimeout(() => {
+      state.server.closeAllConnections?.()
+      finish()
+    }, cursorBridgeLimits.shutdownMs)
+    timeout.unref?.()
+    state.server.closeIdleConnections?.()
+    state.server.close(finish)
+    force = setTimeout(
+      () => state.server.closeAllConnections?.(),
+      cursorBridgeLimits.shutdownForceMs,
+    )
+    force.unref?.()
+  })
 
 const createBridgeLease = (state, handlers) => {
   const owner = { handlers }
@@ -502,13 +977,9 @@ const createBridgeLease = (state, handlers) => {
         return
       }
       if (bridges.get(state.directory) === state) bridges.delete(state.directory)
+      for (const controller of state.activeRequests) controller.abort()
       state.clear()
-      state.closing ??= new Promise((resolve, reject) => {
-        state.server.close((error) => {
-          if (error) reject(error)
-          else resolve()
-        })
-      })
+      state.closing ??= closeBridgeServer(state)
       return state.closing
     },
   }

@@ -192,6 +192,7 @@ test("registers the oy agent, skills, commands, and Cursor provider", async () =
     harness.models.get("cursor/composer-2.5").variants.map((variant) => variant.id),
     ["off", "on", "plan"],
   )
+  assert.equal(defaultCursorStallMs, 120_000)
   assert.equal(environment.OPENCODE_CURSOR_STALL_MS, String(defaultCursorStallMs))
   await cleanup()
 })

@@ -165,7 +165,7 @@ export const cursorVariants = (item) => {
   return { defaults, variants }
 }
 
-export const applyCursorCatalog = (catalog, directory, models, bridge) => {
+export const applyCursorCatalog = (catalog, models, bridge) => {
   let autoCompaction = false
   const bridgeHeaders = bridge ? { "x-oy-cursor-bridge": bridge.token } : {}
   catalog.provider.update("cursor", (provider) => {
@@ -211,7 +211,6 @@ export const applyCursorCatalog = (catalog, directory, models, bridge) => {
       model.request = {
         headers: { ...bridgeHeaders },
         body: {
-          cwd: directory,
           ...(Object.keys(controls.defaults).length > 0 ? { params: controls.defaults } : {}),
         },
       }
