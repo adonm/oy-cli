@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- Bundled the pinned Cursor provider into the OpenCode npm artifact so npm 12
+  consumers do not need to enable Git dependencies to install oy.
+
 ## [0.14.6] - 2026-08-09
 
 ### Changed

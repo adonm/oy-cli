@@ -381,6 +381,7 @@ test("installed plugin layout resolves packaged assets and modules", async () =>
     cpSync(join(packageDirectory, "cursor-paths.js"), join(directory, "cursor-paths.js"))
     cpSync(join(packageDirectory, "cursor-provider.js"), join(directory, "cursor-provider.js"))
     cpSync(join(packageDirectory, "cursor-skills.js"), join(directory, "cursor-skills.js"))
+    cpSync(join(packageDirectory, "vendor"), join(directory, "vendor"), { recursive: true })
     const installed = await import(`${pathToFileURL(join(directory, "index.js")).href}?test=${Date.now()}`)
 
     assert.equal(installed.default.id, "oy")

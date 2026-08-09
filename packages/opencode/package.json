@@ -27,10 +27,11 @@
     "cursor-provider.js",
     "cursor-skills.js",
     "assets",
+    "vendor",
     "README.md"
   ],
   "scripts": {
-    "build": "node --check index.js && node --check cursor-catalog.js && node --check cursor-bridge.js && node --check cursor-paths.js && node --check cursor-provider.js && node --check cursor-skills.js",
+    "build": "node --check index.js && node --check cursor-catalog.js && node --check cursor-bridge.js && node --check cursor-paths.js && node --check cursor-provider.js && node --check cursor-skills.js && node --check vendor/opencode-cursor/provider/index.js && node --check vendor/opencode-cursor/sidecar/agent-host.js",
     "test": "node --test"
   },
   "publishConfig": {
@@ -40,8 +41,8 @@
     "node": ">=24.15.0"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.27",
-    "@oy-cli/opencode-cursor": "git+https://github.com/adonm/opencode-cursor.git#a0ae9d54875e391007dca6766e8eaf8a04d1ef25"
+    "@ai-sdk/provider": "3.0.14",
+    "@cursor/sdk": "1.0.27"
   },
   "overrides": {
     "undici": "6.28.0"

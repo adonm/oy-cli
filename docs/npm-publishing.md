@@ -13,7 +13,7 @@ The npm package is connected to GitHub Actions with these values:
 | Workflow filename | `release.yml` |
 | Environment | `npm` |
 
-The release workflow uses a GitHub-hosted runner, Node 24, an OIDC-capable npm version, the `npm` GitHub environment, and `id-token: write`. No long-lived `NPM_TOKEN` is stored.
+The release workflow uses a GitHub-hosted runner, Node 26, an OIDC-capable npm version, the `npm` GitHub environment, and `id-token: write`. No long-lived `NPM_TOKEN` is stored.
 
 ## Release behavior
 
@@ -28,6 +28,8 @@ Cargo and npm package versions must match before tagging. On a tagged release, `
 The crate and npm jobs run independently after the binaries, while the GitHub release waits for both. CI and the release jobs use `scripts/check_versions.py` for the same alignment check.
 
 `oy setup` registers the npm package version matching the CLI, so never publish only one half of a release.
+The package vendors its commit-pinned Cursor provider runtime so neither source
+installs nor consumers need to permit Git dependencies.
 
 ## npm controls
 

@@ -1,6 +1,6 @@
 import { readFileSync, rmSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { createCursor } from "@oy-cli/opencode-cursor"
+import { createCursor } from "./vendor/opencode-cursor/provider/index.js"
 import { applyCursorCatalog, fallbackCursorModels } from "./cursor-catalog.js"
 import { startCursorBridge } from "./cursor-bridge.js"
 import { safeWorkspacePath } from "./cursor-paths.js"

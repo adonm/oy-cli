@@ -155,6 +155,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
+      - name: Install current npm
+        run: npm install --global npm@12.0.1
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
       - name: Build and test
