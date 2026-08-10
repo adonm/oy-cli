@@ -79,8 +79,8 @@ just opencode-dev models
 ```
 
 The recipe uses the checkout plugin, a private OpenCode server, and ignored
-temporary state. If `opencode2` is missing from `node@latest`, it installs the
-documented `@opencode-ai/cli@next` package there. This verifies the plugin and
+temporary state. If `opencode2` is missing, it is provisioned from the
+project's `.mise.toml` (`mise exec`). This verifies the plugin and
 Cursor integration without making a provider request. To test live model
 discovery, connect a key with `/connect`, choose Cursor, and inspect the model
 picker. Do not paste the key into a config file.

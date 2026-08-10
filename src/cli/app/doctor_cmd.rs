@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use crate::config;
 
-const OPENCODE_NPM_PACKAGE: &str = "@opencode-ai/cli@next";
-const OPENCODE_NODE_TOOL: &str = "node@latest";
 const TOKEI_MISE_TOOL: &str = "aqua:XAMPPRocky/tokei@12.1.2";
 const CTAGS_MISE_TOOL: &str =
     "github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]";
@@ -290,7 +288,7 @@ fn recommended_next_step(
 fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
     let mut tools = Vec::new();
     if !opencode_ok {
-        tools.push(OPENCODE_NODE_TOOL);
+        tools.push(crate::mise::OPENCODE_MISE_SPEC);
     }
     if !tokei_ok {
         tools.push(TOKEI_MISE_TOOL);
@@ -343,19 +341,15 @@ fn maybe_install_missing_with_mise(
     ));
     run_mise_use(&mise, &tools)?;
     if !opencode_ok {
-        run_opencode_npm_install(&mise)?;
+        crate::mise::ensure_opencode_allow_builds()?;
+        run_opencode_install(&mise)?;
     }
     let status = std::process::Command::new(&mise).arg("reshim").status()?;
     if !status.success() {
         bail!("tools installed, but `mise reshim` failed");
     }
-    if !opencode_ok
-        && !command_ok(
-            "mise",
-            &["exec", OPENCODE_NODE_TOOL, "--", "opencode2", "--version"],
-        )
-    {
-        bail!("OpenCode 2 installed, but `mise exec node@latest -- opencode2 --version` failed");
+    if !opencode_ok && !command_ok("mise", &["exec", "--", "opencode2", "--version"]) {
+        bail!("OpenCode 2 installed, but `mise exec -- opencode2 --version` failed");
     }
     if !tokei_ok && !command_ok("mise", &["exec", "--", "tokei", "--version"]) {
         bail!("tokei installed, but `mise exec -- tokei --version` failed");
@@ -388,17 +382,9 @@ fn run_mise_use(mise: &Path, tools: &[&str]) -> Result<()> {
     )
 }
 
-fn run_opencode_npm_install(mise: &Path) -> Result<()> {
+fn run_opencode_install(mise: &Path) -> Result<()> {
     let status = std::process::Command::new(mise)
-        .args([
-            "exec",
-            OPENCODE_NODE_TOOL,
-            "--",
-            "npm",
-            "install",
-            "-g",
-            OPENCODE_NPM_PACKAGE,
-        ])
+        .args(["install", "-f", crate::mise::OPENCODE_MISE_SPEC])
         .status()?;
     if status.success() {
         return Ok(());
@@ -451,7 +437,7 @@ mod tests {
     fn mise_tool_list_tracks_missing_tools() {
         assert_eq!(
             missing_mise_tools(false, false, true),
-            vec![OPENCODE_NODE_TOOL, TOKEI_MISE_TOOL]
+            vec![crate::mise::OPENCODE_MISE_SPEC, TOKEI_MISE_TOOL]
         );
         assert_eq!(missing_mise_tools(true, true, false), vec![CTAGS_MISE_TOOL]);
         assert!(missing_mise_tools(true, true, true).is_empty());

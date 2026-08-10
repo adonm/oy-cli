@@ -53,6 +53,7 @@
 mod artifacts;
 mod audit;
 mod cli;
+mod mise;
 mod opencode;
 mod review;
 mod tools;

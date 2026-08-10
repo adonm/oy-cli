@@ -62,11 +62,11 @@ opencode-dev *args:
     if command -v opencode2 >/dev/null 2>&1; then \
       opencode_bin=$(command -v opencode2); \
     else \
-      if ! MISE_CONFIG_FILE=/dev/null MISE_CONFIG_DIR=/dev/null MISE_GLOBAL_CONFIG_FILE=/dev/null mise exec node@latest -- opencode2 --version >/dev/null 2>&1; then \
-        printf '%s\n' 'opencode2 is missing from node@latest; installing @opencode-ai/cli@next...' >&2; \
-        MISE_CONFIG_FILE=/dev/null MISE_CONFIG_DIR=/dev/null MISE_GLOBAL_CONFIG_FILE=/dev/null mise exec node@latest -- npm install --global @opencode-ai/cli@next; \
+      if ! mise exec -- opencode2 --version >/dev/null 2>&1; then \
+        printf '%s\n' 'opencode2 is not installed; run `mise install` to provision it from .mise.toml, then retry.' >&2; \
+        exit 1; \
       fi; \
-      opencode_bin=$(MISE_CONFIG_FILE=/dev/null MISE_CONFIG_DIR=/dev/null MISE_GLOBAL_CONFIG_FILE=/dev/null mise exec node@latest -- sh -c 'command -v opencode2'); \
+      opencode_bin=$(mise which opencode2); \
     fi; \
     export HOME="$root/home" OPENCODE_CONFIG_DIR="$root/config" XDG_CONFIG_HOME="$root/config-home" XDG_CACHE_HOME="$root/cache" XDG_DATA_HOME="$root/data" XDG_STATE_HOME="$root/state" OY_ROOT="$(pwd)"; \
     "$opencode_bin" {{args}} --standalone

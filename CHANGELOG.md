@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.14.9] - 2026-08-11
+
+### Fixed
+- Install, upgrade, and doctor paths no longer leave a stub `opencode2` when a
+  project-level mise config overrides the global OpenCode tool entry without
+  `allow_builds`.
+
+### Changed
+- Installed OpenCode 2 through mise's npm backend (`npm:@opencode-ai/cli@next`),
+  allowing the package postinstall that downloads the native binary and
+  dropping the Node.js host requirement from install, upgrade, and doctor.
+- Located the mise configs to patch through `mise config ls` and patched every
+  config declaring the OpenCode tool, instead of assuming filenames.
+- `oy upgrade --check` queried npm dist-tags directly instead of invoking npm
+  under a managed Node.js.
+
 ## [0.14.8] - 2026-08-09
 
 ### Fixed

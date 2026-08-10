@@ -18,8 +18,10 @@ If you do not use [`mise`](https://mise.jdx.dev/), install Rust 1.96+ and [`just
 `just opencode-dev` launches a private OpenCode instance using the checkout's
 `packages/opencode/index.js`. It keeps config, cache, state, and service data
 under an ignored `.tmp/opencode-dev.*` directory. Pass OpenCode arguments
-directly, for example `just opencode-dev models`. If `opencode2` is missing
-from `node@latest`, the recipe installs `@opencode-ai/cli@next` there.
+directly, for example `just opencode-dev models`. If `opencode2` is missing,
+the recipe provisions it from the project's `.mise.toml` (`mise exec`), where
+`npm:@opencode-ai/cli` is declared with `allow_builds` so its postinstall can
+download the native binary.
 
 ## Local Checks
 

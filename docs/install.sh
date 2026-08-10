@@ -11,10 +11,11 @@ set -eu
 #   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
 #   OY_SKIP_SETUP     1/true to skip `oy setup` and runtime load checks
 
-oy_version="0.14.8"
+oy_version="0.14.9"
 oy_tool="github:adonm/oy-cli@$oy_version"
-node_tool="node@latest"
-opencode_package="@opencode-ai/cli@next"
+opencode_tool="npm:@opencode-ai/cli@next"
+opencode_plain='"npm:@opencode-ai/cli" = "next"'
+opencode_entry='"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }'
 tokei_tool="aqua:XAMPPRocky/tokei@12.1.2"
 ctags_tool="github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
 
@@ -170,12 +171,37 @@ mise_unuse() {
   fi
 }
 
+# Allow the OpenCode 2 package postinstall, which downloads the native binary.
+# mise's package manager denies lifecycle scripts unless the config entry names
+# them; `mise use` cannot express tool options, so patch the entries it wrote.
+# `mise config ls` reports exactly which config files are in use, so the patch
+# follows mise's own discovery instead of guessing filenames.
+allow_opencode_postinstall() {
+  config_files=$("$mise_bin" config ls --no-header 2>/dev/null | awk '
+    {
+      tools = $0
+      sub(/^[^ ]*  /, "", tools)
+      if (tools ~ /npm:@opencode-ai\/cli/) print $1
+    }
+  ')
+  if [ -z "$config_files" ]; then
+    # Older mise without `mise config ls`: fall back to the standard names.
+    config_files="$(pwd)/mise.toml $(pwd)/.mise.toml $(pwd)/mise.local.toml $(pwd)/.mise.local.toml"
+    config_files="$config_files ${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
+  fi
+  for candidate in $config_files; do
+    [ -f "$candidate" ] || continue
+    sed -i "s|^$opencode_plain\$|$opencode_entry|" "$candidate"
+  done
+  "$mise_bin" install -f "$opencode_tool"
+}
+
 log "Mise scope: $scope"
 log "Installing/upgrading oy and OpenCode with mise..."
-mise_use "$oy_tool" "$node_tool"
+mise_use "$oy_tool" "$opencode_tool"
 
-log "Installing OpenCode 2 with npm as documented upstream..."
-"$mise_bin" exec "$node_tool" -- npm install -g "$opencode_package"
+log "Allowing the OpenCode 2 postinstall and installing the native binary..."
+allow_opencode_postinstall
 
 log "Installing optional prebuilt context helpers..."
 if ! mise_use "$tokei_tool" "$ctags_tool"; then
@@ -185,7 +211,6 @@ fi
 log "Removing superseded source/package-manager tool entries..."
 mise_unuse \
   cargo:oy-cli \
-  "npm:@opencode-ai/cli" \
   cargo:tokei \
   github:universal-ctags/ctags
 "$mise_bin" reshim
@@ -197,7 +222,7 @@ case "$installed_oy_version" in
 *) die "expected oy $oy_version after install, got: $installed_oy_version" ;;
 esac
 
-installed_opencode_version=$("$mise_bin" exec "$node_tool" -- opencode2 --version 2>/dev/null) \
+installed_opencode_version=$("$mise_bin" exec -- opencode2 --version 2>/dev/null) \
   || die "OpenCode 2 installed, but opencode2 --version failed"
 case "$installed_opencode_version" in
 *"0.0.0-next-"[0-9]*) ;;
@@ -205,7 +230,7 @@ case "$installed_opencode_version" in
 esac
 
 log "Stopping any older OpenCode background service..."
-if ! "$mise_bin" exec "$node_tool" -- opencode2 service stop >/dev/null 2>&1; then
+if ! "$mise_bin" exec -- opencode2 service stop >/dev/null 2>&1; then
   log "No running OpenCode service needed stopping."
 fi
 
@@ -227,16 +252,16 @@ case "${OY_SKIP_SETUP:-}" in
   ;;
 *)
   log "Installing the OpenCode integration with oy setup..."
-  "$mise_bin" exec "$oy_tool" "$node_tool" -- oy setup
+  "$mise_bin" exec "$oy_tool" -- oy setup
   log "Starting OpenCode so it can install the version-matched oy plugin..."
-  "$mise_bin" exec "$node_tool" -- opencode2 service start >/dev/null \
+  "$mise_bin" exec -- opencode2 service start >/dev/null \
     || die "OpenCode could not start after oy setup"
   workspace=$(pwd)
   log "Waiting for OpenCode to resolve and load the oy commands..."
   plugin_loaded=0
   attempts=0
   while [ "$attempts" -lt 60 ]; do
-    loaded_plugins=$("$mise_bin" exec "$node_tool" -- opencode2 api v2.command.list \
+    loaded_plugins=$("$mise_bin" exec -- opencode2 api v2.command.list \
       --param "location[directory]=$workspace" 2>/dev/null || true)
     case "$loaded_plugins" in
     *'"name":"oy-audit"'* | *'"name": "oy-audit"'*)

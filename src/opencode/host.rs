@@ -8,7 +8,7 @@ use std::time::Duration;
 use wait_timeout::ChildExt as _;
 
 pub(crate) const OPENCODE_ENV: &str = "OY_OPENCODE";
-const OPENCODE_NEXT_PACKAGE: &str = "@opencode-ai/cli@next";
+const OPENCODE_NEXT_PACKAGE: &str = "npm:@opencode-ai/cli@next";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_OUTPUT_LIMIT: u64 = 16 * 1024;
 
@@ -96,7 +96,7 @@ impl OpenCodeHost {
         }
         if !self.available {
             return Err(format!(
-                "OpenCode 2 host `{}` is unavailable; install {OPENCODE_NEXT_PACKAGE} or set {OPENCODE_ENV}",
+                "OpenCode 2 host `{}` is unavailable; install {OPENCODE_NEXT_PACKAGE} with mise or set {OPENCODE_ENV}",
                 self.executable.display()
             ));
         }

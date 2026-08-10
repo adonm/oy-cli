@@ -123,37 +123,40 @@ run_install() {
 default_log="$tmp/default.log"
 run_install "$default_log" 1 1 "$tmp/home-default" ""
 default=$(cat "$default_log")
-assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version node@latest"
-assert_contains "$default" "exec node@latest -- npm install -g @opencode-ai/cli@next"
+assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@next"
+assert_contains "$default" "config ls --no-header"
+assert_contains "$default" "install -f npm:@opencode-ai/cli@next"
 assert_contains "$default" "exec github:adonm/oy-cli@$oy_version -- oy --version"
-assert_contains "$default" "exec node@latest -- opencode2 --version"
-assert_contains "$default" "unuse --global --yes --no-prune cargo:oy-cli npm:@opencode-ai/cli cargo:tokei github:universal-ctags/ctags"
+assert_contains "$default" "exec -- opencode2 --version"
+assert_contains "$default" "unuse --global --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_contains "$default" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli npm:@opencode-ai/cli cargo:tokei github:universal-ctags/ctags"
 assert_contains "$default" "aqua:XAMPPRocky/tokei@12.1.2"
 assert_contains "$default" "github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
+assert_not_contains "$default" "npm install -g"
+assert_not_contains "$default" "node@latest"
 assert_not_contains "$(cat "$default_log.curl")" "https://cursor.com/install"
 
 workspace_log="$tmp/workspace.log"
 run_install "$workspace_log" 1 1 "$tmp/home-workspace" "" --workspace
 workspace=$(cat "$workspace_log")
-assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version node@latest"
+assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@next"
 assert_not_contains "$workspace" "use --global"
-assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli npm:@opencode-ai/cli cargo:tokei github:universal-ctags/ctags"
+assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_not_contains "$workspace" "unuse --global"
 
 env_workspace_log="$tmp/env-workspace.log"
 run_install "$env_workspace_log" 1 1 "$tmp/home-env-workspace" workspace
 env_workspace=$(cat "$env_workspace_log")
-assert_contains "$env_workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version node@latest"
+assert_contains "$env_workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@next"
 assert_not_contains "$env_workspace" "use --global"
 
 setup_log="$tmp/setup.log"
 run_install "$setup_log" 0 1 "$tmp/home-setup" "" --global
 setup=$(cat "$setup_log")
 assert_not_contains "$setup" "exec -- oy setup --remove"
-assert_contains "$setup" "exec github:adonm/oy-cli@$oy_version node@latest -- oy setup"
-assert_contains "$setup" "exec node@latest -- opencode2 service start"
-assert_contains "$setup" "exec node@latest -- opencode2 api v2.command.list"
+assert_contains "$setup" "exec github:adonm/oy-cli@$oy_version -- oy setup"
+assert_contains "$setup" "exec -- opencode2 service start"
+assert_contains "$setup" "exec -- opencode2 api v2.command.list"
 
 bootstrap_log="$tmp/bootstrap.log"
 run_install "$bootstrap_log" 1 0 "$tmp/home-bootstrap" ""

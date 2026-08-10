@@ -11,10 +11,8 @@ use std::time::Duration;
 const OY_MISE_TOOL: &str = "github:adonm/oy-cli";
 const OY_MISE_SPEC: &str = "github:adonm/oy-cli@latest";
 const LEGACY_OY_MISE_TOOL: &str = "cargo:oy-cli";
-const LEGACY_OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli";
-const OPENCODE_NODE_TOOL: &str = "node";
-const OPENCODE_NODE_SPEC: &str = "node@latest";
-const OPENCODE_NPM_PACKAGE: &str = "@opencode-ai/cli@next";
+const OPENCODE_DIST_TAGS_URL: &str =
+    "https://registry.npmjs.org/-/package/@opencode-ai/cli/dist-tags";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
@@ -25,7 +23,7 @@ pub(super) struct UpgradeArgs {
         long,
         conflicts_with = "check",
         default_value_t = false,
-        help = "Print the mise/npm upgrade commands without running them"
+        help = "Print the mise upgrade commands without running them"
     )]
     dry_run: bool,
     #[arg(
@@ -50,20 +48,21 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
     }
 
     if args.check {
-        return check_for_upgrades(&install);
+        return check_for_upgrades();
     }
 
     run_checked(
         "mise use",
         &mise_use_args(false),
         INSTALL_TIMEOUT,
-        "failed to install the latest oy and Node.js with mise",
+        "failed to install the latest oy with mise",
     )?;
+    crate::mise::ensure_opencode_allow_builds()?;
     run_checked(
         "OpenCode 2 install",
-        &opencode_npm_install_args(),
+        &opencode_install_args(),
         INSTALL_TIMEOUT,
-        "failed to install the current OpenCode 2 beta with npm",
+        "failed to install the current OpenCode 2 beta with mise",
     )?;
 
     if install.has_legacy_tools {
@@ -88,7 +87,7 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
         SETUP_TIMEOUT,
     )
     .context(
-        "upgraded with mise/npm, but failed to refresh oy integration with the newly installed oy",
+        "upgraded with mise, but failed to refresh oy integration with the newly installed oy",
     )?;
     if !setup.status.success() {
         return Ok(report_command_failure("post-upgrade setup", &setup));
@@ -133,7 +132,7 @@ fn print_dry_run(has_legacy_tools: bool) {
     ));
     crate::ui::line(format_args!(
         "{}",
-        shell_command("mise", &opencode_npm_install_args())
+        shell_command("mise", &opencode_install_args())
     ));
     if has_legacy_tools {
         crate::ui::line(format_args!(
@@ -152,7 +151,7 @@ fn print_dry_run(has_legacy_tools: bool) {
     ));
 }
 
-fn check_for_upgrades(install: &ManagedInstall) -> Result<i32> {
+fn check_for_upgrades() -> Result<i32> {
     let mise_status = Command::new("mise")
         .args(mise_use_args(true))
         .status()
@@ -163,7 +162,7 @@ fn check_for_upgrades(install: &ManagedInstall) -> Result<i32> {
         _ => return Ok(mise_status.code().unwrap_or(1)),
     };
 
-    let opencode_outdated = opencode_update_available(install.node_version.as_deref())?;
+    let opencode_outdated = opencode_update_available()?;
     crate::ui::line(if opencode_outdated {
         "OpenCode 2 update available"
     } else {
@@ -172,21 +171,15 @@ fn check_for_upgrades(install: &ManagedInstall) -> Result<i32> {
     Ok(i32::from(mise_outdated || opencode_outdated))
 }
 
-fn opencode_update_available(node_version: Option<&str>) -> Result<bool> {
-    let Some(node_version) = node_version else {
-        return Ok(true);
-    };
-    let node = format!("node@{node_version}");
+fn opencode_update_available() -> Result<bool> {
     let remote = run_command(
         "OpenCode package version check",
         &[
             "exec".to_string(),
-            node.clone(),
             "--".to_string(),
-            "npm".to_string(),
-            "view".to_string(),
-            OPENCODE_NPM_PACKAGE.to_string(),
-            "version".to_string(),
+            "curl".to_string(),
+            "-fsSL".to_string(),
+            OPENCODE_DIST_TAGS_URL.to_string(),
         ],
         SETUP_TIMEOUT,
     )
@@ -194,7 +187,11 @@ fn opencode_update_available(node_version: Option<&str>) -> Result<bool> {
     if !remote.status.success() || remote.truncated {
         bail!("failed to query the current OpenCode 2 npm version");
     }
-    let remote_version = String::from_utf8_lossy(&remote.stdout).trim().to_string();
+    let tags: serde_json::Value = serde_json::from_slice(&remote.stdout)
+        .context("failed to parse the OpenCode 2 npm dist-tags response")?;
+    let Some(remote_version) = tags.get("next").and_then(|tag| tag.as_str()) else {
+        bail!("npm dist-tags response has no `next` channel");
+    };
     if remote_version.is_empty() {
         bail!("npm returned an empty OpenCode 2 version");
     }
@@ -203,7 +200,6 @@ fn opencode_update_available(node_version: Option<&str>) -> Result<bool> {
         "installed OpenCode version check",
         &[
             "exec".to_string(),
-            node,
             "--".to_string(),
             "opencode2".to_string(),
             "--version".to_string(),
@@ -214,7 +210,7 @@ fn opencode_update_available(node_version: Option<&str>) -> Result<bool> {
     if !installed.status.success() || installed.truncated {
         return Ok(true);
     }
-    Ok(!String::from_utf8_lossy(&installed.stdout).contains(&remote_version))
+    Ok(!String::from_utf8_lossy(&installed.stdout).contains(remote_version))
 }
 
 fn run_checked(label: &str, args: &[String], timeout: Duration, context: &str) -> Result<()> {
@@ -270,65 +266,39 @@ fn mise_use_args(check: bool) -> Vec<String> {
     if check {
         args.push("--dry-run-code".to_string());
     }
-    args.extend([OY_MISE_SPEC.to_string(), OPENCODE_NODE_SPEC.to_string()]);
+    args.extend([
+        OY_MISE_SPEC.to_string(),
+        crate::mise::OPENCODE_MISE_SPEC.to_string(),
+    ]);
     args
 }
 
-fn opencode_npm_install_args() -> Vec<String> {
-    [
-        "exec",
-        OPENCODE_NODE_SPEC,
-        "--",
-        "npm",
-        "install",
-        "-g",
-        OPENCODE_NPM_PACKAGE,
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
+fn opencode_install_args() -> Vec<String> {
+    ["install", "-f", crate::mise::OPENCODE_MISE_SPEC]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn legacy_unuse_args() -> Vec<String> {
-    [
-        "unuse",
-        "--global",
-        "--yes",
-        LEGACY_OY_MISE_TOOL,
-        LEGACY_OPENCODE_MISE_TOOL,
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
+    ["unuse", "--global", "--yes", LEGACY_OY_MISE_TOOL]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn post_upgrade_setup_args() -> Vec<String> {
-    [
-        "exec",
-        OY_MISE_SPEC,
-        OPENCODE_NODE_SPEC,
-        "--",
-        "oy",
-        "--json",
-        "setup",
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
+    ["exec", OY_MISE_SPEC, "--", "oy", "--json", "setup"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn service_restart_args() -> Vec<String> {
-    [
-        "exec",
-        OPENCODE_NODE_SPEC,
-        "--",
-        "opencode2",
-        "service",
-        "restart",
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
+    ["exec", "--", "opencode2", "service", "restart"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn mise_managed_install() -> Result<Option<ManagedInstall>> {
@@ -355,7 +325,6 @@ fn mise_managed_install() -> Result<Option<ManagedInstall>> {
 #[derive(Debug, PartialEq, Eq)]
 struct ManagedInstall {
     has_legacy_tools: bool,
-    node_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,9 +353,7 @@ fn mise_managed_install_from_listing(
         return None;
     }
     Some(ManagedInstall {
-        has_legacy_tools: has_mise_toml_tool(listing, LEGACY_OY_MISE_TOOL)
-            || has_mise_toml_tool(listing, LEGACY_OPENCODE_MISE_TOOL),
-        node_version: active_mise_toml_version(listing, OPENCODE_NODE_TOOL),
+        has_legacy_tools: has_mise_toml_tool(listing, LEGACY_OY_MISE_TOOL),
     })
 }
 
@@ -461,16 +428,11 @@ mod tests {
             OY_MISE_TOOL.to_string(),
             vec![tool(true, true, Some("mise.toml"))],
         );
-        listing.insert(
-            OPENCODE_NODE_TOOL.to_string(),
-            vec![tool(true, true, Some("mise.toml"))],
-        );
 
         assert_eq!(
             mise_managed_install_from_listing(&listing),
             Some(ManagedInstall {
                 has_legacy_tools: false,
-                node_version: Some("1.2.3".to_string()),
             })
         );
     }
@@ -482,16 +444,11 @@ mod tests {
             LEGACY_OY_MISE_TOOL.to_string(),
             vec![tool(true, true, Some("mise.toml"))],
         );
-        listing.insert(
-            LEGACY_OPENCODE_MISE_TOOL.to_string(),
-            vec![tool(true, true, Some("mise.toml"))],
-        );
 
         assert_eq!(
             mise_managed_install_from_listing(&listing),
             Some(ManagedInstall {
                 has_legacy_tools: true,
-                node_version: None,
             })
         );
     }
@@ -504,22 +461,22 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_commands_use_binary_oy_and_documented_opencode_install() {
+    fn dry_run_commands_use_binary_oy_and_mise_opencode_install() {
         assert_eq!(
             shell_command("mise", &mise_use_args(false)),
-            "mise use --global --yes --minimum-release-age 0 'github:adonm/oy-cli@latest' 'node@latest'"
+            "mise use --global --yes --minimum-release-age 0 'github:adonm/oy-cli@latest' 'npm:@opencode-ai/cli@next'"
         );
         assert_eq!(
-            shell_command("mise", &opencode_npm_install_args()),
-            "mise exec 'node@latest' -- npm install -g '@opencode-ai/cli@next'"
+            shell_command("mise", &opencode_install_args()),
+            "mise install -f 'npm:@opencode-ai/cli@next'"
         );
         assert_eq!(
             shell_command("mise", &post_upgrade_setup_args()),
-            "mise exec 'github:adonm/oy-cli@latest' 'node@latest' -- oy --json setup"
+            "mise exec 'github:adonm/oy-cli@latest' -- oy --json setup"
         );
         assert_eq!(
             shell_command("mise", &service_restart_args()),
-            "mise exec 'node@latest' -- opencode2 service restart"
+            "mise exec -- opencode2 service restart"
         );
     }
 
@@ -544,7 +501,7 @@ mod tests {
                 "0",
                 "--dry-run-code",
                 OY_MISE_SPEC,
-                OPENCODE_NODE_SPEC,
+                crate::mise::OPENCODE_MISE_SPEC,
             ]
         );
     }
