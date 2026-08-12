@@ -41,11 +41,11 @@ Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_SCOPE=globa
 With mise:
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.9 'npm:@opencode-ai/cli@next'
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.10 'npm:@opencode-ai/cli@next'
 # Allow the OpenCode 2 postinstall, which downloads the native binary.
 sed -i 's|^"npm:@opencode-ai/cli" = "next"$|"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }|' "${MISE_GLOBAL_CONFIG_FILE:-$HOME/.config/mise/config.toml}"
 mise install -f 'npm:@opencode-ai/cli@next'
-mise exec github:adonm/oy-cli@0.14.9 -- oy setup
+mise exec github:adonm/oy-cli@0.14.10 -- oy setup
 ```
 
 Or install only the Rust CLI from crates.io, then provide a compatible OpenCode installation yourself:

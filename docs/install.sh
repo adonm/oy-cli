@@ -11,7 +11,7 @@ set -eu
 #   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
 #   OY_SKIP_SETUP     1/true to skip `oy setup` and runtime load checks
 
-oy_version="0.14.9"
+oy_version="0.14.10"
 oy_tool="github:adonm/oy-cli@$oy_version"
 opencode_tool="npm:@opencode-ai/cli@next"
 opencode_plain='"npm:@opencode-ai/cli" = "next"'

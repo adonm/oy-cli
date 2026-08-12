@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.14.10] - 2026-08-13
+
+### Fixed
+- `allow_builds` patching now handles pinned versions and table-form OpenCode
+  entries, not just the `= "next"` shorthand written by `mise use`, and adds
+  `@opencode-ai/cli` to existing `allow_builds` lists.
+
+### Changed
+- `oy upgrade --check` compares OpenCode 2 versions semantically and queries
+  npm dist-tags in-process instead of shelling out to `curl`.
+
+### Security
+- Cursor tool summaries redact obvious secrets (API keys, bearer tokens,
+  private keys, and known token prefixes) before entering reasoning output.
+
 ## [0.14.9] - 2026-08-11
 
 ### Fixed

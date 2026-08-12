@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto"
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { createServer } from "node:http"
 import { isAbsolute, resolve } from "node:path"
 
@@ -311,6 +311,13 @@ const bearer = (request) => {
   return typeof value === "string" && value.startsWith("Bearer ") ? value.slice(7) : undefined
 }
 
+const tokenMatches = (provided, expected) => {
+  if (typeof provided !== "string") return false
+  const candidate = Buffer.from(provided)
+  const secret = Buffer.from(expected)
+  return candidate.length === secret.length && timingSafeEqual(candidate, secret)
+}
+
 const requestSession = (request) =>
   ["x-session-id", "x-session-affinity", "x-opencode-session"]
     .map((name) => request.headers[name])
@@ -384,9 +391,40 @@ const displayValue = (value) => {
       rendered = String(value)
     }
   }
+  rendered = redactSecrets(rendered)
   const limit = 16 * 1024
   return rendered.length <= limit ? rendered : `${rendered.slice(0, limit)}\n… [tool output truncated]`
 }
+
+// Best-effort scrubbing of obvious secrets before tool summaries enter
+// reasoning output. Tool history is intentionally left unredacted (it feeds
+// Cursor's transcript for correctness); only the human-visible summary is
+// sanitized. This is defense-in-depth, not a guarantee.
+const redactSecrets = (rendered) =>
+  rendered
+    // PEM-encoded private keys, which may span multiple lines.
+    .replace(
+      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+      "[redacted]",
+    )
+    // Authorization headers such as `Authorization: Bearer <token>`.
+    .replace(
+      /(["']?)authorization\1\s*[:=]\s*["']?(?:\s*bearer\s+)?[^\s"',}]+["']?/gi,
+      "$1authorization$1: [redacted]",
+    )
+    // Standalone bearer tokens.
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [redacted]")
+    // Named secret fields: `"api_key": "value"`, `token=value`, and friends.
+    .replace(
+      /((["']?)\b(?:api[_-]?key|apikey|access[_-]?key(?:_?id)?|secret(?:_?key)?|password|passwd|token|private[_-]?key|client[_-]?secret|refresh[_-]?token|credential)\b\2)\s*[:=]\s*["']?[^"',\s}]+["']?/gi,
+      "$1: [redacted]",
+    )
+    // High-signal token prefixes: GitHub, OpenAI, Slack, AWS, and JWTs.
+    .replace(/\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, "[redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]+/g, "[redacted]")
+    .replace(/\b(?:AKIA|ASIA|AIDA|ABIA|ACCA)[A-Z0-9]{16}\b/g, "[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted]")
 
 const startReasoning = async (writer, id, outputIndex, initialText) => {
   await writer.event({
@@ -830,7 +868,7 @@ export const startCursorBridge = async ({
       response.writeHead(404).end()
       return
     }
-    if (request.headers["x-oy-cursor-bridge"] !== token) {
+    if (!tokenMatches(request.headers["x-oy-cursor-bridge"], token)) {
       response.writeHead(403).end()
       return
     }

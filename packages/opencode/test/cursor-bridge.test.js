@@ -226,6 +226,72 @@ test("renders provider-executed tools as named non-shell summaries", async () =>
   }
 })
 
+test("redacts secrets from tool summaries before emitting reasoning", async () => {
+  const bridge = await startCursorBridge({
+    directory: `${process.cwd()}/bridge-redact-${Date.now()}`,
+    createCursor: () => ({
+      languageModel: () => ({
+        doStream: async () => ({
+          stream: stream([
+            { type: "stream-start", warnings: [] },
+            {
+              type: "tool-call",
+              toolCallId: "secret-1",
+              toolName: "cursor_run",
+              input: {
+                command: 'curl -H "Authorization: Bearer tok_live_abc123" https://api.example.com',
+                env: { NPM_TOKEN: "ghp_secretvalue123" },
+              },
+            },
+            {
+              type: "tool-result",
+              toolCallId: "secret-1",
+              toolName: "cursor_run",
+              result: '{"api_key":"sk-deadbeef123456","token":"xoxb-1234567890"}',
+            },
+            {
+              type: "finish",
+              finishReason: { unified: "stop" },
+              usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
+            },
+          ]),
+        }),
+      }),
+    }),
+    listCursorModels: async () => [],
+    onModels: async () => {},
+    onDirectory: () => {},
+    onIdle: () => {},
+    reportError: assert.fail,
+  })
+  try {
+    const response = await fetch(`${bridge.url}/responses`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer cursor-key",
+        "content-type": "application/json",
+        "x-oy-cursor-bridge": bridge.token,
+      },
+      body: JSON.stringify({
+        model: "composer-2.5",
+        input: [{ role: "user", content: [{ type: "input_text", text: "run" }] }],
+        tools: [{ type: "function", name: "cursor_run", parameters: { type: "object" } }],
+        stream: true,
+      }),
+    })
+    const body = await response.text()
+
+    assert.equal(response.status, 200)
+    assert.match(body, /\[redacted\]/)
+    assert.doesNotMatch(body, /tok_live_abc123/)
+    assert.doesNotMatch(body, /ghp_secretvalue123/)
+    assert.doesNotMatch(body, /sk-deadbeef123456/)
+    assert.doesNotMatch(body, /xoxb-1234567890/)
+  } finally {
+    await bridge.close()
+  }
+})
+
 test("honors explicit and system working directories outside the initial workspace", async () => {
   const directories = []
   const bridge = await startCursorBridge({

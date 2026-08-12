@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use semver::Version;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ const OPENCODE_DIST_TAGS_URL: &str =
     "https://registry.npmjs.org/-/package/@opencode-ai/cli/dist-tags";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Args, Clone)]
@@ -159,7 +161,13 @@ fn check_for_upgrades() -> Result<i32> {
     let mise_outdated = match mise_status.code() {
         Some(0) => false,
         Some(1) => true,
-        _ => return Ok(mise_status.code().unwrap_or(1)),
+        code => {
+            crate::ui::err_line(format_args!(
+                "`mise use --dry-run-code` failed with exit code {}",
+                code.unwrap_or(1)
+            ));
+            return Ok(code.unwrap_or(1));
+        }
     };
 
     let opencode_outdated = opencode_update_available()?;
@@ -172,30 +180,7 @@ fn check_for_upgrades() -> Result<i32> {
 }
 
 fn opencode_update_available() -> Result<bool> {
-    let remote = run_command(
-        "OpenCode package version check",
-        &[
-            "exec".to_string(),
-            "--".to_string(),
-            "curl".to_string(),
-            "-fsSL".to_string(),
-            OPENCODE_DIST_TAGS_URL.to_string(),
-        ],
-        SETUP_TIMEOUT,
-    )
-    .context("failed to query the current OpenCode 2 npm version")?;
-    if !remote.status.success() || remote.truncated {
-        bail!("failed to query the current OpenCode 2 npm version");
-    }
-    let tags: serde_json::Value = serde_json::from_slice(&remote.stdout)
-        .context("failed to parse the OpenCode 2 npm dist-tags response")?;
-    let Some(remote_version) = tags.get("next").and_then(|tag| tag.as_str()) else {
-        bail!("npm dist-tags response has no `next` channel");
-    };
-    if remote_version.is_empty() {
-        bail!("npm returned an empty OpenCode 2 version");
-    }
-
+    let remote_version = opencode_dist_tag_version()?;
     let installed = run_command(
         "installed OpenCode version check",
         &[
@@ -210,7 +195,45 @@ fn opencode_update_available() -> Result<bool> {
     if !installed.status.success() || installed.truncated {
         return Ok(true);
     }
-    Ok(!String::from_utf8_lossy(&installed.stdout).contains(remote_version))
+    let Some(installed_version) = installed_opencode_version(&installed.stdout) else {
+        return Ok(true);
+    };
+    Ok(installed_version < remote_version)
+}
+
+fn opencode_dist_tag_version() -> Result<Version> {
+    parse_dist_tag_version(&fetch_opencode_dist_tags()?)
+}
+
+fn parse_dist_tag_version(body: &str) -> Result<Version> {
+    let tags: serde_json::Value = serde_json::from_str(body)
+        .context("failed to parse the OpenCode 2 npm dist-tags response")?;
+    let Some(raw) = tags.get("next").and_then(|tag| tag.as_str()) else {
+        bail!("npm dist-tags response has no `next` channel");
+    };
+    Version::parse(raw)
+        .with_context(|| format!("npm returned an unparseable OpenCode 2 version: {raw:?}"))
+}
+
+fn fetch_opencode_dist_tags() -> Result<String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(VERSION_CHECK_TIMEOUT))
+        .build()
+        .into();
+    let mut response = agent
+        .get(OPENCODE_DIST_TAGS_URL)
+        .call()
+        .context("failed to query the current OpenCode 2 npm version")?;
+    response
+        .body_mut()
+        .read_to_string()
+        .context("failed to read the OpenCode 2 npm dist-tags response")
+}
+
+fn installed_opencode_version(stdout: &[u8]) -> Option<Version> {
+    let text = String::from_utf8_lossy(stdout);
+    text.split_whitespace()
+        .find_map(|token| Version::parse(token.trim_start_matches('v')).ok())
 }
 
 fn run_checked(label: &str, args: &[String], timeout: Duration, context: &str) -> Result<()> {
@@ -504,5 +527,42 @@ mod tests {
                 crate::mise::OPENCODE_MISE_SPEC,
             ]
         );
+    }
+
+    #[test]
+    fn parses_the_opencode_version_from_version_output() {
+        assert_eq!(
+            installed_opencode_version(b"opencode2 v0.0.0-next-17114\n"),
+            Some(Version::parse("0.0.0-next-17114").unwrap())
+        );
+        assert_eq!(
+            installed_opencode_version(b"0.14.9\n"),
+            Some(Version::parse("0.14.9").unwrap())
+        );
+        assert_eq!(installed_opencode_version(b"garbage\n"), None);
+        assert_eq!(installed_opencode_version(b""), None);
+    }
+
+    #[test]
+    fn orders_next_channel_builds_semantically() {
+        let older = Version::parse("0.0.0-next-17114").unwrap();
+        let newer = Version::parse("0.0.0-next-17368").unwrap();
+        assert!(older < newer);
+    }
+
+    #[test]
+    fn parses_the_next_dist_tag() {
+        let version =
+            parse_dist_tag_version(r#"{"latest":"1.18.17","next":"0.0.0-next-17368"}"#).unwrap();
+        assert_eq!(version, Version::parse("0.0.0-next-17368").unwrap());
+    }
+
+    #[test]
+    fn rejects_a_missing_or_unparseable_next_dist_tag() {
+        let missing = parse_dist_tag_version(r#"{"latest":"1.18.17"}"#).unwrap_err();
+        assert!(missing.to_string().contains("no `next` channel"));
+
+        let invalid = parse_dist_tag_version(r#"{"next":"not-semver"}"#).unwrap_err();
+        assert!(invalid.to_string().contains("unparseable"));
     }
 }

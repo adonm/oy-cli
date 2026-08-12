@@ -159,6 +159,12 @@ _opencode-package:
 
 # === Release preparation ===
 
+# Bump every release-facing version pin to a new version, then verify alignment.
+# Usage: just release 0.14.10
+release version:
+    @python3 scripts/bump_version.py {{version}}
+    @python3 scripts/check_versions.py
+
 # Verify the crate can be packaged for publishing.
 package:
     cargo package --locked

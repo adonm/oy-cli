@@ -322,6 +322,40 @@ fn finalize_bound_artifact(
         .transpose()
 }
 
+/// Finalize a bound artifact and verify the workflow wrote its output.
+/// Returns the finalization receipt (when any) and whether the workflow
+/// produced output. Reports and errors when finalization rejects the
+/// candidates, retaining the recovery context for later `oy recover`.
+fn finalize_workflow(
+    root: &Path,
+    context: &crate::workflow::WorkflowContext,
+    lease: &crate::workflow::WorkflowLease,
+) -> Result<(bool, Option<serde_json::Value>)> {
+    let finalization = match finalize_bound_artifact(root, context) {
+        Ok(finalization) => finalization,
+        Err(error) => {
+            ui::err_line(format_args!(
+                "workflow {} produced invalid candidates; recovery context retained at {}",
+                context.run_id,
+                lease.path().display()
+            ));
+            return Err(error).context("failed finalizing prepared artifact workflow");
+        }
+    };
+    let wrote_output = finalization.is_some()
+        || context.kind == crate::workflow::WorkflowKind::Enhance
+        || crate::workflow::output_digest(root, &context.output)? != context.output_before;
+    if !wrote_output {
+        ui::err_line(format_args!(
+            "workflow {} ended without writing {}; recovery context retained at {}",
+            context.run_id,
+            context.output.display(),
+            lease.path().display()
+        ));
+    }
+    Ok((wrote_output, finalization))
+}
+
 fn run_agent_workflow(
     host: &OpenCodeHost,
     root: &Path,
@@ -354,27 +388,8 @@ fn run_agent_workflow(
             return Err(error);
         }
     };
-    let finalization = match finalize_bound_artifact(root, &bound) {
-        Ok(finalization) => finalization,
-        Err(error) => {
-            ui::err_line(format_args!(
-                "workflow {} produced invalid candidates; recovery context retained at {}",
-                bound.run_id,
-                lease.path().display()
-            ));
-            return Err(error).context("failed finalizing prepared artifact workflow");
-        }
-    };
-    let output_ok = finalization.is_some()
-        || bound.kind == crate::workflow::WorkflowKind::Enhance
-        || crate::workflow::output_digest(root, &bound.output)? != bound.output_before;
-    if !output_ok {
-        ui::err_line(format_args!(
-            "workflow {} ended without writing {}; recovery context retained at {}",
-            bound.run_id,
-            bound.output.display(),
-            lease.path().display()
-        ));
+    let (wrote_output, finalization) = finalize_workflow(root, &bound, &lease)?;
+    if !wrote_output {
         return Ok(1);
     }
     if ui::is_json() {
@@ -436,29 +451,10 @@ fn run_opencode(
     if let Some(lease) = lease {
         if status.success() {
             let context = context.expect("workflow lease requires context");
-            let finalization = match finalize_bound_artifact(root, context) {
-                Ok(finalization) => finalization,
-                Err(error) => {
-                    ui::err_line(format_args!(
-                        "workflow {} produced invalid candidates; recovery context retained at {}",
-                        context.run_id,
-                        lease.path().display()
-                    ));
-                    return Err(error).context("failed finalizing prepared artifact workflow");
-                }
-            };
-            let output_ok = finalization.is_some()
-                || context.kind == crate::workflow::WorkflowKind::Enhance
-                || crate::workflow::output_digest(root, &context.output)? != context.output_before;
-            if output_ok {
+            let (wrote_output, _) = finalize_workflow(root, context, &lease)?;
+            if wrote_output {
                 lease.complete();
             } else {
-                ui::err_line(format_args!(
-                    "workflow {} ended without writing {}; recovery context retained at {}",
-                    context.run_id,
-                    context.output.display(),
-                    lease.path().display()
-                ));
                 return Ok(1);
             }
         } else if let Some(context) = context {
