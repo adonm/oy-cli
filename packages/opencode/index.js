@@ -12,6 +12,55 @@ const frontmatter = agent.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)([\s\S]*)$/
 if (!frontmatter) throw new Error("assets/agents/oy.md must contain YAML frontmatter")
 const system = frontmatter[1].trim()
 
+const skillDirectory = (name) => {
+  const source = readFileSync(
+    new URL(`./assets/skills/${name}/SKILL.md`, import.meta.url),
+    "utf8",
+  )
+  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)([\s\S]*)$/)
+  if (!match) throw new Error(`assets/skills/${name}/SKILL.md must contain YAML frontmatter`)
+  const header = match[1].split(/\r?\n/)
+  const field = (key) => {
+    const line = header.find((entry) => entry.startsWith(`${key}:`))
+    if (!line) return undefined
+    return line.slice(key.length + 1).trim().replace(/^["']|["']$/g, "")
+  }
+  const metadataBoolean = (key) => {
+    const line = header.find((entry) => entry.trim().startsWith(`${key}:`))
+    if (!line) return undefined
+    const value = line.slice(line.indexOf(":") + 1).trim()
+    return value === "true" || value === "false" ? value === "true" : undefined
+  }
+  const displayName = field("name")
+  const description = field("description")
+  if (!displayName) throw new Error(`assets/skills/${name}/SKILL.md frontmatter must define name`)
+  if (!description) throw new Error(`assets/skills/${name}/SKILL.md frontmatter must define description`)
+  const slash = field("slash")
+  return {
+    id: name,
+    name: displayName,
+    description,
+    ...(slash === "true" || slash === "false" ? { slash: slash === "true" } : {}),
+    ...(metadataBoolean("opencode/autoinvoke") === false ? { autoinvoke: false } : {}),
+    location: fileURLToPath(new URL(`./assets/skills/${name}/SKILL.md`, import.meta.url)),
+    content: match[2].trim(),
+  }
+}
+
+const bundledSkills = [skillDirectory("oy-audit"), skillDirectory("oy-review"), skillDirectory("oy-enhance")]
+
+const registerBundledSkills = (skills) => {
+  if (typeof skills.add === "function") {
+    for (const skill of bundledSkills) skills.add(skill)
+    return
+  }
+  if (typeof skills.source === "function") {
+    skills.source({ type: "directory", path: `${assets}/skills` })
+    return
+  }
+  throw new Error("OpenCode skill transform draft must provide add() or source()")
+}
+
 export const defaultCursorStallMs = 120_000
 export const cursorModelRefreshMs = 15_000
 export const cursorLifecycleWaitMs = 5_000
@@ -103,7 +152,7 @@ export const createPlugin = (overrides = {}) => {
         )
 
       await ctx.skill.transform((skills) => {
-        skills.source({ type: "directory", path: `${assets}/skills` })
+        registerBundledSkills(skills)
       })
 
       await ctx.agent.transform((agents) => {

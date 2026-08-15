@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.14.11] - 2026-08-15
+
+### Fixed
+- Registered the bundled oy skills as embedded skill entries instead of a
+  directory source. Recent OpenCode 2 beta builds dropped `skills.source()`
+  from the plugin transform draft, so the previous registration threw during
+  catalog initialization and `opencode2 models` failed with "Model catalog
+  initialization timed out". The plugin now parses the bundled `SKILL.md`
+  files at load time and adds them through `skills.add()`, falling back to
+  the directory source on older hosts that lack `add()`.
+
 ## [0.14.10] - 2026-08-13
 
 ### Fixed

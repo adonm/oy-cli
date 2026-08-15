@@ -133,11 +133,11 @@ steps:
 
   - name: Install oy and OpenCode
     run: |
-      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.10 'npm:@opencode-ai/cli@next'
+      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.11 'npm:@opencode-ai/cli@next'
       # Allow the OpenCode 2 postinstall, which downloads the native binary.
       sed -i 's|^"npm:@opencode-ai/cli" = "next"$|"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }|' "$HOME/.config/mise/config.toml"
       mise install -f 'npm:@opencode-ai/cli@next'
-      mise exec github:adonm/oy-cli@0.14.10 -- oy setup
+      mise exec github:adonm/oy-cli@0.14.11 -- oy setup
 
   - name: Run audit
     env:

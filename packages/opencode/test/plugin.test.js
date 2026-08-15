@@ -55,8 +55,9 @@ const createEventStream = () => {
   }
 }
 
-const createHarness = ({ onReload } = {}) => {
+const createHarness = ({ onReload, legacySkills = false } = {}) => {
   const sources = []
+  const skills = new Map()
   const agents = new Map()
   const commands = new Map()
   const integrations = new Map()
@@ -83,11 +84,25 @@ const createHarness = ({ onReload } = {}) => {
     models.clear()
     await catalogTransform(catalog)
   }
+  const skillDraft = legacySkills
+    ? { source: (source) => sources.push(source) }
+    : {
+        list: () => Array.from(skills.values()),
+        add: (skill) => skills.set(skill.id, { ...skill }),
+        update: (name, mutate) => {
+          const current = skills.get(name)
+          if (!current) return
+          mutate(current)
+          current.id = name
+        },
+        remove: (name) => skills.delete(name),
+        source: (source) => sources.push(source),
+      }
   const ctx = {
     options: {},
     event: { subscribe: events.subscribe },
     skill: {
-      transform: async (apply) => apply({ source: (source) => sources.push(source) }),
+      transform: async (apply) => apply(skillDraft),
     },
     agent: {
       transform: async (apply) => apply({ update: update(agents) }),
@@ -140,6 +155,7 @@ const createHarness = ({ onReload } = {}) => {
       connection = value
       credential = resolved
     },
+    skills,
     sources,
   }
 }
@@ -156,9 +172,25 @@ test("registers the oy agent, skills, commands, and Cursor provider", async () =
   const cleanup = await deterministicPlugin.setup(harness.ctx)
 
   assert.equal(plugin.id, "oy")
-  assert.equal(harness.sources.length, 1)
-  assert.equal(harness.sources[0].type, "directory")
-  assert.match(harness.sources[0].path, /assets[/\\]skills$/)
+  assert.equal(harness.sources.length, 0)
+  for (const [id, expectedName] of [
+    ["oy-audit", "oy-audit"],
+    ["oy-review", "oy-review"],
+    ["oy-enhance", "oy-enhance"],
+  ]) {
+    const skill = harness.skills.get(id)
+    assert.ok(skill, `registers the ${id} skill`)
+    assert.equal(skill.name, expectedName)
+    assert.equal(typeof skill.description, "string")
+    assert.ok(skill.description.length > 0)
+    assert.equal(skill.slash, false)
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../assets/skills", id, "SKILL.md"),
+      "utf8",
+    )
+    const body = source.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)([\s\S]*)$/)?.[1].trim()
+    assert.equal(skill.content, body)
+  }
   assert.equal(harness.agents.get("oy").mode, "primary")
   assert.match(harness.agents.get("oy").system, /OpenCode and the user own permissions/)
   assert.deepEqual([...harness.commands.keys()], ["oy-audit", "oy-review", "oy-enhance"])
@@ -289,6 +321,22 @@ test("reruns model discovery with credentials updated during an active refresh",
   assert.deepEqual(apiKeys, ["old-key", "new-key"])
   assert.equal(harness.models.has("cursor/old-model"), false)
   assert.equal(harness.models.get("cursor/new-model").name, "New credential model")
+  await cleanup()
+})
+
+test("falls back to directory skill sources on legacy hosts without add()", async () => {
+  const harness = createHarness({ legacySkills: true })
+  const deterministicPlugin = createPlugin({
+    createCursor: () => ({ languageModel: () => ({}) }),
+    reportError: assert.fail,
+    startCursorBridge: fakeBridge,
+  })
+  const cleanup = await deterministicPlugin.setup(harness.ctx)
+
+  assert.equal(harness.skills.size, 0)
+  assert.equal(harness.sources.length, 1)
+  assert.equal(harness.sources[0].type, "directory")
+  assert.match(harness.sources[0].path, /assets[/\\]skills$/)
   await cleanup()
 })
 
