@@ -64,12 +64,12 @@ jobs:
           # Install OpenCode 2 through mise's npm backend. `mise use` cannot
           # express tool options, so patch the entry to allow the postinstall
           # that downloads the native opencode2 binary.
-          mise use --global --yes --minimum-release-age 0 'npm:@opencode-ai/cli@next'
+          mise use --global --yes --minimum-release-age 0 'npm:@opencode-ai/cli@beta'
           config_file="${MISE_GLOBAL_CONFIG_FILE:-$HOME/.config/mise/config.toml}"
-          sed -i 's|^"npm:@opencode-ai/cli" = "next"$|"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }|' "$config_file"
-          mise install -f 'npm:@opencode-ai/cli@next'
-          export PATH="$(mise where 'npm:@opencode-ai/cli@next')/node_modules/.bin:$PATH"
-          opencode2 --version | grep -E '0\.0\.0-next-[0-9]+'
+          sed -i 's|^"npm:@opencode-ai/cli" = "beta"$|"npm:@opencode-ai/cli" = { version = "beta", allow_builds = ["@opencode-ai/cli"] }|' "$config_file"
+          mise install -f 'npm:@opencode-ai/cli@beta'
+          export PATH="$(mise where 'npm:@opencode-ai/cli@beta')/node_modules/.bin:$PATH"
+          opencode2 --version | grep -E '0\.0\.0-beta-[0-9]+'
           opencode2 run --help | grep -F -- '--agent string'
           cargo build --locked
           export PATH="$PWD/target/debug:$PATH"

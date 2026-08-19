@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 pub(crate) const OPENCODE_MISE_TOOL: &str = "npm:@opencode-ai/cli";
-pub(crate) const OPENCODE_MISE_SPEC: &str = "npm:@opencode-ai/cli@next";
+pub(crate) const OPENCODE_MISE_SPEC: &str = "npm:@opencode-ai/cli@beta";
 const OPENCODE_ALLOW_BUILDS: &str = "@opencode-ai/cli";
 
 /// Ensure every mise config that declares the `npm:@opencode-ai/cli` tool
@@ -176,11 +176,11 @@ mod tests {
 
     #[test]
     fn patches_the_plain_entry_written_by_mise_use() {
-        let config = "[tools]\n\"npm:@opencode-ai/cli\" = \"next\"\nnode = \"latest\"\n";
+        let config = "[tools]\n\"npm:@opencode-ai/cli\" = \"beta\"\nnode = \"latest\"\n";
         assert_eq!(
             patched(config),
             Some(
-                "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"next\", allow_builds = [\"@opencode-ai/cli\"] }\nnode = \"latest\"\n"
+                "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"beta\", allow_builds = [\"@opencode-ai/cli\"] }\nnode = \"latest\"\n"
                     .to_string()
             )
         );
@@ -200,36 +200,36 @@ mod tests {
 
     #[test]
     fn leaves_entries_that_already_allow_builds_untouched() {
-        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"next\", allow_builds = [\"@opencode-ai/cli\"] }\n";
+        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"beta\", allow_builds = [\"@opencode-ai/cli\"] }\n";
         assert_eq!(patched(config), None);
     }
 
     #[test]
     fn adds_allow_builds_to_a_table_entry_without_it() {
-        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"next\" }\n";
+        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"beta\" }\n";
         let patched = patched(config).unwrap();
-        assert!(patched.contains("version = \"next\""));
+        assert!(patched.contains("version = \"beta\""));
         assert!(patched.contains("allow_builds = [\"@opencode-ai/cli\"]"));
     }
 
     #[test]
     fn adds_allow_builds_to_a_subtable_entry() {
-        let config = "[tools.\"npm:@opencode-ai/cli\"]\nversion = \"next\"\n";
+        let config = "[tools.\"npm:@opencode-ai/cli\"]\nversion = \"beta\"\n";
         let patched = patched(config).unwrap();
-        assert!(patched.contains("version = \"next\""));
+        assert!(patched.contains("version = \"beta\""));
         assert!(patched.contains("allow_builds = [\"@opencode-ai/cli\"]"));
     }
 
     #[test]
     fn adds_the_package_to_an_existing_allow_builds_list() {
-        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"next\", allow_builds = [\"other\"] }\n";
+        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"beta\", allow_builds = [\"other\"] }\n";
         let patched = patched(config).unwrap();
         assert!(patched.contains("allow_builds = [\"other\", \"@opencode-ai/cli\"]"));
     }
 
     #[test]
     fn honors_a_wildcard_allow_builds_entry() {
-        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"next\", allow_builds = [\"all\"] }\n";
+        let config = "[tools]\n\"npm:@opencode-ai/cli\" = { version = \"beta\", allow_builds = [\"all\"] }\n";
         assert_eq!(patched(config), None);
     }
 
@@ -241,13 +241,13 @@ mod tests {
 
     #[test]
     fn ignores_the_tool_name_outside_the_tools_table() {
-        let config = "\"npm:@opencode-ai/cli\" = \"next\"\n[alias]\nnode = \"latest\"\n";
+        let config = "\"npm:@opencode-ai/cli\" = \"beta\"\n[alias]\nnode = \"latest\"\n";
         assert_eq!(patched(config), None);
     }
 
     #[test]
     fn preserves_comments_and_unrelated_content() {
-        let config = "# pinned by hand\n[tools]\n\"npm:@opencode-ai/cli\" = \"next\" # keep me\nnode = \"latest\"\n";
+        let config = "# pinned by hand\n[tools]\n\"npm:@opencode-ai/cli\" = \"beta\" # keep me\nnode = \"latest\"\n";
         let patched = patched(config).unwrap();
         assert!(patched.starts_with("# pinned by hand\n"));
         assert!(patched.contains("node = \"latest\"\n"));
@@ -294,7 +294,7 @@ mod tests {
         let path = dir.path().join("mise.toml");
         std::fs::write(
             &path,
-            "[tools]\n\"npm:@opencode-ai/cli\" = \"next\"\nnode = \"latest\"\n",
+            "[tools]\n\"npm:@opencode-ai/cli\" = \"beta\"\nnode = \"latest\"\n",
         )
         .unwrap();
         assert!(patch_config_file(&path).unwrap());

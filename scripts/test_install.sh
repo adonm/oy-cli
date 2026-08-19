@@ -26,7 +26,7 @@ case "$*" in
     printf '%s\n' '{"data":[]}'
   fi
   ;;
-*"-- opencode2 --version") printf '%s\n' 'opencode2 v0.0.0-next-17010' ;;
+*"-- opencode2 --version") printf '%s\n' 'opencode2 v0.0.0-beta-17639' ;;
 esac
 exit 0
 EOF
@@ -123,9 +123,9 @@ run_install() {
 default_log="$tmp/default.log"
 run_install "$default_log" 1 1 "$tmp/home-default" ""
 default=$(cat "$default_log")
-assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@next"
+assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
 assert_contains "$default" "config ls --no-header"
-assert_contains "$default" "install -f npm:@opencode-ai/cli@next"
+assert_contains "$default" "install -f npm:@opencode-ai/cli@beta"
 assert_contains "$default" "exec github:adonm/oy-cli@$oy_version -- oy --version"
 assert_contains "$default" "exec -- opencode2 --version"
 assert_contains "$default" "unuse --global --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
@@ -139,7 +139,7 @@ assert_not_contains "$(cat "$default_log.curl")" "https://cursor.com/install"
 workspace_log="$tmp/workspace.log"
 run_install "$workspace_log" 1 1 "$tmp/home-workspace" "" --workspace
 workspace=$(cat "$workspace_log")
-assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@next"
+assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
 assert_not_contains "$workspace" "use --global"
 assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_not_contains "$workspace" "unuse --global"
@@ -147,7 +147,7 @@ assert_not_contains "$workspace" "unuse --global"
 env_workspace_log="$tmp/env-workspace.log"
 run_install "$env_workspace_log" 1 1 "$tmp/home-env-workspace" workspace
 env_workspace=$(cat "$env_workspace_log")
-assert_contains "$env_workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@next"
+assert_contains "$env_workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
 assert_not_contains "$env_workspace" "use --global"
 
 setup_log="$tmp/setup.log"

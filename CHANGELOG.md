@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.14.12] - 2026-08-19
+
+### Changed
+- Switched OpenCode 2 beta setup from the superseded `next` npm dist-tag to
+  the current `beta` channel. The installer, `oy upgrade`, and host
+  diagnostics now use `npm:@opencode-ai/cli@beta`, and `oy upgrade --check`
+  reads the `beta` dist-tag.
+- Accepted `0.0.0-beta-*` host builds. Legacy `0.0.0-next-*` builds remain
+  supported for existing installs until they are upgraded.
+
 ## [0.14.11] - 2026-08-15
 
 ### Fixed

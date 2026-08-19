@@ -74,7 +74,7 @@ After the CLI and skills cover the deterministic contract:
 - [x] Reduce setup to registering/removing the version-matched plugin package while preserving unrelated OpenCode JSON/JSONC.
 - [x] Remove `oy model`, `oy open`, `oy chat`, and implicit passthrough of unknown arguments; keep bare `oy` as the integration-aware TUI launcher.
 - Demote or remove exact beta version gates, session recovery wrappers, and coupled oy/OpenCode upgrades.
-- When OpenCode 2 leaves beta, replace the moving `next` dependencies with the stable `latest` channel and remove beta-specific host handling.
+- When OpenCode 2 leaves beta, replace the moving `beta` dependencies with the stable `latest` channel and remove beta-specific host handling.
 - Stop installing OpenCode from the oy installer; treat it as a user-managed prerequisite.
 
 ## Agent alignment

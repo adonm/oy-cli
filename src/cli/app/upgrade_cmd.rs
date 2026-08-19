@@ -208,8 +208,8 @@ fn opencode_dist_tag_version() -> Result<Version> {
 fn parse_dist_tag_version(body: &str) -> Result<Version> {
     let tags: serde_json::Value = serde_json::from_str(body)
         .context("failed to parse the OpenCode 2 npm dist-tags response")?;
-    let Some(raw) = tags.get("next").and_then(|tag| tag.as_str()) else {
-        bail!("npm dist-tags response has no `next` channel");
+    let Some(raw) = tags.get("beta").and_then(|tag| tag.as_str()) else {
+        bail!("npm dist-tags response has no `beta` channel");
     };
     Version::parse(raw)
         .with_context(|| format!("npm returned an unparseable OpenCode 2 version: {raw:?}"))
@@ -487,11 +487,11 @@ mod tests {
     fn dry_run_commands_use_binary_oy_and_mise_opencode_install() {
         assert_eq!(
             shell_command("mise", &mise_use_args(false)),
-            "mise use --global --yes --minimum-release-age 0 'github:adonm/oy-cli@latest' 'npm:@opencode-ai/cli@next'"
+            "mise use --global --yes --minimum-release-age 0 'github:adonm/oy-cli@latest' 'npm:@opencode-ai/cli@beta'"
         );
         assert_eq!(
             shell_command("mise", &opencode_install_args()),
-            "mise install -f 'npm:@opencode-ai/cli@next'"
+            "mise install -f 'npm:@opencode-ai/cli@beta'"
         );
         assert_eq!(
             shell_command("mise", &post_upgrade_setup_args()),
@@ -532,6 +532,10 @@ mod tests {
     #[test]
     fn parses_the_opencode_version_from_version_output() {
         assert_eq!(
+            installed_opencode_version(b"opencode2 v0.0.0-beta-17639\n"),
+            Some(Version::parse("0.0.0-beta-17639").unwrap())
+        );
+        assert_eq!(
             installed_opencode_version(b"opencode2 v0.0.0-next-17114\n"),
             Some(Version::parse("0.0.0-next-17114").unwrap())
         );
@@ -544,25 +548,25 @@ mod tests {
     }
 
     #[test]
-    fn orders_next_channel_builds_semantically() {
-        let older = Version::parse("0.0.0-next-17114").unwrap();
-        let newer = Version::parse("0.0.0-next-17368").unwrap();
+    fn orders_beta_channel_builds_semantically() {
+        let older = Version::parse("0.0.0-beta-17639").unwrap();
+        let newer = Version::parse("0.0.0-beta-18001").unwrap();
         assert!(older < newer);
     }
 
     #[test]
-    fn parses_the_next_dist_tag() {
+    fn parses_the_beta_dist_tag() {
         let version =
-            parse_dist_tag_version(r#"{"latest":"1.18.17","next":"0.0.0-next-17368"}"#).unwrap();
-        assert_eq!(version, Version::parse("0.0.0-next-17368").unwrap());
+            parse_dist_tag_version(r#"{"latest":"1.18.18","beta":"0.0.0-beta-17639"}"#).unwrap();
+        assert_eq!(version, Version::parse("0.0.0-beta-17639").unwrap());
     }
 
     #[test]
-    fn rejects_a_missing_or_unparseable_next_dist_tag() {
-        let missing = parse_dist_tag_version(r#"{"latest":"1.18.17"}"#).unwrap_err();
-        assert!(missing.to_string().contains("no `next` channel"));
+    fn rejects_a_missing_or_unparseable_beta_dist_tag() {
+        let missing = parse_dist_tag_version(r#"{"latest":"1.18.18"}"#).unwrap_err();
+        assert!(missing.to_string().contains("no `beta` channel"));
 
-        let invalid = parse_dist_tag_version(r#"{"next":"not-semver"}"#).unwrap_err();
+        let invalid = parse_dist_tag_version(r#"{"beta":"not-semver"}"#).unwrap_err();
         assert!(invalid.to_string().contains("unparseable"));
     }
 }

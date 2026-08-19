@@ -11,11 +11,11 @@ set -eu
 #   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
 #   OY_SKIP_SETUP     1/true to skip `oy setup` and runtime load checks
 
-oy_version="0.14.11"
+oy_version="0.14.12"
 oy_tool="github:adonm/oy-cli@$oy_version"
-opencode_tool="npm:@opencode-ai/cli@next"
-opencode_plain='"npm:@opencode-ai/cli" = "next"'
-opencode_entry='"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }'
+opencode_tool="npm:@opencode-ai/cli@beta"
+opencode_plain='"npm:@opencode-ai/cli" = "beta"'
+opencode_entry='"npm:@opencode-ai/cli" = { version = "beta", allow_builds = ["@opencode-ai/cli"] }'
 tokei_tool="aqua:XAMPPRocky/tokei@12.1.2"
 ctags_tool="github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
 
@@ -225,8 +225,8 @@ esac
 installed_opencode_version=$("$mise_bin" exec -- opencode2 --version 2>/dev/null) \
   || die "OpenCode 2 installed, but opencode2 --version failed"
 case "$installed_opencode_version" in
-*"0.0.0-next-"[0-9]*) ;;
-*) die "expected an OpenCode 2 next-channel build after install, got: $installed_opencode_version" ;;
+*"0.0.0-beta-"[0-9]* | *"0.0.0-next-"[0-9]*) ;;
+*) die "expected an OpenCode 2 beta-channel build after install, got: $installed_opencode_version" ;;
 esac
 
 log "Stopping any older OpenCode background service..."
