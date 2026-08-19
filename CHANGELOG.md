@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.14.13] - 2026-08-19
+
+### Fixed
+- `oy doctor --install-missing` now gives workspace mise configs that pin
+  `npm:@opencode-ai/cli` the same `allow_builds` patch the global config gets,
+  even when no tool is missing, so a later `mise install` in the workspace
+  cannot leave a stub `opencode2`.
+- `install.sh` now expands the `~`-abbreviated paths that `mise config ls`
+  reports, so its `allow_builds` patching reaches the global and workspace
+  mise configs instead of silently skipping every file.
+
 ## [0.14.12] - 2026-08-19
 
 ### Changed

@@ -322,6 +322,13 @@ fn maybe_install_missing_with_mise(
 ) -> Result<()> {
     let tools = missing_mise_tools(opencode_ok, tokei_ok, ctags_ok);
     if tools.is_empty() {
+        if requested && mise_ok && crate::mise::ensure_opencode_allow_builds()? {
+            // Nothing is missing, but a workspace mise config can still pin
+            // the OpenCode tool without `allow_builds`. Patch it now so a
+            // later `mise install` here has the same postinstall permission
+            // the global config has and cannot leave a stub `opencode2`.
+            crate::ui::success("patched mise configs to allow the OpenCode 2 postinstall");
+        }
         return Ok(());
     }
     if !mise_ok {
@@ -340,8 +347,11 @@ fn maybe_install_missing_with_mise(
         tools.join(" ")
     ));
     run_mise_use(&mise, &tools)?;
+    // Patch every mise config declaring the OpenCode tool, including
+    // workspace configs that override the global entry without
+    // `allow_builds`, before any install runs its postinstall.
+    crate::mise::ensure_opencode_allow_builds()?;
     if !opencode_ok {
-        crate::mise::ensure_opencode_allow_builds()?;
         run_opencode_install(&mise)?;
     }
     let status = std::process::Command::new(&mise).arg("reshim").status()?;
@@ -483,5 +493,111 @@ mod tests {
             recommended_next_step(false, false, true, false, true),
             "Fix or unset `OY_OPENCODE`, then rerun `oy doctor`."
         );
+    }
+
+    #[cfg(unix)]
+    mod fake_mise {
+        use super::*;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::{Path, PathBuf};
+        use std::sync::Mutex;
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        struct PathGuard {
+            previous: Option<OsString>,
+        }
+
+        impl PathGuard {
+            fn prepend(bin: &Path) -> Self {
+                let previous = std::env::var_os("PATH");
+                let mut paths = vec![bin.as_os_str().to_owned()];
+                if let Some(path) = &previous {
+                    paths.extend(std::env::split_paths(path).map(OsString::from));
+                }
+                unsafe {
+                    std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+                }
+                Self { previous }
+            }
+        }
+
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(previous) = &self.previous {
+                        std::env::set_var("PATH", previous);
+                    } else {
+                        std::env::remove_var("PATH");
+                    }
+                }
+            }
+        }
+
+        /// A `mise` shim that answers `config ls --json` with a workspace
+        /// config pinning the OpenCode tool without `allow_builds`, and logs
+        /// every invocation so tests can assert whether mise was called.
+        struct FakeMise {
+            _dir: tempfile::TempDir,
+            config: PathBuf,
+            log: PathBuf,
+            _path_guard: PathGuard,
+        }
+
+        impl FakeMise {
+            fn new() -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                let bin = dir.path().join("bin");
+                std::fs::create_dir(&bin).unwrap();
+                let config = dir.path().join("workspace.mise.toml");
+                std::fs::write(&config, "[tools]\n\"npm:@opencode-ai/cli\" = \"beta\"\n").unwrap();
+                let log = dir.path().join("mise.log");
+                let shim = bin.join("mise");
+                std::fs::write(
+                    &shim,
+                    format!(
+                        "#!/bin/sh\nprintf '%s' \"$*\" >> '{}'\nprintf '%s' '[{{\"path\":\"{}\",\"tools\":[\"npm:@opencode-ai/cli\"]}}]'\n",
+                        log.display(),
+                        config.display()
+                    ),
+                )
+                .unwrap();
+                std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let _path_guard = PathGuard::prepend(&bin);
+                Self {
+                    _dir: dir,
+                    config,
+                    log,
+                    _path_guard,
+                }
+            }
+        }
+
+        #[test]
+        fn explicit_install_patches_workspace_configs_even_when_nothing_is_missing() {
+            let _lock = ENV_LOCK.lock().unwrap();
+            let fake = FakeMise::new();
+            maybe_install_missing_with_mise(true, true, true, true, true).unwrap();
+            let patched = std::fs::read_to_string(&fake.config).unwrap();
+            assert!(
+                patched.contains("allow_builds = [\"@opencode-ai/cli\"]"),
+                "workspace config should get the same allow_builds patch as the global config: {patched}"
+            );
+            assert!(fake.log.exists(), "patch path must consult mise config ls");
+        }
+
+        #[test]
+        fn diagnostic_doctor_leaves_workspace_configs_untouched() {
+            let _lock = ENV_LOCK.lock().unwrap();
+            let fake = FakeMise::new();
+            maybe_install_missing_with_mise(false, true, true, true, true).unwrap();
+            assert!(
+                !fake.log.exists(),
+                "plain doctor must stay read-only and never invoke mise"
+            );
+            let config = std::fs::read_to_string(&fake.config).unwrap();
+            assert_eq!(config, "[tools]\n\"npm:@opencode-ai/cli\" = \"beta\"\n");
+        }
     }
 }

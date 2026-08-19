@@ -11,7 +11,7 @@ set -eu
 #   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
 #   OY_SKIP_SETUP     1/true to skip `oy setup` and runtime load checks
 
-oy_version="0.14.12"
+oy_version="0.14.13"
 oy_tool="github:adonm/oy-cli@$oy_version"
 opencode_tool="npm:@opencode-ai/cli@beta"
 opencode_plain='"npm:@opencode-ai/cli" = "beta"'
@@ -190,6 +190,11 @@ allow_opencode_postinstall() {
     config_files="$config_files ${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
   fi
   for candidate in $config_files; do
+    # `mise config ls` abbreviates paths under $HOME with `~`, which the
+    # shell does not expand inside variables; expand it before patching.
+    case "$candidate" in
+    "~"/*) candidate="$HOME${candidate#"~"}" ;;
+    esac
     [ -f "$candidate" ] || continue
     sed -i "s|^$opencode_plain\$|$opencode_entry|" "$candidate"
   done

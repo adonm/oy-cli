@@ -16,6 +16,12 @@ cat >"$tmp/mise-mock" <<'EOF'
 printf '%s\n' "$*" >>"$OY_INSTALL_TEST_LOG"
 case "$*" in
 *"-- oy --version") printf 'oy-cli %s\n' "$OY_INSTALL_TEST_VERSION" ;;
+*"config ls --no-header"*)
+  # Reproduce mise's ~-abbreviated paths; the installer must expand them
+  # before checking or patching the files.
+  printf '%s\n' '~/.config/mise/config.toml  npm:@opencode-ai/cli, node'
+  printf '%s\n' '~/dev/project/.mise.toml  npm:@opencode-ai/cli, node'
+  ;;
 *"-- opencode2 api v2.command.list"*)
   count=$(cat "$OY_INSTALL_TEST_PLUGIN_COUNT")
   count=$((count + 1))
@@ -121,6 +127,8 @@ run_install() {
 }
 
 default_log="$tmp/default.log"
+mkdir -p "$tmp/home-default/.config/mise"
+printf '%s\n' '"npm:@opencode-ai/cli" = "beta"' >"$tmp/home-default/.config/mise/config.toml"
 run_install "$default_log" 1 1 "$tmp/home-default" ""
 default=$(cat "$default_log")
 assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
@@ -135,14 +143,18 @@ assert_contains "$default" "github:universal-ctags/ctags-nightly-build[matching=
 assert_not_contains "$default" "npm install -g"
 assert_not_contains "$default" "node@latest"
 assert_not_contains "$(cat "$default_log.curl")" "https://cursor.com/install"
+assert_contains "$(cat "$tmp/home-default/.config/mise/config.toml")" 'allow_builds = ["@opencode-ai/cli"]'
 
 workspace_log="$tmp/workspace.log"
+mkdir -p "$tmp/home-workspace/dev/project"
+printf '%s\n' '"npm:@opencode-ai/cli" = "beta"' >"$tmp/home-workspace/dev/project/.mise.toml"
 run_install "$workspace_log" 1 1 "$tmp/home-workspace" "" --workspace
 workspace=$(cat "$workspace_log")
 assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
 assert_not_contains "$workspace" "use --global"
 assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_not_contains "$workspace" "unuse --global"
+assert_contains "$(cat "$tmp/home-workspace/dev/project/.mise.toml")" 'allow_builds = ["@opencode-ai/cli"]'
 
 env_workspace_log="$tmp/env-workspace.log"
 run_install "$env_workspace_log" 1 1 "$tmp/home-env-workspace" workspace
