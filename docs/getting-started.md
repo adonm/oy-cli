@@ -2,137 +2,177 @@
 
 > **New here? TL;DR — 2 minutes:**
 > ```bash
-> curl -fsSL https://oy.adonm.dev/install.sh | sh  # installs oy + skills
+> curl -fsSL https://oy.adonm.dev/install.sh | sh  # installs oy + skills, choose Global
 > oy doctor --check                                  # should say "global skills ok"
 > # then in Cursor / OpenCode / Codex / Copilot, say:
 > # "run the oy-setup skill to finish setup"
 > # "audit this repository with the oy-audit skill"
 > ```
 
-This guide installs oy, installs the skills, and creates a first report.
+This guide installs oy, verifies it, and creates your first report. Follow it top-to-bottom the first time — later runs are just one line to your agent.
 
-## Before you begin
+## Before you begin — checklist
 
 You need:
 
-- Linux or macOS; use WSL2 on Windows;
-- any agent that reads Agent Skills (OpenCode, Cursor, Codex, Copilot, or Gemini CLI);
-- a model provider configured in that agent;
-- `git` only for target-diff reviews such as reviewing against `main`.
+- **OS:** Linux or macOS (use WSL2 on Windows) — check with `uname -a`
+- **Agent:** any that reads Agent Skills — OpenCode, Cursor, Codex, Copilot, or Gemini CLI
+- **Model provider:** configured *in your agent* (for example an API key in Cursor/OpenCode settings). `oy` never stores credentials.
+- **`git`** only if you plan to review a diff against a branch (e.g. `main`)
 
-See [Compatibility](compatibility.md) for exact tested versions and platforms.
+Not sure if your setup qualifies? See [Compatibility](compatibility.md) for tested versions.
 
-## 1. Install
+## 1. Install oy
 
-### Recommended: mise installer
+### Recommended: one-line installer
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
-
-# Or choose a scope without prompting.
-curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --global
-curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --workspace
 ```
 
-The installer:
+When prompted, choose **Global** unless you only want oy in the current repository.
 
-1. installs and activates [mise](https://mise.jdx.dev/) with its official bootstrap for bash, zsh, or fish when mise is missing;
-2. installs a prebuilt oy release with mise;
-3. installs prebuilt `tokei` and Universal Ctags context helpers in the selected mise scope;
-4. runs `oy setup`, which writes the oy skills under `~/.agents/skills/` and removes any legacy OpenCode plugin state.
+To skip the prompt (for scripts or CI):
 
-The default interactive installer asks whether to write mise's global config or `mise.toml` in the current workspace. Noninteractive use defaults to global unless `--workspace` or `OY_INSTALL_SCOPE=workspace` is supplied.
+```bash
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --global
+curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --workspace  # current repo only
+```
 
-Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_SCOPE=global|workspace` as an alternative to flags. Set `OY_SKIP_SETUP=1` to install binaries without changing the skills installation.
+What the installer does:
 
-### Manual install
+1. Installs [mise](https://mise.jdx.dev/) (if missing) with its official bootstrap for bash/zsh/fish;
+2. Installs a prebuilt `oy` release with mise;
+3. Installs prebuilt `tokei` and Universal Ctags context helpers (optional, for large repos);
+4. Runs `oy setup`, which writes the skills to `~/.agents/skills/` and removes any legacy OpenCode plugin state.
 
-With mise:
+> **Tip:** Review [`install.sh`](install.sh) before piping to a shell. Set `OY_INSTALL_SCOPE=global|workspace` as an alternative to flags, or `OY_SKIP_SETUP=1` to install binaries without changing skills.
+
+### Alternative installs
+
+**With mise (no curl pipe):**
 
 ```bash
 mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.0
 mise exec github:adonm/oy-cli@0.15.0 -- oy setup
 ```
 
-Or install only the Rust CLI from crates.io:
+**From source (requires Rust 1.96+):**
 
 ```bash
 cargo install oy-cli --locked
 oy setup
 ```
 
-Rust 1.96+ is required only when building from source.
+The installer and `oy doctor --install-missing` use `aqua:XAMPPRocky/tokei@12.1.2` and release-only archives from `github:universal-ctags/ctags-nightly-build` — no Rust toolchain needed.
 
-The installer and `oy doctor --install-missing` use `aqua:XAMPPRocky/tokei@12.1.2`, the newest stable official tokei release that provides binaries, and the release-only archives from `github:universal-ctags/ctags-nightly-build`. They do not install a Rust build toolchain.
+## 2. Verify and finish agent setup
 
-## 2. Finish agent setup
-
-Run `oy doctor --check` to verify the skills:
+**Check the CLI:**
 
 ```bash
-oy doctor --check
+oy --version        # should print 0.15.x
+oy doctor --check   # should print "global skills ok" or "workspace skills ok"
 ```
 
-Then ask your agent to finish host-specific setup:
+If `oy doctor --check` says skills are missing, run:
+
+```bash
+oy setup            # writes to ~/.agents/skills
+# or for this repo only:
+oy setup --workspace
+oy doctor --check   # check again
+```
+
+**Finish inside your agent** — copy-paste this prompt:
 
 ```text
 run the oy-setup skill
 ```
 
-The skill verifies discovery, offers to copy the skills to any host-specific
-directory this agent prefers (for example `.claude/skills`), installs the oy
-persona (improving the default agent or creating an `oy` agent), and reruns
-`oy doctor --check`.
+What the skill does:
 
-## 3. Choose setup scope
+- Confirms your agent can discover `oy-audit`, `oy-review`, `oy-enhance`, `oy-setup` from `~/.agents/skills` or `.agents/skills`;
+- If your agent prefers a different directory (for example `.claude/skills` for Claude Code), it offers to copy or symlink the skills there;
+- Installs the oy persona (improves your default agent or creates an `oy` agent) and reruns `oy doctor --check`.
 
-Skills install globally by default. You can preview or change the scope later:
+You only do this once per machine (or per workspace if you used `--workspace`).
 
-```bash
-oy setup --dry-run        # preview global setup
-oy setup                  # skills under ~/.agents/skills
-oy setup --workspace      # skills under this repository's .agents/skills
-oy setup --remove         # back up and remove oy-owned skills and legacy config
-```
+## 3. Understand setup scope (pick one, don't overthink)
 
-Use global setup for your own workstation. Use `--workspace` when only one repository should load oy. The installer's `--workspace` flag is separate: it controls where mise writes its tool versions.
+| Scope | Command | When to use |
+|---|---|---|
+| **Global** (default) | `oy setup` | Your personal workstation — skills available in every repo |
+| **Workspace** | `oy setup --workspace` | Only this repository should load oy |
+| Preview | `oy setup --dry-run` | See what setup would change without writing |
+| Remove | `oy setup --remove` | Back up and remove oy-owned skills and legacy config |
 
-Before changing existing oy-owned files, setup creates a private backup and reports its path. Unchanged files stay byte-for-byte intact. User-modified skill files without the setup marker are preserved. Setup also removes the obsolete OpenCode plugin package cache. See [Setup ownership and backups](reference.md#setup-ownership-and-backups).
+For most new users: **use Global**. The installer's `--workspace` flag is separate — it controls where *mise* writes tool versions, not where skills go.
 
-## 4. Create a first report
+> Setup backs up any oy-owned files before changing them and leaves user-modified skill files untouched (it only overwrites files with `<!-- Generated by oy setup -->`). See [Setup ownership](reference.md#setup-ownership-and-backups).
 
-Start in a small or medium repository and ask your agent:
+## 4. Create your first report
+
+Pick a **small or medium repository** for your first run — you'll get faster feedback and avoid the 80-chunk limit.
+
+**Audit (security-focused):**
 
 ```text
 audit this repository with the oy-audit skill
 ```
 
-The command writes `ISSUES.md`. Read the findings alongside the documented collection exclusions before acting on them.
+Look for `ISSUES.md` in the workspace root. Open it — you'll see a verdict, a findings summary with IDs like `audit-abc123...`, detailed evidence with file paths, and a machine-readable JSON block at the bottom.
 
-For a code-quality review:
+**Review (code-quality):**
 
 ```text
 review this repository with the oy-review skill     # whole workspace
-review the diff against main with the oy-review skill   # current work vs main
+review the diff against main with the oy-review skill   # only changes vs main
 ```
 
-To fix one finding:
+Look for `REVIEW.md`. Target-diff reviews need `git` and a valid ref (branch, commit, tag).
+
+**Fix one finding:**
 
 ```text
 use the oy-enhance skill to fix audit-0123456789abcdef
 ```
 
-Rerun the originating audit or review to confirm the finding against current code.
+Use the real ID from your report. The skill checks the cited source, makes one minimal fix, and runs the narrowest verification available. Then rerun the same audit/review to confirm — the report will carry forward or drop the finding.
 
-## If something fails
+## 5. What to expect
 
-- Run `oy doctor` for paths, versions, and missing tools.
-- Run `oy doctor --check` to validate the skills installation.
-- Confirm the skills are visible to your agent; see [Compatibility](compatibility.md) for the directory each agent reads.
-- Rerun `oy setup`, then ask your agent to run the `oy-setup` skill again.
+- **Evidence is frozen:** `oy` writes ordered chunks under `.oy/runs/<run-id>/` and the model must read every chunk.
+- **Reports are generated:** `ISSUES.md` / `REVIEW.md` / `oy.sarif` are overwritten on each run. Treat findings as candidates until you confirm the evidence.
+- **No silent sampling:** if the repo exceeds 80 chunks, `oy` *fails* instead of sampling. Narrow the path first (e.g. `audit src/auth`).
 
-## Next
+Read the exclusions before relying on a report: gitignored/hidden files, `target`/`node_modules`/`.tmp`, lockfiles, secrets, binary or >512 KiB files are skipped. See [Coverage and limits](workflows.md#coverage-and-limits).
 
-- [Choose scopes and understand reports](workflows.md)
-- [See report and CI examples](examples.md)
-- [Look up every command and environment variable](reference.md)
+## If something fails — quick fixes
+
+| Symptom | Fix |
+|---|---|
+| `oy: command not found` | Restart your shell (mise activation) or add `~/.local/bin` to `PATH`; try `mise exec github:adonm/oy-cli@latest -- oy --version` to test |
+| `oy doctor` says legacy plugin cache present | Run `oy setup` again — it deletes the obsolete cache under `~/.cache/opencode/packages` |
+| `oy doctor --check` says skills missing | Run `oy setup`, then `oy doctor --check`; if it still fails, check `~/.agents/skills/oy-audit/SKILL.md` exists and `OY_SKILLS_DIR` isn't pointing elsewhere |
+| Agent says "skill not found" | Ask the agent to run the `oy-setup` skill — it will copy/symlink to your agent's directory (e.g. `.claude/skills`). See [Compatibility](compatibility.md) for each agent's search path |
+| `exceeds max-chunks 80` | Narrow the scope: `audit src/auth with the oy-audit skill` — only raise `--max-chunks` when the broader scope is intentional |
+| `not a git repository` or bad target | Target-diff reviews need a git repo and a valid ref — try `git rev-parse --verify main` first |
+| Model not responding / auth error | Configure your provider in your agent (Cursor: Settings → Models, OpenCode: `opencode.jsonc`). `oy` never handles API keys |
+| Empty or sparse report | Expected for small/mature repos — check `oy-findings` JSON block is `[]` and verdict says no concerns; try a more focused prompt or different model |
+
+Still stuck?
+
+```bash
+oy doctor --json | head -n 100   # redacted diagnostic output — safe to share
+oy setup --dry-run               # preview what setup would change
+```
+
+Include `oy --version`, your agent + version, OS/architecture, and redacted `oy doctor --json` when asking for help (see [Compatibility](compatibility.md#reporting-a-compatibility-problem)).
+
+## Next steps
+
+- [Workflow guide](workflows.md) — choose scopes (path vs focus), understand statuses (`new`, `fixed?`, `stale`), and remediation loops
+- [Examples and CI](examples.md) — see real `ISSUES.md` / `REVIEW.md` / SARIF snippets and GitHub Actions upload
+- [Troubleshooting](troubleshooting.md) — expanded fixes with copy-paste commands
+- [CLI reference](reference.md) — every command, environment variable, and file layout

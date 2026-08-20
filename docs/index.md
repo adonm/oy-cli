@@ -18,25 +18,46 @@ oy selects and freezes the review input
 
 This prevents silent model-selected sampling and makes the reviewed input visible. Findings are still model-generated and can vary.
 
-## Start here
+## Start here — 3 steps
+
+**1. Install**
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
-# Choose global or current-workspace mise installation when prompted.
-oy doctor --check
-
-cd your-repository
-# Ask your agent: "audit this repository with the oy-audit skill"
+oy doctor --check   # expect "global skills ok"
 ```
 
-Then try:
+**2. Finish setup in your agent** — copy-paste:
 
 ```text
-"review the diff against main with the oy-review skill"
-"fix audit-0123456789abcdef with the oy-enhance skill"
+run the oy-setup skill to finish setup
 ```
 
-See [Getting started](getting-started.md) for manual installation, the `oy-setup` skill, mise scope, and global versus project-local skills.
+The skill checks that your agent can see `oy-audit`, `oy-review`, `oy-enhance`, and copies them to your host's preferred location if needed (for example `.claude/skills`).
+
+**3. Create your first report**
+
+```text
+audit this repository with the oy-audit skill
+```
+
+Look for `ISSUES.md` in the workspace root. Then try:
+
+```text
+review the diff against main with the oy-review skill
+use the oy-enhance skill to fix audit-0123456789abcdef
+```
+
+> **First time?** Follow the full walkthrough in [Getting started](getting-started.md) — it explains what each step does and what to do if something fails.
+
+## New to Agent Skills?
+
+Agent Skills are plain Markdown files (`SKILL.md`). `oy setup` writes four of them to `~/.agents/skills/`:
+
+- `oy-audit`, `oy-review`, `oy-enhance` — the workflows
+- `oy-setup` — verifies installation and installs the `oy` persona
+
+Your agent loads the matching SKILL.md when you mention it. No extra daemon, no API keys stored by oy.
 
 ## What oy owns
 
@@ -57,9 +78,10 @@ The skills run under your agent's own permission model and never broaden it. `oy
 
 ## Choose your next page
 
-- [Getting started](getting-started.md) — install and create a first report
+- [Getting started](getting-started.md) — install and create a first report (start here if you're new)
 - [Workflow guide](workflows.md) — choose scope, understand findings, and remediate
 - [Examples and CI](examples.md) — inspect reports and upload SARIF
+- [Troubleshooting](troubleshooting.md) — fix the 6 most common first-run problems
 - [CLI reference](reference.md) — exact commands, setup behavior, and environment variables
 - [Compatibility](compatibility.md) — supported platforms and agent hosts
 - [Security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) — trust and disclosure boundaries

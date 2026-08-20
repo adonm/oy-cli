@@ -90,7 +90,7 @@ The `oy` system prompt intentionally remains much shorter than OpenCode's provid
 - prefer minimal changes and local reasoning;
 - batch independent inspection and keep communication concise.
 
-Do not copy provider-specific frontend preferences, formatting rules, tool names, or temporary implementation details into oy. Compare the prompt against tagged OpenCode 2 releases during compatibility updates and use live evaluations for behavioral changes.
+Do not copy provider-specific frontend preferences, formatting rules, tool names, or temporary implementation details into oy. Compare the prompt against tagged OpenCode 2 releases during compatibility updates and spot-check behavioral changes on a few pinned public repos when needed.
 
 ## Success signals
 
@@ -100,7 +100,7 @@ Do not copy provider-specific frontend preferences, formatting rules, tool names
 - Unchanged evidence and explicit metadata produce byte-stable canonical reports.
 - A finding ID can drive one focused fix and disappear or change status on rerun.
 - OpenCode API compatibility code shrinks without losing collection, report, SARIF, or workflow quality.
-- Prompt evaluations show that the shorter `oy` agent matches or improves OpenCode Build on completion, verification, worktree safety, and concise communication.
+- Spot-checks show that the shorter `oy` agent matches or improves OpenCode Build on completion, verification, worktree safety, and concise communication.
 
 ## Non-goals
 

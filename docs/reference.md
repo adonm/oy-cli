@@ -1,5 +1,9 @@
 # CLI reference
 
+> **New user?** You probably don't need this page yet. Most users just talk to their agent:
+> `audit this repository with the oy-audit skill` — the skill calls these commands for you.
+> Come here when you want exact flags, environment variables, or to automate `prepare`/`finalize` outside an agent.
+
 Run `oy <command> --help` for the exact flags supported by your installed version.
 
 ## Setup and maintenance

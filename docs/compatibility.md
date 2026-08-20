@@ -1,5 +1,15 @@
 # Compatibility
 
+## Which setup do I have?
+
+Not sure? Run:
+
+```bash
+oy --version
+oy doctor --check   # "global skills ok" or "workspace skills ok" means you're good
+oy doctor --json | head -n 40
+```
+
 ## Platforms
 
 | Environment | Support |
@@ -18,9 +28,20 @@ The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy rele
 oy does not require any specific agent. The skills are plain Agent Skills
 (`SKILL.md` files) under the cross-agent `.agents/skills` location, which
 the current releases of OpenCode, Cursor, Codex, GitHub Copilot, and Gemini
-CLI all discover natively. Claude Code reads `.claude/skills` instead; the
-`oy-setup` skill offers to copy or symlink the canonical files there when
-needed.
+CLI all discover natively.
+
+| Agent | Where it looks for skills |
+|---|---|
+| OpenCode, Cursor, Codex, Copilot, Gemini CLI | `~/.agents/skills` (global) or `.agents/skills` (workspace) |
+| Claude Code | `.claude/skills` — the `oy-setup` skill offers to copy or symlink there |
+
+If `oy doctor --check` passes but your agent says "skill not found", ask it:
+
+```text
+run the oy-setup skill
+```
+
+The skill will detect the host and offer to copy the files to the right place. No manual file copying needed.
 
 The optional post-setup OpenCode location refresh uses `opencode2` (or
 `OY_OPENCODE`). It is best-effort: when OpenCode is absent or unsupported,
@@ -37,6 +58,8 @@ content in the global or workspace skills directory and that the obsolete
 OpenCode plugin package cache is gone. It does not validate your agent's
 permission choices or make a model request.
 
+If it fails, run `oy setup` again and retry. See [Troubleshooting](troubleshooting.md) for common fixes.
+
 ## Setup locations
 
 - Global skills: `~/.agents/skills/`, or `OY_SKILLS_DIR` when set
@@ -48,7 +71,7 @@ Setup preserves unrelated configuration and backs up changed oy-owned entries. S
 ## Optional tools
 
 `tokei` and Universal Ctags are optional context helpers the oy persona
-mentions for large unfamiliar scopes. Missing them does not block setup,
+mentions for large unfamiliar scopes. Missing them does **not** block setup,
 audit, review, or remediation. Install them with:
 
 ```bash
@@ -56,6 +79,8 @@ oy doctor --install-missing
 ```
 
 The helper installs prebuilt artifacts only: tokei 12.1.2 through mise's Aqua backend and Universal Ctags release archives from the official nightly-build repository.
+
+If the install fails, you can safely ignore it — your first audit will still work.
 
 ## Reporting a compatibility problem
 

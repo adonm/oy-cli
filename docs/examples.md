@@ -1,14 +1,18 @@
 # Examples and CI
 
+> **New?** Start with `audit this repository with the oy-audit skill` — the snippets below show what the generated reports look like so you know what to expect.
+
 The reports below are illustrative. Paths, IDs, wording, and findings depend on the reviewed code and selected model.
 
 ## Audit with one finding
+
+Prompt to your agent:
 
 ```text
 audit this repository with the oy-audit skill, focusing on authentication boundaries
 ```
 
-Shortened `ISSUES.md`:
+Shortened `ISSUES.md` (look for this file in your workspace root after the run):
 
 ````markdown
 # Audit Issues
@@ -44,9 +48,15 @@ Evidence: `src/auth.rs:84` uses the caller-provided tenant before authorization.
 ```
 ````
 
-The Markdown is for people; the JSON block preserves finding IDs and state for reruns and the `oy-enhance` skill.
+The Markdown is for people; the JSON block preserves finding IDs and state for reruns and the `oy-enhance` skill. Copy the ID (e.g. `audit-2a71...`) to fix it:
+
+```text
+use the oy-enhance skill to fix audit-2a71...
+```
 
 ## Target-diff review
+
+Great for pull requests — only the changed code is reviewed.
 
 ```text
 review the diff against main with the oy-review skill, focusing on types and boundaries
@@ -78,7 +88,11 @@ Both structs are serialized independently. Keep one persisted representation and
 ```
 ````
 
+No target → whole workspace is reviewed. With a target (`main`, `HEAD~3`, a commit SHA), only that diff is collected.
+
 ## Successful no-findings review
+
+This is success, not failure — the run passed and nothing high-conviction was found:
 
 ````markdown
 # Code Quality Review
@@ -98,17 +112,17 @@ No high-conviction findings.
 ```
 ````
 
-A successful no-findings report still has generated metadata and an empty JSON array. A failed run exits nonzero or does not finalize the report.
+A failed run exits nonzero or does not finalize the report at all. Check the CLI exit status and the header metadata (digest, chunk count) to tell the two apart.
 
 ## Fix and confirm
 
 ```text
 use the oy-enhance skill to fix audit-2a71...
-# Inspect the source diff and verification output, then rerun:
+# Inspect the source diff and verification output, then rerun the same audit:
 # "audit this repository with the oy-audit skill, focusing on authentication boundaries"
 ```
 
-The second audit should drop the finding if it no longer applies or update its lifecycle state from current evidence.
+The second audit should drop the finding if it no longer applies or update its lifecycle state (`new` → `fixed?` → `stale` → gone) from current evidence. Always rerun the originating workflow to confirm.
 
 ## SARIF
 
@@ -154,3 +168,10 @@ steps:
 ```
 
 Pin versions in production CI and configure the provider in your agent of choice. oy does not upload reports itself.
+
+## Tips for new users
+
+- **Start narrow:** `audit src/auth` is faster and cheaper than `audit this repository` on a large codebase
+- **Read the evidence:** every finding should cite a path/line/symbol — if it doesn't, treat it skeptically
+- **One fix at a time:** let `oy-enhance` handle one ID, verify, rerun — don't batch unrelated fixes
+- **Compare runs:** set `OY_OPENCODE_MODEL=provider/model#variant` to keep model choice explicit across reruns

@@ -48,4 +48,4 @@ The Rust CLI prepares evidence, verifies model-written candidates, normalizes fi
 - claiming deterministic security or quality conclusions;
 - running paid model evaluations in default CI.
 
-See [Architecture](architecture.md) for implementation boundaries, [LLM evaluation](evaluation.md) for prompt testing, and [`ROADMAP.md`](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) for current work.
+See [Architecture](architecture.md) for implementation boundaries and [`ROADMAP.md`](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) for current work.

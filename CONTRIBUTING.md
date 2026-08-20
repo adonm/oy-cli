@@ -38,28 +38,19 @@ Keep `Cargo.lock` in sync with `Cargo.toml` after dependency changes.
 2. Make the smallest targeted change.
 3. Add focused tests for behavior changes.
 4. Run `just check`.
-5. For generated prompt/skill changes, run or update the evaluation plan in `docs/evaluation.md`.
-6. Update user-facing docs and `CHANGELOG.md` for behavior changes.
+5. Update user-facing docs and `CHANGELOG.md` for behavior changes.
 
 ## Prompt And Skill Changes
 
 Prompt quality is live-model behavior, not a deterministic unit-test problem.
-Before changing skills or the persona, read `docs/evaluation.md` and use a
-pinned public-repository corpus when possible. Keep raw model outputs under
-`.tmp/eval/`; do not commit generated `ISSUES.md`, `REVIEW.md`, or SARIF files
-from local runs.
+Keep raw model outputs under `.tmp/eval/` when manually checking prompt changes
+against a few pinned public repositories; do not commit generated `ISSUES.md`,
+`REVIEW.md`, or SARIF files from local runs.
 
 The canonical skill files live in `assets/skills/` and are embedded into the
 binary at compile time; `oy setup` writes them and `oy doctor --check`
 verifies byte-exact content. Keep the bodies host-neutral: they run in
 OpenCode, Cursor, Codex, Copilot, and Gemini CLI alike.
-
-Useful commands:
-
-```bash
-just eval
-python3 scripts/eval_runner.py run --dry-run
-```
 
 ## Design Rules
 
@@ -98,7 +89,6 @@ python3 scripts/eval_runner.py run --dry-run
 See also:
 
 - `docs/architecture.md` for runtime flow and ownership boundaries
-- `docs/evaluation.md` for prompt/skill evaluation on public OSS corpora
 - `SECURITY.md` for user-facing security guidance
 - `ROADMAP.md` for current project priorities
 

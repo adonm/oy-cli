@@ -123,9 +123,9 @@ fn remove_legacy_plugins(object: &mut Map<String, Value>) -> Result<()> {
 
 pub(super) fn config_has_oy_entries(config: &Value) -> bool {
     config
-            .get("plugins")
-            .and_then(Value::as_array)
-            .is_some_and(|plugins| plugins.iter().any(is_legacy_plugin_value))
+        .get("plugins")
+        .and_then(Value::as_array)
+        .is_some_and(|plugins| plugins.iter().any(is_legacy_plugin_value))
         || ["command", "commands"].iter().any(|key| {
             config
                 .get(*key)

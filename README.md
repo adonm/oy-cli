@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/oy-cli.svg)](https://crates.io/crates/oy-cli)
 [![docs.rs](https://docs.rs/oy-cli/badge.svg)](https://docs.rs/oy-cli)
 
-**Deterministic-input audits, code reviews, and one-finding fixes as portable agent skills.**
+**Deterministic-input audits, code reviews, and one-finding fixes — as portable agent skills.**
 
 `oy` helps your coding agent review a repository without quietly choosing a small sample. It prepares an ordered, reviewable set of files, lets your agent's model analyze them under its own permissions, and verifies the report before writing it. The workflows are standard Agent Skills that OpenCode, Cursor, Codex, Copilot, and Gemini CLI all discover from `.agents/skills`.
 
@@ -17,32 +17,52 @@
 
 Your agent owns models, credentials, sessions, and general tools. `oy` adds the evidence and report workflow; it is not a second agent runtime or permission system.
 
-## Quick start
+## Quick start — 2 minutes
 
-Requirements: Linux or macOS (WSL2 on Windows), `oy` on `PATH`, and any agent that reads Agent Skills.
+**You need:** Linux or macOS (WSL2 on Windows), any agent that reads Agent Skills (OpenCode, Cursor, Codex, Copilot, or Gemini CLI) with a model provider already configured.
 
-> **Copy-paste for a new repo (30 seconds after install):**
-> ```text
-> run the oy-setup skill to finish setup
-> audit this repository with the oy-audit skill
-> ```
+**Step 1 — Install oy:**
 
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
-# Choose global or current-workspace mise installation when prompted.
-oy doctor --check
-
-cd your-repository
-# Ask your agent: "audit this repository with the oy-audit skill"
+# choose Global when prompted (or pass --global / --workspace to skip the prompt)
+oy doctor --check   # expect: "global skills ok" or "workspace skills ok"
 ```
 
-Use `--global` or `--workspace` to skip the mise scope prompt.
+> Review [install.sh](https://oy.adonm.dev/install.sh) before piping to a shell. Prefer a manual install? See [Getting started](https://oy.adonm.dev/getting-started.html).
 
-The installer uses [mise](https://mise.jdx.dev/) for prebuilt oy and the optional tokei/Universal Ctags context helpers, then runs `oy setup` to install the skills. [Review the installer](https://oy.adonm.dev/install.sh) before piping it to a shell.
+**Step 2 — Ask your agent (copy-paste one line):**
 
-Prefer a manual install or project-local setup? See [Getting started](https://oy.adonm.dev/getting-started.html).
+```text
+run the oy-setup skill to finish setup
+```
+
+Then create your first report:
+
+```text
+audit this repository with the oy-audit skill
+```
+
+That's it — look for `ISSUES.md` in your workspace root. Try next:
+
+```text
+review the diff against main with the oy-review skill
+use the oy-enhance skill to fix audit-0123456789abcdef
+```
 
 Local dev from this checkout: `just install` (cargo install + `oy setup` + `oy doctor --check`).
+
+### What just happened?
+
+1. `oy` collected eligible files into ordered chunks under `.oy/runs/<id>/`
+2. Your agent read every chunk and wrote candidate findings
+3. `oy` verified the evidence wasn't changed and normalized the report
+
+> **The inputs are deterministic; the conclusions are not.** Model choice still affects findings. See [Coverage and limits](https://oy.adonm.dev/workflows.html#coverage-and-limits) before using a report for high-assurance work.
+
+### New to Agent Skills?
+
+Agent Skills are just `SKILL.md` files. `oy setup` writes them to `~/.agents/skills/` (or `.agents/skills/` for workspace-only). Your agent discovers them automatically — no API keys or separate daemon. If `oy doctor --check` passes but your agent can't see the skills, ask it to run the `oy-setup` skill; it will copy/symlink them to your host's preferred location (e.g. `.claude/skills`).
 
 ## Common workflows
 
@@ -55,7 +75,7 @@ audit the authentication boundaries with the oy-audit skill
 audit with sarif output and write oy.sarif
 ```
 
-A single existing workspace path narrows collection. Other text is treated as review guidance.
+A single existing workspace path narrows collection (e.g. `src/auth`). Other text is treated as review guidance for the model.
 
 ### Review code
 
@@ -70,21 +90,20 @@ A branch, commit, tag, or ref selects target-diff review. Without a target, the 
 ### Fix one finding
 
 ```text
-use the oy-enhance skill to fix review-0123456789abcdef
+use the oy-enhance skill to fix audit-0123456789abcdef
 ```
 
 Reports include stable finding IDs. The skill confirms the cited source, makes one focused fix, and runs the narrowest available verification. Rerun the originating audit or review to confirm.
 
-## How repeatable review works
+## Troubleshooting
 
-1. **Prepare:** oy collects eligible repository text or a Git diff into ordered files under `.oy/runs/`.
-2. **Review:** your agent reads every prepared chunk and writes a candidate report.
-3. **Verify:** oy rejects changed inputs, modified evidence, concurrent report changes, or malformed findings.
-4. **Finalize:** oy writes normalized Markdown or SARIF with stable finding metadata.
+- `oy: command not found` → restart your shell (mise activation) or check `~/.local/bin` is on `PATH`
+- `oy doctor --check` fails → run `oy setup` again, then ask your agent to run the `oy-setup` skill
+- Agent can't find the skill → see [Compatibility](https://oy.adonm.dev/compatibility.html) for where each agent looks, or ask the `oy-setup` skill to copy them
+- `exceeds max-chunks 80` → narrow the path first (e.g. `audit src/auth`), only then raise `--max-chunks`
+- Model not configured → configure your provider in your agent (not in oy); `oy` never stores credentials
 
-> **The inputs are deterministic; the conclusions are not.** Model choice and prompt quality still affect findings.
-
-“Every chunk” means every chunk collected by oy, not every byte in the repository. The collector excludes ignored/hidden paths, dependencies and build output, lockfiles, likely secrets, binary or unreadable files, and files larger than 512 KiB. See [Coverage and limits](https://oy.adonm.dev/workflows.html#coverage-and-limits) before using a report for high-assurance work.
+More help: [Getting started](https://oy.adonm.dev/getting-started.html) · [Workflow guide](https://oy.adonm.dev/workflows.html) · [Troubleshooting](https://oy.adonm.dev/troubleshooting.html) · `oy doctor` · `oy <command> --help`
 
 ## Safety
 
