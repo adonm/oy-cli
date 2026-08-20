@@ -27,7 +27,7 @@ install:
     mkdir -p ~/.local/bin && ln -sf ~/.cargo/bin/oy ~/.local/bin/oy
     oy setup
     oy doctor --check
-    @echo "Installed oy $$(~/.cargo/bin/oy --version) — skills at ~/.agents/skills — run 'oy doctor --check' and ask your agent to run the oy-setup skill"
+    @echo "Installed oy $(~/.cargo/bin/oy --version) — skills at ~/.agents/skills — run 'oy doctor --check' and ask your agent to run the oy-setup skill"
 
 # Standard local check suite. Uses stable Cargo only so it works after `mise install`.
 check: _version-check _fmt-check _clippy _test _rustdoc _book _help-smoke _installer-smoke _shellcheck
