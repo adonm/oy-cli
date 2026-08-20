@@ -296,16 +296,15 @@ fn setup_moves_legacy_direct_files_to_backup() {
 }
 
 #[test]
-fn setup_drops_a_default_agent_pointing_at_the_removed_oy_agent() {
+fn setup_preserves_default_agent_even_when_pointing_at_oy() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.json");
-    fs::write(&path, r#"{ "default_agent": "oy", "model": "test/model" }"#).unwrap();
+    let original = r#"{ "default_agent": "oy", "model": "test/model" }"#;
+    fs::write(&path, original).unwrap();
 
     update_config(&path).unwrap();
 
-    let updated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(updated["model"], "test/model");
-    assert!(updated.get("default_agent").is_none());
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
 }
 
 #[test]

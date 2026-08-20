@@ -59,11 +59,6 @@ fn read_config(path: &Path) -> Result<Value> {
 
 pub(super) fn remove_oy_config_entries(object: &mut Map<String, Value>) -> Result<()> {
     remove_legacy_plugins(object)?;
-    if object.get("default_agent").and_then(Value::as_str) == Some("oy") {
-        // The removed plugin registered the `oy` agent; without the plugin the
-        // pointer would dangle. OpenCode falls back to its built-in agent.
-        object.remove("default_agent");
-    }
     for key in ["command", "commands"] {
         let remove = object
             .get_mut(key)
@@ -127,8 +122,7 @@ fn remove_legacy_plugins(object: &mut Map<String, Value>) -> Result<()> {
 }
 
 pub(super) fn config_has_oy_entries(config: &Value) -> bool {
-    config.get("default_agent").and_then(Value::as_str) == Some("oy")
-        || config
+    config
             .get("plugins")
             .and_then(Value::as_array)
             .is_some_and(|plugins| plugins.iter().any(is_legacy_plugin_value))
