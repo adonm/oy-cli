@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-21
+
+### Changed
+- **Skills are now standard Agent Skills:** `oy setup` writes `oy-audit`, `oy-review`, `oy-enhance`, and `oy-setup` under `~/.agents/skills` (or `.agents/skills` with `--workspace`) — the directory OpenCode, Cursor, Codex, Copilot, and Gemini CLI all read natively. Skill bodies are host-neutral (no OpenCode-specific tool names or permission language).
+- **Plain mise install:** `docs/install.sh` only installs `github:adonm/oy-cli` + optional `tokei`/`ctags` and runs `oy setup`. No `npm:@opencode-ai/cli`, no `allow_builds` patching, no `opencode2` service polling. Manual install is `mise use github:adonm/oy-cli@0.15.0` + `oy setup`.
+- **Persona upgrade:** the oy persona is now concise (~30 lines) and the `oy-setup` skill upgrades your default agent (merging principles, preserving project instructions) instead of replacing it. The persona is available as `~/.agents/skills/oy-setup/oy-persona.md`.
+- **Repo layout:** `src/opencode` → `src/skills`, `packages/opencode/assets` → `assets/skills`, `src/mise.rs` and the `oy run`/`enhance`/`recover` orchestration removed. `just install` added for local dev (`cargo install --path . --locked` + `oy setup`).
+- **Docs for new users:** `getting-started`, `README`, `index`, and `reference` rewritten around “install → ask your agent” with copy-paste skill prompts. `docs/npm-publishing.md` removed.
+
+### Removed
+- The `@oy-cli/opencode` npm OpenCode plugin, Cursor provider fork, `agents/commands` plugin registration, and the `cursor/*` provider path. `oy setup` now migrates any existing plugin config and deletes the regenerable package cache under `~/.cache/opencode/packages`.
+- `oy run`, `oy enhance`, `oy recover`, and bare `oy audit`/`oy review` orchestration (use the skills via your agent; `oy audit|review prepare`/`finalize` remain for automation).
+
+### Added
+- `oy doctor --check` now validates skills byte-exact and that the legacy plugin cache is absent; `doctor --install-missing` only handles `tokei`/`ctags`.
+- `oy upgrade` now only refreshes the mise-managed `oy` binary and re-runs `oy setup`.
+- Shell lint: `shellcheck` via mise (`aqua:koalaman/shellcheck`), `just _shellcheck`, and a CI step.
+
 ## [0.14.13] - 2026-08-19
 
 ### Fixed

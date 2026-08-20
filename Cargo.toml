@@ -1,6 +1,6 @@
 [package]
 name = "oy-cli"
-version = "0.14.13"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.96"
 description = "Deterministic audit and review evidence preparation for agent skills"

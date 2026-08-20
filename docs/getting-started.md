@@ -1,5 +1,14 @@
 # Getting started
 
+> **New here? TL;DR — 2 minutes:**
+> ```bash
+> curl -fsSL https://oy.adonm.dev/install.sh | sh  # installs oy + skills
+> oy doctor --check                                  # should say "global skills ok"
+> # then in Cursor / OpenCode / Codex / Copilot, say:
+> # "run the oy-setup skill to finish setup"
+> # "audit this repository with the oy-audit skill"
+> ```
+
 This guide installs oy, installs the skills, and creates a first report.
 
 ## Before you begin
@@ -41,8 +50,8 @@ Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_SCOPE=globa
 With mise:
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.13
-mise exec github:adonm/oy-cli@0.14.13 -- oy setup
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.0
+mise exec github:adonm/oy-cli@0.15.0 -- oy setup
 ```
 
 Or install only the Rust CLI from crates.io:

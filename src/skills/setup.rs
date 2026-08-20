@@ -325,7 +325,16 @@ fn legacy_oy_paths(dir: &Path) -> Result<Vec<PathBuf>> {
                 continue;
             };
             if name == "oy" || name.starts_with("oy-") || name.starts_with("oy.") {
-                paths.push(entry.path());
+                let path = entry.path();
+                // Don't treat the current oy persona as legacy — the skill
+                // creates agents/oy.md with the canonical persona, and setup
+                // should preserve it.
+                if path.ends_with("agents/oy.md")
+                    && fs::read_to_string(&path).ok().as_deref() == Some(OY_PERSONA)
+                {
+                    continue;
+                }
+                paths.push(path);
             }
         }
     }

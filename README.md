@@ -21,6 +21,12 @@ Your agent owns models, credentials, sessions, and general tools. `oy` adds the 
 
 Requirements: Linux or macOS (WSL2 on Windows), `oy` on `PATH`, and any agent that reads Agent Skills.
 
+> **Copy-paste for a new repo (30 seconds after install):**
+> ```text
+> run the oy-setup skill to finish setup
+> audit this repository with the oy-audit skill
+> ```
+
 ```bash
 curl -fsSL https://oy.adonm.dev/install.sh | sh
 # Choose global or current-workspace mise installation when prompted.
@@ -35,6 +41,8 @@ Use `--global` or `--workspace` to skip the mise scope prompt.
 The installer uses [mise](https://mise.jdx.dev/) for prebuilt oy and the optional tokei/Universal Ctags context helpers, then runs `oy setup` to install the skills. [Review the installer](https://oy.adonm.dev/install.sh) before piping it to a shell.
 
 Prefer a manual install or project-local setup? See [Getting started](https://oy.adonm.dev/getting-started.html).
+
+Local dev from this checkout: `just install` (cargo install + `oy setup` + `oy doctor --check`).
 
 ## Common workflows
 
