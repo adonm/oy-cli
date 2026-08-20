@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 import tomllib
@@ -19,14 +18,9 @@ def read(path: str) -> str:
 
 def main() -> int:
     version = tomllib.loads(read("Cargo.toml"))["package"]["version"]
-    package = json.loads(read("packages/opencode/package.json"))
-    package_lock = json.loads(read("packages/opencode/package-lock.json"))
     installer = re.search(r'^oy_version="([^"]+)"$', read("docs/install.sh"), re.MULTILINE)
 
     checks = {
-        "packages/opencode/package.json": package["version"],
-        "packages/opencode/package-lock.json": package_lock["version"],
-        "packages/opencode/package-lock.json root package": package_lock["packages"][""]["version"],
         "docs/install.sh": installer.group(1) if installer else "<missing oy_version>",
     }
     errors = [
@@ -39,7 +33,6 @@ def main() -> int:
         "CHANGELOG.md": f"## [{version}]",
         "docs/getting-started.md": f"github:adonm/oy-cli@{version}",
         "docs/examples.md": f"github:adonm/oy-cli@{version}",
-        "packages/opencode/README.md": f"@oy-cli/opencode@{version}",
     }
     errors.extend(
         f"{path}: missing {needle}"

@@ -3,14 +3,20 @@
 `oy` has two different quality bars:
 
 1. Deterministic Rust/CI tests for the code `oy` owns: evidence preparation,
-   path safety, repository chunking, report rendering, and package/setup behavior.
-2. Live model evaluations for the behavior opencode owns: whether the `oy`
-   agent and skills find useful findings, avoid noise, and follow the audit/review
-   protocol with a real model.
+   path safety, repository chunking, report rendering, and skills/setup behavior.
+2. Live model evaluations for the behavior the skills own: whether the skills
+   find useful findings, avoid noise, and follow the audit/review protocol
+   with a real model and agent.
 
 Do not mix them. CI should stay deterministic and provider-free. Prompt changes
 should be judged with pinned public repositories, fixed model/provider settings,
 and a before/after scorecard.
+
+> Live evaluation runs are currently disabled in `scripts/eval_runner.py`:
+> the managed opencode orchestration was removed in favor of the skill-driven
+> workflow. Rework the runner to drive the skills through an agent CLI before
+> re-enabling. `just eval` (corpus validation) and `--dry-run` planning remain
+> available.
 
 ## Capability Inventory
 

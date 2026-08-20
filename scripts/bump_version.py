@@ -57,15 +57,10 @@ def main() -> int:
     )
     write("Cargo.lock", lock)
 
-    # npm package metadata and lockfile.
-    for path in ("packages/opencode/package.json", "packages/opencode/package-lock.json"):
-        write(path, read(path).replace(f'"version": "{old}"', f'"version": "{new}"'))
-
     # Installer pin and versioned documentation examples.
     write("docs/install.sh", read("docs/install.sh").replace(f'oy_version="{old}"', f'oy_version="{new}"'))
     for path in ("docs/getting-started.md", "docs/examples.md"):
         write(path, read(path).replace(f"github:adonm/oy-cli@{old}", f"github:adonm/oy-cli@{new}"))
-    write("packages/opencode/README.md", read("packages/opencode/README.md").replace(f"@oy-cli/opencode@{old}", f"@oy-cli/opencode@{new}"))
 
     # Changelog heading under the [Unreleased] section.
     heading = f"## [{new}] - {day}"

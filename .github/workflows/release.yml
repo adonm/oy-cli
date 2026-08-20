@@ -65,7 +65,7 @@ jobs:
 
   publish-release:
     if: github.repository_owner == 'adonm'
-    needs: [release, publish-crate, publish-npm]
+    needs: [release, publish-crate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -186,68 +186,3 @@ jobs:
             fi
           fi
 
-  publish-npm:
-    if: github.repository_owner == 'adonm'
-    needs: release
-    runs-on: ubuntu-latest
-    environment: npm
-    permissions:
-      contents: read
-      id-token: write
-
-    defaults:
-      run:
-        working-directory: packages/opencode
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "26"
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-      - name: Install OIDC-capable npm
-        run: npm install --global npm@12.0.1
-      - name: Require release versions to match tag
-        working-directory: .
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          python3 scripts/check_versions.py
-          test "v$(node -p 'require("./packages/opencode/package.json").version')" = "$REF_NAME"
-      - name: Install, build, test, and audit
-        run: |
-          npm ci --ignore-scripts
-          npm run build
-          npm test
-          npm audit --omit=dev
-      - name: Pack publishable tarball
-        run: |
-          mkdir -p ../../.tmp/npm-package
-          npm pack --pack-destination ../../.tmp/npm-package
-      - name: Verify the packed package installs
-        working-directory: .
-        run: |
-          mkdir -p .tmp/npm-smoke
-          cd .tmp/npm-smoke
-          npm init --yes >/dev/null
-          npm install --ignore-scripts ../npm-package/*.tgz
-          node --input-type=module -e 'import("@oy-cli/opencode").then(({default: plugin}) => { if (plugin.id !== "oy") process.exit(1) })'
-      - name: Publish public package with npm trusted publishing
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          package=$(node -p 'require("./package.json").name')
-          version=$(node -p 'require("./package.json").version')
-          if npm view "$package@$version" version >/dev/null 2>&1; then
-            published_sha=$(npm view "$package@$version" gitHead)
-            if [ "$published_sha" != "$EXPECTED_SHA" ]; then
-              echo "::error::$package@$version already exists from unexpected commit $published_sha"
-              exit 1
-            fi
-            echo "::notice::$package@$version is already published from $published_sha; skipping"
-          else
-            npm publish --access public
-          fi

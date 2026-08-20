@@ -2,9 +2,14 @@
 """Local oy prompt-evaluation runner.
 
 This script intentionally stays outside the Rust binary. It orchestrates public
-repo clones and opencode-backed `oy audit`/`oy review` runs under `.tmp/eval/`,
+repo clones and skill-driven `oy audit`/`oy review` runs under `.tmp/eval/`,
 then validates report shape and records a small scorecard. It does not call a
 model directly and is not intended for default CI.
+
+`validate` checks the offline corpus. Live `run`/`matrix` modes are currently
+disabled: the managed opencode orchestration was removed in favor of the
+skill-driven workflow, and this path needs to be rewired to drive the skills
+through an agent CLI.
 """
 
 from __future__ import annotations
@@ -198,12 +203,12 @@ def run_tasks(tasks: list[Task], args: argparse.Namespace) -> int:
             print_plan(task, run_dir, args.opencode_model)
         return 0
 
-    EVAL_ROOT.mkdir(parents=True, exist_ok=True)
-    repos_dir.mkdir(parents=True, exist_ok=True)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    if not args.skip_build:
-        checked_run(["cargo", "build", "--locked"], cwd=REPO_ROOT, env=env)
+    raise SystemExit(
+        "live eval runs are disabled: the managed `oy audit`/`oy review` "
+        "orchestration was removed in favor of the skill-driven workflow. "
+        "Run the oy skills through an agent CLI and rework this path to drive "
+        "them directly; `validate` and `--dry-run` remain available."
+    )
 
     results = []
     started = time.time()

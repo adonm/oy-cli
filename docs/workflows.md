@@ -2,39 +2,41 @@
 
 Start with the task you want to perform. The lower-level evidence protocol is automatic.
 
-| Goal | Command | Default output |
+| Goal | How to run it | Default output |
 |---|---|---|
-| Security audit | `oy audit` | `ISSUES.md` |
-| Code-quality review | `oy review` | `REVIEW.md` |
-| Review current work against a ref | `oy review main` | `REVIEW.md` |
-| Fix one finding | `oy enhance <finding-id>` | source changes |
+| Security audit | Ask your agent to audit with the `oy-audit` skill | `ISSUES.md` |
+| Code-quality review | Ask your agent to review with the `oy-review` skill | `REVIEW.md` |
+| Review current work against a ref | "Review the diff against `main`" | `REVIEW.md` |
+| Fix one finding | Ask your agent to use the `oy-enhance` skill targeting the finding ID | source changes |
 
-The same workflows are available inside OpenCode as `/oy-audit`, `/oy-review`, and `/oy-enhance`.
+Your agent picks the matching skill from `.agents/skills` (or
+`~/.agents/skills`) and runs its protocol: prepare evidence, read every
+chunk, write candidates, and finalize the report.
 
 ## Choose what to review
 
 ### Audit scope and focus
 
-```bash
-oy audit                                  # workspace
-oy audit src/auth                         # one existing path
-oy audit "authentication boundaries"     # focus text
-oy audit --out reports/security.md
-oy audit --format sarif --out oy.sarif
+When you ask for an audit, name the scope:
+
+```text
+audit this repository
+audit src/auth
+audit the authentication boundaries
 ```
 
-When the audit receives exactly one argument and it names an existing workspace-relative file or directory, that path becomes the collection scope. Other text guides the model without narrowing collection.
+A single existing workspace-relative path becomes the collection scope.
+Other text guides the model without narrowing collection.
 
 ### Review scope and focus
 
-```bash
-oy review                                 # workspace
-oy review main                            # git diff main
-oy review HEAD~3 --focus "error handling"
-oy review main --out reports/review.md
+```text
+review this repository
+review the diff against main
+review the diff against HEAD~3, focusing on error handling
 ```
 
-A positional branch, commit, tag, or ref selects target-diff review. `--focus` adds review guidance and can be repeated.
+A branch, commit, tag, or ref selects target-diff review. Focus text adds review guidance.
 
 Review findings are intentionally sparse. The reviewer prefers concrete structural issues—unclear ownership, unnecessary complexity, weak boundaries/types, expensive dependencies, or files needing meaningful decomposition—over generic advice.
 
@@ -55,32 +57,25 @@ Treat findings as candidates until a person confirms the evidence and impact.
 
 ## Fix and confirm one finding
 
-```bash
-oy enhance audit-0123456789abcdef
-oy enhance review-0123456789abcdef
+Ask your agent to fix a finding with the `oy-enhance` skill, ideally by ID:
+
+```text
+use the oy-enhance skill to fix audit-0123456789abcdef
+use the oy-enhance skill to fix review-0123456789abcdef
 ```
 
-`oy enhance` reads `ISSUES.md` or `REVIEW.md`, confirms the cited source, fixes one actionable finding, and runs focused verification. Use `--interactive` when you want OpenCode `mini` to show native permission prompts, questions, and forms:
+The skill reads `ISSUES.md` or `REVIEW.md`, confirms the cited source, fixes
+one actionable finding, and runs focused verification. It never broadens
+permissions; if a needed check is denied, it reports the remaining check.
 
-```bash
-oy enhance --interactive review-0123456789abcdef
-```
-
-Then rerun the originating command:
-
-```bash
-oy audit
-oy review main
-```
-
-The new report replaces the old generated report, carries forward findings that still apply, and drops stale ones.
+Then rerun the originating audit or review. The new report replaces the old generated report, carries forward findings that still apply, and drops stale ones.
 
 ## What happens under the hood
 
 Audit and review follow four stages:
 
 1. **Prepare** — collect eligible workspace files or a target diff into ordered chunks under `.oy/runs/<run-id>/`.
-2. **Review** — OpenCode reads every prepared chunk under your current model and permissions.
+2. **Review** — the agent reads every prepared chunk under your current model and permissions.
 3. **Verify** — reject changed inputs, modified evidence, concurrent output changes, or malformed finding data.
 4. **Finalize** — write normalized Markdown or SARIF.
 
@@ -101,7 +96,7 @@ The workspace collector excludes:
 
 These exclusions reduce accidental disclosure and context waste, but they also limit completeness. In particular, an oy audit is not a complete supply-chain audit because lockfiles are excluded.
 
-Eligible large files and diffs are split into bounded chunks. Prepared source may be sent to the model provider configured in OpenCode.
+Eligible large files and diffs are split into bounded chunks. Prepared source may be sent to the model provider configured in your agent.
 
 ## Practical guidance
 

@@ -1,18 +1,17 @@
 ---
 source: src/cli/app.rs
-assertion_line: 342
 expression: "command_help_for_test(\"doctor\")"
 ---
-Show config paths, OpenCode availability, and integration status
+Show skills installation, paths, and optional tooling status
 
 Usage: doctor [OPTIONS]
 
 Options:
       --install-missing
-          Install missing OpenCode 2, tokei, and Universal Ctags with global mise config
+          Install missing tokei and Universal Ctags with global mise config
 
       --check
-          Validate the effective oy agent, commands, skills, and models; exit nonzero on failure
+          Validate the oy skills installation; exit nonzero on failure
 
   -h, --help
           Print help

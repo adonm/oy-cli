@@ -1,6 +1,6 @@
-# Audits and code reviews for OpenCode
+# Audits and code reviews for coding agents
 
-`oy` adds a focused coding agent and a repeatable review workflow to [OpenCode 2](https://v2.opencode.ai/). Cursor models are available inside OpenCode after connecting a Cursor API key.
+`oy` adds repeatable, deterministic-input audit and review workflows to the coding agent you already use. The workflows ship as standard [Agent Skills](https://agentskills.io/) under `.agents/skills`, which OpenCode, Cursor, Codex, Copilot, and Gemini CLI all read natively.
 
 Use it to:
 
@@ -12,7 +12,7 @@ Use it to:
 
 ```text
 oy selects and freezes the review input
-  → OpenCode analyzes it with your model and permissions
+  → your agent analyzes it with your model and permissions
   → oy validates and writes the report
 ```
 
@@ -26,33 +26,34 @@ curl -fsSL https://oy.adonm.dev/install.sh | sh
 oy doctor --check
 
 cd your-repository
-oy audit
+# Ask your agent: "audit this repository with the oy-audit skill"
 ```
 
 Then try:
 
-```bash
-oy review main
-oy enhance <finding-id>
+```text
+"review the diff against main with the oy-review skill"
+"fix audit-0123456789abcdef with the oy-enhance skill"
 ```
 
-See [Getting started](getting-started.md) for manual installation, provider setup, mise scope, and global versus project-local OpenCode configuration.
+See [Getting started](getting-started.md) for manual installation, the `oy-setup` skill, mise scope, and global versus project-local skills.
 
 ## What oy owns
 
 - gitignore-aware repository and target-diff collection;
 - ordered evidence files and explicit coverage limits;
 - changed-input and artifact-integrity checks;
-- normalized Markdown/SARIF reports with stable finding IDs.
+- normalized Markdown/SARIF reports with stable finding IDs;
+- skill installation and legacy OpenCode plugin migration.
 
-## What OpenCode owns
+## What your agent owns
 
 - models and provider credentials;
 - permissions and approvals;
 - shell, edit, web, and other tools;
-- sessions, the TUI, and model execution.
+- sessions, UI, and model execution.
 
-`oy` does not broaden OpenCode permissions and is not a sandbox. `cursor/*` uses Cursor tools outside OpenCode permissions; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
+The skills run under your agent's own permission model and never broaden it. `oy` is not a sandbox; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 
 ## Choose your next page
 
@@ -60,5 +61,5 @@ See [Getting started](getting-started.md) for manual installation, provider setu
 - [Workflow guide](workflows.md) — choose scope, understand findings, and remediate
 - [Examples and CI](examples.md) — inspect reports and upload SARIF
 - [CLI reference](reference.md) — exact commands, setup behavior, and environment variables
-- [Compatibility](compatibility.md) — supported platforms and OpenCode versions
+- [Compatibility](compatibility.md) — supported platforms and agent hosts
 - [Security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md) — trust and disclosure boundaries

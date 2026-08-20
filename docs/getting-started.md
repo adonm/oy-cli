@@ -1,15 +1,15 @@
 # Getting started
 
-This guide installs oy, configures OpenCode, and creates a first report.
+This guide installs oy, installs the skills, and creates a first report.
 
 ## Before you begin
 
 You need:
 
 - Linux or macOS; use WSL2 on Windows;
-- a supported OpenCode 2 release;
-- a model provider configured in OpenCode;
-- `git` only for target-diff reviews such as `oy review main`.
+- any agent that reads Agent Skills (OpenCode, Cursor, Codex, Copilot, or Gemini CLI);
+- a model provider configured in that agent;
+- `git` only for target-diff reviews such as reviewing against `main`.
 
 See [Compatibility](compatibility.md) for exact tested versions and platforms.
 
@@ -30,25 +30,22 @@ The installer:
 1. installs and activates [mise](https://mise.jdx.dev/) with its official bootstrap for bash, zsh, or fish when mise is missing;
 2. installs a prebuilt oy release with mise;
 3. installs prebuilt `tokei` and Universal Ctags context helpers in the selected mise scope;
-4. installs OpenCode 2, registers the version-matched oy plugin, and checks that it loaded.
+4. runs `oy setup`, which writes the oy skills under `~/.agents/skills/` and removes any legacy OpenCode plugin state.
 
 The default interactive installer asks whether to write mise's global config or `mise.toml` in the current workspace. Noninteractive use defaults to global unless `--workspace` or `OY_INSTALL_SCOPE=workspace` is supplied.
 
-Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_SCOPE=global|workspace` as an alternative to flags. Set `OY_SKIP_SETUP=1` to install binaries without changing OpenCode integration files.
+Review [`install.sh`](install.sh) before running it. Set `OY_INSTALL_SCOPE=global|workspace` as an alternative to flags. Set `OY_SKIP_SETUP=1` to install binaries without changing the skills installation.
 
 ### Manual install
 
 With mise:
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.13 'npm:@opencode-ai/cli@beta'
-# Allow the OpenCode 2 postinstall, which downloads the native binary.
-sed -i 's|^"npm:@opencode-ai/cli" = "beta"$|"npm:@opencode-ai/cli" = { version = "beta", allow_builds = ["@opencode-ai/cli"] }|' "${MISE_GLOBAL_CONFIG_FILE:-$HOME/.config/mise/config.toml}"
-mise install -f 'npm:@opencode-ai/cli@beta'
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.13
 mise exec github:adonm/oy-cli@0.14.13 -- oy setup
 ```
 
-Or install only the Rust CLI from crates.io, then provide a compatible OpenCode installation yourself:
+Or install only the Rust CLI from crates.io:
 
 ```bash
 cargo install oy-cli --locked
@@ -59,71 +56,61 @@ Rust 1.96+ is required only when building from source.
 
 The installer and `oy doctor --install-missing` use `aqua:XAMPPRocky/tokei@12.1.2`, the newest stable official tokei release that provides binaries, and the release-only archives from `github:universal-ctags/ctags-nightly-build`. They do not install a Rust build toolchain.
 
-## 2. Check the host
+## 2. Finish agent setup
 
-Configure a provider using the [OpenCode provider guide](https://v2.opencode.ai/providers), then verify both OpenCode and oy:
+Run `oy doctor --check` to verify the skills:
 
 ```bash
-opencode2
 oy doctor --check
 ```
 
-To use Cursor models through OpenCode, run `/connect` in OpenCode, choose **Cursor**, and paste an API key from the Cursor dashboard. Models available to that key appear as `cursor/<id>` in the model picker. `CURSOR_API_KEY` is also recognized.
+Then ask your agent to finish host-specific setup:
 
-> `cursor/*` uses host-capable Cursor tools outside OpenCode permissions and
-> follows the requested working directory outside the initial workspace. Use an
-> external container or VM for isolation-sensitive work; see the
-> [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
-
-`oy doctor --check` validates the OpenCode service, plugin, agent, skills, commands, and model/provider discovery. It does not test or change your permission policy.
-
-If optional context helpers are missing:
-
-```bash
-oy doctor --install-missing
+```text
+run the oy-setup skill
 ```
+
+The skill verifies discovery, offers to copy the skills to any host-specific
+directory this agent prefers (for example `.claude/skills`), installs the oy
+persona (improving the default agent or creating an `oy` agent), and reruns
+`oy doctor --check`.
 
 ## 3. Choose setup scope
 
-OpenCode setup runs globally by default. You can preview or change the OpenCode config scope later:
+Skills install globally by default. You can preview or change the scope later:
 
 ```bash
 oy setup --dry-run        # preview global setup
-oy setup                  # global OpenCode config
-oy setup --workspace      # this repository's .opencode config
-oy setup --remove         # back up and remove global oy entries
+oy setup                  # skills under ~/.agents/skills
+oy setup --workspace      # skills under this repository's .agents/skills
+oy setup --remove         # back up and remove oy-owned skills and legacy config
 ```
 
-Use global setup for your own workstation. Use `--workspace` when only one repository should load oy. The installer’s `--workspace` flag is separate: it controls where mise writes its tool versions.
+Use global setup for your own workstation. Use `--workspace` when only one repository should load oy. The installer's `--workspace` flag is separate: it controls where mise writes its tool versions.
 
-Setup defaults Cursor CLI commit and PR attribution to disabled in its global `cli-config.json` when those preferences are absent. Explicit values and unrelated Cursor settings are preserved. This global preference update also applies with `oy setup --workspace`.
-
-Before changing existing oy entries, setup creates a private backup and reports its path. Unchanged config stays byte-for-byte intact. When an oy-owned entry changes, setup preserves unrelated settings but reserializes the active file; the backup retains its original formatting and comments. See [Setup ownership and backups](reference.md#setup-ownership-and-backups).
-
-Restart OpenCode after changing a plugin version or setup scope.
+Before changing existing oy-owned files, setup creates a private backup and reports its path. Unchanged files stay byte-for-byte intact. User-modified skill files without the setup marker are preserved. Setup also removes the obsolete OpenCode plugin package cache. See [Setup ownership and backups](reference.md#setup-ownership-and-backups).
 
 ## 4. Create a first report
 
-Start in a small or medium repository:
+Start in a small or medium repository and ask your agent:
 
-```bash
-cd your-repository
-oy audit
+```text
+audit this repository with the oy-audit skill
 ```
 
 The command writes `ISSUES.md`. Read the findings alongside the documented collection exclusions before acting on them.
 
 For a code-quality review:
 
-```bash
-oy review             # whole workspace
-oy review main        # current work compared with main
+```text
+review this repository with the oy-review skill     # whole workspace
+review the diff against main with the oy-review skill   # current work vs main
 ```
 
 To fix one finding:
 
-```bash
-oy enhance <finding-id>
+```text
+use the oy-enhance skill to fix audit-0123456789abcdef
 ```
 
 Rerun the originating audit or review to confirm the finding against current code.
@@ -131,10 +118,9 @@ Rerun the originating audit or review to confirm the finding against current cod
 ## If something fails
 
 - Run `oy doctor` for paths, versions, and missing tools.
-- Run `oy doctor --check` for effective plugin/runtime validation.
-- Restart the OpenCode service with `opencode2 service restart`.
-- Check [Compatibility](compatibility.md) before overriding `OY_OPENCODE`.
-- Use [OpenCode troubleshooting](https://v2.opencode.ai/troubleshooting) for service, provider, and session problems.
+- Run `oy doctor --check` to validate the skills installation.
+- Confirm the skills are visible to your agent; see [Compatibility](compatibility.md) for the directory each agent reads.
+- Rerun `oy setup`, then ask your agent to run the `oy-setup` skill again.
 
 ## Next
 

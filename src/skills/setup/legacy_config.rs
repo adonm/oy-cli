@@ -1,11 +1,15 @@
-//! OpenCode JSON/JSONC parsing and oy-owned config transformations.
+//! OpenCode JSON/JSONC parsing and oy-owned config stripping.
+//!
+//! Older oy releases registered the `@oy-cli/opencode` plugin and oy-named
+//! commands in OpenCode config files. Setup now installs plain skill files
+//! and strips those legacy entries, preserving unrelated config.
 
 use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use std::fs;
 use std::path::Path;
 
-const OPENCODE_PLUGIN_PACKAGE: &str = "@oy-cli/opencode";
+const LEGACY_PLUGIN_PACKAGE: &str = "@oy-cli/opencode";
 
 /// Strip oy-owned entries from an OpenCode config, returning `None` when the
 /// file is unchanged so unmodified configs are never rewritten.
@@ -21,67 +25,21 @@ pub(super) fn strip_owned_config(path: &Path) -> Result<Option<String>> {
     format_json(&root).map(Some)
 }
 
-/// Install the version-matched oy package, preserving unrelated config.
-pub(super) fn install_owned_config(path: &Path) -> Result<Option<String>> {
-    let mut root = read_config(path)?;
-    if config_has_current_package_only(&root) {
-        return Ok(None);
-    }
-    let plugin = updated_oy_plugin(&root);
-    let object = root
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("{} must contain a JSON object", path.display()))?;
-    remove_oy_config_entries(object)?;
-    let plugins = object
-        .entry("plugins")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("native OpenCode `plugins` must be an array"))?;
-    plugins.push(plugin);
-    let body = format_json(&root)?;
-    Ok(Some(body))
-}
-
-pub(super) fn config_has_current_package_only(root: &Value) -> bool {
-    let Some(object) = root.as_object() else {
-        return false;
+#[cfg(test)]
+pub(super) fn update_config(path: &Path) -> Result<()> {
+    let Some(body) = strip_owned_config(path)? else {
+        return Ok(());
     };
-    let expected = opencode_plugin_spec();
-    let plugins = object
-        .get("plugins")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let owned = plugins
-        .iter()
-        .filter(|plugin| is_oy_plugin_value(plugin))
-        .collect::<Vec<_>>();
-    if owned.len() != 1 || !plugin_matches_spec(owned[0], &expected) {
-        return false;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    if ["command", "commands"].iter().any(|key| {
-        object
-            .get(*key)
-            .and_then(Value::as_object)
-            .is_some_and(|entries| entries.keys().any(|name| is_oy_name(name)))
-    }) {
-        return false;
-    }
-    !object
-        .get("mcp")
-        .and_then(Value::as_object)
-        .is_some_and(|mcp| {
-            mcp.contains_key("oy")
-                || mcp
-                    .get("servers")
-                    .and_then(Value::as_object)
-                    .is_some_and(|servers| servers.contains_key("oy"))
-        })
+    fs::write(path, body)?;
+    Ok(())
 }
 
 fn read_config(path: &Path) -> Result<Value> {
     if !path.exists() {
-        return Ok(json!({}));
+        return Ok(Value::Object(Map::new()));
     }
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         bail!(
@@ -99,20 +57,13 @@ fn read_config(path: &Path) -> Result<Value> {
     })
 }
 
-#[cfg(test)]
-pub(super) fn update_config(path: &Path) -> Result<()> {
-    let Some(body) = strip_owned_config(path)? else {
-        return Ok(());
-    };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, body)?;
-    Ok(())
-}
-
 pub(super) fn remove_oy_config_entries(object: &mut Map<String, Value>) -> Result<()> {
-    remove_owned_plugins(object)?;
+    remove_legacy_plugins(object)?;
+    if object.get("default_agent").and_then(Value::as_str) == Some("oy") {
+        // The removed plugin registered the `oy` agent; without the plugin the
+        // pointer would dangle. OpenCode falls back to its built-in agent.
+        object.remove("default_agent");
+    }
     for key in ["command", "commands"] {
         let remove = object
             .get_mut(key)
@@ -144,61 +95,31 @@ fn is_oy_name(name: &str) -> bool {
     name == "oy" || name.starts_with("oy-")
 }
 
-pub(super) fn opencode_plugin_package() -> &'static str {
-    OPENCODE_PLUGIN_PACKAGE
+fn is_legacy_plugin_value(value: &Value) -> bool {
+    value.as_str().is_some_and(|spec| {
+        spec == LEGACY_PLUGIN_PACKAGE
+            || spec
+                .strip_prefix(LEGACY_PLUGIN_PACKAGE)
+                .is_some_and(|suffix| suffix.starts_with('@') && suffix.len() > 1)
+    }) || value
+        .get("package")
+        .and_then(Value::as_str)
+        .is_some_and(|spec| {
+            spec == LEGACY_PLUGIN_PACKAGE
+                || spec
+                    .strip_prefix(LEGACY_PLUGIN_PACKAGE)
+                    .is_some_and(|suffix| suffix.starts_with('@') && suffix.len() > 1)
+        })
 }
 
-fn opencode_plugin_spec() -> String {
-    format!("{OPENCODE_PLUGIN_PACKAGE}@{}", env!("CARGO_PKG_VERSION"))
-}
-
-fn is_oy_plugin_spec(value: &str) -> bool {
-    value == OPENCODE_PLUGIN_PACKAGE
-        || value
-            .strip_prefix(OPENCODE_PLUGIN_PACKAGE)
-            .is_some_and(|suffix| suffix.starts_with('@') && suffix.len() > 1)
-}
-
-fn is_oy_plugin_value(value: &Value) -> bool {
-    value.as_str().is_some_and(is_oy_plugin_spec)
-        || value
-            .get("package")
-            .and_then(Value::as_str)
-            .is_some_and(is_oy_plugin_spec)
-}
-
-fn plugin_matches_spec(value: &Value, expected: &str) -> bool {
-    value.as_str() == Some(expected)
-        || value.get("package").and_then(Value::as_str) == Some(expected)
-}
-
-fn updated_oy_plugin(root: &Value) -> Value {
-    let expected = opencode_plugin_spec();
-    let Some(plugins) = root.get("plugins").and_then(Value::as_array) else {
-        return json!(expected);
-    };
-    let mut owned = plugins.iter().filter(|plugin| is_oy_plugin_value(plugin));
-    let Some(plugin) = owned.next() else {
-        return json!(expected);
-    };
-    if owned.next().is_some() {
-        return json!(expected);
-    }
-    let Some(mut plugin) = plugin.as_object().cloned() else {
-        return json!(expected);
-    };
-    plugin.insert("package".to_string(), json!(expected));
-    Value::Object(plugin)
-}
-
-fn remove_owned_plugins(object: &mut Map<String, Value>) -> Result<()> {
+fn remove_legacy_plugins(object: &mut Map<String, Value>) -> Result<()> {
     let Some(plugins) = object.get_mut("plugins") else {
         return Ok(());
     };
     let Some(plugins) = plugins.as_array_mut() else {
         bail!("native OpenCode `plugins` must be an array");
     };
-    plugins.retain(|plugin| !is_oy_plugin_value(plugin));
+    plugins.retain(|plugin| !is_legacy_plugin_value(plugin));
     if plugins.is_empty() {
         object.remove("plugins");
     }
@@ -206,10 +127,11 @@ fn remove_owned_plugins(object: &mut Map<String, Value>) -> Result<()> {
 }
 
 pub(super) fn config_has_oy_entries(config: &Value) -> bool {
-    config
-        .get("plugins")
-        .and_then(Value::as_array)
-        .is_some_and(|plugins| plugins.iter().any(is_oy_plugin_value))
+    config.get("default_agent").and_then(Value::as_str) == Some("oy")
+        || config
+            .get("plugins")
+            .and_then(Value::as_array)
+            .is_some_and(|plugins| plugins.iter().any(is_legacy_plugin_value))
         || ["command", "commands"].iter().any(|key| {
             config
                 .get(*key)

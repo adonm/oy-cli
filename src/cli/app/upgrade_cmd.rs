@@ -1,8 +1,7 @@
-//! `oy upgrade` refreshes the mise-installed oy/OpenCode toolchain.
+//! `oy upgrade` refreshes the mise-installed oy toolchain and agent skills.
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use semver::Version;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -12,11 +11,8 @@ use std::time::Duration;
 const OY_MISE_TOOL: &str = "github:adonm/oy-cli";
 const OY_MISE_SPEC: &str = "github:adonm/oy-cli@latest";
 const LEGACY_OY_MISE_TOOL: &str = "cargo:oy-cli";
-const OPENCODE_DIST_TAGS_URL: &str =
-    "https://registry.npmjs.org/-/package/@opencode-ai/cli/dist-tags";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Args, Clone)]
@@ -32,7 +28,7 @@ pub(super) struct UpgradeArgs {
         long,
         conflicts_with = "dry_run",
         default_value_t = false,
-        help = "Check whether mise-managed oy/OpenCode are outdated"
+        help = "Check whether mise-managed oy is outdated"
     )]
     check: bool,
 }
@@ -59,13 +55,6 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
         INSTALL_TIMEOUT,
         "failed to install the latest oy with mise",
     )?;
-    crate::mise::ensure_opencode_allow_builds()?;
-    run_checked(
-        "OpenCode 2 install",
-        &opencode_install_args(),
-        INSTALL_TIMEOUT,
-        "failed to install the current OpenCode 2 beta with mise",
-    )?;
 
     if install.has_legacy_tools {
         run_checked(
@@ -89,7 +78,7 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
         SETUP_TIMEOUT,
     )
     .context(
-        "upgraded with mise, but failed to refresh oy integration with the newly installed oy",
+        "upgraded with mise, but failed to refresh the oy skills with the newly installed oy",
     )?;
     if !setup.status.success() {
         return Ok(report_command_failure("post-upgrade setup", &setup));
@@ -110,14 +99,7 @@ pub(super) fn upgrade_command(args: UpgradeArgs) -> Result<i32> {
         );
     }
 
-    run_checked(
-        "OpenCode service restart",
-        &service_restart_args(),
-        SETUP_TIMEOUT,
-        "upgraded oy/OpenCode, but failed to restart the OpenCode service",
-    )?;
-
-    crate::ui::success("upgraded oy and OpenCode");
+    crate::ui::success("upgraded oy and refreshed the agent skills");
     if let Some(backup) = summary.backup {
         crate::ui::line(format_args!(
             "Previous oy integration files were moved to {}.",
@@ -132,10 +114,6 @@ fn print_dry_run(has_legacy_tools: bool) {
         "{}",
         shell_command("mise", &mise_use_args(false))
     ));
-    crate::ui::line(format_args!(
-        "{}",
-        shell_command("mise", &opencode_install_args())
-    ));
     if has_legacy_tools {
         crate::ui::line(format_args!(
             "{}",
@@ -147,10 +125,6 @@ fn print_dry_run(has_legacy_tools: bool) {
         "{}",
         shell_command("mise", &post_upgrade_setup_args())
     ));
-    crate::ui::line(format_args!(
-        "{}",
-        shell_command("mise", &service_restart_args())
-    ));
 }
 
 fn check_for_upgrades() -> Result<i32> {
@@ -158,82 +132,17 @@ fn check_for_upgrades() -> Result<i32> {
         .args(mise_use_args(true))
         .status()
         .context("failed to launch mise; install mise or upgrade oy manually")?;
-    let mise_outdated = match mise_status.code() {
-        Some(0) => false,
-        Some(1) => true,
+    match mise_status.code() {
+        Some(0) => Ok(0),
+        Some(1) => Ok(1),
         code => {
             crate::ui::err_line(format_args!(
                 "`mise use --dry-run-code` failed with exit code {}",
                 code.unwrap_or(1)
             ));
-            return Ok(code.unwrap_or(1));
+            Ok(code.unwrap_or(1))
         }
-    };
-
-    let opencode_outdated = opencode_update_available()?;
-    crate::ui::line(if opencode_outdated {
-        "OpenCode 2 update available"
-    } else {
-        "OpenCode 2 is up to date"
-    });
-    Ok(i32::from(mise_outdated || opencode_outdated))
-}
-
-fn opencode_update_available() -> Result<bool> {
-    let remote_version = opencode_dist_tag_version()?;
-    let installed = run_command(
-        "installed OpenCode version check",
-        &[
-            "exec".to_string(),
-            "--".to_string(),
-            "opencode2".to_string(),
-            "--version".to_string(),
-        ],
-        SETUP_TIMEOUT,
-    )
-    .context("failed to inspect the installed OpenCode 2 version")?;
-    if !installed.status.success() || installed.truncated {
-        return Ok(true);
     }
-    let Some(installed_version) = installed_opencode_version(&installed.stdout) else {
-        return Ok(true);
-    };
-    Ok(installed_version < remote_version)
-}
-
-fn opencode_dist_tag_version() -> Result<Version> {
-    parse_dist_tag_version(&fetch_opencode_dist_tags()?)
-}
-
-fn parse_dist_tag_version(body: &str) -> Result<Version> {
-    let tags: serde_json::Value = serde_json::from_str(body)
-        .context("failed to parse the OpenCode 2 npm dist-tags response")?;
-    let Some(raw) = tags.get("beta").and_then(|tag| tag.as_str()) else {
-        bail!("npm dist-tags response has no `beta` channel");
-    };
-    Version::parse(raw)
-        .with_context(|| format!("npm returned an unparseable OpenCode 2 version: {raw:?}"))
-}
-
-fn fetch_opencode_dist_tags() -> Result<String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(VERSION_CHECK_TIMEOUT))
-        .build()
-        .into();
-    let mut response = agent
-        .get(OPENCODE_DIST_TAGS_URL)
-        .call()
-        .context("failed to query the current OpenCode 2 npm version")?;
-    response
-        .body_mut()
-        .read_to_string()
-        .context("failed to read the OpenCode 2 npm dist-tags response")
-}
-
-fn installed_opencode_version(stdout: &[u8]) -> Option<Version> {
-    let text = String::from_utf8_lossy(stdout);
-    text.split_whitespace()
-        .find_map(|token| Version::parse(token.trim_start_matches('v')).ok())
 }
 
 fn run_checked(label: &str, args: &[String], timeout: Duration, context: &str) -> Result<()> {
@@ -289,18 +198,8 @@ fn mise_use_args(check: bool) -> Vec<String> {
     if check {
         args.push("--dry-run-code".to_string());
     }
-    args.extend([
-        OY_MISE_SPEC.to_string(),
-        crate::mise::OPENCODE_MISE_SPEC.to_string(),
-    ]);
+    args.push(OY_MISE_SPEC.to_string());
     args
-}
-
-fn opencode_install_args() -> Vec<String> {
-    ["install", "-f", crate::mise::OPENCODE_MISE_SPEC]
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn legacy_unuse_args() -> Vec<String> {
@@ -312,13 +211,6 @@ fn legacy_unuse_args() -> Vec<String> {
 
 fn post_upgrade_setup_args() -> Vec<String> {
     ["exec", OY_MISE_SPEC, "--", "oy", "--json", "setup"]
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn service_restart_args() -> Vec<String> {
-    ["exec", "--", "opencode2", "service", "restart"]
         .into_iter()
         .map(ToOwned::to_owned)
         .collect()
@@ -484,22 +376,18 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_commands_use_binary_oy_and_mise_opencode_install() {
+    fn dry_run_commands_use_binary_oy_and_post_upgrade_setup() {
         assert_eq!(
             shell_command("mise", &mise_use_args(false)),
-            "mise use --global --yes --minimum-release-age 0 'github:adonm/oy-cli@latest' 'npm:@opencode-ai/cli@beta'"
-        );
-        assert_eq!(
-            shell_command("mise", &opencode_install_args()),
-            "mise install -f 'npm:@opencode-ai/cli@beta'"
+            "mise use --global --yes --minimum-release-age 0 'github:adonm/oy-cli@latest'"
         );
         assert_eq!(
             shell_command("mise", &post_upgrade_setup_args()),
             "mise exec 'github:adonm/oy-cli@latest' -- oy --json setup"
         );
         assert_eq!(
-            shell_command("mise", &service_restart_args()),
-            "mise exec -- opencode2 service restart"
+            shell_command("mise", &legacy_unuse_args()),
+            "mise unuse --global --yes cargo:oy-cli"
         );
     }
 
@@ -524,49 +412,7 @@ mod tests {
                 "0",
                 "--dry-run-code",
                 OY_MISE_SPEC,
-                crate::mise::OPENCODE_MISE_SPEC,
             ]
         );
-    }
-
-    #[test]
-    fn parses_the_opencode_version_from_version_output() {
-        assert_eq!(
-            installed_opencode_version(b"opencode2 v0.0.0-beta-17639\n"),
-            Some(Version::parse("0.0.0-beta-17639").unwrap())
-        );
-        assert_eq!(
-            installed_opencode_version(b"opencode2 v0.0.0-next-17114\n"),
-            Some(Version::parse("0.0.0-next-17114").unwrap())
-        );
-        assert_eq!(
-            installed_opencode_version(b"0.14.9\n"),
-            Some(Version::parse("0.14.9").unwrap())
-        );
-        assert_eq!(installed_opencode_version(b"garbage\n"), None);
-        assert_eq!(installed_opencode_version(b""), None);
-    }
-
-    #[test]
-    fn orders_beta_channel_builds_semantically() {
-        let older = Version::parse("0.0.0-beta-17639").unwrap();
-        let newer = Version::parse("0.0.0-beta-18001").unwrap();
-        assert!(older < newer);
-    }
-
-    #[test]
-    fn parses_the_beta_dist_tag() {
-        let version =
-            parse_dist_tag_version(r#"{"latest":"1.18.18","beta":"0.0.0-beta-17639"}"#).unwrap();
-        assert_eq!(version, Version::parse("0.0.0-beta-17639").unwrap());
-    }
-
-    #[test]
-    fn rejects_a_missing_or_unparseable_beta_dist_tag() {
-        let missing = parse_dist_tag_version(r#"{"latest":"1.18.18"}"#).unwrap_err();
-        assert!(missing.to_string().contains("no `beta` channel"));
-
-        let invalid = parse_dist_tag_version(r#"{"beta":"not-semver"}"#).unwrap_err();
-        assert!(invalid.to_string().contains("unparseable"));
     }
 }

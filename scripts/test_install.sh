@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+# Deliberate empty CDPATH for portable cd.
+# shellcheck disable=SC1007
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 oy_version=$(awk -F '"' '/^version = "/ { print $2; exit }' "$repo_root/Cargo.toml")
 [ -n "$oy_version" ] || {
@@ -16,23 +18,6 @@ cat >"$tmp/mise-mock" <<'EOF'
 printf '%s\n' "$*" >>"$OY_INSTALL_TEST_LOG"
 case "$*" in
 *"-- oy --version") printf 'oy-cli %s\n' "$OY_INSTALL_TEST_VERSION" ;;
-*"config ls --no-header"*)
-  # Reproduce mise's ~-abbreviated paths; the installer must expand them
-  # before checking or patching the files.
-  printf '%s\n' '~/.config/mise/config.toml  npm:@opencode-ai/cli, node'
-  printf '%s\n' '~/dev/project/.mise.toml  npm:@opencode-ai/cli, node'
-  ;;
-*"-- opencode2 api v2.command.list"*)
-  count=$(cat "$OY_INSTALL_TEST_PLUGIN_COUNT")
-  count=$((count + 1))
-  printf '%s\n' "$count" >"$OY_INSTALL_TEST_PLUGIN_COUNT"
-  if [ "$count" -ge 4 ]; then
-    printf '%s\n' '{"data":[{"name":"oy-audit"}]}'
-  else
-    printf '%s\n' '{"data":[]}'
-  fi
-  ;;
-*"-- opencode2 --version") printf '%s\n' 'opencode2 v0.0.0-beta-17639' ;;
 esac
 exit 0
 EOF
@@ -103,23 +88,21 @@ run_install() {
   shift 5
   : >"$log_file"
   : >"$log_file.curl"
-  printf '%s\n' 0 >"$tmp/plugin-count"
   mkdir -p "$home"
   if [ "$with_mise" -eq 1 ]; then
     cp "$tmp/mise-mock" "$tmp/bin/mise"
   else
     rm -f "$tmp/bin/mise"
   fi
+  # Exported overrides so the installer starts from a clean state.
+  # shellcheck disable=SC2034,SC1007
+  MISE_CONFIG_DIR= MISE_GLOBAL_CONFIG_FILE= XDG_CONFIG_HOME="$home/.config"
   PATH="$tmp/bin:/usr/bin:/bin" \
     HOME="$home" \
-    XDG_CONFIG_HOME="$home/.config" \
-    MISE_CONFIG_DIR= \
-    MISE_GLOBAL_CONFIG_FILE= \
     SHELL=/bin/bash \
     OY_INSTALL_TEST_LOG="$log_file" \
     OY_INSTALL_TEST_CURL_LOG="$log_file.curl" \
     OY_INSTALL_TEST_MISE_SOURCE="$tmp/mise-mock" \
-    OY_INSTALL_TEST_PLUGIN_COUNT="$tmp/plugin-count" \
     OY_INSTALL_TEST_VERSION="$oy_version" \
     OY_INSTALL_SCOPE="$scope" \
     OY_SKIP_SETUP="$skip_setup" \
@@ -127,48 +110,40 @@ run_install() {
 }
 
 default_log="$tmp/default.log"
-mkdir -p "$tmp/home-default/.config/mise"
-printf '%s\n' '"npm:@opencode-ai/cli" = "beta"' >"$tmp/home-default/.config/mise/config.toml"
 run_install "$default_log" 1 1 "$tmp/home-default" ""
 default=$(cat "$default_log")
-assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
-assert_contains "$default" "config ls --no-header"
-assert_contains "$default" "install -f npm:@opencode-ai/cli@beta"
+assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version"
+assert_contains "$default" "use --global --yes --minimum-release-age 0 aqua:XAMPPRocky/tokei@12.1.2 github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
 assert_contains "$default" "exec github:adonm/oy-cli@$oy_version -- oy --version"
-assert_contains "$default" "exec -- opencode2 --version"
 assert_contains "$default" "unuse --global --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
-assert_contains "$default" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli npm:@opencode-ai/cli cargo:tokei github:universal-ctags/ctags"
-assert_contains "$default" "aqua:XAMPPRocky/tokei@12.1.2"
-assert_contains "$default" "github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
+assert_contains "$default" "reshim"
+assert_contains "$default" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_not_contains "$default" "npm install -g"
 assert_not_contains "$default" "node@latest"
+assert_not_contains "$default" "npm:@opencode-ai/cli"
+assert_not_contains "$default" "config ls"
+assert_not_contains "$default" "allow_builds"
+assert_not_contains "$default" "opencode2"
 assert_not_contains "$(cat "$default_log.curl")" "https://cursor.com/install"
-assert_contains "$(cat "$tmp/home-default/.config/mise/config.toml")" 'allow_builds = ["@opencode-ai/cli"]'
 
 workspace_log="$tmp/workspace.log"
-mkdir -p "$tmp/home-workspace/dev/project"
-printf '%s\n' '"npm:@opencode-ai/cli" = "beta"' >"$tmp/home-workspace/dev/project/.mise.toml"
 run_install "$workspace_log" 1 1 "$tmp/home-workspace" "" --workspace
 workspace=$(cat "$workspace_log")
-assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
+assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version"
 assert_not_contains "$workspace" "use --global"
 assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_not_contains "$workspace" "unuse --global"
-assert_contains "$(cat "$tmp/home-workspace/dev/project/.mise.toml")" 'allow_builds = ["@opencode-ai/cli"]'
 
 env_workspace_log="$tmp/env-workspace.log"
 run_install "$env_workspace_log" 1 1 "$tmp/home-env-workspace" workspace
 env_workspace=$(cat "$env_workspace_log")
-assert_contains "$env_workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version npm:@opencode-ai/cli@beta"
+assert_contains "$env_workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version"
 assert_not_contains "$env_workspace" "use --global"
 
 setup_log="$tmp/setup.log"
-run_install "$setup_log" 0 1 "$tmp/home-setup" "" --global
+run_install "$setup_log" 0 1 "$tmp/home-setup" ""
 setup=$(cat "$setup_log")
-assert_not_contains "$setup" "exec -- oy setup --remove"
 assert_contains "$setup" "exec github:adonm/oy-cli@$oy_version -- oy setup"
-assert_contains "$setup" "exec -- opencode2 service start"
-assert_contains "$setup" "exec -- opencode2 api v2.command.list"
 
 bootstrap_log="$tmp/bootstrap.log"
 run_install "$bootstrap_log" 1 0 "$tmp/home-bootstrap" ""
@@ -184,6 +159,7 @@ assert_contains "$help" "--global"
 assert_contains "$help" "--workspace"
 assert_contains "$help" "--yes"
 assert_not_contains "$help" "cursor"
+assert_not_contains "$help" "opencode"
 assert_not_contains "$help" "both"
 if sh "$repo_root/docs/install.sh" --global --workspace >/dev/null 2>&1; then
   printf 'installer accepted conflicting scopes\n' >&2

@@ -1,4 +1,8 @@
 //! OpenCode executable selection and compatibility detection.
+//!
+//! Only setup's location eviction uses the host: after `oy setup` changes
+//! skills on disk, a running, supported OpenCode 2 service is asked to drop
+//! its cached location.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,27 +12,15 @@ use std::time::Duration;
 use wait_timeout::ChildExt as _;
 
 pub(crate) const OPENCODE_ENV: &str = "OY_OPENCODE";
-const OPENCODE_BETA_PACKAGE: &str = "npm:@opencode-ai/cli@beta";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_OUTPUT_LIMIT: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpenCodeContract {
+enum OpenCodeContract {
     V1,
     V2Beta,
     V2,
     Unknown,
-}
-
-impl OpenCodeContract {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::V1 => "v1",
-            Self::V2Beta => "v2-beta",
-            Self::V2 => "v2",
-            Self::Unknown => "unknown (unprobed preview)",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,26 +51,6 @@ impl OpenCodeHost {
         &self.executable
     }
 
-    pub(crate) fn executable_display(&self) -> String {
-        self.executable.display().to_string()
-    }
-
-    pub(crate) fn version(&self) -> Option<&str> {
-        self.version.as_deref()
-    }
-
-    pub(crate) fn installation_version(&self) -> Option<&str> {
-        self.version.as_deref().and_then(version_token)
-    }
-
-    pub(crate) fn available(&self) -> bool {
-        self.available
-    }
-
-    pub(crate) fn contract(&self) -> OpenCodeContract {
-        self.contract
-    }
-
     pub(crate) fn supported(&self) -> bool {
         if !self.available {
             return false;
@@ -88,34 +60,6 @@ impl OpenCodeHost {
             OpenCodeContract::V2Beta => self.version.as_deref().is_some_and(is_beta_build),
             OpenCodeContract::V1 | OpenCodeContract::Unknown => false,
         }
-    }
-
-    pub(crate) fn require_supported(&self) -> Result<(), String> {
-        if self.supported() {
-            return Ok(());
-        }
-        if !self.available {
-            return Err(format!(
-                "OpenCode 2 host `{}` is unavailable; install {OPENCODE_BETA_PACKAGE} with mise or set {OPENCODE_ENV}",
-                self.executable.display()
-            ));
-        }
-        match self.contract {
-            OpenCodeContract::V1 => Err(format!(
-                "OpenCode 1 is no longer supported; install {OPENCODE_BETA_PACKAGE}"
-            )),
-            OpenCodeContract::V2Beta => Err(format!(
-                "OpenCode beta {} is unsupported; install the current {OPENCODE_BETA_PACKAGE} build",
-                self.version.as_deref().unwrap_or("unknown")
-            )),
-            OpenCodeContract::V2 | OpenCodeContract::Unknown => {
-                Err("failed to identify a supported OpenCode 2 version".to_string())
-            }
-        }
-    }
-
-    pub(crate) fn is_default_executable(&self) -> bool {
-        self.executable == Path::new("opencode2")
     }
 }
 
