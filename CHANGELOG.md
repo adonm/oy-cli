@@ -2,13 +2,18 @@
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-08-25
+
 ### Changed
+- **Persona:** removed the entire Tools section so agents keep host-default tool behaviors such as OpenCode 2's native web search; the persona now states only principles.
 - **Docs for new users:** `README`, `docs/index`, `docs/getting-started`, `docs/workflows`, `docs/examples`, `docs/compatibility`, `docs/reference` rewritten around 2-minute `install → ask your agent` flow with copy-paste prompts, scope vs focus cheat-sheet, and expected `ISSUES.md`/`REVIEW.md` snippets. Added `docs/troubleshooting.md` and linked it from `SUMMARY.md`/`README`/`workflows`.
 
 ### Removed
 - **Eval harness:** deleted `scripts/eval_runner.py`, `docs/eval-corpus.toml`, `docs/evaluation.md`, and `just eval`/`eval-run`/`eval-compare`/`eval-matrix` recipes. Live runs were already disabled (`SystemExit` after 0.15 skill migration) and left unreachable `results`/`write_summary` and a `High` `Task.id` traversal (`repos_dir / task.id` → `git clean -fd`) plus dead `run_matrix` path.
+- **Prose-pinning tests:** removed the markdown content assertions for the generated skill assets (`audit/review/setup_skill_is_canonical`, deterministic-protocol and host-neutrality pins). Setup tests still verify installed skills byte-for-byte against the canonical assets.
 
 ### Fixed
+- **Test isolation:** `TestEnv` dropped its env lock before restoring process env vars, so parallel setup tests could corrupt each other's environment (observed: a test ran `oy setup --remove` against the real `~/.agents/skills`); the lock is now declared last (drops after env restoration) and recovers from poisoning instead of cascading failures.
 - Formatting: `src/skills/setup/legacy_config.rs` indentation (`cargo fmt`).
 
 ## [0.15.0] - 2026-08-21

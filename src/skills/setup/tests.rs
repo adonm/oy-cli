@@ -69,7 +69,6 @@ impl Drop for BackupStateGuard {
 struct TestEnv {
     home: tempfile::TempDir,
     workspace: tempfile::TempDir,
-    _lock: std::sync::MutexGuard<'static, ()>,
     _xdg: EnvGuard,
     _skills: EnvGuard,
     _cache: EnvGuard,
@@ -77,11 +76,15 @@ struct TestEnv {
     _root: EnvGuard,
     _host: EnvGuard,
     _config_dir: EnvGuard,
+    // Declared last so it drops last: env guards restore the real
+    // environment before the next test can acquire the lock.
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl TestEnv {
     fn new() -> Self {
-        let lock = ENV_LOCK.lock().unwrap();
+        // Recover a poisoned lock: the previous holder restored env on drop.
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let xdg = EnvGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
