@@ -120,10 +120,9 @@ assert_contains "$default" "reshim"
 assert_contains "$default" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_not_contains "$default" "npm install -g"
 assert_not_contains "$default" "node@latest"
-assert_not_contains "$default" "npm:@opencode-ai/cli"
 assert_not_contains "$default" "config ls"
-assert_not_contains "$default" "allow_builds"
-assert_not_contains "$default" "opencode2"
+assert_contains "$default" "use --global --yes --minimum-release-age 0 npm:@opencode-ai/cli@beta"
+assert_not_contains "$default" "config set"
 assert_not_contains "$(cat "$default_log.curl")" "https://cursor.com/install"
 
 workspace_log="$tmp/workspace.log"
@@ -131,6 +130,7 @@ run_install "$workspace_log" 1 1 "$tmp/home-workspace" "" --workspace
 workspace=$(cat "$workspace_log")
 assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version"
 assert_not_contains "$workspace" "use --global"
+assert_contains "$workspace" "use --yes --minimum-release-age 0 npm:@opencode-ai/cli@beta"
 assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
 assert_not_contains "$workspace" "unuse --global"
 
@@ -159,7 +159,7 @@ assert_contains "$help" "--global"
 assert_contains "$help" "--workspace"
 assert_contains "$help" "--yes"
 assert_not_contains "$help" "cursor"
-assert_not_contains "$help" "opencode"
+assert_contains "$help" "opencode2"
 assert_not_contains "$help" "both"
 if sh "$repo_root/docs/install.sh" --global --workspace >/dev/null 2>&1; then
   printf 'installer accepted conflicting scopes\n' >&2

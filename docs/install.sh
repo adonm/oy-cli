@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Install or upgrade oy and its optional context helpers through mise, then
-# write the oy agent skills into the standard cross-agent skills directory.
+# Install or upgrade oy and its optional context helpers through mise, install
+# opencode2 when it is missing, then write the oy agent skills into the
+# standard cross-agent skills directory.
 #
 # Intended curl usage:
 #   curl -fsSL https://oy.adonm.dev/install.sh | sh
@@ -16,6 +17,7 @@ oy_version="0.15.1"
 oy_tool="github:adonm/oy-cli@$oy_version"
 tokei_tool="aqua:XAMPPRocky/tokei@12.1.2"
 ctags_tool="github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
+opencode2_tool="npm:@opencode-ai/cli@beta"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -28,7 +30,8 @@ die() {
 
 show_help() {
   cat <<'EOF'
-Install oy, its agent skills, and optional context helpers with mise.
+Install oy, its agent skills, and optional context helpers with mise,
+and opencode2 when it is not already installed.
 
 Usage:
   install.sh [--global|--workspace] [--yes]
@@ -176,6 +179,22 @@ mise_use "$oy_tool"
 log "Installing optional prebuilt context helpers..."
 if ! mise_use "$tokei_tool" "$ctags_tool"; then
   log "Warning: optional context helpers could not be installed; rerun this installer later."
+fi
+
+if command -v opencode2 >/dev/null 2>&1; then
+  log "opencode2 is already installed; skipping."
+else
+  log "Installing opencode2 with mise..."
+  mise_use "$opencode2_tool"
+  if [ "$scope" = "global" ]; then
+    opencode2_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
+  else
+    opencode2_config="mise.toml"
+  fi
+  log "To allow non-interactive npm builds for opencode2, add this to $opencode2_config:"
+  log '  [tools."npm:@opencode-ai/cli"]'
+  log '  version = "beta"'
+  log '  allow_builds = ["@opencode-ai/cli"]'
 fi
 
 log "Removing superseded source/package-manager tool entries..."

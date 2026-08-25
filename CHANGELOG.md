@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Installer:** `docs/install.sh` now installs opencode2 (`npm:@opencode-ai/cli@beta`) when it is missing from PATH and prints the `allow_builds` TOML snippet to add for non-interactive npm installs; skips silently when opencode2 is already installed.
+
 ## [0.15.1] - 2026-08-25
 
 ### Changed
