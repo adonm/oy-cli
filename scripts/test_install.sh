@@ -154,6 +154,15 @@ assert_contains "$bootstrap_curl" "-fsSL https://mise.run/bash"
   exit 1
 }
 
+# When opencode2 is already on PATH the installer skips the npm install.
+printf '#!/bin/sh\nexit 0\n' >"$tmp/bin/opencode2"
+chmod +x "$tmp/bin/opencode2"
+opencode2_log="$tmp/opencode2.log"
+run_install "$opencode2_log" 1 1 "$tmp/home-opencode2" ""
+opencode2_run=$(cat "$opencode2_log")
+assert_not_contains "$opencode2_run" "npm:@opencode-ai/cli"
+rm -f "$tmp/bin/opencode2"
+
 help=$(sh "$repo_root/docs/install.sh" --help)
 assert_contains "$help" "--global"
 assert_contains "$help" "--workspace"
