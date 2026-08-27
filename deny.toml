@@ -1,0 +1,25 @@
+# Configuration for cargo-deny (https://embarkstudios.github.io/cargo-deny/).
+# CI fails on published RustSec advisories, yanked releases, or dependencies
+# whose licenses are incompatible with oy-cli's Apache-2.0 licensing.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Only licenses observed among current transitive dependencies plus their
+# documented variations. Extend deliberately when adding a dependency.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0", # via dirs -> option-ext; weak file-level copyleft, Apache-2.0-compatible
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"

@@ -29,6 +29,8 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Cargo deny (advisories + licenses)
+        run: cargo deny check advisories licenses bans
       - name: Test
         run: |
           cargo nextest run --all-targets --locked --profile ci

@@ -30,11 +30,11 @@ install:
     @echo "Installed oy $(~/.cargo/bin/oy --version) — skills at ~/.agents/skills — run 'oy doctor --check' and ask your agent to run the oy-setup skill"
 
 # Standard local check suite. Uses stable Cargo only so it works after `mise install`.
-check: _version-check _fmt-check _clippy _test _rustdoc _book _help-smoke _installer-smoke _shellcheck
+check: _version-check _fmt-check _clippy _test _rustdoc _book _help-smoke _installer-smoke _shellcheck _deny
     @echo "✓ local checks passed"
 
 # Extended local suite using CI's nextest and Miri runners.
-ci: _version-check _fmt-check _clippy _nextest _miri _rustdoc _book _help-smoke _installer-smoke _shellcheck
+ci: _version-check _fmt-check _clippy _nextest _miri _rustdoc _book _help-smoke _installer-smoke _shellcheck _deny
     @echo "✓ extended checks passed"
 
 # Auto-format, apply clippy suggestions, update lockfile, then run the local suite.
@@ -111,6 +111,10 @@ _installer-smoke:
 # Lint the shell scripts with shellcheck.
 _shellcheck:
     shellcheck docs/install.sh scripts/test_install.sh
+
+# Check RustSec advisories, yanked crates, and dependency licenses.
+_deny:
+    cargo deny check advisories licenses bans
 
 # Check release-facing version pins against Cargo.toml.
 _version-check:
