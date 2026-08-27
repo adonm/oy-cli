@@ -13,7 +13,7 @@ set -eu
 #   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
 #   OY_SKIP_SETUP     1/true to skip `oy setup`
 
-oy_version="0.15.2"
+oy_version="0.15.3"
 oy_tool="github:adonm/oy-cli@$oy_version"
 tokei_tool="aqua:XAMPPRocky/tokei@12.1.2"
 ctags_tool="github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"

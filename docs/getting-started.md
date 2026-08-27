@@ -53,8 +53,8 @@ What the installer does:
 **With mise (no curl pipe):**
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.2
-mise exec github:adonm/oy-cli@0.15.2 -- oy setup
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.3
+mise exec github:adonm/oy-cli@0.15.3 -- oy setup
 ```
 
 **From source (requires Rust 1.96+):**

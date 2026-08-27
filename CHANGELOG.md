@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-08-27
+
 ### Changed
 - **Evidence:** whole-file chunk headers now carry true source line ranges (`## path (lines 1-N)`) so findings can cite original file lines without inferring offsets; sliced files already labeled their ranges. Diff-hunk chunks are unchanged.
 - **Collection:** security-prioritized ordering now matches keywords as identifier words in path components (`auth`, `sessions`, `handle_upload`, `AuthHandler`) instead of raw substrings; removed the noisy `file`/`path` needles so ordinary repositories no longer fall entirely into the security bucket.
