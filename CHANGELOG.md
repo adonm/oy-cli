@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+- **Evidence:** whole-file chunk headers now carry true source line ranges (`## path (lines 1-N)`) so findings can cite original file lines without inferring offsets; sliced files already labeled their ranges. Diff-hunk chunks are unchanged.
+- **Collection:** security-prioritized ordering now matches keywords as identifier words in path components (`auth`, `sessions`, `handle_upload`, `AuthHandler`) instead of raw substrings; removed the noisy `file`/`path` needles so ordinary repositories no longer fall entirely into the security bucket.
+- **Index:** prepared run indexes report per-chunk `tokens` alongside bytes/lines/sha256 for model context budgeting.
+- **Skills:** the audit and review skills read the run manifest (scope, languages, largest files) before reading chunks.
+- **Platform support:** dropped macOS support. Release archives ship for Linux x86_64 and aarch64 only; the installer exits with a clear message on non-Linux systems; docs describe Linux-only operation with WSL2 elsewhere. Source builds on other Unix targets remain possible but unsupported.
+
+### Added
+- **Supply chain:** CI and `just check` now gate on cargo-deny (RustSec advisories, yanked crates, license allowlist); lockfile refreshed to pick up published advisories (anyhow 1.0.104, crossbeam-epoch 0.9.20).
+
+### Fixed
+- Setup removal no longer panics when a bundled skill path has no parent directory.
+
 ## [0.15.2] - 2026-08-25
 
 ### Changed

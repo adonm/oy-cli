@@ -19,7 +19,7 @@ Your agent owns models, credentials, sessions, and general tools. `oy` adds the 
 
 ## Quick start — 2 minutes
 
-**You need:** Linux or macOS (WSL2 on Windows), any agent that reads Agent Skills (OpenCode, Cursor, Codex, Copilot, or Gemini CLI) with a model provider already configured.
+**You need:** Linux (WSL2 works elsewhere), any agent that reads Agent Skills (OpenCode, Cursor, Codex, Copilot, or Gemini CLI) with a model provider already configured.
 
 **Step 1 — Install oy:**
 

@@ -2,7 +2,7 @@
 
 Keep `oy` focused. Its product is the deterministic audit → review → remediate workflow shipped as portable agent skills. The user's agent owns models, permissions, and general tools; `oy` owns deterministic collection/report boundaries and skill installation.
 
-Native development and builds are supported on Linux and macOS. Use WSL2 rather than native Windows.
+Native development and builds are supported on Linux. Use WSL2 rather than native Windows or macOS.
 
 ## Quick Start
 

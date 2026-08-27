@@ -6,7 +6,7 @@
 //! prefers — OpenCode, Cursor, Codex, Copilot, or Gemini CLI all discover skills under
 //! `.agents/skills`. `oy setup` installs the skills; the agent executes them under its own
 //! permission model. oy does not store provider credentials.
-//! The native CLI supports Linux and macOS; Windows users should run it in WSL2.
+//! The native CLI supports Linux; Windows users should run it in WSL2.
 //!
 //! ## Start with the CLI
 //!

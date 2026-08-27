@@ -97,8 +97,8 @@ global | workspace) ;;
 esac
 
 case "$(uname -s)" in
-Linux | Darwin) ;;
-*) die "oy supports Linux and macOS only; Windows users should run the installer in WSL2" ;;
+Linux) ;;
+*) die "oy supports Linux only; use WSL2 elsewhere, or build from source" ;;
 esac
 
 find_mise() {

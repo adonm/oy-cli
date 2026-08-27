@@ -15,7 +15,7 @@ This guide installs oy, verifies it, and creates your first report. Follow it to
 
 You need:
 
-- **OS:** Linux or macOS (use WSL2 on Windows) — check with `uname -a`
+- **OS:** Linux (use WSL2 on Windows; other systems build from source) — check with `uname -a`
 - **Agent:** any that reads Agent Skills — OpenCode, Cursor, Codex, Copilot, or Gemini CLI
 - **Model provider:** configured *in your agent* (for example an API key in Cursor/OpenCode settings). `oy` never stores credentials.
 - **`git`** only if you plan to review a diff against a branch (e.g. `main`)

@@ -16,12 +16,11 @@ oy doctor --json | head -n 40
 |---|---|
 | Linux x86_64 with glibc | Full CI and release archive |
 | Linux aarch64 with glibc | Release archive; full suite not run on target |
-| macOS Apple Silicon | Release archive; full suite not run on target |
-| Other Linux/macOS targets | Source build; not release-tested |
-| Windows | Use WSL2; native Windows is unsupported |
+| Other Linux targets | Source build; not release-tested |
+| macOS, Windows | Unsupported; use WSL2 or build from source |
 | Other operating systems | Unsupported at build time |
 
-The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy release supports the three release-archive targets above; other Linux/macOS targets require a source build. Building from source requires Rust 1.96+.
+The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy release supports the two release-archive targets above; other Linux targets require a source build. Building from source requires Rust 1.96+.
 
 ## Agent skills hosts
 
