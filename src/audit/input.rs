@@ -10,6 +10,14 @@ use std::path::Path;
 
 use super::MAX_FILE_BYTES;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextOrigin {
+    /// Whole content of a workspace file; `(lines first-last)` headers are true source lines.
+    WorkspaceFile,
+    /// Raw `git diff` text for one file; line numbers come from embedded `@@` hunks.
+    GitDiffHunk,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AuditFile {
     pub(crate) path: String,
@@ -18,6 +26,7 @@ pub(crate) struct AuditFile {
     pub(crate) tokens: usize,
     pub(crate) text: String,
     pub(crate) slice: Option<InputSlice>,
+    pub(crate) origin: TextOrigin,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +106,7 @@ pub(crate) fn collect_files(
             tokens,
             text,
             slice: None,
+            origin: TextOrigin::WorkspaceFile,
         });
     }
     files.sort_by_key(audit_priority);
@@ -129,6 +139,7 @@ pub(crate) fn collect_file(
         tokens,
         text,
         slice: None,
+        origin: TextOrigin::WorkspaceFile,
     }))
 }
 
@@ -232,8 +243,11 @@ fn audit_priority(file: &AuditFile) -> (u8, std::cmp::Reverse<usize>, String) {
     (score, std::cmp::Reverse(file.tokens), path)
 }
 
+/// Security-relevant paths sort first. A keyword must appear as a standalone
+/// identifier word in some path component (snake/kebab/camel-aware, plural
+/// allowed), so `src/auth/login.rs` scores but `src/profile.rs` does not.
 fn security_path_score(path: &str) -> bool {
-    [
+    const NEEDLES: &[&str] = &[
         "auth",
         "session",
         "token",
@@ -253,14 +267,45 @@ fn security_path_score(path: &str) -> bool {
         "shell",
         "command",
         "process",
-        "file",
-        "path",
         "upload",
         "download",
         "network",
-    ]
-    .iter()
-    .any(|needle| path.contains(needle))
+    ];
+    path.split('/').any(|component| {
+        let stem = component.split('.').next().unwrap_or(component);
+        let words = identifier_words(stem);
+        words.iter().any(|word| {
+            NEEDLES.contains(&word.as_str())
+                || word
+                    .strip_suffix('s')
+                    .is_some_and(|singular| NEEDLES.contains(&singular))
+        })
+    })
+}
+
+/// Splits an identifier into lowercase words at separators and lower→upper
+/// boundaries: `handle_upload`, `handle-upload`, and `HandleUpload` all yield
+/// `["handle", "upload"]`.
+fn identifier_words(stem: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut previous_lowercase = false;
+    for character in stem.chars() {
+        if character.is_alphanumeric() {
+            if previous_lowercase && character.is_uppercase() && !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            current.extend(character.to_lowercase());
+            previous_lowercase = character.is_lowercase();
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+            previous_lowercase = false;
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 pub(crate) fn chunk_files(files: Vec<AuditFile>, target_tokens: usize) -> Vec<AuditChunk> {
@@ -385,6 +430,7 @@ fn split_file(
                     start_line,
                     end_line,
                 }),
+                origin: file.origin,
             }
         })
         .collect()
@@ -470,6 +516,12 @@ fn chunk_file_text(file: &AuditFile) -> String {
             slice.start_line,
             slice.end_line
         );
+    } else if file.origin == TextOrigin::WorkspaceFile {
+        // Anchor chunk-relative reads to true source lines so findings can cite
+        // `locations[].line` without inferring offsets. Diff hunks carry their
+        // own @@ line numbers and are left unlabeled.
+        let end_line = file.text.lines().count().max(1);
+        let _ = writeln!(out, "\n## {file} (lines 1-{end_line})\n", file = file.path);
     } else {
         let _ = writeln!(out, "\n## {}\n", file.path);
     }
@@ -519,6 +571,7 @@ fn push_diff_file(files: &mut Vec<AuditFile>, text: &str, model: &str) {
         tokens,
         text: text.to_string(),
         slice: None,
+        origin: TextOrigin::GitDiffHunk,
     });
 }
 
@@ -636,6 +689,7 @@ mod slice_tests {
             tokens: 1,
             text,
             slice: None,
+            origin: TextOrigin::WorkspaceFile,
         }
     }
 
@@ -711,5 +765,62 @@ mod slice_tests {
                 .collect::<String>(),
             text
         );
+    }
+
+    #[test]
+    fn whole_workspace_files_carry_source_line_headers_and_diffs_do_not() {
+        let workspace = chunk_text(&AuditChunk {
+            files: vec![file(
+                "src/auth/login.rs".to_string(),
+                "fn a() {}\nfn b() {}\n".to_string(),
+            )],
+            tokens: 1,
+        });
+        assert!(workspace.contains("## src/auth/login.rs (lines 1-2)"));
+
+        let diff_file = AuditFile {
+            path: "src/main.rs".to_string(),
+            language: "Diff",
+            bytes: 10,
+            tokens: 1,
+            text: "@@ -3,2 +3,2 @@\n-old\n+new\n".to_string(),
+            slice: None,
+            origin: TextOrigin::GitDiffHunk,
+        };
+        let rendered = chunk_text(&AuditChunk {
+            files: vec![diff_file],
+            tokens: 1,
+        });
+        assert!(rendered.contains("\n## src/main.rs\n"));
+        assert!(!rendered.contains("(lines 1-"));
+    }
+
+    #[test]
+    fn security_path_score_matches_identifier_words_not_substrings() {
+        for path in [
+            "src/auth/login.rs",
+            "internal/handle_upload.py",
+            "AuthHandler.java",
+            "routes/sessions.go",
+            "lib/token_cache/cache.rs",
+            "api/v2/users.rb",
+            "security/policy.yaml",
+        ] {
+            assert!(security_path_score(path), "{path} should score");
+        }
+        for path in [
+            "src/profile.rs",
+            "src/file.rs",
+            "docs/pathological.md",
+            "src/utils/helpers.rb",
+        ] {
+            assert!(!security_path_score(path), "{path} should not score");
+        }
+    }
+
+    #[test]
+    fn security_path_score_is_case_insensitive_on_the_whole_path() {
+        assert!(security_path_score("SRC/AUTH/LOGIN.RS"));
+        assert!(identifier_words("HandleUpload").join(",") == "handle,upload");
     }
 }

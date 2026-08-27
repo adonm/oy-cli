@@ -179,12 +179,13 @@ pub(crate) fn prepare(root: &Path, request: PrepareRequest) -> Result<Value> {
         "candidate_report": candidate_report,
         "candidate_findings": candidate_findings,
         "chunk_count": chunk_artifacts.len(),
-        "chunks": chunk_artifacts.iter().enumerate().map(|(index, artifact)| json!({
+        "chunks": chunk_artifacts.iter().zip(evidence.chunks.iter()).enumerate().map(|(index, (artifact, chunk))| json!({
             "number": index + 1,
             "path": artifact.path,
             "sha256": artifact.sha256,
             "bytes": artifact.bytes,
             "lines": artifact.lines,
+            "tokens": chunk.tokens,
         })).collect::<Vec<_>>(),
     });
     artifacts.push(write_artifact(
@@ -725,6 +726,7 @@ mod tests {
             tokens: 1,
             text: text.to_string(),
             slice: None,
+            origin: input::TextOrigin::WorkspaceFile,
         };
         let first = vec![AuditChunk {
             files: vec![file("one")],
