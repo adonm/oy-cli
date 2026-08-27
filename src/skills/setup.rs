@@ -272,8 +272,10 @@ fn remove_opencode(scope: SetupScope, dry_run: bool) -> Result<i32> {
     let backup = apply_integration_update(&[&skills_dir, &opencode_dir], &old_paths, &updates)?;
     let cache_removed = remove_plugin_cache(&cache_paths);
     for (relative, _) in bundled_files() {
-        let directory = skills_dir.join(relative).parent().unwrap().to_path_buf();
-        let _ = fs::remove_dir(directory);
+        let Some(directory) = Path::new(relative).parent() else {
+            continue;
+        };
+        let _ = fs::remove_dir(skills_dir.join(directory));
     }
     for namespace in ["agents", "commands", "plugins", "skills"] {
         let _ = fs::remove_dir(opencode_dir.join(namespace));
