@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-09-03
+
 ### Changed
 - **Docs:** reframed around what oy contributes (frozen evidence, full-coverage reading, verified reports) rather than what it avoids; `docs/project.md` non-goals became a short Boundaries section.
 
