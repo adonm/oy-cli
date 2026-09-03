@@ -149,8 +149,8 @@ steps:
 
   - name: Install oy
     run: |
-      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.4
-      mise exec github:adonm/oy-cli@0.15.4 -- oy setup
+      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.5
+      mise exec github:adonm/oy-cli@0.15.5 -- oy setup
 
   - name: Run audit with an agent
     env:
