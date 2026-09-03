@@ -1,6 +1,6 @@
 # Project direction
 
-`oy` gives coding agents repeatable audit → review → fix workflows through portable Agent Skills. Any agent that reads `.agents/skills` can run them; oy itself is not a second agent or model runtime.
+`oy` gives coding agents repeatable audit → review → fix workflows through portable Agent Skills. Any agent that reads `.agents/skills` can run them; oy works through your agent's own tools and permissions.
 
 ## Mission
 
@@ -23,7 +23,7 @@ prepare known input
 
 ## Principles
 
-1. **Do not add a parallel permission policy.** The skills run under whatever permissions the user's agent has; they never broaden them.
+1. **Run inside the user's agent.** The skills use the permissions the user's agent already has; oy contributes workflow structure — frozen input, full-coverage reading, verified reports — not new capabilities.
 2. **Inputs can be repeatable; conclusions cannot.** Evidence and report normalization are deterministic, model reasoning is not.
 3. **Fail instead of silently sampling.** Changed evidence, malformed reports, and explicit limits are visible errors.
 4. **Reports are handoff artifacts.** Stable IDs and reruns matter more than chat-only output.
@@ -38,13 +38,8 @@ Setup writes:
 
 The Rust CLI prepares evidence, verifies model-written candidates, normalizes finding metadata, writes Markdown/SARIF, installs the skills, and migrates legacy OpenCode plugin state.
 
-## Non-goals
+## Boundaries
 
-- becoming a second coding-agent or model runtime;
-- owning provider credentials or model routing;
-- adding permission overrides;
-- adding general shell, edit, web, clone, or search tools;
-- claiming deterministic security or quality conclusions;
-- running paid model evaluations in default CI.
+oy stays focused on evidence collection, report validation, and skill installation. Model choice, permissions, provider credentials, editing tools, and final judgment stay with your agent — oy structures the review workflow without taking it over. Paid model evaluations stay out of default CI.
 
 See [Architecture](architecture.md) for implementation boundaries and [`ROADMAP.md`](https://github.com/adonm/oy-cli/blob/main/ROADMAP.md) for current work.

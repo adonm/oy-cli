@@ -15,7 +15,7 @@
 - `oy-setup` skill — agent-driven setup and verification
 - deterministic CLI: `oy audit|review prepare` and `finalize`, `oy setup`, `oy doctor`
 
-Your agent owns models, credentials, sessions, and general tools. `oy` adds the evidence and report workflow; it is not a second agent runtime or permission system.
+Your agent brings models, credentials, sessions, and general tools. `oy` contributes the review workflow around them: frozen, fully-enumerated evidence input, a read-every-chunk protocol, and verified `ISSUES.md`/`REVIEW.md` output with stable finding IDs.
 
 ## Quick start — 2 minutes
 

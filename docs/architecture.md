@@ -100,9 +100,9 @@ indexed chunk; complete ordered reading is enforced by the skill protocol.
 
 ## Design rules
 
-- Do not add permission overrides; the skills run under whatever permissions the user's agent has.
+- Run under the user's agent permissions; contribute workflow structure, not new capabilities.
 - Keep oy to three workflow skills plus the setup skill.
 - Put evidence identity, ordering, limits, and report validation in Rust.
 - Prefer file artifacts and native agent reads over large tool responses.
 - Validate workspace paths at read/write boundaries.
-- Do not reintroduce a model client, provider router, chat UI, or general tool registry.
+- Keep model execution, provider routing, and UI with the host agent.

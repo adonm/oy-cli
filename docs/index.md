@@ -74,7 +74,7 @@ Your agent loads the matching SKILL.md when you mention it. No extra daemon, no 
 - shell, edit, web, and other tools;
 - sessions, UI, and model execution.
 
-The skills run under your agent's own permission model and never broaden it. `oy` is not a sandbox; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
+The skills run under your agent's own permission model. `oy` is not a sandbox; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
 
 ## Choose your next page
 
