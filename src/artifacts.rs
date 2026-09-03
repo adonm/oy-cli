@@ -179,12 +179,13 @@ pub(crate) fn prepare(root: &Path, request: PrepareRequest) -> Result<Value> {
         "candidate_report": candidate_report,
         "candidate_findings": candidate_findings,
         "chunk_count": chunk_artifacts.len(),
-        "chunks": chunk_artifacts.iter().enumerate().map(|(index, artifact)| json!({
+        "chunks": chunk_artifacts.iter().zip(evidence.chunks.iter()).enumerate().map(|(index, (artifact, chunk))| json!({
             "number": index + 1,
             "path": artifact.path,
             "sha256": artifact.sha256,
             "bytes": artifact.bytes,
             "lines": artifact.lines,
+            "tokens": chunk.tokens,
         })).collect::<Vec<_>>(),
     });
     artifacts.push(write_artifact(
@@ -239,28 +240,6 @@ pub(crate) fn prepare(root: &Path, request: PrepareRequest) -> Result<Value> {
         "chunk_count": chunk_artifacts.len(),
         "evidence_digest": evidence_digest,
         "next": format!("Read the index and every chunk, write {} and {}, then run `oy {} finalize --run {}`", state.candidate_report.display(), state.candidate_findings.display(), match state.kind { Kind::Audit => "audit", Kind::Review => "review" }, state.run_id),
-    }))
-}
-
-pub(crate) fn describe_prepared(root: &Path, run_id: &str) -> Result<Value> {
-    validate_run_id(run_id)?;
-    let state = read_state(run_id)?;
-    if state.workspace != root.canonicalize()? {
-        bail!("workflow workspace does not match the active workspace");
-    }
-    if state.schema_version != SCHEMA_VERSION {
-        bail!("unsupported artifact workflow schema");
-    }
-    let artifact_dir = PathBuf::from(format!(".oy/runs/{run_id}"));
-    Ok(json!({
-        "schema_version": SCHEMA_VERSION,
-        "run_id": run_id,
-        "kind": state.kind,
-        "index": artifact_dir.join("index.json"),
-        "candidate_report": state.candidate_report,
-        "candidate_findings": state.candidate_findings,
-        "output": state.output,
-        "finalization": "owned_by_oy_orchestrator",
     }))
 }
 
@@ -747,6 +726,7 @@ mod tests {
             tokens: 1,
             text: text.to_string(),
             slice: None,
+            origin: input::TextOrigin::WorkspaceFile,
         };
         let first = vec![AuditChunk {
             files: vec![file("one")],

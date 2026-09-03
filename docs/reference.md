@@ -1,73 +1,77 @@
 # CLI reference
 
+> **New user?** You probably don't need this page yet. Most users just talk to their agent:
+> `audit this repository with the oy-audit skill` — the skill calls these commands for you.
+> Come here when you want exact flags, environment variables, or to automate `prepare`/`finalize` outside an agent.
+
 Run `oy <command> --help` for the exact flags supported by your installed version.
-
-## Workflow commands
-
-| Command | Purpose |
-|---|---|
-| `oy audit [FOCUS...]` | Audit a workspace/path and write `ISSUES.md`; add `--format sarif` for SARIF. |
-| `oy review [TARGET]` | Review the workspace or `git diff TARGET` and write `REVIEW.md`. |
-| `oy enhance [FOCUS...]` | Confirm and fix one finding from `ISSUES.md` or `REVIEW.md`. A finding ID is the clearest focus. |
-| `oy enhance --interactive [FOCUS...]` | Run enhancement through OpenCode `mini` for native prompts and forms. |
-| `oy run [OPTIONS] [PROMPT...]` | Run a general task with the `oy` agent; prompt may come from stdin. |
-| `oy recover` | Resume an interrupted managed audit, review, or enhance session. |
-| `oy` | Validate setup and launch the OpenCode TUI. |
-
-Common options:
-
-| Option | Meaning |
-|---|---|
-| `--out PATH` | Write the report to a workspace-relative path. |
-| `--max-chunks N` | Change the fail-closed evidence limit (default `80`). |
-| `oy review --focus TEXT` | Add repeatable review guidance. |
-| `oy audit --format markdown|sarif` | Select report format. |
-| `--json` | Request machine-readable output where supported. |
-| `oy run --auto` | Ask OpenCode to approve pending requests once; explicit denies still apply. |
-
-Unknown oy commands are errors. Use `opencode2` directly for native OpenCode commands.
-
-## OpenCode slash commands
-
-The OpenCode plugin exposes:
-
-| Command | Action |
-|---|---|
-| `/oy-audit` | Load the audit skill and review all prepared evidence. |
-| `/oy-review` | Load the code-review skill and review all prepared evidence. |
-| `/oy-enhance` | Fix one finding from a generated report. |
-
-These are OpenCode slash commands, not shell subcommands. They use OpenCode tools and your effective permissions.
 
 ## Setup and maintenance
 
 | Command | Purpose |
 |---|---|
-| `oy setup` | Register the version-matched oy plugin package in global OpenCode config and default Cursor commit/PR attribution off. |
-| `oy setup --workspace` | Register the package under `OY_ROOT/.opencode/opencode.json(c)` and apply the same global Cursor attribution defaults. |
-| `oy setup --dry-run` | Preview setup or removal. |
-| `oy setup --remove` | Back up and remove the oy package entry and legacy oy-owned files/config entries. |
-| `oy doctor` | Show selected paths, host version, setup state, and optional tools. |
-| `oy doctor --check` | Validate the effective service, API, plugin, agent, skills, commands, and models. |
-| `oy doctor --install-missing` | Install missing OpenCode/context helpers with mise. |
-| `oy upgrade [--check|--dry-run]` | Upgrade a mise-installed oy, latest Node.js, and the OpenCode 2 npm package. |
+| `oy setup` | Write the oy skills under `~/.agents/skills/` (or `OY_SKILLS_DIR`) and clean up legacy OpenCode plugin files/config entries. |
+| `oy setup --workspace` | Write the skills under `.agents/skills/` in the current workspace instead. |
+| `oy setup --dry-run` | Preview setup or removal without writing. |
+| `oy setup --remove` | Back up and remove oy-owned skill files and legacy OpenCode config entries. |
+| `oy doctor` | Show skills installation state, paths, and optional tooling. |
+| `oy doctor --check` | Validate the skills installation and plugin-cache cleanup; exit nonzero on failure. |
+| `oy doctor --install-missing` | Install optional tokei and Universal Ctags context helpers with mise. |
+| `oy upgrade [--check\|--dry-run]` | Upgrade a mise-installed oy and refresh the skills. |
 
-See [Compatibility](compatibility.md) for the OpenCode versions accepted by this release.
+## Workflow commands
+
+The oy skills run inside your agent (OpenCode, Cursor, Codex, Copilot, or
+Gemini CLI). The deterministic evidence steps are CLI commands the skills
+call:
+
+| Command | Purpose |
+|---|---|
+| `oy audit prepare [OPTIONS]` | Prepare immutable audit evidence under `.oy/runs/<run-id>/`. |
+| `oy audit finalize --run <run-id>` | Validate prepared evidence and write `ISSUES.md` or SARIF. |
+| `oy review prepare [TARGET] [OPTIONS]` | Prepare workspace or `git diff TARGET` review evidence. |
+| `oy review finalize --run <run-id>` | Validate prepared evidence and write `REVIEW.md`. |
+
+`oy audit prepare` options: `--path PATH` (default `.`), `--out PATH`,
+`--format markdown|sarif`, `--focus TEXT` (repeatable), `--max-chunks N`
+(default `80`). `oy review prepare` adds an optional positional `TARGET`
+branch/commit/ref; omit `--path` when a target is present.
+
+Ask your agent to "audit this repository" or "review the diff against main";
+it loads the matching oy skill, which runs prepare, reads every indexed
+chunk, writes candidates, and finalizes the report. `oy enhance` remediation
+is the `oy-enhance` skill: ask your agent to fix a finding by ID from
+`ISSUES.md` or `REVIEW.md`.
+
+Unknown oy commands are errors.
 
 ## Setup ownership and backups
 
-OpenCode global setup uses `OPENCODE_CONFIG_DIR` when set; otherwise it uses the platform OpenCode config directory (normally `~/.config/opencode/` on Linux). OpenCode workspace setup uses `OY_ROOT/.opencode/`. An existing `opencode.jsonc` is selected before `opencode.json`.
+Global setup uses `~/.agents/skills/` (the cross-agent Agent Skills location
+read natively by OpenCode, Cursor, Codex, Copilot, and Gemini CLI), or
+`OY_SKILLS_DIR` when set. Workspace setup uses `.agents/skills/` under
+`OY_ROOT`. Setup writes:
 
-Setup registers `@oy-cli/opencode@<matching-oy-version>` in `opencode.json(c)`. OpenCode installs the package and its production dependencies, including the Cursor provider and official Cursor SDK. Setup also sets missing `attribution.attributeCommitsToAgent` and `attribution.attributePRsToAgent` preferences to `false` in Cursor's global `cli-config.json`. Explicit attribution values and unrelated Cursor settings are preserved; `--remove` leaves these user preferences in place.
+- `oy-audit/SKILL.md`, `oy-review/SKILL.md`, `oy-enhance/SKILL.md`;
+- `oy-setup/SKILL.md`.
 
-Setup owns:
+Files written by setup carry `<!-- Generated by oy setup -->` and are
+oy-owned; setup refreshes them in place and preserves user-modified files
+without the marker.
 
-- the version-matched `@oy-cli/opencode` entry in `plugins`;
-- superseded `plugins/oy.js` and `plugins/assets/` files from direct-file releases;
-- old direct files named `oy`, `oy-*`, or `oy.*` under `agents`, `commands`, and `skills`;
-- obsolete oy plugin, command, and MCP config entries from earlier releases.
+Setup also migrates older oy releases: it strips the version-matched
+`@oy-cli/opencode` plugin entry, obsolete oy plugin/command/MCP config
+entries, and direct `oy`, `oy-*`, `oy.*` files under the OpenCode
+`agents`/`commands`/`skills`/`plugins` directories from `opencode.json(c)`
+and the platform OpenCode config directory. The downloaded OpenCode plugin
+package cache (`<cache>/opencode/packages/@oy-cli/...` and the bundled
+`@stablekernel/cursor-opencode-provider` fork) is deleted outright; it is a
+regenerable cache.
 
-Before changing existing owned entries or adding Cursor attribution defaults, setup creates a mode-`0700` backup under the platform state directory (or local-data fallback). It moves namespaced files, snapshots changed config bytes, and leaves unmodified configs byte-for-byte untouched. Unrelated settings remain in place. JSON/JSONC comments and formatting are preserved in the backup, while changed configs are pretty-reserialized.
+Before changing existing owned files, setup creates a mode-`0700` backup
+under the platform state directory (or local-data fallback). Unmodified
+files remain byte-for-byte untouched. JSON/JSONC comments and formatting are
+preserved in the backup, while changed configs are pretty-reserialized.
 
 ## Curl installer
 
@@ -77,50 +81,41 @@ curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --global    # global mise 
 curl -fsSL https://oy.adonm.dev/install.sh | sh -s -- --workspace # current mise.toml
 ```
 
-The installer uses mise for oy, Node.js, OpenCode, and optional context helpers. The default is interactive: choose global config or the current workspace’s `mise.toml`. Noninteractive installs default to global.
+The installer uses mise for oy and the optional tokei/Universal Ctags
+context helpers, then runs `oy setup`. The default is interactive: choose
+global config or the current workspace's `mise.toml`. Noninteractive
+installs default to global.
 
 ## Environment variables
 
 | Variable | Purpose |
 |---|---|
 | `OY_ROOT` | Select the oy CLI workspace root and evidence/report path boundary. |
-| `OPENCODE_CONFIG_DIR` | Override the global OpenCode config directory. |
-| `OY_OPENCODE` | Select the OpenCode executable; default `opencode2`. |
-| `OY_OPENCODE_MODEL` | Select a workflow model as `provider/model#variant`. |
+| `OY_SKILLS_DIR` | Override the global agent skills directory; default `~/.agents/skills`. |
+| `OY_OPENCODE` | Select the OpenCode executable used for the optional post-setup location refresh; default `opencode2`. |
+| `OY_OPENCODE_MODEL` | Record a model preference as `provider/model#variant` in prepared artifacts. |
 | `OY_COLOR` | Set `auto`, `always`, or `never`. |
 | `NO_COLOR` | Disable color output. |
 | `OY_INSTALL_SCOPE` | Select `global` or `workspace` in `install.sh`; an explicit installer flag wins. |
-| `OY_SKIP_SETUP` | Skip integration setup and runtime load checks in `install.sh`. |
-| `CURSOR_API_KEY` | Supply the Cursor provider key without using OpenCode `/connect`. |
-| `OPENCODE_CURSOR_STALL_MS` | Override oy's 120,000 ms Cursor idle-stream watchdog default; set `0` to disable it. |
-| `OPENCODE_CURSOR_TOOL_STALL_MS` | Override the 600,000 ms watchdog used while a Cursor tool is running; set `0` to disable it. |
-
-## Cursor models in OpenCode
-
-The default OpenCode plugin registers a **Cursor** provider. Use `/connect` and paste a Cursor API key; the account's live catalog replaces the fallback list after first use. OpenCode 2 talks to the official Cursor local-agent runtime through an authenticated `127.0.0.1` bridge. The bridge preserves Cursor sessions, correct token/cache usage, native tool activity, bundled oy skills, and named Cursor subagents. It validates every streamed text, reasoning, tool, and finish transition before completing the response. Select a model's `plan` variant for Cursor plan mode.
-
-Configuration under `providers.cursor.request.body` is forwarded to the Cursor agent. Supported settings include `cwd`, `sandbox`, `autoReview`, `settingSources`, `agents`, `mcpServers`, `session`, `systemPrompt`, `toolDisplay`, and `transport`. An explicit absolute `cwd` wins; otherwise the bridge follows the current absolute OpenCode working directory. Either may be outside `OY_ROOT`, which is intentional for multi-repository workflows. Use an external container or VM when host isolation is needed. Oy uses a 120,000 ms idle watchdog and a separate 600,000 ms tool-phase watchdog; explicit environment values win. OpenCode's live MCP state and per-tool permission prompts are not forwarded because the current V2 plugin API does not expose that request context.
-
-For a checkout smoke test, use `CURSOR_API_KEY=... just opencode-dev`, select a `cursor/*` model, and start with a no-edit read request. `OPENCODE_CURSOR_DEBUG=1` enables provider diagnostics without printing the API key.
-
-`cursor/*` uses host-capable Cursor tools outside OpenCode permissions. Oy preserves the provider's sandbox default; see the [security policy](https://github.com/adonm/oy-cli/blob/main/SECURITY.md).
+| `OY_SKIP_SETUP` | Skip the skills setup in `install.sh`. |
 
 ## Files written by oy
 
 | Path | Purpose |
 |---|---|
+| `~/.agents/skills/oy-*/SKILL.md` | Canonical oy skills (global setup). |
+| `.agents/skills/oy-*/SKILL.md` | Canonical oy skills (workspace setup). |
 | `ISSUES.md` | Default Markdown audit report. |
 | `REVIEW.md` | Default code-quality report. |
 | `oy.sarif` | Default SARIF audit output. |
 | `.oy/runs/<run-id>/` | Prepared evidence and model-written candidates. |
-| Cursor global `cli-config.json` | Missing commit/PR attribution preferences, defaulted to `false` by setup. |
 | platform state/data directory | Private backup and prepared-run metadata. |
 
 Report output paths must be workspace-relative and may not escape through parent traversal or symlinks.
 
 ## Advanced prepare/finalize protocol
 
-Normal workflows orchestrate these commands automatically:
+The oy skills run these commands automatically:
 
 ```text
 oy audit prepare [options]

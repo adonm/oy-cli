@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Install or upgrade oy, OpenCode 2, and compact context helpers through mise.
+# Install or upgrade oy and its optional context helpers through mise, install
+# opencode2 when it is missing, then write the oy agent skills into the
+# standard cross-agent skills directory.
 #
 # Intended curl usage:
 #   curl -fsSL https://oy.adonm.dev/install.sh | sh
@@ -9,15 +11,13 @@ set -eu
 #
 # Environment knobs:
 #   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
-#   OY_SKIP_SETUP     1/true to skip `oy setup` and runtime load checks
+#   OY_SKIP_SETUP     1/true to skip `oy setup`
 
-oy_version="0.14.9"
+oy_version="0.15.4"
 oy_tool="github:adonm/oy-cli@$oy_version"
-opencode_tool="npm:@opencode-ai/cli@next"
-opencode_plain='"npm:@opencode-ai/cli" = "next"'
-opencode_entry='"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }'
 tokei_tool="aqua:XAMPPRocky/tokei@12.1.2"
 ctags_tool="github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
+opencode2_tool="npm:@opencode-ai/cli@beta"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -30,7 +30,8 @@ die() {
 
 show_help() {
   cat <<'EOF'
-Install oy, OpenCode 2, and context helpers with mise.
+Install oy, its agent skills, and optional context helpers with mise,
+and opencode2 when it is not already installed.
 
 Usage:
   install.sh [--global|--workspace] [--yes]
@@ -42,7 +43,7 @@ Scope:
 
 Environment:
   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
-  OY_SKIP_SETUP     1/true skips OpenCode integration setup and load checks
+  OY_SKIP_SETUP     1/true skips the agent skills setup
 EOF
 }
 
@@ -96,8 +97,8 @@ global | workspace) ;;
 esac
 
 case "$(uname -s)" in
-Linux | Darwin) ;;
-*) die "oy supports Linux and macOS only; Windows users should run the installer in WSL2" ;;
+Linux) ;;
+*) die "oy supports Linux only; use WSL2 elsewhere, or build from source" ;;
 esac
 
 find_mise() {
@@ -171,41 +172,29 @@ mise_unuse() {
   fi
 }
 
-# Allow the OpenCode 2 package postinstall, which downloads the native binary.
-# mise's package manager denies lifecycle scripts unless the config entry names
-# them; `mise use` cannot express tool options, so patch the entries it wrote.
-# `mise config ls` reports exactly which config files are in use, so the patch
-# follows mise's own discovery instead of guessing filenames.
-allow_opencode_postinstall() {
-  config_files=$("$mise_bin" config ls --no-header 2>/dev/null | awk '
-    {
-      tools = $0
-      sub(/^[^ ]*  /, "", tools)
-      if (tools ~ /npm:@opencode-ai\/cli/) print $1
-    }
-  ')
-  if [ -z "$config_files" ]; then
-    # Older mise without `mise config ls`: fall back to the standard names.
-    config_files="$(pwd)/mise.toml $(pwd)/.mise.toml $(pwd)/mise.local.toml $(pwd)/.mise.local.toml"
-    config_files="$config_files ${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
-  fi
-  for candidate in $config_files; do
-    [ -f "$candidate" ] || continue
-    sed -i "s|^$opencode_plain\$|$opencode_entry|" "$candidate"
-  done
-  "$mise_bin" install -f "$opencode_tool"
-}
-
 log "Mise scope: $scope"
-log "Installing/upgrading oy and OpenCode with mise..."
-mise_use "$oy_tool" "$opencode_tool"
-
-log "Allowing the OpenCode 2 postinstall and installing the native binary..."
-allow_opencode_postinstall
+log "Installing/upgrading oy with mise..."
+mise_use "$oy_tool"
 
 log "Installing optional prebuilt context helpers..."
 if ! mise_use "$tokei_tool" "$ctags_tool"; then
   log "Warning: optional context helpers could not be installed; rerun this installer later."
+fi
+
+if command -v opencode2 >/dev/null 2>&1; then
+  log "opencode2 is already installed; skipping."
+else
+  log "Installing opencode2 with mise..."
+  mise_use "$opencode2_tool"
+  if [ "$scope" = "global" ]; then
+    opencode2_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
+  else
+    opencode2_config="mise.toml"
+  fi
+  log "To allow non-interactive npm builds for opencode2, add this to $opencode2_config:"
+  log '  [tools."npm:@opencode-ai/cli"]'
+  log '  version = "beta"'
+  log '  allow_builds = ["@opencode-ai/cli"]'
 fi
 
 log "Removing superseded source/package-manager tool entries..."
@@ -222,24 +211,11 @@ case "$installed_oy_version" in
 *) die "expected oy $oy_version after install, got: $installed_oy_version" ;;
 esac
 
-installed_opencode_version=$("$mise_bin" exec -- opencode2 --version 2>/dev/null) \
-  || die "OpenCode 2 installed, but opencode2 --version failed"
-case "$installed_opencode_version" in
-*"0.0.0-next-"[0-9]*) ;;
-*) die "expected an OpenCode 2 next-channel build after install, got: $installed_opencode_version" ;;
-esac
-
-log "Stopping any older OpenCode background service..."
-if ! "$mise_bin" exec -- opencode2 service stop >/dev/null 2>&1; then
-  log "No running OpenCode service needed stopping."
-fi
-
 log "Pruning unreferenced old tool versions..."
 prune_status=0
 "$mise_bin" prune --yes --tools \
   github:adonm/oy-cli \
   cargo:oy-cli \
-  "npm:@opencode-ai/cli" \
   cargo:tokei \
   github:universal-ctags/ctags || prune_status=$?
 if [ "$prune_status" -ne 0 ]; then
@@ -251,30 +227,8 @@ case "${OY_SKIP_SETUP:-}" in
   log "Skipping oy setup because OY_SKIP_SETUP is set."
   ;;
 *)
-  log "Installing the OpenCode integration with oy setup..."
+  log "Installing the oy agent skills with oy setup..."
   "$mise_bin" exec "$oy_tool" -- oy setup
-  log "Starting OpenCode so it can install the version-matched oy plugin..."
-  "$mise_bin" exec -- opencode2 service start >/dev/null \
-    || die "OpenCode could not start after oy setup"
-  workspace=$(pwd)
-  log "Waiting for OpenCode to resolve and load the oy commands..."
-  plugin_loaded=0
-  attempts=0
-  while [ "$attempts" -lt 60 ]; do
-    loaded_plugins=$("$mise_bin" exec -- opencode2 api v2.command.list \
-      --param "location[directory]=$workspace" 2>/dev/null || true)
-    case "$loaded_plugins" in
-    *'"name":"oy-audit"'* | *'"name": "oy-audit"'*)
-      plugin_loaded=1
-      break
-      ;;
-    esac
-    attempts=$((attempts + 1))
-    sleep 2
-  done
-  [ "$plugin_loaded" -eq 1 ] \
-    || die "OpenCode started, but the oy commands did not load within 120 seconds; run 'oy doctor --check' for details"
-  log "Verified OpenCode loaded the oy commands."
   ;;
 esac
 
@@ -287,4 +241,5 @@ if [ "$scope" = "workspace" ]; then
 else
   log "Mise tools were added to the global config."
 fi
-log "Then run: oy doctor"
+log "Then run: oy doctor --check"
+log "Then ask your agent to run the oy-setup skill to finish setup."

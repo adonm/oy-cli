@@ -1,15 +1,15 @@
 [package]
 name = "oy-cli"
-version = "0.14.9"
+version = "0.15.4"
 edition = "2024"
 rust-version = "1.96"
-description = "Focused coding agent integrations with repeatable audits, reviews, and one-finding fixes"
+description = "Deterministic audit and review evidence preparation for agent skills"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/adonm/oy-cli"
 homepage = "https://oy.adonm.dev/"
 documentation = "https://docs.rs/oy-cli"
-keywords = ["opencode", "cursor", "code-review", "security-audit", "coding-agent"]
+keywords = ["agent-skills", "code-review", "security-audit", "coding-agent", "sarif"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.oy/"]
 

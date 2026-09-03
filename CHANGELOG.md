@@ -2,6 +2,113 @@
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-09-03
+
+### Changed
+- **Docs:** reframed around what oy contributes (frozen evidence, full-coverage reading, verified reports) rather than what it avoids; `docs/project.md` non-goals became a short Boundaries section.
+
+### Removed
+- **Standalone oy agent:** dropped the `oy` persona (`oy-setup/oy-persona.md`) and the default-agent upgrade flow. The `oy-setup` skill now only installs and verifies the four skills; remediation discipline (inspect first, smallest change, verify, report concisely) lives in the `oy-enhance` skill and runs under the user's own agent. Setup backs up and removes oy-owned persona copies; `agents/oy.md` from older releases is treated as legacy state and migrated to backup. If you set `default_agent: "oy"`, remove the override and keep your host default.
+
+## [0.15.3] - 2026-08-27
+
+### Changed
+- **Evidence:** whole-file chunk headers now carry true source line ranges (`## path (lines 1-N)`) so findings can cite original file lines without inferring offsets; sliced files already labeled their ranges. Diff-hunk chunks are unchanged.
+- **Collection:** security-prioritized ordering now matches keywords as identifier words in path components (`auth`, `sessions`, `handle_upload`, `AuthHandler`) instead of raw substrings; removed the noisy `file`/`path` needles so ordinary repositories no longer fall entirely into the security bucket.
+- **Index:** prepared run indexes report per-chunk `tokens` alongside bytes/lines/sha256 for model context budgeting.
+- **Skills:** the audit and review skills read the run manifest (scope, languages, largest files) before reading chunks.
+- **Platform support:** dropped macOS support. Release archives ship for Linux x86_64 and aarch64 only; the installer exits with a clear message on non-Linux systems; docs describe Linux-only operation with WSL2 elsewhere. Source builds on other Unix targets remain possible but unsupported.
+
+### Added
+- **Supply chain:** CI and `just check` now gate on cargo-deny (RustSec advisories, yanked crates, license allowlist); lockfile refreshed to pick up published advisories (anyhow 1.0.104, crossbeam-epoch 0.9.20).
+
+### Fixed
+- Setup removal no longer panics when a bundled skill path has no parent directory.
+
+## [0.15.2] - 2026-08-25
+
+### Changed
+- **Installer:** `docs/install.sh` now installs opencode2 (`npm:@opencode-ai/cli@beta`) when it is missing from PATH and prints the `allow_builds` TOML snippet to add for non-interactive npm installs; skips silently when opencode2 is already installed.
+
+## [0.15.1] - 2026-08-25
+
+### Changed
+- **Persona:** removed the entire Tools section so agents keep host-default tool behaviors such as OpenCode 2's native web search; the persona now states only principles.
+- **Docs for new users:** `README`, `docs/index`, `docs/getting-started`, `docs/workflows`, `docs/examples`, `docs/compatibility`, `docs/reference` rewritten around 2-minute `install → ask your agent` flow with copy-paste prompts, scope vs focus cheat-sheet, and expected `ISSUES.md`/`REVIEW.md` snippets. Added `docs/troubleshooting.md` and linked it from `SUMMARY.md`/`README`/`workflows`.
+
+### Removed
+- **Eval harness:** deleted `scripts/eval_runner.py`, `docs/eval-corpus.toml`, `docs/evaluation.md`, and `just eval`/`eval-run`/`eval-compare`/`eval-matrix` recipes. Live runs were already disabled (`SystemExit` after 0.15 skill migration) and left unreachable `results`/`write_summary` and a `High` `Task.id` traversal (`repos_dir / task.id` → `git clean -fd`) plus dead `run_matrix` path.
+- **Prose-pinning tests:** removed the markdown content assertions for the generated skill assets (`audit/review/setup_skill_is_canonical`, deterministic-protocol and host-neutrality pins). Setup tests still verify installed skills byte-for-byte against the canonical assets.
+
+### Fixed
+- **Test isolation:** `TestEnv` dropped its env lock before restoring process env vars, so parallel setup tests could corrupt each other's environment (observed: a test ran `oy setup --remove` against the real `~/.agents/skills`); the lock is now declared last (drops after env restoration) and recovers from poisoning instead of cascading failures.
+- Formatting: `src/skills/setup/legacy_config.rs` indentation (`cargo fmt`).
+
+## [0.15.0] - 2026-08-21
+
+### Changed
+- **Skills are now standard Agent Skills:** `oy setup` writes `oy-audit`, `oy-review`, `oy-enhance`, and `oy-setup` under `~/.agents/skills` (or `.agents/skills` with `--workspace`) — the directory OpenCode, Cursor, Codex, Copilot, and Gemini CLI all read natively. Skill bodies are host-neutral (no OpenCode-specific tool names or permission language).
+- **Plain mise install:** `docs/install.sh` only installs `github:adonm/oy-cli` + optional `tokei`/`ctags` and runs `oy setup`. No `npm:@opencode-ai/cli`, no `allow_builds` patching, no `opencode2` service polling. Manual install is `mise use github:adonm/oy-cli@0.15.0` + `oy setup`.
+- **Persona upgrade:** the oy persona is now concise (~30 lines) and the `oy-setup` skill upgrades your default agent (merging principles, preserving project instructions) instead of replacing it. The persona is available as `~/.agents/skills/oy-setup/oy-persona.md`.
+- **Repo layout:** `src/opencode` → `src/skills`, `packages/opencode/assets` → `assets/skills`, `src/mise.rs` and the `oy run`/`enhance`/`recover` orchestration removed. `just install` added for local dev (`cargo install --path . --locked` + `oy setup`).
+- **Docs for new users:** `getting-started`, `README`, `index`, and `reference` rewritten around “install → ask your agent” with copy-paste skill prompts. `docs/npm-publishing.md` removed.
+
+### Removed
+- The `@oy-cli/opencode` npm OpenCode plugin, Cursor provider fork, `agents/commands` plugin registration, and the `cursor/*` provider path. `oy setup` now migrates any existing plugin config and deletes the regenerable package cache under `~/.cache/opencode/packages`.
+- `oy run`, `oy enhance`, `oy recover`, and bare `oy audit`/`oy review` orchestration (use the skills via your agent; `oy audit|review prepare`/`finalize` remain for automation).
+
+### Added
+- `oy doctor --check` now validates skills byte-exact and that the legacy plugin cache is absent; `doctor --install-missing` only handles `tokei`/`ctags`.
+- `oy upgrade` now only refreshes the mise-managed `oy` binary and re-runs `oy setup`.
+- Shell lint: `shellcheck` via mise (`aqua:koalaman/shellcheck`), `just _shellcheck`, and a CI step.
+
+## [0.14.13] - 2026-08-19
+
+### Fixed
+- `oy doctor --install-missing` now gives workspace mise configs that pin
+  `npm:@opencode-ai/cli` the same `allow_builds` patch the global config gets,
+  even when no tool is missing, so a later `mise install` in the workspace
+  cannot leave a stub `opencode2`.
+- `install.sh` now expands the `~`-abbreviated paths that `mise config ls`
+  reports, so its `allow_builds` patching reaches the global and workspace
+  mise configs instead of silently skipping every file.
+
+## [0.14.12] - 2026-08-19
+
+### Changed
+- Switched OpenCode 2 beta setup from the superseded `next` npm dist-tag to
+  the current `beta` channel. The installer, `oy upgrade`, and host
+  diagnostics now use `npm:@opencode-ai/cli@beta`, and `oy upgrade --check`
+  reads the `beta` dist-tag.
+- Accepted `0.0.0-beta-*` host builds. Legacy `0.0.0-next-*` builds remain
+  supported for existing installs until they are upgraded.
+
+## [0.14.11] - 2026-08-15
+
+### Fixed
+- Registered the bundled oy skills as embedded skill entries instead of a
+  directory source. Recent OpenCode 2 beta builds dropped `skills.source()`
+  from the plugin transform draft, so the previous registration threw during
+  catalog initialization and `opencode2 models` failed with "Model catalog
+  initialization timed out". The plugin now parses the bundled `SKILL.md`
+  files at load time and adds them through `skills.add()`, falling back to
+  the directory source on older hosts that lack `add()`.
+
+## [0.14.10] - 2026-08-13
+
+### Fixed
+- `allow_builds` patching now handles pinned versions and table-form OpenCode
+  entries, not just the `= "next"` shorthand written by `mise use`, and adds
+  `@opencode-ai/cli` to existing `allow_builds` lists.
+
+### Changed
+- `oy upgrade --check` compares OpenCode 2 versions semantically and queries
+  npm dist-tags in-process instead of shelling out to `curl`.
+
+### Security
+- Cursor tool summaries redact obvious secrets (API keys, bearer tokens,
+  private keys, and known token prefixes) before entering reasoning output.
+
 ## [0.14.9] - 2026-08-11
 
 ### Fixed

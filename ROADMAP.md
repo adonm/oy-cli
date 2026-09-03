@@ -4,7 +4,7 @@ _Updated July 2026. Ordered by outcome, not promised release date._
 
 ## Direction
 
-**Mission:** give OpenCode a concise autonomous agent plus deterministic repository evidence and report workflows.
+**Mission:** give the coding agent the user already runs deterministic repository evidence and report workflows.
 
 **Primary user:** a maintainer already using OpenCode who wants oy to complete audit, review, and remediation work without adopting another model runtime or another permission system.
 
@@ -15,7 +15,7 @@ The integration is CLI-first, package-delivered, and skill-led. OpenCode wrapper
 ## Product principles
 
 1. **OpenCode owns execution policy.** Users configure models, agents, permissions, edits, shell, web, sessions, and approvals in OpenCode. Oy does not maintain parallel plan/edit/auto permission modes.
-2. **Keep one useful agent.** The packaged `oy` agent is a concise autonomous system prompt. It adds completion discipline and engineering defaults without overriding the user's permissions.
+2. **No custom agent.** Oy ships skills and deterministic evidence, not a system prompt or default-agent override. Completion discipline (inspect first, smallest change, verify, report concisely) lives in the skill protocols and runs under the user's own agent.
 3. **Own the evidence boundary, not the model.** Oy owns collection, ordering, limits, evidence identity, and report normalization; OpenCode owns inference and general tools.
 4. **Skills are the integration contract.** Audit, review, and one-finding remediation protocols should be usable from normal OpenCode sessions and should not require dedicated permission-adapter agents.
 5. **Prefer files over large tool responses.** Prepare immutable workspace-local evidence artifacts, return small structured descriptors, and let OpenCode read them with native tools.
@@ -74,33 +74,17 @@ After the CLI and skills cover the deterministic contract:
 - [x] Reduce setup to registering/removing the version-matched plugin package while preserving unrelated OpenCode JSON/JSONC.
 - [x] Remove `oy model`, `oy open`, `oy chat`, and implicit passthrough of unknown arguments; keep bare `oy` as the integration-aware TUI launcher.
 - Demote or remove exact beta version gates, session recovery wrappers, and coupled oy/OpenCode upgrades.
-- When OpenCode 2 leaves beta, replace the moving `next` dependencies with the stable `latest` channel and remove beta-specific host handling.
+- When OpenCode 2 leaves beta, replace the moving `beta` dependencies with the stable `latest` channel and remove beta-specific host handling.
 - Stop installing OpenCode from the oy installer; treat it as a user-managed prerequisite.
-
-## Agent alignment
-
-The `oy` system prompt intentionally remains much shorter than OpenCode's provider-specific prompts. Because a custom system prompt replaces those base prompts, maintain the following parity explicitly:
-
-- inspect the repository before editing;
-- use existing dependencies and conventions;
-- implement rather than only propose when the request calls for action;
-- persist through verification and a clear result;
-- preserve dirty-worktree changes not made by the agent;
-- allow focused verified checkpoint commits for long unattended work while protecting unrelated changes, history, pushes, and tags;
-- prefer minimal changes and local reasoning;
-- batch independent inspection and keep communication concise.
-
-Do not copy provider-specific frontend preferences, formatting rules, tool names, or temporary implementation details into oy. Compare the prompt against tagged OpenCode 2 releases during compatibility updates and use live evaluations for behavioral changes.
 
 ## Success signals
 
-- A normal OpenCode user can install oy, select the `oy` agent or load an oy skill, and keep their existing permission policy.
+- A normal OpenCode user can install oy, load an oy skill, and keep their existing permission policy.
 - Setup owns only version-matched package registration and migration of legacy oy entries.
 - Evidence preparation returns a small stable JSON descriptor and workspace-local artifacts with explicit coverage.
 - Unchanged evidence and explicit metadata produce byte-stable canonical reports.
 - A finding ID can drive one focused fix and disappear or change status on rerun.
 - OpenCode API compatibility code shrinks without losing collection, report, SARIF, or workflow quality.
-- Prompt evaluations show that the shorter `oy` agent matches or improves OpenCode Build on completion, verification, worktree safety, and concise communication.
 
 ## Non-goals
 

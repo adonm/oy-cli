@@ -1,4 +1,4 @@
-//! `oy doctor` checks the OpenCode integration.
+//! `oy doctor` checks the agent-skills installation and optional tooling.
 
 use anyhow::{Result, bail};
 use clap::Args;
@@ -20,14 +20,14 @@ pub(super) struct DoctorArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Install missing OpenCode 2, tokei, and Universal Ctags with global mise config"
+        help = "Install missing tokei and Universal Ctags with global mise config"
     )]
     install_missing: bool,
     #[arg(
         long,
         conflicts_with = "install_missing",
         default_value_t = false,
-        help = "Validate the effective oy agent, commands, skills, and models; exit nonzero on failure"
+        help = "Validate the oy skills installation; exit nonzero on failure"
     )]
     check: bool,
 }
@@ -37,52 +37,34 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
         bail!("--json cannot be combined with doctor install flags");
     }
     let root = config::oy_root()?;
-    let opencode_host = crate::opencode::OpenCodeHost::selected_in(&root);
-    let opencode_ok = opencode_host.available();
-    let opencode_supported = opencode_host.supported();
+    let global_skills = crate::skills::global_skills_dir()?;
+    let workspace_skills = crate::skills::workspace_skills_dir()?;
+    let global_complete = crate::skills::skills_complete(&global_skills);
+    let workspace_complete = crate::skills::skills_complete(&workspace_skills);
+    let skills_ok = global_complete || workspace_complete;
+    let plugin_cache = crate::skills::plugin_cache_paths();
+    let cache_clean = plugin_cache.is_empty();
     let mise_ok = command_ok("mise", &["--version"]);
     let tokei_ok = command_ok("tokei", &["--version"]);
     let ctags_ok = universal_ctags_ok();
-    let global_config = crate::opencode::global_config_path()?;
-    let workspace_config = crate::opencode::workspace_config_path()?;
-    let configured = global_config.exists() || workspace_config.exists();
-    let custom_host = !opencode_host.is_default_executable();
-    let opencode_mise_satisfied = opencode_supported || custom_host;
-    let no_missing_mise_tools =
-        missing_mise_tools(opencode_mise_satisfied, tokei_ok, ctags_ok).is_empty();
-    let runtime = if args.check && opencode_supported && configured {
-        crate::opencode::runtime_health(&opencode_host, &root).ok()
-    } else {
-        None
-    };
-    let runtime_ok = runtime.as_ref().is_some_and(|runtime| {
-        runtime.healthy
-            && runtime.service_version
-            && runtime.openapi
-            && runtime.location
-            && runtime.agents
-            && runtime.commands
-            && runtime.skills
-            && runtime.models
-            && runtime.providers
-            && runtime.cursor_provider
-            && runtime.cursor_bridge
-            && runtime.plugins
-    });
-    let check_ok = opencode_supported && configured && runtime_ok;
+    let no_missing_mise_tools = missing_mise_tools(tokei_ok, ctags_ok).is_empty();
+    let check_ok = skills_ok && cache_clean;
 
     if crate::ui::is_json() {
         let payload = serde_json::json!({
             "workspace": root,
-            "opencode": opencode_ok,
-            "opencode_host": {
-                "executable": opencode_host.executable_display(),
-                "version": opencode_host.version(),
-                "contract": opencode_host.contract().label(),
-                "supported": opencode_supported,
-                "run_workflows": opencode_supported,
-                "model_api": opencode_supported,
+            "skills": {
+                "global": {
+                    "path": global_skills,
+                    "complete": global_complete,
+                },
+                "workspace": {
+                    "path": workspace_skills,
+                    "complete": workspace_complete,
+                },
             },
+            "complete": skills_ok,
+            "legacy_plugin_cache": plugin_cache,
             "mise": mise_ok,
             "optional_tools": {
                 "tokei": {
@@ -94,12 +76,8 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
                     "purpose": "scoped JSON symbol outlines",
                 }
             },
-            "global_opencode_config": global_config,
-            "workspace_opencode_config": workspace_config,
-            "configured": configured,
-            "runtime": runtime,
             "check_ok": check_ok,
-            "next_step": recommended_next_step(opencode_supported, configured, mise_ok, no_missing_mise_tools, custom_host),
+            "next_step": recommended_next_step(check_ok, skills_ok, cache_clean, mise_ok, no_missing_mise_tools),
         });
         crate::ui::line(serde_json::to_string_pretty(&payload)?);
         return Ok(if args.check && !check_ok { 1 } else { 0 });
@@ -108,24 +86,45 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
     crate::ui::section("Doctor");
     crate::ui::kv("workspace", root.display());
     crate::ui::kv(
-        "opencode",
+        "global skills",
         crate::ui::status_text(
-            opencode_supported,
-            if opencode_supported {
-                format!(
-                    "ok; {} ({}, {})",
-                    opencode_host.executable_display(),
-                    opencode_host.version().unwrap_or("version unknown"),
-                    opencode_host.contract().label()
-                )
-            } else if opencode_ok {
-                format!(
-                    "unsupported; {} ({})",
-                    opencode_host.executable_display(),
-                    opencode_host.version().unwrap_or("version unknown")
-                )
+            global_complete,
+            format_args!(
+                "{}",
+                if global_complete {
+                    format!("ok; {}", global_skills.display())
+                } else {
+                    format!("incomplete; {}", global_skills.display())
+                }
+            ),
+        ),
+    );
+    crate::ui::kv(
+        "workspace skills",
+        crate::ui::status_text(
+            workspace_complete,
+            format_args!(
+                "{}",
+                if workspace_complete {
+                    format!("ok; {}", workspace_skills.display())
+                } else {
+                    format!("incomplete; {}", workspace_skills.display())
+                }
+            ),
+        ),
+    );
+    crate::ui::kv(
+        "legacy plugin cache",
+        crate::ui::status_text(
+            cache_clean,
+            if cache_clean {
+                "absent".to_string()
             } else {
-                format!("missing; {}", opencode_host.executable_display())
+                plugin_cache
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             },
         ),
     );
@@ -155,66 +154,19 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
             },
         ),
     );
-    crate::ui::kv(
-        "global config",
-        crate::ui::status_text(
-            global_config.exists(),
-            format_args!("{}", global_config.display()),
-        ),
-    );
-    crate::ui::kv(
-        "workspace config",
-        crate::ui::status_text(
-            workspace_config.exists(),
-            format_args!("{}", workspace_config.display()),
-        ),
-    );
-    if args.check {
-        crate::ui::kv(
-            "runtime",
-            crate::ui::status_text(
-                runtime_ok,
-                runtime
-                    .as_ref()
-                    .map(|runtime| {
-                        format!(
-                            "service={} openapi={} location={} agent={} commands={} skills={} models={} providers={} cursor_provider={} cursor_bridge={} plugins={}",
-                            runtime.service_version,
-                            runtime.openapi,
-                            runtime.location,
-                            runtime.agents,
-                            runtime.commands,
-                            runtime.skills,
-                            runtime.models,
-                            runtime.providers,
-                            runtime.cursor_provider,
-                            runtime.cursor_bridge,
-                            runtime.plugins
-                        )
-                    })
-                    .unwrap_or_else(|| "unavailable".to_string()),
-            ),
-        );
-    }
     crate::ui::line("");
     crate::ui::section("Recommended next step");
     crate::ui::line(format_args!(
         "  {}",
         recommended_next_step(
-            opencode_supported,
-            configured,
+            check_ok,
+            skills_ok,
+            cache_clean,
             mise_ok,
-            no_missing_mise_tools,
-            custom_host,
+            no_missing_mise_tools
         )
     ));
-    maybe_install_missing_with_mise(
-        args.install_missing,
-        mise_ok,
-        opencode_mise_satisfied,
-        tokei_ok,
-        ctags_ok,
-    )?;
+    maybe_install_missing_with_mise(args.install_missing, mise_ok, tokei_ok, ctags_ok)?;
     Ok(if args.check && !check_ok { 1 } else { 0 })
 }
 
@@ -258,38 +210,30 @@ fn ctags_supports_json(output: &[u8]) -> bool {
 }
 
 fn recommended_next_step(
-    opencode_supported: bool,
-    configured: bool,
+    check_ok: bool,
+    skills_ok: bool,
+    cache_clean: bool,
     mise_ok: bool,
     no_missing_mise_tools: bool,
-    custom_host: bool,
 ) -> &'static str {
-    if !opencode_supported && custom_host {
-        return "Fix or unset `OY_OPENCODE`, then rerun `oy doctor`.";
+    if check_ok {
+        return if mise_ok && !no_missing_mise_tools {
+            "Run `oy doctor --install-missing` for optional context helpers."
+        } else {
+            "Ask your agent to audit or review with the oy skills."
+        };
     }
-    match (
-        opencode_supported,
-        configured,
-        mise_ok,
-        no_missing_mise_tools,
-    ) {
-        (false, _, true, _) => {
-            "Run `oy doctor --install-missing` to install the current OpenCode 2 beta, then `oy setup`."
-        }
-        (false, _, false, _) => "Install OpenCode 2, then run `oy setup`.",
-        (true, false, _, _) => "Run `oy setup`, then restart OpenCode 2.",
-        (true, true, true, false) => {
-            "Run `oy doctor --install-missing` for optional context helpers, or `oy` to launch now."
-        }
-        (true, true, _, _) => "Run `oy` to launch with the oy integration.",
+    if !cache_clean {
+        return "Run `oy setup` to remove the obsolete OpenCode plugin cache.";
     }
+    if !skills_ok {
+        return "Run `oy setup` (or `oy setup --workspace`), then ask your agent to run the oy-setup skill.";
+    }
+    "Run `oy doctor --check` for details."
 }
 
-fn missing_mise_tools(opencode_ok: bool, tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
+fn missing_mise_tools(tokei_ok: bool, ctags_ok: bool) -> Vec<&'static str> {
     let mut tools = Vec::new();
-    if !opencode_ok {
-        tools.push(crate::mise::OPENCODE_MISE_SPEC);
-    }
     if !tokei_ok {
         tools.push(TOKEI_MISE_TOOL);
     }
@@ -316,11 +260,10 @@ fn mise_use_global_args(tools: &[&str]) -> Vec<String> {
 fn maybe_install_missing_with_mise(
     requested: bool,
     mise_ok: bool,
-    opencode_ok: bool,
     tokei_ok: bool,
     ctags_ok: bool,
 ) -> Result<()> {
-    let tools = missing_mise_tools(opencode_ok, tokei_ok, ctags_ok);
+    let tools = missing_mise_tools(tokei_ok, ctags_ok);
     if tools.is_empty() {
         return Ok(());
     }
@@ -340,16 +283,9 @@ fn maybe_install_missing_with_mise(
         tools.join(" ")
     ));
     run_mise_use(&mise, &tools)?;
-    if !opencode_ok {
-        crate::mise::ensure_opencode_allow_builds()?;
-        run_opencode_install(&mise)?;
-    }
     let status = std::process::Command::new(&mise).arg("reshim").status()?;
     if !status.success() {
         bail!("tools installed, but `mise reshim` failed");
-    }
-    if !opencode_ok && !command_ok("mise", &["exec", "--", "opencode2", "--version"]) {
-        bail!("OpenCode 2 installed, but `mise exec -- opencode2 --version` failed");
     }
     if !tokei_ok && !command_ok("mise", &["exec", "--", "tokei", "--version"]) {
         bail!("tokei installed, but `mise exec -- tokei --version` failed");
@@ -378,19 +314,6 @@ fn run_mise_use(mise: &Path, tools: &[&str]) -> Result<()> {
     }
     bail!(
         "mise use --global failed with exit code {}",
-        status.code().unwrap_or(1)
-    )
-}
-
-fn run_opencode_install(mise: &Path) -> Result<()> {
-    let status = std::process::Command::new(mise)
-        .args(["install", "-f", crate::mise::OPENCODE_MISE_SPEC])
-        .status()?;
-    if status.success() {
-        return Ok(());
-    }
-    bail!(
-        "OpenCode install failed with exit code {}",
         status.code().unwrap_or(1)
     )
 }
@@ -435,12 +358,9 @@ mod tests {
 
     #[test]
     fn mise_tool_list_tracks_missing_tools() {
-        assert_eq!(
-            missing_mise_tools(false, false, true),
-            vec![crate::mise::OPENCODE_MISE_SPEC, TOKEI_MISE_TOOL]
-        );
-        assert_eq!(missing_mise_tools(true, true, false), vec![CTAGS_MISE_TOOL]);
-        assert!(missing_mise_tools(true, true, true).is_empty());
+        assert_eq!(missing_mise_tools(false, true), vec![TOKEI_MISE_TOOL]);
+        assert_eq!(missing_mise_tools(true, false), vec![CTAGS_MISE_TOOL]);
+        assert!(missing_mise_tools(true, true).is_empty());
     }
 
     #[test]
@@ -461,27 +381,27 @@ mod tests {
 
     #[test]
     fn explicit_install_requires_mise() {
-        let error = maybe_install_missing_with_mise(true, false, true, false, false).unwrap_err();
+        let error = maybe_install_missing_with_mise(true, false, false, false).unwrap_err();
         assert!(error.to_string().contains("requires mise"));
     }
 
     #[test]
-    fn supported_v2_guidance_launches_oy_integration() {
+    fn skills_guidance_depends_on_installation_state() {
         assert_eq!(
-            recommended_next_step(false, false, true, false, false),
-            "Run `oy doctor --install-missing` to install the current OpenCode 2 beta, then `oy setup`."
+            recommended_next_step(false, false, true, true, true),
+            "Run `oy setup` (or `oy setup --workspace`), then ask your agent to run the oy-setup skill."
+        );
+        assert_eq!(
+            recommended_next_step(false, true, false, true, true),
+            "Run `oy setup` to remove the obsolete OpenCode plugin cache."
         );
         assert_eq!(
             recommended_next_step(true, true, true, true, false),
-            "Run `oy` to launch with the oy integration."
+            "Run `oy doctor --install-missing` for optional context helpers."
         );
-    }
-
-    #[test]
-    fn custom_host_guidance_does_not_offer_an_ineffective_mise_install() {
         assert_eq!(
-            recommended_next_step(false, false, true, false, true),
-            "Fix or unset `OY_OPENCODE`, then rerun `oy doctor`."
+            recommended_next_step(true, true, true, true, true),
+            "Ask your agent to audit or review with the oy skills."
         );
     }
 }

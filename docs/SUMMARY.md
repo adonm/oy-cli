@@ -7,6 +7,7 @@
 
 - [Workflow guide](workflows.md)
 - [Examples and CI](examples.md)
+- [Troubleshooting](troubleshooting.md)
 - [CLI reference](reference.md)
 - [Compatibility](compatibility.md)
 
@@ -14,8 +15,3 @@
 
 - [Project direction](project.md)
 - [Architecture](architecture.md)
-
-# Contribute
-
-- [LLM evaluation](evaluation.md)
-- [Publishing the OpenCode npm package](npm-publishing.md)

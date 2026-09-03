@@ -1,23 +1,27 @@
 # Examples and CI
 
+> **New?** Start with `audit this repository with the oy-audit skill` — the snippets below show what the generated reports look like so you know what to expect.
+
 The reports below are illustrative. Paths, IDs, wording, and findings depend on the reviewed code and selected model.
 
 ## Audit with one finding
 
-```bash
-oy audit "authentication boundaries"
+Prompt to your agent:
+
+```text
+audit this repository with the oy-audit skill, focusing on authentication boundaries
 ```
 
-Shortened `ISSUES.md`:
+Shortened `ISSUES.md` (look for this file in your workspace root after the run):
 
 ````markdown
 # Audit Issues
 
-> Generated with [oy-cli](https://crates.io/crates/oy-cli): `oy audit 'authentication boundaries'` · 2026-07-13
+> Generated with [oy-cli](https://crates.io/crates/oy-cli): `oy audit prepare --focus 'authentication boundaries'` · 2026-07-13
 
 ## Findings summary
 
-- `audit-2a71...` **High** `src/auth.rs:84` — Session lookup accepts an unscoped tenant ID _(status: new; fix: `oy enhance audit-2a71...`)_
+- `audit-2a71...` **High** `src/auth.rs:84` — Session lookup accepts an unscoped tenant ID _(status: new; fix: use the `oy-enhance` skill targeting `audit-2a71...`)_
 
 ## Detailed findings
 
@@ -44,12 +48,18 @@ Evidence: `src/auth.rs:84` uses the caller-provided tenant before authorization.
 ```
 ````
 
-The Markdown is for people; the JSON block preserves finding IDs and state for reruns and `oy enhance`.
+The Markdown is for people; the JSON block preserves finding IDs and state for reruns and the `oy-enhance` skill. Copy the ID (e.g. `audit-2a71...`) to fix it:
+
+```text
+use the oy-enhance skill to fix audit-2a71...
+```
 
 ## Target-diff review
 
-```bash
-oy review main --focus "types and boundaries"
+Great for pull requests — only the changed code is reviewed.
+
+```text
+review the diff against main with the oy-review skill, focusing on types and boundaries
 ```
 
 Shortened `REVIEW.md`:
@@ -78,7 +88,11 @@ Both structs are serialized independently. Keep one persisted representation and
 ```
 ````
 
+No target → whole workspace is reviewed. With a target (`main`, `HEAD~3`, a commit SHA), only that diff is collected.
+
 ## Successful no-findings review
+
+This is success, not failure — the run passed and nothing high-conviction was found:
 
 ````markdown
 # Code Quality Review
@@ -98,29 +112,31 @@ No high-conviction findings.
 ```
 ````
 
-A successful no-findings report still has generated metadata and an empty JSON array. A failed run exits nonzero or does not finalize the report.
+A failed run exits nonzero or does not finalize the report at all. Check the CLI exit status and the header metadata (digest, chunk count) to tell the two apart.
 
 ## Fix and confirm
 
-```bash
-oy enhance audit-2a71...
-# Inspect the source diff and verification output, then rerun:
-oy audit "authentication boundaries"
+```text
+use the oy-enhance skill to fix audit-2a71...
+# Inspect the source diff and verification output, then rerun the same audit:
+# "audit this repository with the oy-audit skill, focusing on authentication boundaries"
 ```
 
-The second audit should drop the finding if it no longer applies or update its lifecycle state from current evidence.
+The second audit should drop the finding if it no longer applies or update its lifecycle state (`new` → `fixed?` → `stale` → gone) from current evidence. Always rerun the originating workflow to confirm.
 
 ## SARIF
 
-```bash
-oy audit --format sarif --out oy.sarif
+The `oy-audit` skill writes SARIF when you ask for sarif output:
+
+```text
+audit this repository with the oy-audit skill, using sarif format and writing oy.sarif
 ```
 
-oy writes SARIF 2.1.0 with normalized rules, locations, severity, and provenance. Inspect it before upload, especially when repository paths or finding text are sensitive.
+The CLI normalizes SARIF 2.1.0 with rules, locations, severity, and provenance. Inspect it before upload, especially when repository paths or finding text are sensitive.
 
 ## GitHub code scanning
 
-Provider-backed audits need OpenCode credentials. Use protected secrets and do not expose privileged credentials to untrusted pull-request code.
+Agent-backed audits need the agent and its provider configured in CI. Use protected secrets and do not expose privileged credentials to untrusted pull-request code.
 
 ```yaml
 permissions:
@@ -131,19 +147,18 @@ steps:
   - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
   - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
 
-  - name: Install oy and OpenCode
+  - name: Install oy
     run: |
-      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.14.9 'npm:@opencode-ai/cli@next'
-      # Allow the OpenCode 2 postinstall, which downloads the native binary.
-      sed -i 's|^"npm:@opencode-ai/cli" = "next"$|"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }|' "$HOME/.config/mise/config.toml"
-      mise install -f 'npm:@opencode-ai/cli@next'
-      mise exec github:adonm/oy-cli@0.14.9 -- oy setup
+      mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.4
+      mise exec github:adonm/oy-cli@0.15.4 -- oy setup
 
-  - name: Run audit
+  - name: Run audit with an agent
     env:
-      # Replace with the environment variable required by your OpenCode provider.
+      # Replace with the environment variable required by your agent's provider.
       PROVIDER_API_KEY: ${{ secrets.PROVIDER_API_KEY }}
-    run: oy audit --format sarif --out oy.sarif
+    run: |
+      opencode2 run "Load the oy-audit skill and audit this repository with sarif output." --format json
+      # Or use your CI's agent CLI (Cursor CLI, Codex, etc.) the same way.
 
   - name: Upload SARIF
     if: always() && hashFiles('oy.sarif') != ''
@@ -152,4 +167,11 @@ steps:
       sarif_file: oy.sarif
 ```
 
-Pin versions in production CI and configure the provider according to the [OpenCode provider guide](https://v2.opencode.ai/providers). oy does not upload reports itself.
+Pin versions in production CI and configure the provider in your agent of choice. oy does not upload reports itself.
+
+## Tips for new users
+
+- **Start narrow:** `audit src/auth` is faster and cheaper than `audit this repository` on a large codebase
+- **Read the evidence:** every finding should cite a path/line/symbol — if it doesn't, treat it skeptically
+- **One fix at a time:** let `oy-enhance` handle one ID, verify, rerun — don't batch unrelated fixes
+- **Compare runs:** set `OY_OPENCODE_MODEL=provider/model#variant` to keep model choice explicit across reruns

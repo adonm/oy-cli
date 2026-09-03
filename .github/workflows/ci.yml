@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - name: Check release version alignment
         run: python3 scripts/check_versions.py
       - name: Install Rust components
@@ -29,6 +29,8 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Cargo deny (advisories + licenses)
+        run: cargo deny check advisories licenses bans
       - name: Test
         run: |
           cargo nextest run --all-targets --locked --profile ci
@@ -47,92 +49,37 @@ jobs:
         run: |
           cargo run --locked -- --help
           cargo run --locked -- setup --help
-          cargo run --locked -- run --help
-          cargo run --locked -- audit --help | tee /tmp/oy-audit-help.txt
+          cargo run --locked -- audit --help
+          cargo run --locked -- audit prepare --help | tee /tmp/oy-audit-help.txt
           grep -F -- "--max-chunks <N>" /tmp/oy-audit-help.txt
-          cargo run --locked -- audit prepare --help
           cargo run --locked -- audit finalize --help
           cargo run --locked -- review --help
           cargo run --locked -- review prepare --help
           cargo run --locked -- review finalize --help
-          cargo run --locked -- enhance --help
-          cargo run --locked -- recover --help
           cargo run --locked -- doctor --help
           cargo run --locked -- upgrade --help
-      - name: OpenCode 2 integration smoke
+      - name: Agent skills smoke
         run: |
-          # Install OpenCode 2 through mise's npm backend. `mise use` cannot
-          # express tool options, so patch the entry to allow the postinstall
-          # that downloads the native opencode2 binary.
-          mise use --global --yes --minimum-release-age 0 'npm:@opencode-ai/cli@next'
-          config_file="${MISE_GLOBAL_CONFIG_FILE:-$HOME/.config/mise/config.toml}"
-          sed -i 's|^"npm:@opencode-ai/cli" = "next"$|"npm:@opencode-ai/cli" = { version = "next", allow_builds = ["@opencode-ai/cli"] }|' "$config_file"
-          mise install -f 'npm:@opencode-ai/cli@next'
-          export PATH="$(mise where 'npm:@opencode-ai/cli@next')/node_modules/.bin:$PATH"
-          opencode2 --version | grep -E '0\.0\.0-next-[0-9]+'
-          opencode2 run --help | grep -F -- '--agent string'
           cargo build --locked
           export PATH="$PWD/target/debug:$PATH"
           oy setup
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-          grep -F "\"@oy-cli/opencode@$version\"" "$HOME/.config/opencode/opencode.json"
-          python3 -c 'import json, pathlib; config=json.loads(pathlib.Path.home().joinpath(".config/opencode/opencode.json").read_text()); assert "command" not in config; assert "oy-audit" not in config.get("commands", {}); assert "tool_output" not in config'
-          # The release version does not exist in npm until the tag publishes it.
-          # Load this checkout directly for the pre-publish runtime smoke instead.
-          npm ci --prefix packages/opencode --ignore-scripts
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path.home() / ".config/opencode/opencode.json"
-          config = json.loads(path.read_text())
-          config["plugins"] = [str(Path("packages/opencode/index.js").resolve())]
-          path.write_text(json.dumps(config, indent=2) + "\n")
-          PY
-          opencode2 service start
-          # The first location-scoped query boots project services asynchronously.
-          opencode2 api v2.command.list --param "location[directory]=$PWD" > /dev/null
-          commands_loaded=0
-          attempts=0
-          while [ "$attempts" -lt 60 ]; do
-            opencode2 api v2.command.list --param "location[directory]=$PWD" > /tmp/opencode-commands.json
-            if grep -F '"name":"oy-audit"' /tmp/opencode-commands.json; then
-              commands_loaded=1
-              break
-            fi
-            attempts=$((attempts + 1))
-            sleep 2
-          done
-          test "$commands_loaded" -eq 1
-          opencode2 api v2.agent.list --param "location[directory]=$PWD" > /tmp/opencode-agents.json
-          opencode2 api v2.integration.connect.key --param "location[directory]=$PWD" --param "integrationID=cursor" --data '{"key":"ci-probe-key","label":"CI probe"}'
-          opencode2 api v2.model.list --param "location[directory]=$PWD" > /tmp/opencode-models.json
-          grep -F '"id":"oy"' /tmp/opencode-agents.json
-          ! grep -F '"id":"oy-auto"' /tmp/opencode-agents.json
-          grep -F '"agent":"oy"' /tmp/opencode-commands.json
-          grep -F '"providerID":"cursor"' /tmp/opencode-models.json
-          python3 - <<'PY'
-          import json
-
-          models = json.load(open("/tmp/opencode-models.json"))["data"]
-          cursor = [model for model in models if model["providerID"] == "cursor"]
-          assert cursor
-          def package(model):
-              return model.get("api", {}).get("package", model.get("package", "")).removeprefix("aisdk:")
-          def base_url(model):
-              return model.get("api", {}).get("url") or model.get("settings", {}).get("baseURL", "")
-          assert all(package(model) == "@ai-sdk/openai" for model in cursor)
-          assert all(base_url(model).startswith("http://127.0.0.1:") for model in cursor)
-          assert all(any(variant["id"] == "plan" for variant in model["variants"]) for model in cursor)
-          PY
+          test -f "$HOME/.agents/skills/oy-audit/SKILL.md"
+          test -f "$HOME/.agents/skills/oy-review/SKILL.md"
+          test -f "$HOME/.agents/skills/oy-enhance/SKILL.md"
+          test -f "$HOME/.agents/skills/oy-setup/SKILL.md"
+          test ! -e "$HOME/.agents/skills/oy-setup/oy-persona.md"
           oy doctor --check --json | tee /tmp/oy-doctor.json
-          python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True'
-          opencode2 service stop
+          python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True; assert data["skills"]["global"]["complete"] is True'
+          oy setup --remove
+          test ! -d "$HOME/.agents/skills/oy-audit"
+          test ! -f "$HOME/.agents/skills/oy-setup/SKILL.md"
       - name: Documentation drift checks
         run: |
           ! grep -R -n -E 'src/(app|chat|config|model|session|ui)\.rs' README.md CONTRIBUTING.md docs
       - name: Installer smoke
         run: sh scripts/test_install.sh
+      - name: Shellcheck
+        run: shellcheck docs/install.sh scripts/test_install.sh
       - name: Package crate
         run: |
           mkdir -p .oy/runs/package-sentinel
@@ -143,49 +90,3 @@ jobs:
           assert not any(path == ".oy" or path.startswith(".oy/") for path in files)
           PY
           cargo package --locked
-
-  opencode-package:
-    name: OpenCode npm package (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["24.x", "26.x"]
-    defaults:
-      run:
-        working-directory: packages/opencode
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ matrix.node }}
-          package-manager-cache: false
-      - name: Install current npm
-        run: npm install --global npm@12.0.1
-      - name: Install locked dependencies
-        run: npm ci --ignore-scripts
-      - name: Build and test
-        run: |
-          npm run build
-          npm test
-          npm audit --omit=dev
-      - name: Pack publishable tarball
-        run: |
-          mkdir -p ../../.tmp/npm-package
-          npm pack --pack-destination ../../.tmp/npm-package
-      - name: Verify the packed package installs
-        working-directory: .
-        run: |
-          mkdir -p .tmp/npm-smoke
-          cd .tmp/npm-smoke
-          npm init --yes >/dev/null
-          npm install --ignore-scripts ../npm-package/*.tgz
-          node --input-type=module -e 'import("@oy-cli/opencode").then(({default: plugin}) => { if (plugin.id !== "oy") process.exit(1) })'
-      - name: Upload npm package artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: opencode-npm-package-node-${{ matrix.node }}
-          path: .tmp/npm-package/*.tgz
-          if-no-files-found: error

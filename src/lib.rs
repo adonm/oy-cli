@@ -1,35 +1,35 @@
 //! # oy
 //!
-//! `oy` adds one focused coding-agent behavior and repeatable repository audit/review workflows
-//! to [OpenCode 2](https://v2.opencode.ai/). File-backed CLI preparation and
-//! finalization provide deterministic repository collection, ordered chunks, target-diff input,
-//! and normalized Markdown/SARIF reports. OpenCode remains responsible for model
-//! execution, providers, authenticated sessions, and general coding tools. The optional
-//! `cursor/*` provider runs Cursor tools outside OpenCode's permission boundary. oy does not store
-//! provider credentials.
-//! The native CLI supports Linux and macOS; Windows users should run it in WSL2.
+//! `oy` prepares deterministic repository evidence for audits and code-quality reviews, and
+//! finalizes the resulting Markdown/SARIF reports. The review, audit, and one-finding-fix
+//! workflows run as [Agent Skills](https://agentskills.io/) inside whichever agent the user
+//! prefers — OpenCode, Cursor, Codex, Copilot, or Gemini CLI all discover skills under
+//! `.agents/skills`. `oy setup` installs the skills; the agent executes them under its own
+//! permission model. oy does not store provider credentials.
+//! The native CLI supports Linux; Windows users should run it in WSL2.
 //!
 //! ## Start with the CLI
 //!
 //! The command-line interface is the supported automation surface:
 //!
 //! ```text
-//! oy setup --dry-run       # preview package/config migration
-//! oy setup                 # register the version-matched OpenCode package
-//! oy audit                 # write ISSUES.md
-//! oy review main           # write REVIEW.md for git diff main
-//! oy enhance <finding-id>  # remediate one reported finding
+//! oy setup                    # install the oy skills under ~/.agents/skills
+//! oy setup --workspace        # install project-local skills under .agents/skills
+//! oy audit prepare --path .   # prepare deterministic audit evidence
+//! oy audit finalize --run <id># write ISSUES.md or SARIF
+//! oy review prepare main      # prepare a git-diff review
+//! oy review finalize --run <id># write REVIEW.md
+//! oy doctor --check           # verify the skills installation
 //! ```
 //!
 //! See the [getting-started guide](https://oy.adonm.dev/getting-started.html),
 //! [workflow guide](https://oy.adonm.dev/workflows.html), and
-//! [CLI and OpenCode reference](https://oy.adonm.dev/reference.html) for the user-facing
-//! contract.
+//! [CLI reference](https://oy.adonm.dev/reference.html) for the user-facing contract.
 //!
 //! ## Determinism boundary
 //!
 //! Input collection, ordering, limits, and report rendering are deterministic. Findings are
-//! produced by the model selected in opencode and are not deterministic. The collector also
+//! produced by the model the user's agent runs and are not deterministic. The collector also
 //! has documented exclusions; “all chunks” does not mean every byte in a repository.
 //!
 //! ## Rust API
@@ -53,9 +53,8 @@
 mod artifacts;
 mod audit;
 mod cli;
-mod mise;
-mod opencode;
 mod review;
+mod skills;
 mod tools;
 mod workflow;
 
@@ -76,12 +75,12 @@ pub(crate) fn decode_utf8(raw: Vec<u8>) -> Result<String, TextDecodeError> {
 
 /// Runs the `oy` command dispatcher with arguments that exclude the executable name.
 ///
-/// Normal command and delegated opencode exit statuses are returned as `Ok(code)`. Setup,
-/// filesystem, process-launch, and protocol failures are returned as errors. This function may
-/// update opencode integration config or launch child processes depending on the arguments.
+/// Normal command statuses are returned as `Ok(code)`. Setup, filesystem, and process
+/// failures are returned as errors. This function may update the agent skills installation
+/// or launch child processes depending on the arguments.
 ///
-/// Prefer invoking the `oy` executable when process isolation or concurrent invocations matter;
-/// CLI output configuration is process-global.
+/// Prefer invoking the `oy` executable when process isolation or concurrent invocations
+/// matter; CLI output configuration is process-global.
 pub fn run(argv: Vec<String>) -> anyhow::Result<i32> {
     cli::app::run(argv)
 }

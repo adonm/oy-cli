@@ -1,4 +1,4 @@
-//! `oy audit` workflow and file-backed artifact arguments.
+//! `oy audit` file-backed artifact arguments.
 
 use clap::{Args, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -8,19 +8,7 @@ use crate::audit;
 #[derive(Debug, Args, Clone)]
 pub(super) struct AuditArgs {
     #[command(subcommand)]
-    pub(super) action: Option<AuditAction>,
-    #[arg(long, value_enum, default_value_t = AuditFormat::Markdown, help = "Output format: markdown or sarif")]
-    pub(super) format: AuditFormat,
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "Write findings to a workspace file (default: ISSUES.md or oy.sarif)"
-    )]
-    pub(super) out: Option<PathBuf>,
-    #[arg(long, value_name = "N", default_value_t = audit::DEFAULT_MAX_REVIEW_CHUNKS, help = "Maximum audit chunks before failing closed")]
-    pub(super) max_chunks: usize,
-    #[arg(value_name = "FOCUS", help = "Optional audit focus text")]
-    pub(super) focus: Vec<String>,
+    pub(super) action: AuditAction,
 }
 
 #[derive(Debug, Clone, Subcommand)]
