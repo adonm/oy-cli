@@ -39,6 +39,24 @@ def main() -> int:
         return 1
     day = sys.argv[2] if len(sys.argv) > 2 else date.today().isoformat()
 
+    # Whatever sits under [Unreleased] at bump time becomes the new version's
+    # notes, so refuse an empty section before writing anything instead of
+    # shipping a release with no notes (the release workflow fails closed too).
+    new_heading = f"## [{new}] - {day}"
+    unreleased = re.search(
+        r"^## \[Unreleased\]\n(?P<body>.*?)(?=^## \[|\Z)",
+        read("CHANGELOG.md"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if new_heading not in read("CHANGELOG.md") and (
+        unreleased is None or not unreleased.group("body").strip()
+    ):
+        print(
+            "CHANGELOG.md [Unreleased] section is empty; add release notes first",
+            file=sys.stderr,
+        )
+        return 1
+
     # Cargo package metadata and its lockfile entry.
     write(
         "Cargo.toml",
