@@ -9,7 +9,7 @@
 #   just fix            # auto-fix formatting and clippy lints, then check
 #   just run -- --help
 #
-# Requires: cargo, rustc >= 1.96, just, and mdbook. `mise install`
+# Requires: cargo, rustc >= 1.98, just, and mdbook. `mise install`
 # provides them. The extended suite also requires cargo-nextest and nightly Miri.
 
 _default:

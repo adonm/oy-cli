@@ -20,7 +20,7 @@ oy doctor --json | head -n 40
 | macOS, Windows | Unsupported; use WSL2 or build from source |
 | Other operating systems | Unsupported at build time |
 
-The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy release supports the two release-archive targets above; other Linux targets require a source build. Building from source requires Rust 1.96+.
+The installer requires a POSIX shell plus `curl` or `wget`. Its prebuilt oy release supports the two release-archive targets above; other Linux targets require a source build. Building from source requires Rust 1.98+.
 
 ## Agent skills hosts
 

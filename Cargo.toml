@@ -2,7 +2,7 @@
 name = "oy-cli"
 version = "0.15.4"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 description = "Deterministic audit and review evidence preparation for agent skills"
 license = "Apache-2.0"
 readme = "README.md"

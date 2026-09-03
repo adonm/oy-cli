@@ -12,7 +12,7 @@ just check
 just run -- --help
 ```
 
-If you do not use [`mise`](https://mise.jdx.dev/), install Rust 1.96+ and [`just`](https://github.com/casey/just) yourself.
+If you do not use [`mise`](https://mise.jdx.dev/), install Rust 1.98+ and [`just`](https://github.com/casey/just) yourself.
 
 To try the skills in an agent, run `oy setup` (writes them under
 `~/.agents/skills/`) or `oy setup --workspace` for the checkout's

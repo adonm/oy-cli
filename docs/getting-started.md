@@ -57,7 +57,7 @@ mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.15.4
 mise exec github:adonm/oy-cli@0.15.4 -- oy setup
 ```
 
-**From source (requires Rust 1.96+):**
+**From source (requires Rust 1.98+):**
 
 ```bash
 cargo install oy-cli --locked

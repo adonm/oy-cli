@@ -6,6 +6,7 @@
 
 ### Changed
 - **Docs:** reframed around what oy contributes (frozen evidence, full-coverage reading, verified reports) rather than what it avoids; `docs/project.md` non-goals became a short Boundaries section.
+- **Toolchain:** bumped MSRV to Rust 1.98 and refreshed `Cargo.lock` (31 crate updates including clap 4.6.6, regex 1.13.1, ignore 0.4.33, serde 1.0.229).
 
 ### Removed
 - **Standalone oy agent:** dropped the `oy` persona (`oy-setup/oy-persona.md`) and the default-agent upgrade flow. The `oy-setup` skill now only installs and verifies the four skills; remediation discipline (inspect first, smallest change, verify, report concisely) lives in the `oy-enhance` skill and runs under the user's own agent. Setup backs up and removes oy-owned persona copies; `agents/oy.md` from older releases is treated as legacy state and migrated to backup. If you set `default_agent: "oy"`, remove the override and keep your host default.
