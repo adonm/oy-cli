@@ -68,7 +68,7 @@ OpenCode, Cursor, Codex, Copilot, and Gemini CLI alike.
 
 | Path | Role |
 |---|---|
-| `src/skills.rs` | Canonical skill/persona assets and asset contract tests |
+| `src/skills.rs` | Canonical skill assets and asset contract tests |
 | `src/skills/setup.rs` | Skill installation/removal, legacy migration, locking, plugin-cache cleanup |
 | `src/skills/setup/backup.rs` | Persistent setup backups and move/restore mechanics |
 | `src/skills/setup/legacy_config.rs` | OpenCode JSON/JSONC parsing and stripping of legacy oy entries |

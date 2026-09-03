@@ -69,8 +69,7 @@ Setup preserves unrelated configuration and backs up changed oy-owned entries. S
 
 ## Optional tools
 
-`tokei` and Universal Ctags are optional context helpers the oy persona
-mentions for large unfamiliar scopes. Missing them does **not** block setup,
+`tokei` and Universal Ctags are optional context helpers for large unfamiliar scopes. Missing them does **not** block setup,
 audit, review, or remediation. Install them with:
 
 ```bash

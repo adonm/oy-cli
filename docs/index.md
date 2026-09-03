@@ -55,7 +55,7 @@ use the oy-enhance skill to fix audit-0123456789abcdef
 Agent Skills are plain Markdown files (`SKILL.md`). `oy setup` writes four of them to `~/.agents/skills/`:
 
 - `oy-audit`, `oy-review`, `oy-enhance` — the workflows
-- `oy-setup` — verifies installation and installs the `oy` persona
+- `oy-setup` — verifies installation and skill discovery
 
 Your agent loads the matching SKILL.md when you mention it. No extra daemon, no API keys stored by oy.
 

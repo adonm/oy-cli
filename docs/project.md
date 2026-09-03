@@ -18,7 +18,7 @@ prepare known input
 | Owner | Responsibilities |
 |---|---|
 | oy CLI | Repository/diff collection, ordering, limits, evidence identity, report validation, Markdown/SARIF output, skill installation |
-| oy skills | Three workflow skills, one setup skill, and the oy persona |
+| oy skills | Three workflow skills and one setup skill |
 | the agent and user | Models, providers, credentials, tools, sessions, UI, and project instructions |
 
 ## Principles
@@ -28,14 +28,13 @@ prepare known input
 3. **Fail instead of silently sampling.** Changed evidence, malformed reports, and explicit limits are visible errors.
 4. **Reports are handoff artifacts.** Stable IDs and reruns matter more than chat-only output.
 5. **Keep host coupling narrow.** The only agent-specific code is the optional OpenCode location refresh after setup.
-6. **Keep one useful persona.** The oy persona emphasizes inspection, small changes, verification, and worktree safety without defining permissions.
 
 ## Current product
 
 Setup writes:
 
 - `oy-audit`, `oy-review`, and `oy-enhance` skills;
-- the `oy-setup` skill and the `oy-persona.md` it installs into the agent's environment (improving the default agent or creating an `oy` agent).
+- the `oy-setup` skill, which verifies skill discovery in the agent's environment.
 
 The Rust CLI prepares evidence, verifies model-written candidates, normalizes finding metadata, writes Markdown/SARIF, installs the skills, and migrates legacy OpenCode plugin state.
 

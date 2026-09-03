@@ -133,7 +133,7 @@ Check `ls -la ISSUES.md REVIEW.md oy.sarif` in the workspace root. Custom paths 
 
 ## 9. `oy setup` or `oy doctor --install-missing` fails on tokei/ctags
 
-These are optional context helpers — audits and reviews work without them. They help the `oy` persona explore large unfamiliar codebases faster.
+These are optional context helpers — audits and reviews work without them. They help your agent explore large unfamiliar codebases faster.
 
 Retry:
 

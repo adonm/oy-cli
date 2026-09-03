@@ -12,7 +12,7 @@
 - `oy-audit` skill — security-focused repository audits (`ISSUES.md` or SARIF)
 - `oy-review` skill — whole-workspace or target-diff code reviews (`REVIEW.md`)
 - `oy-enhance` skill — fix one reported finding at a time
-- `oy-setup` skill — agent-driven setup, verification, and persona installation
+- `oy-setup` skill — agent-driven setup and verification
 - deterministic CLI: `oy audit|review prepare` and `finalize`, `oy setup`, `oy doctor`
 
 Your agent owns models, credentials, sessions, and general tools. `oy` adds the evidence and report workflow; it is not a second agent runtime or permission system.

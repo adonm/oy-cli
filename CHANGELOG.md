@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Removed
+- **Standalone oy agent:** dropped the `oy` persona (`oy-setup/oy-persona.md`) and the default-agent upgrade flow. The `oy-setup` skill now only installs and verifies the four skills; remediation discipline (inspect first, smallest change, verify, report concisely) lives in the `oy-enhance` skill and runs under the user's own agent. Setup backs up and removes oy-owned persona copies; `agents/oy.md` from older releases is treated as legacy state and migrated to backup. If you set `default_agent: "oy"`, remove the override and keep your host default.
+
 ## [0.15.3] - 2026-08-27
 
 ### Changed

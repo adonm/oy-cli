@@ -25,7 +25,7 @@ finalize deterministically.
 | Path | Responsibility |
 |---|---|
 | `src/cli/app.rs` | CLI parsing and dispatch |
-| `src/skills.rs` | Canonical skill/persona assets (embedded) and asset contract tests |
+| `src/skills.rs` | Canonical skill assets (embedded) and asset contract tests |
 | `src/skills/setup.rs` | Skill installation/removal, legacy migration, locking, plugin-cache cleanup |
 | `src/skills/setup/backup.rs` | Persistent setup backups and move/restore mechanics |
 | `src/skills/setup/legacy_config.rs` | OpenCode JSON/JSONC parsing and stripping of legacy oy entries |
@@ -48,8 +48,7 @@ written by setup:
 | `assets/skills/oy-audit/SKILL.md` | Deterministic security-audit protocol |
 | `assets/skills/oy-review/SKILL.md` | Deterministic code-quality review protocol |
 | `assets/skills/oy-enhance/SKILL.md` | One-finding remediation protocol |
-| `assets/skills/oy-setup/SKILL.md` | Agent-driven setup: verify, install, persona, doctor |
-| `assets/skills/oy-setup/oy-persona.md` | The oy agent persona the setup skill installs |
+| `assets/skills/oy-setup/SKILL.md` | Agent-driven setup: verify, install, doctor |
 
 ## Setup
 
@@ -102,7 +101,7 @@ indexed chunk; complete ordered reading is enforced by the skill protocol.
 ## Design rules
 
 - Do not add permission overrides; the skills run under whatever permissions the user's agent has.
-- Keep oy to three workflow skills plus the setup skill and persona.
+- Keep oy to three workflow skills plus the setup skill.
 - Put evidence identity, ordering, limits, and report validation in Rust.
 - Prefer file artifacts and native agent reads over large tool responses.
 - Validate workspace paths at read/write boundaries.

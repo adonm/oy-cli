@@ -94,7 +94,7 @@ What the skill does:
 
 - Confirms your agent can discover `oy-audit`, `oy-review`, `oy-enhance`, `oy-setup` from `~/.agents/skills` or `.agents/skills`;
 - If your agent prefers a different directory (for example `.claude/skills` for Claude Code), it offers to copy or symlink the skills there;
-- Installs the oy persona (improves your default agent or creates an `oy` agent) and reruns `oy doctor --check`.
+- Reruns `oy doctor --check` to confirm the installation.
 
 You only do this once per machine (or per workspace if you used `--workspace`).
 
