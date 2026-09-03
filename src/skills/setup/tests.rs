@@ -3,7 +3,7 @@ use super::{
     backup::{TEST_BACKUP_STATE_DIR, backup_state_dir, copy_path},
     legacy_config::{config_has_oy_entries, remove_oy_config_entries, update_config},
 };
-use crate::skills::{OY_PERSONA, OY_SETUP_SKILL};
+use crate::skills::OY_SETUP_SKILL;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::sync::Mutex;
@@ -352,7 +352,7 @@ fn skills_complete_detects_drift() {
     let dir = env.global_skills();
     assert!(skills_complete(&dir));
 
-    fs::write(dir.join("oy-setup/oy-persona.md"), "drifted persona\n").unwrap();
+    fs::write(dir.join("oy-setup/SKILL.md"), "drifted setup skill\n").unwrap();
     assert!(!skills_complete(&dir));
 }
 
@@ -589,7 +589,7 @@ fn failed_config_update_restores_files_and_retains_snapshot() {
 }
 
 #[test]
-fn persona_and_setup_skill_files_are_canonical_after_setup() {
+fn setup_skill_file_is_canonical_after_setup() {
     let env = TestEnv::new();
 
     setup_command(false, false, false).unwrap();
@@ -598,15 +598,46 @@ fn persona_and_setup_skill_files_are_canonical_after_setup() {
         fs::read_to_string(env.global_skills().join("oy-setup/SKILL.md")).unwrap(),
         OY_SETUP_SKILL
     );
-    assert_eq!(
-        fs::read_to_string(env.global_skills().join("oy-setup/oy-persona.md")).unwrap(),
-        OY_PERSONA
-    );
+    assert!(!env.global_skills().join("oy-setup/oy-persona.md").exists());
     assert!(OY_SETUP_SKILL.contains("oy doctor --check"));
     assert!(!config_has_oy_entries(&json!({ "model": "test/model" })));
     assert!(config_has_oy_entries(
         &json!({ "plugins": ["@oy-cli/opencode@0.1.0"] })
     ));
+}
+
+#[test]
+fn setup_removes_stale_oy_persona_file_with_backup() {
+    let env = TestEnv::new();
+    let persona = env.global_skills().join("oy-setup/oy-persona.md");
+    fs::create_dir_all(persona.parent().unwrap()).unwrap();
+    fs::write(&persona, format!("{GENERATED_MARKER}\nstale persona\n")).unwrap();
+
+    setup_command(false, false, false).unwrap();
+
+    assert!(!persona.exists());
+    let backups = backup_dirs();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        fs::read_to_string(backups[0].join("oy-setup/oy-persona.md")).unwrap(),
+        format!("{GENERATED_MARKER}\nstale persona\n")
+    );
+}
+
+#[test]
+fn setup_preserves_unmarked_file_at_stale_persona_path() {
+    let env = TestEnv::new();
+    let persona = env.global_skills().join("oy-setup/oy-persona.md");
+    fs::create_dir_all(persona.parent().unwrap()).unwrap();
+    fs::write(&persona, "user-owned file without the setup marker\n").unwrap();
+
+    setup_command(false, false, false).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&persona).unwrap(),
+        "user-owned file without the setup marker\n"
+    );
+    assert!(backup_dirs().is_empty());
 }
 
 fn seed_plugin_cache(cache: &Path) {

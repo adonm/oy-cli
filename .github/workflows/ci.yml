@@ -67,7 +67,7 @@ jobs:
           test -f "$HOME/.agents/skills/oy-review/SKILL.md"
           test -f "$HOME/.agents/skills/oy-enhance/SKILL.md"
           test -f "$HOME/.agents/skills/oy-setup/SKILL.md"
-          test -f "$HOME/.agents/skills/oy-setup/oy-persona.md"
+          test ! -e "$HOME/.agents/skills/oy-setup/oy-persona.md"
           oy doctor --check --json | tee /tmp/oy-doctor.json
           python3 -c 'import json; data=json.load(open("/tmp/oy-doctor.json")); assert data["check_ok"] is True; assert data["skills"]["global"]["complete"] is True'
           oy setup --remove
