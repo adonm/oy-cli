@@ -12,9 +12,9 @@ metadata:
 Set up oy so audits, reviews, and one-finding fixes work in this agent environment. Run this skill when the user asks to set up, install, repair, or verify oy, or when `oy doctor --check` reports missing skills.
 
 Protocol:
-1. Verify the oy CLI: run `oy --version`. If it is missing, install it with mise: `mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@latest`, or point the user at the installer (`curl -fsSL https://oy.adonm.dev/install.sh | sh`).
+1. Verify the oy CLI: run `oy --version`. If it is missing, install it with mise: `mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@latest`, or point the user at the installer (`curl -fsSL https://oy.adonm.dev/install.sh | sh`). After an upgrade, verify the version again; if it is stale, inspect executable resolution for an older install shadowing the upgraded binary before rerunning setup.
 2. Install the canonical skills with `oy setup` (global) or `oy setup --workspace` for a single repository. This writes the skills and this skill's files; prefer it over hand-copying. `oy setup --dry-run` previews changes.
-3. Verify discovery in this environment. Confirm this agent can see `oy-audit`, `oy-review`, `oy-enhance`, `adversarial-review`, and `oy-setup` from the canonical locations (`~/.agents/skills` / `.agents/skills`). If this host discovers skills elsewhere, offer to copy or symlink them there.
+3. Verify discovery in this environment. Confirm this agent can see `oy-audit`, `oy-review`, `oy-enhance`, `adversarial-review`, and `oy-setup` from the canonical locations (`~/.agents/skills` / `.agents/skills`). Check which definition the host actually loads: an older host-specific copy may shadow the upgraded skill even when doctor passes. Preserve user edits; refresh stale oy-owned copies or offer a symlink to the canonical location when needed.
 4. Verify with `oy doctor --check`. If it fails, run `oy setup` again and recheck. `oy doctor --install-missing` installs the optional tokei and Universal Ctags context helpers with mise.
 5. Report what was installed where, which host-specific steps were taken, and any remaining manual steps (provider or model configuration, permission policies). Keep the report short.
 

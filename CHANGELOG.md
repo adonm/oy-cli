@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-09
+
+### Fixed
+- **Adversarial review:** ask once for supported reasoning effort (including existing preferences without it), recommend high/xhigh rather than unconditional max, and support plain-language per-run overrides. Honor explicitly authorized conditional fallbacks, verify analysis-only invocation and actual output, and report the provider/model/effort actually used.
+- **Skill setup:** check for stale binaries and host-specific skill copies shadowing the upgraded installation.
+
 ## [0.16.0] - 2026-09-09
 
 ### Added

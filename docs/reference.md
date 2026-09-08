@@ -50,8 +50,14 @@ Unknown oy commands are errors.
 Say `adversarial review, use Cursor` or `use Codex this time`. The host agent
 asks you to choose a CLI and one of a few strong model/reasoning options on
 first use, then remembers your choice in
-`${XDG_STATE_HOME:-~/.local/state}/oy/adversarial-review.json`.
-Say `switch reviewer` to change it. The skill is a single Markdown file;
+`${XDG_STATE_HOME:-$HOME/.local/state}/oy/adversarial-review.json`.
+It asks once about reasoning effort, recommending a supported high/xhigh level
+and offering max when available. Say `use max this time` for a one-run override,
+or `remember this` to save it. Models with fixed effort use `default`.
+Say `switch reviewer` to change the saved reviewer. A fallback (for example,
+“use Zen only when my OpenAI limit is hit”) runs only with your prior permission
+and is reported along with the actual model and effort used.
+The skill is a single Markdown file;
 the host handles context gathering and the chosen CLI's invocation.
 
 ## Setup ownership and backups
