@@ -12,6 +12,7 @@
 - `oy-audit` skill — security-focused repository audits (`ISSUES.md` or SARIF)
 - `oy-review` skill — whole-workspace or target-diff code reviews (`REVIEW.md`)
 - `oy-enhance` skill — fix one reported finding at a time
+- `adversarial-review` skill — independent critique of recent work and direction; say “use Cursor” or “use Codex this time” to choose the reviewer
 - `oy-setup` skill — agent-driven setup and verification
 - deterministic CLI: `oy audit|review prepare` and `finalize`, `oy setup`, `oy doctor`
 

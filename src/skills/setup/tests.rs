@@ -3,7 +3,7 @@ use super::{
     backup::{TEST_BACKUP_STATE_DIR, backup_state_dir, copy_path},
     legacy_config::{config_has_oy_entries, remove_oy_config_entries, update_config},
 };
-use crate::skills::OY_SETUP_SKILL;
+use crate::skills::{OY_ADVERSARIAL_REVIEW_SKILL, OY_SETUP_SKILL};
 use serde_json::Value;
 use std::ffi::OsString;
 use std::sync::Mutex;
@@ -598,6 +598,14 @@ fn setup_skill_file_is_canonical_after_setup() {
         fs::read_to_string(env.global_skills().join("oy-setup/SKILL.md")).unwrap(),
         OY_SETUP_SKILL
     );
+    assert_eq!(
+        fs::read_to_string(env.global_skills().join("adversarial-review/SKILL.md")).unwrap(),
+        OY_ADVERSARIAL_REVIEW_SKILL
+    );
+    assert!(OY_ADVERSARIAL_REVIEW_SKILL.contains("Adversarial Review"));
+    assert!(OY_ADVERSARIAL_REVIEW_SKILL.contains("your active permissions"));
+    assert!(OY_ADVERSARIAL_REVIEW_SKILL.contains("untrusted"));
+    assert!(!OY_ADVERSARIAL_REVIEW_SKILL.contains("OpenCode's native"));
     assert!(!env.global_skills().join("oy-setup/oy-persona.md").exists());
     assert!(OY_SETUP_SKILL.contains("oy doctor --check"));
     assert!(!config_has_oy_entries(&json!({ "model": "test/model" })));

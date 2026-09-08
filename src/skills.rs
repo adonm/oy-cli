@@ -12,3 +12,5 @@ pub(crate) const OY_AUDIT_SKILL: &str = include_str!("../assets/skills/oy-audit/
 pub(crate) const OY_REVIEW_SKILL: &str = include_str!("../assets/skills/oy-review/SKILL.md");
 pub(crate) const OY_ENHANCE_SKILL: &str = include_str!("../assets/skills/oy-enhance/SKILL.md");
 pub(crate) const OY_SETUP_SKILL: &str = include_str!("../assets/skills/oy-setup/SKILL.md");
+pub(crate) const OY_ADVERSARIAL_REVIEW_SKILL: &str =
+    include_str!("../assets/skills/adversarial-review/SKILL.md");
