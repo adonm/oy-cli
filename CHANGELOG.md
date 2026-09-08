@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-09
+
 ### Added
 - **Adversarial-review skill:** new `adversarial-review` skill gets an independent critique of recent work and session direction from a headless agent CLI. The host agent asks which CLI to use on first run, offers strong model/reasoning options from its live catalog, and remembers the choice in `${XDG_STATE_HOME:-~/.local/state}/oy/adversarial-review.json`. Plain-language overrides (`use Codex this time`, `switch reviewer`) included; `oy setup` installs it by default.
 
