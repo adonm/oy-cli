@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Adversarial review:** fold reasoning effort into the model offers instead of asking twice; record cross-CLI fallbacks with `fallback_cli`; open evidence with a fixed CLI/model/effort/checks/omissions header. `oy doctor --check` now flags stale oy-owned copies in host skill directories (Cursor, OpenCode, Claude) that shadow the canonical skills.
+
 ## [0.16.1] - 2026-09-09
 
 ### Fixed

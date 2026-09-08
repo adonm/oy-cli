@@ -44,11 +44,13 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
     let skills_ok = global_complete || workspace_complete;
     let plugin_cache = crate::skills::plugin_cache_paths();
     let cache_clean = plugin_cache.is_empty();
+    let host_drift = crate::skills::host_skill_drift();
+    let drift_clean = host_drift.is_empty();
     let mise_ok = command_ok("mise", &["--version"]);
     let tokei_ok = command_ok("tokei", &["--version"]);
     let ctags_ok = universal_ctags_ok();
     let no_missing_mise_tools = missing_mise_tools(tokei_ok, ctags_ok).is_empty();
-    let check_ok = skills_ok && cache_clean;
+    let check_ok = skills_ok && cache_clean && drift_clean;
 
     if crate::ui::is_json() {
         let payload = serde_json::json!({
@@ -65,6 +67,7 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
             },
             "complete": skills_ok,
             "legacy_plugin_cache": plugin_cache,
+            "host_skill_drift": host_drift,
             "mise": mise_ok,
             "optional_tools": {
                 "tokei": {
@@ -77,7 +80,7 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
                 }
             },
             "check_ok": check_ok,
-            "next_step": recommended_next_step(check_ok, skills_ok, cache_clean, mise_ok, no_missing_mise_tools),
+            "next_step": recommended_next_step(check_ok, skills_ok, cache_clean, drift_clean, mise_ok, no_missing_mise_tools),
         });
         crate::ui::line(serde_json::to_string_pretty(&payload)?);
         return Ok(if args.check && !check_ok { 1 } else { 0 });
@@ -129,6 +132,21 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
         ),
     );
     crate::ui::kv(
+        "host skill copies",
+        crate::ui::status_text(
+            drift_clean,
+            if drift_clean {
+                "current".to_string()
+            } else {
+                host_drift
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
+    );
+    crate::ui::kv(
         "mise",
         crate::ui::status_text(mise_ok, if mise_ok { "ok" } else { "missing" }),
     );
@@ -162,6 +180,7 @@ pub(super) fn doctor_command(args: DoctorArgs) -> Result<i32> {
             check_ok,
             skills_ok,
             cache_clean,
+            drift_clean,
             mise_ok,
             no_missing_mise_tools
         )
@@ -213,6 +232,7 @@ fn recommended_next_step(
     check_ok: bool,
     skills_ok: bool,
     cache_clean: bool,
+    drift_clean: bool,
     mise_ok: bool,
     no_missing_mise_tools: bool,
 ) -> &'static str {
@@ -228,6 +248,9 @@ fn recommended_next_step(
     }
     if !skills_ok {
         return "Run `oy setup` (or `oy setup --workspace`), then ask your agent to run the oy-setup skill.";
+    }
+    if !drift_clean {
+        return "Ask your agent to run the oy-setup skill to refresh stale host skill copies.";
     }
     "Run `oy doctor --check` for details."
 }
@@ -388,19 +411,23 @@ mod tests {
     #[test]
     fn skills_guidance_depends_on_installation_state() {
         assert_eq!(
-            recommended_next_step(false, false, true, true, true),
+            recommended_next_step(false, false, true, true, true, true),
             "Run `oy setup` (or `oy setup --workspace`), then ask your agent to run the oy-setup skill."
         );
         assert_eq!(
-            recommended_next_step(false, true, false, true, true),
+            recommended_next_step(false, true, false, true, true, true),
             "Run `oy setup` to remove the obsolete OpenCode plugin cache."
         );
         assert_eq!(
-            recommended_next_step(true, true, true, true, false),
+            recommended_next_step(false, true, true, false, true, true),
+            "Ask your agent to run the oy-setup skill to refresh stale host skill copies."
+        );
+        assert_eq!(
+            recommended_next_step(true, true, true, true, true, false),
             "Run `oy doctor --install-missing` for optional context helpers."
         );
         assert_eq!(
-            recommended_next_step(true, true, true, true, true),
+            recommended_next_step(true, true, true, true, true, true),
             "Ask your agent to audit or review with the oy skills."
         );
     }

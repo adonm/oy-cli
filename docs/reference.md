@@ -56,7 +56,8 @@ and offering max when available. Say `use max this time` for a one-run override,
 or `remember this` to save it. Models with fixed effort use `default`.
 Say `switch reviewer` to change the saved reviewer. A fallback (for example,
 “use Zen only when my OpenAI limit is hit”) runs only with your prior permission
-and is reported along with the actual model and effort used.
+and is reported along with the actual CLI, model, and effort used; cross-CLI
+fallbacks record a `fallback_cli` alongside the model.
 The skill is a single Markdown file;
 the host handles context gathering and the chosen CLI's invocation.
 

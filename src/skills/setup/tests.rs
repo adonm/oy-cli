@@ -3,7 +3,7 @@ use super::{
     backup::{TEST_BACKUP_STATE_DIR, backup_state_dir, copy_path},
     legacy_config::{config_has_oy_entries, remove_oy_config_entries, update_config},
 };
-use crate::skills::{OY_ADVERSARIAL_REVIEW_SKILL, OY_SETUP_SKILL};
+use crate::skills::{OY_ADVERSARIAL_REVIEW_SKILL, OY_REVIEW_SKILL, OY_SETUP_SKILL};
 use serde_json::Value;
 use std::ffi::OsString;
 use std::sync::Mutex;
@@ -586,6 +586,24 @@ fn failed_config_update_restores_files_and_retains_snapshot() {
         fs::read_to_string(backups[0].join("blocked")).unwrap(),
         "old config\n"
     );
+}
+
+#[test]
+fn host_drift_flags_only_stale_owned_copies() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("host-skills");
+    let stale = root.join("oy-review/SKILL.md");
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    fs::write(&stale, format!("{GENERATED_MARKER}\nstale owned copy\n")).unwrap();
+    let current = root.join("oy-setup/SKILL.md");
+    fs::create_dir_all(current.parent().unwrap()).unwrap();
+    fs::write(&current, OY_SETUP_SKILL).unwrap();
+    let user = root.join("oy-audit/SKILL.md");
+    fs::create_dir_all(user.parent().unwrap()).unwrap();
+    fs::write(&user, "user notes without the marker\n").unwrap();
+    assert_eq!(drift_in_roots(&[root]), vec![stale]);
+    assert!(drift_in_roots(&[dir.path().join("missing")]).is_empty());
+    assert!(OY_REVIEW_SKILL.contains(GENERATED_MARKER));
 }
 
 #[test]

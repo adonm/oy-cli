@@ -168,6 +168,51 @@ pub(crate) fn skills_complete(dir: &Path) -> bool {
     })
 }
 
+/// Host-specific skill directories that shadow the canonical location.
+/// Hosts discover skills here instead of (or in addition to) `.agents/skills`.
+fn host_skill_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for relative in [
+            ".cursor/skills",
+            ".config/opencode/skills",
+            ".claude/skills",
+        ] {
+            roots.push(home.join(relative));
+        }
+    }
+    if let Ok(root) = config::oy_root() {
+        for relative in [".cursor/skills", ".claude/skills"] {
+            roots.push(root.join(relative));
+        }
+    }
+    roots
+}
+
+/// Oy-owned host copies whose content drifted from canonical. Only files
+/// carrying the setup marker count: user files without it are never oy-owned.
+/// Symlinks resolving to canonical content read equal and stay clean.
+pub(crate) fn host_skill_drift() -> Vec<PathBuf> {
+    drift_in_roots(&host_skill_roots())
+}
+
+fn drift_in_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut drifted = Vec::new();
+    for root in roots {
+        for (relative, canonical) in bundled_files() {
+            let path = root.join(relative);
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if content != canonical && content.contains(GENERATED_MARKER) {
+                drifted.push(path);
+            }
+        }
+    }
+    drifted.sort();
+    drifted
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SetupScope {
     Global,

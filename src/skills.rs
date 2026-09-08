@@ -5,7 +5,8 @@ mod opencode_host;
 mod setup;
 
 pub(crate) use setup::{
-    global_skills_dir, plugin_cache_paths, setup_command, skills_complete, workspace_skills_dir,
+    global_skills_dir, host_skill_drift, plugin_cache_paths, setup_command, skills_complete,
+    workspace_skills_dir,
 };
 
 pub(crate) const OY_AUDIT_SKILL: &str = include_str!("../assets/skills/oy-audit/SKILL.md");
