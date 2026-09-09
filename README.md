@@ -12,7 +12,7 @@
 - `oy-audit` skill — security-focused repository audits (`ISSUES.md` or SARIF)
 - `oy-review` skill — whole-workspace or target-diff code reviews (`REVIEW.md`)
 - `oy-enhance` skill — fix one reported finding at a time
-- `adversarial-review` skill — independent critique of recent work and direction; say “use Cursor” or “use Codex this time” to choose the reviewer
+- [`adversarial-review` skill](https://oy.adonm.dev/adversarial-review.html) — independent critique of recent work and direction; say “use Cursor” or “use Codex this time” to choose the reviewer
 - `oy-setup` skill — agent-driven setup and verification
 - deterministic CLI: `oy audit|review prepare` and `finalize`, `oy setup`, `oy doctor`
 
@@ -114,6 +114,7 @@ More help: [Getting started](https://oy.adonm.dev/getting-started.html) · [Work
 
 - [Getting started](https://oy.adonm.dev/getting-started.html) — install, configure, and create a first report
 - [Workflow guide](https://oy.adonm.dev/workflows.html) — scopes, findings, remediation, and limits
+- [Adversarial review](https://oy.adonm.dev/adversarial-review.html) — standalone skill, installation, and effective independent critique
 - [Examples and CI](https://oy.adonm.dev/examples.html) — report examples and SARIF upload
 - [CLI reference](https://oy.adonm.dev/reference.html) — commands, environment variables, and setup ownership
 - [Compatibility](https://oy.adonm.dev/compatibility.html) — supported platforms and agent hosts

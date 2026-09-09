@@ -52,6 +52,15 @@ binary at compile time; `oy setup` writes them and `oy doctor --check`
 verifies byte-exact content. Keep the bodies host-neutral: they run in
 OpenCode, Cursor, Codex, Copilot, and Gemini CLI alike.
 
+## Independent Review
+
+For substantial changes or uncertain design decisions, use the
+[adversarial-review skill](https://oy.adonm.dev/adversarial-review.html) to
+challenge the work and proposed next steps. Provide the goal, constraints,
+relevant changes, and actual check results. If the skill is unavailable, follow
+the linked installation instructions. Validate findings against the checkout
+before acting on them.
+
 ## Design Rules
 
 - Do not add a native LLM client, provider router, transcript store, or chat UI back to `oy`.

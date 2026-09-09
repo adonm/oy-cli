@@ -53,8 +53,8 @@ What the installer does:
 **With mise (no curl pipe):**
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.16.2
-mise exec github:adonm/oy-cli@0.16.2 -- oy setup
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.16.3
+mise exec github:adonm/oy-cli@0.16.3 -- oy setup
 ```
 
 **From source (requires Rust 1.98+):**
@@ -71,7 +71,7 @@ The installer and `oy doctor --install-missing` use `aqua:XAMPPRocky/tokei@12.1.
 **Check the CLI:**
 
 ```bash
-oy --version        # should print 0.15.x
+oy --version        # prints the installed version
 oy doctor --check   # should print "global skills ok" or "workspace skills ok"
 ```
 
@@ -92,7 +92,7 @@ run the oy-setup skill
 
 What the skill does:
 
-- Confirms your agent can discover `oy-audit`, `oy-review`, `oy-enhance`, `oy-setup` from `~/.agents/skills` or `.agents/skills`;
+- Confirms your agent can discover `oy-audit`, `oy-review`, `oy-enhance`, `adversarial-review`, `oy-setup` from `~/.agents/skills` or `.agents/skills`;
 - If your agent prefers a different directory (for example `.claude/skills` for Claude Code), it offers to copy or symlink the skills there;
 - Reruns `oy doctor --check` to confirm the installation.
 
@@ -173,6 +173,7 @@ Include `oy --version`, your agent + version, OS/architecture, and redacted `oy 
 ## Next steps
 
 - [Workflow guide](workflows.md) — choose scopes (path vs focus), understand statuses (`new`, `fixed?`, `stale`), and remediation loops
+- [Adversarial review](adversarial-review.md) — get an independent critique of your work or plan; includes single-file installation
 - [Examples and CI](examples.md) — see real `ISSUES.md` / `REVIEW.md` / SARIF snippets and GitHub Actions upload
 - [Troubleshooting](troubleshooting.md) — expanded fixes with copy-paste commands
 - [CLI reference](reference.md) — every command, environment variable, and file layout

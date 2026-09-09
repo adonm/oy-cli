@@ -8,6 +8,7 @@ on:
       - ".mise.toml"
       - "book.toml"
       - "docs/**"
+      - "assets/skills/adversarial-review/SKILL.md"
   workflow_dispatch:
 
 permissions:

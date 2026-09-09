@@ -8,6 +8,9 @@ Use it to:
 - review a workspace or `git diff <target>` and write `REVIEW.md`;
 - fix one reported finding, verify it, and rerun the review.
 
+For an independent critique of recent work or a proposed plan, use the
+[adversarial-review skill](adversarial-review.md).
+
 ## The simple mental model
 
 ```text
@@ -33,7 +36,7 @@ oy doctor --check   # expect "global skills ok"
 run the oy-setup skill to finish setup
 ```
 
-The skill checks that your agent can see `oy-audit`, `oy-review`, `oy-enhance`, and copies them to your host's preferred location if needed (for example `.claude/skills`).
+The setup skill checks discovery of all five skills and copies them to your host's preferred location if needed (for example `.claude/skills`).
 
 **3. Create your first report**
 
@@ -52,9 +55,10 @@ use the oy-enhance skill to fix audit-0123456789abcdef
 
 ## New to Agent Skills?
 
-Agent Skills are plain Markdown files (`SKILL.md`). `oy setup` writes four of them to `~/.agents/skills/`:
+Agent Skills are plain Markdown files (`SKILL.md`). `oy setup` writes five of them to `~/.agents/skills/`:
 
 - `oy-audit`, `oy-review`, `oy-enhance` — the workflows
+- [`adversarial-review`](adversarial-review.md) — independent critique of work and direction
 - `oy-setup` — verifies installation and skill discovery
 
 Your agent loads the matching SKILL.md when you mention it. No extra daemon, no API keys stored by oy.
@@ -80,6 +84,7 @@ The skills run under your agent's own permission model. `oy` is not a sandbox; s
 
 - [Getting started](getting-started.md) — install and create a first report (start here if you're new)
 - [Workflow guide](workflows.md) — choose scope, understand findings, and remediate
+- [Adversarial review](adversarial-review.md) — install and use the standalone independent-review skill
 - [Examples and CI](examples.md) — inspect reports and upload SARIF
 - [Troubleshooting](troubleshooting.md) — fix the 6 most common first-run problems
 - [CLI reference](reference.md) — exact commands, setup behavior, and environment variables

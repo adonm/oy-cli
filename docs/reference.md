@@ -47,19 +47,11 @@ Unknown oy commands are errors.
 
 ## Adversarial review
 
-Say `adversarial review, use Cursor` or `use Codex this time`. The host agent
-asks you to choose a CLI and one of a few strong model/reasoning options on
-first use, then remembers your choice in
-`${XDG_STATE_HOME:-$HOME/.local/state}/oy/adversarial-review.json`.
-It asks once about reasoning effort, recommending a supported high/xhigh level
-and offering max when available. Say `use max this time` for a one-run override,
-or `remember this` to save it. Models with fixed effort use `default`.
-Say `switch reviewer` to change the saved reviewer. A fallback (for example,
-“use Zen only when my OpenAI limit is hit”) runs only with your prior permission
-and is reported along with the actual CLI, model, and effort used; cross-CLI
-fallbacks record a `fallback_cli` alongside the model.
-The skill is a single Markdown file;
-the host handles context gathering and the chosen CLI's invocation.
+Say `use the adversarial-review skill, using Cursor` or `use Codex this time`.
+The host gathers evidence, runs a fresh headless reviewer, and validates its
+findings. See the [standalone guide](adversarial-review.md) for installation,
+effective use, saved reviewer preferences, contributing instructions, and the
+complete skill content.
 
 ## Setup ownership and backups
 

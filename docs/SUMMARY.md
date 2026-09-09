@@ -6,6 +6,7 @@
 # Use oy
 
 - [Workflow guide](workflows.md)
+- [Adversarial review](adversarial-review.md)
 - [Examples and CI](examples.md)
 - [Troubleshooting](troubleshooting.md)
 - [CLI reference](reference.md)

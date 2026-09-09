@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-09-10
+
+### Added
+- **Adversarial-review guide:** standalone page with quick-start prompts, oy and single-file installation, an evidence-packet template, reviewer preferences, and reusable contributing instructions. The page embeds the canonical skill and rebuilds when it changes.
+
+### Fixed
+- **Adversarial-review skill:** resolve explicit choices before compatible saved preferences and ask only for missing choices; make review scope, source evidence, constraints, and proposed work explicit; validate findings and adjust verdicts when supporting claims fail.
+- **Skill discovery docs:** include adversarial review in setup guidance and the five-skill inventory.
+
 ## [0.16.2] - 2026-09-09
 
 ### Fixed
