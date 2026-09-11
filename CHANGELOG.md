@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-09-12
+
 ### Changed
 - **Adversarial-review skill:** replace external headless CLI/model selection, saved preferences, and fallback routing with one foreground `adversarial-review` subagent invocation. The subagent inspects the repository read-only; the host passes only repository path and session context. Simplify the standalone guide around this contract.
 
