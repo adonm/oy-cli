@@ -47,11 +47,11 @@ Unknown oy commands are errors.
 
 ## Adversarial review
 
-Say `use the adversarial-review skill, using Cursor` or `use Codex this time`.
-The host gathers evidence, runs a fresh headless reviewer, and validates its
-findings. See the [standalone guide](adversarial-review.md) for installation,
-effective use, saved reviewer preferences, contributing instructions, and the
-complete skill content.
+Say `use the adversarial-review skill to review our changes and proposed next
+steps`. The host launches one named, read-only `adversarial-review` subagent and
+passes it the repository path plus relevant session context. See the
+[standalone guide](adversarial-review.md) for requirements, installation,
+effective use, contributing instructions, and the complete skill content.
 
 ## Setup ownership and backups
 

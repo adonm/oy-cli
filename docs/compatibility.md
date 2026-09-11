@@ -34,6 +34,11 @@ CLI all discover natively.
 | OpenCode, Cursor, Codex, Copilot, Gemini CLI | `~/.agents/skills` (global) or `.agents/skills` (workspace) |
 | Claude Code | `.claude/skills` — the `oy-setup` skill offers to copy or symlink there |
 
+The `adversarial-review` skill additionally requires the host to provide a named
+`adversarial-review` subagent with read-only repository tools. Installing the
+skill does not create that subagent, and `oy doctor --check` does not validate
+host subagent availability. The other oy skills do not have this requirement.
+
 If `oy doctor --check` passes but your agent says "skill not found", ask it:
 
 ```text

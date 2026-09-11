@@ -173,7 +173,7 @@ Include `oy --version`, your agent + version, OS/architecture, and redacted `oy 
 ## Next steps
 
 - [Workflow guide](workflows.md) — choose scopes (path vs focus), understand statuses (`new`, `fixed?`, `stale`), and remediation loops
-- [Adversarial review](adversarial-review.md) — get an independent critique of your work or plan; includes single-file installation
+- [Adversarial review](adversarial-review.md) — launch a read-only review subagent; includes single-file installation
 - [Examples and CI](examples.md) — see real `ISSUES.md` / `REVIEW.md` / SARIF snippets and GitHub Actions upload
 - [Troubleshooting](troubleshooting.md) — expanded fixes with copy-paste commands
 - [CLI reference](reference.md) — every command, environment variable, and file layout

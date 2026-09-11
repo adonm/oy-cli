@@ -57,9 +57,8 @@ OpenCode, Cursor, Codex, Copilot, and Gemini CLI alike.
 For substantial changes or uncertain design decisions, use the
 [adversarial-review skill](https://oy.adonm.dev/adversarial-review.html) to
 challenge the work and proposed next steps. Provide the goal, constraints,
-relevant changes, and actual check results. If the skill is unavailable, follow
-the linked installation instructions. Validate findings against the checkout
-before acting on them.
+and actual check results; let the read-only subagent inspect the repository itself.
+Treat the result as advice and validate findings before acting on them.
 
 ## Design Rules
 

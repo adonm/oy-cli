@@ -58,7 +58,7 @@ use the oy-enhance skill to fix audit-0123456789abcdef
 Agent Skills are plain Markdown files (`SKILL.md`). `oy setup` writes five of them to `~/.agents/skills/`:
 
 - `oy-audit`, `oy-review`, `oy-enhance` — the workflows
-- [`adversarial-review`](adversarial-review.md) — independent critique of work and direction
+- [`adversarial-review`](adversarial-review.md) — launches a read-only subagent for independent critique
 - `oy-setup` — verifies installation and skill discovery
 
 Your agent loads the matching SKILL.md when you mention it. No extra daemon, no API keys stored by oy.
@@ -84,7 +84,7 @@ The skills run under your agent's own permission model. `oy` is not a sandbox; s
 
 - [Getting started](getting-started.md) — install and create a first report (start here if you're new)
 - [Workflow guide](workflows.md) — choose scope, understand findings, and remediate
-- [Adversarial review](adversarial-review.md) — install and use the standalone independent-review skill
+- [Adversarial review](adversarial-review.md) — install and use the standalone subagent-launcher skill
 - [Examples and CI](examples.md) — inspect reports and upload SARIF
 - [Troubleshooting](troubleshooting.md) — fix the 6 most common first-run problems
 - [CLI reference](reference.md) — exact commands, setup behavior, and environment variables

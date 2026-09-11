@@ -1,10 +1,9 @@
 # Adversarial review
 
-Get an independent critique of recent work and the session's direction from a
-fresh headless agent session. The `adversarial-review` skill helps your host agent
-prepare evidence, invoke your chosen reviewer CLI, and validate its findings.
-The result is a conversational verdict, up to five actionable improvements, and
-the single best next action.
+The `adversarial-review` skill launches one independent, read-only
+`adversarial-review` subagent to challenge recent work or a proposed direction.
+The subagent inspects the repository itself; the host only supplies the repository
+path and relevant session context.
 
 ## Quick start
 
@@ -12,25 +11,56 @@ Ask your agent:
 
 ```text
 Use the adversarial-review skill to review our changes and proposed next steps.
-Use the adversarial-review skill on the diff against main, using Cursor.
+Use the adversarial-review skill on the diff against main.
 Use the adversarial-review skill to challenge this plan before implementation.
 ```
 
-The host uses your requested or saved reviewer selection and asks for any missing
-CLI, model, or reasoning-effort choices. Subsequent runs reuse the saved choice.
-See [Install](#install) if your agent cannot discover the skill yet.
+The result is a proceed/course-correct/rethink verdict, up to five actionable
+improvements, material evidence gaps, and the best next action. The review is
+advice: changes are made only when you request them.
+
+## How it works
+
+The host launches exactly one named subagent in the foreground unless you ask for
+background execution. It does not choose another CLI or model, persist reviewer
+preferences, or prepare a broad diff. The read-only subagent inspects the relevant
+repository state and returns its review.
+
+The host passes only context the subagent cannot recover from the checkout:
+
+```text
+Full Repository Path: <absolute path>
+Review Scope: <requested files/diff/commits/plan, or infer from current work>
+User Goal: <requested outcome>
+Session Direction: <recent decisions and proposed next steps>
+Constraints: <material user or project constraints>
+Checks Run: <commands and actual results>
+Known Failures or Uncertainties: <material gaps>
+Custom Instructions: <specific review focus from the user>
+```
+
+The first four lines are always included; the others are included only when they
+have useful values.
+
+Use it at meaningful checkpoints: before committing to an uncertain design, after
+substantial changes and focused checks, or when deciding which remaining problem
+deserves attention. State the decision or scope you want challenged. Confirmed
+defects, hypotheses, and risks in proposed work should remain distinct.
+
+For deterministic, enumerated repository coverage and a `REVIEW.md` report, use
+the [oy-review workflow](workflows.md#review-scope-and-focus) instead.
 
 ## Install
 
-You need a host agent that can load Agent Skills and launch an installed,
-authenticated reviewer CLI. The reviewer must support headless operation with
-documented analysis-only restrictions; the host checks its current help or docs.
-Use your existing CLI login and model access.
+The host must support Agent Skills and provide a named `adversarial-review`
+subagent with read-only repository tools. The skill does not install or emulate
+that subagent. If it is unavailable, configure it through your agent host before
+using this skill.
 
 ### With oy
 
-`oy setup` includes this skill. Choose global installation, or use
-`oy setup --workspace` for only the current repository:
+`oy setup` installs the skill globally, or use `--workspace` for the current
+repository only:
 
 ```bash
 oy setup            # ~/.agents/skills/; use --workspace for .agents/skills/
@@ -38,14 +68,13 @@ oy doctor --check
 ```
 
 Then ask your agent to `run the oy-setup skill` to verify discovery and catch stale
-host-specific copies. If you need the oy CLI, follow [Getting started](getting-started.md).
+host-specific copies. See [Getting started](getting-started.md) if you need oy.
 
 ### Install just this skill
 
-The skill is one self-contained Markdown file and can run without the oy binary.
-Save the [raw SKILL.md](https://raw.githubusercontent.com/adonm/oy-cli/main/assets/skills/adversarial-review/SKILL.md)
-from the current source, or copy the [full skill below](#full-skill), including its
-YAML frontmatter, to one of these locations:
+The skill is one Markdown file and does not require the oy binary. Save the
+[raw SKILL.md](https://raw.githubusercontent.com/adonm/oy-cli/main/assets/skills/adversarial-review/SKILL.md),
+or copy the [full skill below](#full-skill), including its YAML frontmatter:
 
 | Scope | Destination |
 |---|---|
@@ -53,89 +82,13 @@ YAML frontmatter, to one of these locations:
 | Repository | `.agents/skills/adversarial-review/SKILL.md` |
 
 Use your host's supported skill directory when it differs; see
-[Compatibility](compatibility.md#agent-skills-hosts). Preserve any existing custom
-definition. The `Generated by oy setup` marker makes the copied file oy-managed
-during later setup; remove that marker before maintaining your own customized copy.
+[Compatibility](compatibility.md#agent-skills-hosts). Preserve existing custom
+definitions. The `Generated by oy setup` marker makes a copy oy-managed during
+later setup; remove the marker before maintaining a customized copy.
 
-Reload skill discovery or start a new agent session, then ask it to identify the
-loaded `adversarial-review` definition and its path. This also catches an older
-host-specific copy shadowing the new one. `oy doctor --check` validates the full oy
-skill bundle; for a single-file installation, verify discovery in your host.
-
-## Effective use
-
-Use a review at a meaningful checkpoint: before committing to an uncertain design,
-after substantial changes and focused checks, or when deciding which remaining
-problem deserves attention. Name the decision you want challenged and the scope
-you want reviewed.
-
-The host should provide actual diffs and relevant source excerpts alongside the
-user's goal and constraints. Include staged, unstaged, and relevant untracked
-changes; with a clean tree, identify the session-related commits. Distinguish
-implemented changes from planned work and the host's interpretations. Known
-failures and uncertainties are valuable evidence.
-
-A useful evidence packet looks like this:
-
-```text
-CLI: <selected CLI>
-Model: <exact model>
-Effort: <supported reasoning effort, or default>
-Enforcement mechanism: <documented tool restrictions or read-only agent>
-Scope: <base ref, selected commits, files, or proposed plan>
-Checks run: <commands and actual results, including failures>
-Evidence omitted: <relevant material unavailable or left out; none known otherwise>
-
-Goal and constraints: <what the user needs, including compatibility requirements>
-Evidence: <diffs and relevant source excerpts with path/line references>
-Host interpretation: <rationale and assumptions for the reviewer to challenge>
-Planned steps and uncertainties: <proposals and unresolved questions>
-```
-
-The reviewer starts fresh and evaluates the supplied evidence. The host verifies
-each returned finding's citations, consequence, and fit to the user's constraints
-against the checkout and session. It explains material rejections and adjusts the
-verdict when its supporting claims fail.
-
-Expect:
-
-- a **proceed / course-correct / rethink** verdict;
-- up to five improvements ranked by impact, confidence, and effort, each with
-  evidence, a consequence, and the smallest useful next step;
-- the best next action and material evidence gaps;
-- the actual CLI/provider/model/effort used, including any fallback.
-
-Zero findings is a valid result. Confirmed defects, hypotheses, and risks in
-planned work should be clearly identified. Apply changes when requested, then run
-the relevant checks. Review coverage is limited to the supplied evidence. For
-enumerated repository coverage and a `REVIEW.md` report, use the
-[oy-review workflow](workflows.md#review-scope-and-focus).
-
-## Reviewer preferences
-
-The host remembers `cli`, exact `model`, and `reasoning` in
-`${XDG_STATE_HOME:-$HOME/.local/state}/oy/adversarial-review.json`.
-It discovers model and effort options from the selected CLI's live catalog and
-help, using current docs or your selection when the catalog is unavailable.
-
-| Say | Effect |
-|---|---|
-| `Use Codex this time` | Override the CLI for this run; select a compatible model and effort as needed. |
-| `Use max this time` | Use the highest supported effort for this run. |
-| `Switch reviewer` | Choose and save a new default. |
-| `Remember this selection` | Save the current choice for future runs. |
-| `Use Cursor only if my primary reviewer hits its usage limit` | Authorize that conditional fallback; choose its model and effort as needed. |
-
-Model offers include reasoning effort so you can choose them together. A separate
-effort question is needed only when it is still missing and selectable. The skill
-recommends a supported high/xhigh-equivalent for everyday reviews and offers the
-highest supported effort for difficult reviews with extra latency/usage. Fixed or
-unselectable effort is recorded as `default`.
-
-Fallbacks run only under the authorized condition and are reported explicitly.
-Authentication, configuration, and permission failures require their own
-resolution. A timeout, empty response, or error response is a failed invocation;
-the host reports the cause before retrying or asking to change reviewers.
+Reload skill discovery or start a new session, then ask the host to identify the
+loaded definition and its path. `oy doctor --check` validates the full oy bundle;
+for a single-file install, verify discovery in the host itself.
 
 ## Reference from contributing instructions
 
@@ -144,10 +97,9 @@ Copy this into a repository's `CONTRIBUTING.md` or agent instructions:
 ```markdown
 For substantial changes or uncertain design decisions, use the
 [adversarial-review skill](https://oy.adonm.dev/adversarial-review.html) to
-challenge the work and proposed next steps. Provide the goal, constraints,
-relevant changes, and actual check results. If the skill is unavailable, follow
-the linked installation instructions. Validate findings against the checkout
-before acting on them.
+challenge the work and proposed next steps. Provide the goal, constraints, and
+actual check results; let the read-only subagent inspect the repository itself.
+Treat the result as advice and validate findings before acting on them.
 ```
 
 ## Full skill

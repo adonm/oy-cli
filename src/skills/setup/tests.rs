@@ -623,6 +623,9 @@ fn setup_skill_file_is_canonical_after_setup() {
     assert!(OY_ADVERSARIAL_REVIEW_SKILL.contains("Adversarial Review"));
     assert!(OY_ADVERSARIAL_REVIEW_SKILL.contains("your active permissions"));
     assert!(OY_ADVERSARIAL_REVIEW_SKILL.contains("untrusted"));
+    assert!(OY_ADVERSARIAL_REVIEW_SKILL.contains("exactly one `adversarial-review` subagent"));
+    assert!(!OY_ADVERSARIAL_REVIEW_SKILL.contains("adversarial-review.json"));
+    assert!(!OY_ADVERSARIAL_REVIEW_SKILL.contains("selected CLI"));
     assert!(!OY_ADVERSARIAL_REVIEW_SKILL.contains("OpenCode's native"));
     assert!(!env.global_skills().join("oy-setup/oy-persona.md").exists());
     assert!(OY_SETUP_SKILL.contains("oy doctor --check"));
