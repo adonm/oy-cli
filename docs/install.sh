@@ -13,11 +13,11 @@ set -eu
 #   OY_INSTALL_SCOPE  global or workspace; an explicit flag wins
 #   OY_SKIP_SETUP     1/true to skip `oy setup`
 
-oy_version="0.16.4"
+oy_version="0.16.5"
 oy_tool="github:adonm/oy-cli@$oy_version"
 tokei_tool="aqua:XAMPPRocky/tokei@12.1.2"
 ctags_tool="github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
-opencode2_tool="npm:@opencode-ai/cli@beta"
+opencode2_tool="npm:@opencode/cli"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -181,27 +181,50 @@ if ! mise_use "$tokei_tool" "$ctags_tool"; then
   log "Warning: optional context helpers could not be installed; rerun this installer later."
 fi
 
-if command -v opencode2 >/dev/null 2>&1; then
+if [ "$scope" = "global" ]; then
+  opencode2_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
+else
+  opencode2_config="mise.toml"
+fi
+
+legacy_beta=0
+if [ -f "$opencode2_config" ] && grep -q 'npm:@opencode-ai/cli' "$opencode2_config"; then
+  legacy_beta=1
+fi
+
+if [ "$legacy_beta" -eq 0 ] && command -v opencode2 >/dev/null 2>&1; then
   log "opencode2 is already installed; skipping."
 else
-  log "Installing opencode2 with mise..."
-  mise_use "$opencode2_tool"
-  if [ "$scope" = "global" ]; then
-    opencode2_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
+  log "Installing opencode2 (OpenCode 2 stable) with mise..."
+  # mise's npm installer runs package lifecycle scripts only when approved and
+  # prompts for newly published package names, so the config entry carries the
+  # two approvals up front: `allow_builds` runs the binary-selecting
+  # postinstall, `allow_low_downloads` accepts the new @opencode/cli name
+  # non-interactively.
+  if [ -f "$opencode2_config" ] && grep -q 'npm:@opencode/cli' "$opencode2_config"; then
+    log "Keeping the existing npm:@opencode/cli entry in $opencode2_config."
   else
-    opencode2_config="mise.toml"
+    mkdir -p "$(dirname "$opencode2_config")"
+    cat >>"$opencode2_config" <<'EOF'
+
+[tools."npm:@opencode/cli"]
+version = "latest"
+allow_builds = ["@opencode/cli"]
+allow_low_downloads = true
+EOF
   fi
-  log "To allow non-interactive npm builds for opencode2, add this to $opencode2_config:"
-  log '  [tools."npm:@opencode-ai/cli"]'
-  log '  version = "beta"'
-  log '  allow_builds = ["@opencode-ai/cli"]'
+  # The postinstall script needs node; mise resolves it as an npm install
+  # dependency only from an already installed node version.
+  "$mise_bin" install --yes --minimum-release-age 0 node@latest
+  "$mise_bin" install --yes --minimum-release-age 0 "$opencode2_tool"
 fi
 
 log "Removing superseded source/package-manager tool entries..."
 mise_unuse \
   cargo:oy-cli \
   cargo:tokei \
-  github:universal-ctags/ctags
+  github:universal-ctags/ctags \
+  npm:@opencode-ai/cli
 "$mise_bin" reshim
 
 installed_oy_version=$("$mise_bin" exec "$oy_tool" -- oy --version 2>/dev/null) \
@@ -217,7 +240,8 @@ prune_status=0
   github:adonm/oy-cli \
   cargo:oy-cli \
   cargo:tokei \
-  github:universal-ctags/ctags || prune_status=$?
+  github:universal-ctags/ctags \
+  npm:@opencode-ai/cli || prune_status=$?
 if [ "$prune_status" -ne 0 ]; then
   log "Warning: mise could not prune old versions; the newly installed versions remain active."
 fi

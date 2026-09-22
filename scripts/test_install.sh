@@ -88,25 +88,30 @@ run_install() {
   shift 5
   : >"$log_file"
   : >"$log_file.curl"
-  mkdir -p "$home"
+  mkdir -p "$home/project"
   if [ "$with_mise" -eq 1 ]; then
     cp "$tmp/mise-mock" "$tmp/bin/mise"
   else
     rm -f "$tmp/bin/mise"
   fi
-  # Exported overrides so the installer starts from a clean state.
-  # shellcheck disable=SC2034,SC1007
-  MISE_CONFIG_DIR= MISE_GLOBAL_CONFIG_FILE= XDG_CONFIG_HOME="$home/.config"
-  PATH="$tmp/bin:/usr/bin:/bin" \
-    HOME="$home" \
-    SHELL=/bin/bash \
-    OY_INSTALL_TEST_LOG="$log_file" \
-    OY_INSTALL_TEST_CURL_LOG="$log_file.curl" \
-    OY_INSTALL_TEST_MISE_SOURCE="$tmp/mise-mock" \
-    OY_INSTALL_TEST_VERSION="$oy_version" \
-    OY_INSTALL_SCOPE="$scope" \
-    OY_SKIP_SETUP="$skip_setup" \
-    sh "$repo_root/docs/install.sh" "$@" >/dev/null
+  # Exported overrides so the installer starts from a clean state. The
+  # workspace scope writes mise.toml in the current directory, so the
+  # installer runs from a scratch project directory.
+  (
+    cd "$home/project"
+    MISE_CONFIG_DIR='' MISE_GLOBAL_CONFIG_FILE='' \
+      PATH="$tmp/bin:/usr/bin:/bin" \
+      HOME="$home" \
+      XDG_CONFIG_HOME="$home/.config" \
+      SHELL=/bin/bash \
+      OY_INSTALL_TEST_LOG="$log_file" \
+      OY_INSTALL_TEST_CURL_LOG="$log_file.curl" \
+      OY_INSTALL_TEST_MISE_SOURCE="$tmp/mise-mock" \
+      OY_INSTALL_TEST_VERSION="$oy_version" \
+      OY_INSTALL_SCOPE="$scope" \
+      OY_SKIP_SETUP="$skip_setup" \
+      sh "$repo_root/docs/install.sh" "$@" >/dev/null
+  )
 }
 
 default_log="$tmp/default.log"
@@ -115,24 +120,33 @@ default=$(cat "$default_log")
 assert_contains "$default" "use --global --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version"
 assert_contains "$default" "use --global --yes --minimum-release-age 0 aqua:XAMPPRocky/tokei@12.1.2 github:universal-ctags/ctags-nightly-build[matching=.release.tar.gz]"
 assert_contains "$default" "exec github:adonm/oy-cli@$oy_version -- oy --version"
-assert_contains "$default" "unuse --global --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
+assert_contains "$default" "unuse --global --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags npm:@opencode-ai/cli"
 assert_contains "$default" "reshim"
-assert_contains "$default" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
+assert_contains "$default" "prune --yes --tools github:adonm/oy-cli cargo:oy-cli cargo:tokei github:universal-ctags/ctags npm:@opencode-ai/cli"
 assert_not_contains "$default" "npm install -g"
-assert_not_contains "$default" "node@latest"
 assert_not_contains "$default" "config ls"
-assert_contains "$default" "use --global --yes --minimum-release-age 0 npm:@opencode-ai/cli@beta"
+assert_contains "$default" "install --yes --minimum-release-age 0 node@latest"
+assert_contains "$default" "install --yes --minimum-release-age 0 npm:@opencode/cli"
 assert_not_contains "$default" "config set"
 assert_not_contains "$(cat "$default_log.curl")" "https://cursor.com/install"
+default_toml=$(cat "$tmp/home-default/.config/mise/config.toml")
+assert_contains "$default_toml" '[tools."npm:@opencode/cli"]'
+assert_contains "$default_toml" 'version = "latest"'
+assert_contains "$default_toml" 'allow_builds = ["@opencode/cli"]'
+assert_contains "$default_toml" "allow_low_downloads = true"
 
 workspace_log="$tmp/workspace.log"
 run_install "$workspace_log" 1 1 "$tmp/home-workspace" "" --workspace
 workspace=$(cat "$workspace_log")
 assert_contains "$workspace" "use --yes --minimum-release-age 0 github:adonm/oy-cli@$oy_version"
 assert_not_contains "$workspace" "use --global"
-assert_contains "$workspace" "use --yes --minimum-release-age 0 npm:@opencode-ai/cli@beta"
-assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags"
+assert_contains "$workspace" "install --yes --minimum-release-age 0 node@latest"
+assert_contains "$workspace" "install --yes --minimum-release-age 0 npm:@opencode/cli"
+assert_contains "$workspace" "unuse --yes --no-prune cargo:oy-cli cargo:tokei github:universal-ctags/ctags npm:@opencode-ai/cli"
 assert_not_contains "$workspace" "unuse --global"
+workspace_toml=$(cat "$tmp/home-workspace/project/mise.toml")
+assert_contains "$workspace_toml" '[tools."npm:@opencode/cli"]'
+assert_contains "$workspace_toml" 'allow_builds = ["@opencode/cli"]'
 
 env_workspace_log="$tmp/env-workspace.log"
 run_install "$env_workspace_log" 1 1 "$tmp/home-env-workspace" workspace
@@ -160,7 +174,24 @@ chmod +x "$tmp/bin/opencode2"
 opencode2_log="$tmp/opencode2.log"
 run_install "$opencode2_log" 1 1 "$tmp/home-opencode2" ""
 opencode2_run=$(cat "$opencode2_log")
-assert_not_contains "$opencode2_run" "npm:@opencode-ai/cli"
+assert_not_contains "$opencode2_run" "install --yes --minimum-release-age 0 npm:@opencode/cli"
+assert_not_contains "$opencode2_run" "node@latest"
+
+# A legacy @opencode-ai/cli@beta entry migrates to the stable package even
+# when an old beta opencode2 is still on PATH.
+legacy_home="$tmp/home-legacy-beta"
+mkdir -p "$legacy_home/.config/mise"
+cat >"$legacy_home/.config/mise/config.toml" <<'EOF'
+[tools]
+"npm:@opencode-ai/cli" = "beta"
+EOF
+legacy_log="$tmp/legacy-beta.log"
+run_install "$legacy_log" 1 1 "$legacy_home" ""
+legacy_run=$(cat "$legacy_log")
+assert_contains "$legacy_run" "install --yes --minimum-release-age 0 npm:@opencode/cli"
+legacy_toml=$(cat "$legacy_home/.config/mise/config.toml")
+assert_contains "$legacy_toml" '[tools."npm:@opencode/cli"]'
+assert_contains "$legacy_toml" '"npm:@opencode-ai/cli" = "beta"'
 rm -f "$tmp/bin/opencode2"
 
 help=$(sh "$repo_root/docs/install.sh" --help)

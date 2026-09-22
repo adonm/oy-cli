@@ -48,7 +48,9 @@ run the oy-setup skill
 The skill will detect the host and offer to copy the files to the right place. No manual file copying needed.
 
 The optional post-setup OpenCode location refresh uses `opencode2` (or
-`OY_OPENCODE`). It is best-effort: when OpenCode is absent or unsupported,
+`OY_OPENCODE`) and recognizes tagged OpenCode 2 stable releases (`2.x.y`); the
+installer provisions those from the stable `latest` channel of `npm:@opencode/cli`.
+It is best-effort: when OpenCode is absent or unsupported,
 setup simply skips the refresh and everything else still works.
 
 ## What `doctor --check` covers

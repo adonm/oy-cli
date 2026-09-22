@@ -15,20 +15,11 @@ pub(crate) const OPENCODE_ENV: &str = "OY_OPENCODE";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_OUTPUT_LIMIT: u64 = 16 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenCodeContract {
-    V1,
-    V2Beta,
-    V2,
-    Unknown,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OpenCodeHost {
     executable: PathBuf,
     version: Option<String>,
     available: bool,
-    contract: OpenCodeContract,
 }
 
 impl OpenCodeHost {
@@ -38,12 +29,10 @@ impl OpenCodeHost {
 
     fn probe(executable: PathBuf, directory: Option<&Path>) -> Self {
         let (available, version) = probe_version(&executable, directory).unwrap_or((false, None));
-        let contract = detect_contract(&executable, version.as_deref());
         Self {
             executable,
             version,
             available,
-            contract,
         }
     }
 
@@ -51,15 +40,11 @@ impl OpenCodeHost {
         &self.executable
     }
 
+    /// Supported hosts run a tagged OpenCode 2 stable release (`2.x.y`).
+    /// Prerelease, unparseable, and unavailable hosts are unsupported: setup
+    /// then skips the optional location refresh instead of guessing.
     pub(crate) fn supported(&self) -> bool {
-        if !self.available {
-            return false;
-        }
-        match self.contract {
-            OpenCodeContract::V2 => true,
-            OpenCodeContract::V2Beta => self.version.as_deref().is_some_and(is_beta_build),
-            OpenCodeContract::V1 | OpenCodeContract::Unknown => false,
-        }
+        self.available && self.version.as_deref().and_then(version_major) == Some(2)
     }
 }
 
@@ -137,51 +122,15 @@ fn read_first_line(mut reader: impl Read) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn detect_contract(executable: &Path, version: Option<&str>) -> OpenCodeContract {
-    if version.is_some_and(is_beta_build) {
-        return OpenCodeContract::V2Beta;
-    }
-    if let Some(major) = version.and_then(version_major) {
-        return if major == 2 {
-            OpenCodeContract::V2
-        } else if major == 1 {
-            OpenCodeContract::V1
-        } else {
-            OpenCodeContract::Unknown
-        };
-    }
-    if version.is_none()
-        && executable
-            .file_stem()
-            .is_some_and(|name| name == "opencode2")
-    {
-        return OpenCodeContract::V2Beta;
-    }
-    OpenCodeContract::Unknown
-}
-
 fn version_major(version: &str) -> Option<u64> {
-    if version.contains('-') {
+    let token = version_token(version)?;
+    // Fail closed on prereleases (for example `2.0.0-rc.1` or the retired
+    // `0.0.0-beta-*`/`0.0.0-next-*` channels): only tagged `2.x.y` builds are
+    // supported.
+    if token.contains('-') {
         return None;
     }
-    version
-        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
-        .find(|part| part.contains('.'))?
-        .split('.')
-        .next()?
-        .parse()
-        .ok()
-}
-
-fn is_beta_build(version: &str) -> bool {
-    let token = version_token(version).unwrap_or(version);
-    // The current beta channel publishes `0.0.0-beta-<build>`; earlier
-    // `0.0.0-next-<build>` builds remain supported for existing installs.
-    ["0.0.0-beta-", "0.0.0-next-"].iter().any(|prefix| {
-        token.strip_prefix(prefix).is_some_and(|build| {
-            !build.is_empty() && build.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    })
+    token.split('.').next()?.parse().ok()
 }
 
 fn version_token(version: &str) -> Option<&str> {
@@ -197,75 +146,47 @@ fn version_token(version: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn detects_v2_beta_from_executable_or_beta_version() {
-        assert_eq!(
-            detect_contract(Path::new("opencode2"), Some("opencode2 v0.0.0-beta-17639")),
-            OpenCodeContract::V2Beta
-        );
-        assert_eq!(
-            detect_contract(Path::new("custom-host"), Some("opencode 0.0.0-beta-42")),
-            OpenCodeContract::V2Beta
-        );
-        assert_eq!(
-            detect_contract(Path::new("opencode2"), Some("opencode2 v0.0.0-next-15321")),
-            OpenCodeContract::V2Beta
-        );
-    }
-
-    #[test]
-    fn recognizes_numeric_beta_builds() {
-        assert!(is_beta_build("0.0.0-beta-17639"));
-        assert!(is_beta_build("opencode 0.0.0-beta-42"));
-        assert!(is_beta_build("0.0.0-next-15353"));
-        assert!(is_beta_build("opencode 0.0.0-next-15363"));
-        assert!(!is_beta_build("0.0.0-beta-"));
-        assert!(!is_beta_build("0.0.0-next-"));
-        assert!(!is_beta_build("0.0.0-beta-dev"));
-        assert!(!is_beta_build("0.0.0-next-dev"));
-        assert!(!is_beta_build("2.0.0"));
-    }
-
-    #[test]
-    fn support_accepts_beta_channel_builds_or_tagged_v2() {
-        let host = |version: &str, contract| OpenCodeHost {
+    fn host(version: Option<&str>) -> OpenCodeHost {
+        OpenCodeHost {
             executable: PathBuf::from("opencode2"),
-            version: Some(version.to_string()),
+            version: version.map(ToOwned::to_owned),
             available: true,
-            contract,
-        };
-        assert!(host("0.0.0-beta-17639", OpenCodeContract::V2Beta).supported());
-        assert!(host("0.0.0-next-15322", OpenCodeContract::V2Beta).supported());
-        assert!(host("0.0.0-next-15363", OpenCodeContract::V2Beta).supported());
-        assert!(!host("0.0.0-beta-dev", OpenCodeContract::V2Beta).supported());
-        assert!(!host("0.0.0-next-dev", OpenCodeContract::V2Beta).supported());
-        assert!(!host("1.0.0-beta-17639", OpenCodeContract::V2Beta).supported());
-        assert!(host("2.0.0", OpenCodeContract::V2).supported());
-        assert!(!host("3.0.0", OpenCodeContract::Unknown).supported());
-        assert!(!host("1.17.18", OpenCodeContract::V1).supported());
+        }
     }
 
     #[test]
-    fn detects_tagged_major_versions() {
-        assert_eq!(
-            detect_contract(Path::new("opencode"), Some("opencode version 1.17.18")),
-            OpenCodeContract::V1
+    fn supports_tagged_v2_builds() {
+        assert!(host(Some("opencode v2.0.12")).supported());
+        assert!(host(Some("opencode2 v2.0.0")).supported());
+        assert!(host(Some("2.0.14")).supported());
+    }
+
+    #[test]
+    fn rejects_prerelease_other_major_and_unavailable_hosts() {
+        assert!(!host(Some("opencode v0.0.0-beta-19271")).supported());
+        assert!(!host(Some("0.0.0-next-15363")).supported());
+        assert!(!host(Some("opencode2 v2.0.0-rc.1")).supported());
+        assert!(!host(Some("opencode version 1.17.18")).supported());
+        assert!(!host(Some("3.0.0")).supported());
+        assert!(!host(Some("custom version unknown")).supported());
+        assert!(!host(None).supported());
+        assert!(
+            !OpenCodeHost {
+                executable: PathBuf::from("opencode2"),
+                version: Some("2.0.12".to_string()),
+                available: false,
+            }
+            .supported()
         );
-        assert_eq!(
-            detect_contract(Path::new("opencode2"), Some("opencode2 v2.0.0")),
-            OpenCodeContract::V2
-        );
-        assert_eq!(
-            detect_contract(Path::new("opencode2"), Some("opencode2 v1.17.18")),
-            OpenCodeContract::V1
-        );
-        assert_eq!(
-            detect_contract(Path::new("custom"), Some("custom version unknown")),
-            OpenCodeContract::Unknown
-        );
-        assert_eq!(
-            detect_contract(Path::new("opencode2"), Some("opencode2 v2.0.0-rc.1")),
-            OpenCodeContract::Unknown
-        );
+    }
+
+    #[test]
+    fn version_major_reads_the_version_token() {
+        assert_eq!(version_major("opencode v2.0.12"), Some(2));
+        assert_eq!(version_major("opencode version 1.17.18"), Some(1));
+        assert_eq!(version_major("2.0.0"), Some(2));
+        assert_eq!(version_major("2.0.0-rc.1"), None);
+        assert_eq!(version_major("0.0.0-beta-19271"), None);
+        assert_eq!(version_major("custom version unknown"), None);
     }
 }

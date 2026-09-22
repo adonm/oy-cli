@@ -44,7 +44,8 @@ What the installer does:
 1. Installs [mise](https://mise.jdx.dev/) (if missing) with its official bootstrap for bash/zsh/fish;
 2. Installs a prebuilt `oy` release with mise;
 3. Installs prebuilt `tokei` and Universal Ctags context helpers (optional, for large repos);
-4. Runs `oy setup`, which writes the skills to `~/.agents/skills/` and removes any legacy OpenCode plugin state.
+4. Installs OpenCode 2 stable (`npm:@opencode/cli` through mise) when `opencode2` is not already installed, and retires legacy `npm:@opencode-ai/cli` beta entries;
+5. Runs `oy setup`, which writes the skills to `~/.agents/skills/` and removes any legacy OpenCode plugin state.
 
 > **Tip:** Review [`install.sh`](install.sh) before piping to a shell. Set `OY_INSTALL_SCOPE=global|workspace` as an alternative to flags, or `OY_SKIP_SETUP=1` to install binaries without changing skills.
 
@@ -53,8 +54,8 @@ What the installer does:
 **With mise (no curl pipe):**
 
 ```bash
-mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.16.4
-mise exec github:adonm/oy-cli@0.16.4 -- oy setup
+mise use --global --yes --minimum-release-age 0 github:adonm/oy-cli@0.16.5
+mise exec github:adonm/oy-cli@0.16.5 -- oy setup
 ```
 
 **From source (requires Rust 1.98+):**
